@@ -648,6 +648,28 @@ describe("POST /api/gdb/generate-network", () => {
     expect(res.statusCode).toBe(404);
     expect(res.json()).toMatchObject({ error: "no_base_version" });
   });
+
+  it("fails with no_routable_network when synthesis produces no graph", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await publishBaseWithFacilities(app, cookie);
+    fake.exportThrowsNoGraph = true; // simulate an empty synthesized graph
+    fake.compileCalls.length = 0;
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+      payload: { venueId },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = res.json() as { versionId: number };
+    await app.queue.idle();
+
+    const row = app.db
+      .prepare("SELECT status, error FROM versions WHERE id = ?")
+      .get(body.versionId) as { status: string; error: string | null };
+    expect(row.status).toBe("failed");
+    expect(JSON.parse(row.error!).code).toBe("no_routable_network");
+  });
 });
 
 describe("POST /api/gdb/import-network", () => {

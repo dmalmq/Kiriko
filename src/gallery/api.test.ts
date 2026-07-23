@@ -133,6 +133,10 @@ describe("gdb api", () => {
     );
     expect(conv).toContain("Station_1_Space");
   });
+
+  it("maps no_routable_network to actionable copy", () => {
+    expect(gdbErrorMessage({ code: "no_routable_network", message: "x" }, "en")).toContain("walkable");
+  });
 });
 
 describe("augmentGdb", () => {

@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { BlobStore } from "../blobs/store";
-import { compileVenueBundle, CoreCompileError, type CompileVenueMetadata } from "../core/native";
+import { compileVenueBundle, CoreCompileError, CoreExportError, exportVenueNetwork, type CompileVenueMetadata } from "../core/native";
 
 /** Persisted into `versions.error` (and mirrored into `jobs.error`) verbatim as JSON. */
 interface StructuredError {
@@ -25,6 +25,9 @@ class StaleVersionError extends Error {
   }
 }
 
+/** Thrown when a synthesize request compiles a bundle with no §5 graph. */
+class NoRoutableNetworkError extends Error {}
+
 function staleVersionError(versionId: number): StructuredError {
   return { code: "stale_version", message: `version ${versionId} was replaced during compilation` };
 }
@@ -37,6 +40,12 @@ function toStructuredError(error: unknown): StructuredError {
   }
   if (error instanceof StaleVersionError) {
     return { code: "stale_version", message: error.message };
+  }
+  if (error instanceof NoRoutableNetworkError) {
+    return {
+      code: "no_routable_network",
+      message: "No routable space found. Check that walkable units (walkway, platform, etc.) are mapped.",
+    };
   }
   return { code: "internal_error", message: error instanceof Error ? error.message : String(error) };
 }
@@ -129,6 +138,16 @@ export function makePublishRunner(
         metadata.synthesizeNetwork = true;
       }
       const { bundle, stats } = await compile(source, metadata);
+      if (synthesizeNetwork === true) {
+        try {
+          await exportVenueNetwork(bundle);
+        } catch (error) {
+          if (error instanceof CoreExportError && error.code === "no_graph") {
+            throw new NoRoutableNetworkError("synthesized graph is empty");
+          }
+          throw error;
+        }
+      }
       // Content-addressed: safe to persist even if this row turns out to
       // be stale below — the blob then simply has no referencing row.
       const { hash: bundleHash, size } = blobs.put(bundle);

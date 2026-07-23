@@ -112,6 +112,10 @@ const gdbErrorCopy: Record<string, { ja: string; en: string } | undefined> = {
     ja: "ルーティングネットワークを抽出できませんでした。net_junction / net_path レイヤーを確認してください。",
     en: "The routing network could not be extracted. Check the net_junction / net_path layers.",
   },
+  no_routable_network: {
+    ja: "経路網を生成できませんでした。歩行可能なユニット（walkway / platform など）が割り当てられているか確認してください。",
+    en: "No routable network could be generated. Check that walkable units (e.g. walkway, platform) are mapped.",
+  },
 };
 
 export function gdbErrorMessage(err: GdbError, locale: LocaleCode): string {
