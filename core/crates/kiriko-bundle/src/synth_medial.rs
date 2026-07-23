@@ -259,7 +259,20 @@ const VERTICAL_MATCH_M: f64 = 5.0;
 const ADJACENCY_BRIDGE_M: f64 = 2.0;
 
 fn is_walkway(category: &str) -> bool {
-    matches!(category, "walkway" | "corridor" | "sidewalk" | "ramp")
+    matches!(
+        category,
+        "walkway"
+            | "walkway.island"
+            | "movingwalkway"
+            | "footbridge"
+            | "ramp"
+            | "steps"
+            | "lobby"
+            | "platform"
+            | "unenclosedarea"
+            | "corridor"
+            | "sidewalk"
+    )
 }
 fn is_transit(category: &str) -> bool {
     matches!(category, "elevator" | "escalator" | "stairs")
@@ -874,5 +887,35 @@ mod tests {
         // Determinism: identical input → identical graph.
         let again = synthesize_network_medial(&doc);
         assert_eq!(build.graph, again.graph, "synthesis is deterministic");
+    }
+
+    #[test]
+    fn platform_units_are_walkable() {
+        // A floor whose only navigable unit is a platform must still synthesize
+        // a centerline network.
+        let features = vec![feature(
+            "p",
+            FeatureType::Unit,
+            "l0",
+            Some("platform"),
+            rect(139.70000, 35.60000, 0.00060, 0.00003),
+        )];
+        let doc = document(&[("l0", 0.0)], features);
+        let build = synthesize_network_medial(&doc);
+        assert!(!build.graph.nodes.is_empty(), "platform is walkable → non-empty graph");
+    }
+
+    #[test]
+    fn rooms_only_yield_no_network() {
+        let features = vec![feature(
+            "r",
+            FeatureType::Unit,
+            "l0",
+            Some("room"),
+            square(139.70000, 35.60000, 0.00040),
+        )];
+        let doc = document(&[("l0", 0.0)], features);
+        let build = synthesize_network_medial(&doc);
+        assert!(build.graph.nodes.is_empty(), "non-walkable rooms → empty graph");
     }
 }

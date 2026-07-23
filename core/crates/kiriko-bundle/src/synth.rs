@@ -54,7 +54,20 @@ fn floor_cost(category: &str) -> f64 {
 }
 
 fn is_walkway(category: &str) -> bool {
-    matches!(category, "walkway" | "corridor" | "sidewalk" | "ramp")
+    matches!(
+        category,
+        "walkway"
+            | "walkway.island"
+            | "movingwalkway"
+            | "footbridge"
+            | "ramp"
+            | "steps"
+            | "lobby"
+            | "platform"
+            | "unenclosedarea"
+            | "corridor"
+            | "sidewalk"
+    )
 }
 
 fn is_transit(category: &str) -> bool {
