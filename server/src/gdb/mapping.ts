@@ -17,6 +17,7 @@
  *    canonicalization into `source_properties`, so nothing is lost.
  */
 import type { GdbGeometryFamily, GdbTargetType } from "./types";
+import { mapCategoryCode } from "./categoryCodes";
 import {
   gdbLayerKeyString,
   type GdbBuildingPlan,
@@ -1185,6 +1186,7 @@ export function buildGdbImdf(
 
       const name = coerceString(layer.nameField ? props[layer.nameField] : undefined);
       let category = coerceString(layer.categoryField ? props[layer.categoryField] : undefined);
+      if (category !== null) category = mapCategoryCode(category);
       if (targetType === "unit" && category === null) category = "room";
 
       const original = { ...props };
