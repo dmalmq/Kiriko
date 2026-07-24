@@ -44,24 +44,12 @@ import { exportVenueNetwork, CoreExportError } from "../core/native";
 import { packageNetworkGdbZip } from "./exportGdb";
 
 const TENANT_ID = 1;
-const INSPECT_TIMEOUT_MS = 60_000;
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-    promise.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(t);
-        reject(e);
-      },
-    );
-  });
-}
-
+// The GDAL process queue (gdalProcess.ts) now enforces a real, cancelling
+// per-operation deadline, so route-level GDAL calls no longer need an
+// in-process timeout wrapper. Its returned promise also settles only after the
+// worker has exited, so `removeStagedGdb` in a `finally` after the await runs
+// with no live worker holding the staged file.
 
 const GdbLayerKeySchema = Type.Object({
   databaseId: Type.String(),
@@ -232,11 +220,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       const stagedPath = stageGdbBlobForGdal(request.server.blobs.path(hash), hash);
       let inspection: GdbInspection;
       try {
-        inspection = await withTimeout(
-          inspectGdbArchive(stagedPath, rootName),
-          INSPECT_TIMEOUT_MS,
-          "gdb inspect",
-        );
+        inspection = await inspectGdbArchive(stagedPath, rootName);
       } catch (error) {
         request.log.warn({ err: error }, "gdb inspect failed");
         return reply.code(400).send(
@@ -298,11 +282,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       const stagedPath = stageGdbBlobForGdal(request.server.blobs.path(hash), hash);
       let network: NetworkExtraction;
       try {
-        network = await withTimeout(
-          extractNetworkGeoJson(stagedPath),
-          INSPECT_TIMEOUT_MS,
-          "gdb network inspect",
-        );
+        network = await extractNetworkGeoJson(stagedPath);
       } catch (error) {
         if (isGdbSourceError(error)) {
           return reply
@@ -369,11 +349,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       const stagedPath = stageGdbBlobForGdal(request.server.blobs.path(hash), hash);
       let facilities: FacilitiesExtraction;
       try {
-        facilities = await withTimeout(
-          extractFacilitiesGeoJson(stagedPath),
-          INSPECT_TIMEOUT_MS,
-          "gdb facilities inspect",
-        );
+        facilities = await extractFacilitiesGeoJson(stagedPath);
       } catch (error) {
         if (isGdbSourceError(error)) {
           return reply
@@ -811,11 +787,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       }
       let zip: Uint8Array;
       try {
-        zip = await withTimeout(
-          packageNetworkGdbZip(network.junctions, network.paths),
-          INSPECT_TIMEOUT_MS,
-          "gdb network export",
-        );
+        zip = await packageNetworkGdbZip(network.junctions, network.paths);
       } catch (error) {
         request.log.error({ err: error }, "gdb export packaging failed");
         return reply.code(400).send(
@@ -965,11 +937,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       const stagedPath = stageGdbBlobForGdal(request.server.blobs.path(row.g), row.g);
       let inspection: GdbInspection;
       try {
-        inspection = await withTimeout(
-          inspectGdbArchive(stagedPath, rootName),
-          INSPECT_TIMEOUT_MS,
-          "gdb mapping inspect",
-        );
+        inspection = await inspectGdbArchive(stagedPath, rootName);
       } catch (error) {
         request.log.warn({ err: error }, "gdb mapping inspect failed");
         return reply.code(400).send(

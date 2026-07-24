@@ -3,18 +3,31 @@
  * `POST /api/gdb/inspect-network` and network-aware `POST /api/gdb/publish`
  * route tests.
  *
- * gdal3.js is faked at the `../src/gdb/gdal` module boundary (the real WASM
- * runtime never sees these synthetic archives — see gdbRoutes.test.ts for why
- * crafted archives must not reach it), and `compileVenueBundle` is faked at
- * the `../src/core/native` boundary so the publish job records exactly which
- * network GeoJSON the compile step received.
+ * The GDAL process queue is driven through an in-process fake worker
+ * (`useInProcessGdal`) that runs the real shared `runGdalRequest` body against
+ * a fake gdal instance — the real WASM runtime never sees these synthetic
+ * archives (see gdbRoutes.test.ts for why crafted archives must not reach it).
+ * `compileVenueBundle` is faked at the `../src/core/native` boundary so the
+ * publish job records exactly which network GeoJSON the compile step received.
  */
+import { existsSync, rmSync } from "node:fs";
 import { TextReader, Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { extractNetworkGeoJson } from "../src/gdb/network";
 import { GdbSourceError } from "../src/gdb/sourceValidation";
-import { cleanupTestApps, loginCookie, makeTestApp } from "./helpers";
+import {
+  cleanupTestApps,
+  loginCookie,
+  makeTestApp,
+  useInProcessGdal,
+} from "./helpers";
+import {
+  resetSpawnWorkerForTests,
+  setGdalDeadlineForTests,
+  setSpawnWorkerForTests,
+} from "../src/gdb/gdalProcess";
+import * as staging from "../src/gdb/staging";
 
 /** Mutable fake-GDAL/compile state, hoisted so the mock factories can close over it. */
 const fake = vi.hoisted(() => ({
@@ -27,9 +40,9 @@ const fake = vi.hoisted(() => ({
   compileCalls: [] as Array<{ source: unknown; metadata: Record<string, unknown> }>,
 }));
 
-vi.mock("../src/gdb/gdal", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/gdb/gdal")>();
-  const fakeGdal = {
+/** Build the fake gdal instance the in-process worker runs `runGdalRequest` against. */
+function makeFakeGdal() {
+  return {
     open: async (path: string) => ({ datasets: [{ path }] }),
     ogrinfo: async () => ({ layers: fake.ogrinfoLayers }),
     ogr2ogr: async (_dataset: unknown, args: string[], outputName: string) => {
@@ -51,8 +64,7 @@ vi.mock("../src/gdb/gdal", async (importOriginal) => {
     close: async () => undefined,
     drivers: { vector: {} },
   };
-  return { ...actual, getGdal: async () => fakeGdal };
-});
+}
 
 vi.mock("../src/core/native", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/core/native")>();
@@ -180,8 +192,13 @@ beforeEach(() => {
   fake.layerOutputs.set("net_junction", JUNCTIONS_GEOJSON);
   fake.layerOutputs.set("net_path", PATHS_GEOJSON);
   fake.layerOutputs.set("Levels", LEVELS_GEOJSON);
+  useInProcessGdal(makeFakeGdal());
 });
 
+afterEach(() => {
+  resetSpawnWorkerForTests();
+  setGdalDeadlineForTests(null);
+});
 afterEach(cleanupTestApps);
 
 describe("extractNetworkGeoJson", () => {
@@ -395,5 +412,61 @@ describe("POST /api/gdb/publish with networkBlobHash", () => {
     expect(
       (app.db.prepare("SELECT COUNT(*) AS n FROM versions").get() as { n: number }).n,
     ).toBe(0);
+  });
+});
+
+describe("staged-file safety on GDAL timeout", () => {
+  it("removes the staged .gdb.zip only after the worker has exited on timeout", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+
+    // Order log: the worker's exit must be recorded strictly before the route
+    // deletes the staged file in its `finally`.
+    const events: string[] = [];
+    let removedPath = "";
+    const removeSpy = vi
+      .spyOn(staging, "removeStagedGdb")
+      .mockImplementation((path: string) => {
+        events.push("remove");
+        removedPath = path;
+        rmSync(path, { force: true });
+      });
+
+    // A worker that never posts a result. It stays alive until terminated by
+    // the queue's deadline, at which point it records + fires its exit — proving
+    // a hung GDAL call cannot wedge the route and is truly torn down.
+    setSpawnWorkerForTests(() => {
+      const exitCbs: Array<(code: number) => void> = [];
+      return {
+        onMessage: () => {},
+        onError: () => {},
+        onExit: (cb) => {
+          exitCbs.push(cb);
+        },
+        terminate: () => {
+          events.push("exit");
+          for (const cb of [...exitCbs]) cb(1);
+        },
+      };
+    });
+    // Integration timing: exercise the real, cancelling deadline timer with a
+    // short budget instead of the production 60s (no test-authored sleeps).
+    setGdalDeadlineForTests(30);
+
+    const multipart = multipartZip(await validGdbZipBytes());
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/gdb/inspect-network",
+      headers: { cookie, ...multipart.headers },
+      payload: multipart.payload,
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ code: "gdb_network_extraction_failed" });
+    expect(events).toEqual(["exit", "remove"]);
+    expect(removedPath).not.toBe("");
+    expect(existsSync(removedPath)).toBe(false);
+
+    removeSpy.mockRestore();
   });
 });

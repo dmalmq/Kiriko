@@ -13,10 +13,15 @@ import { TextReader, Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as NativeModule from "../src/core/native";
-import type * as GdalModule from "../src/gdb/gdal";
 import { extractFacilitiesGeoJson } from "../src/gdb/facilities";
 import { GdbSourceError } from "../src/gdb/sourceValidation";
-import { cleanupTestApps, loginCookie, makeTestApp } from "./helpers";
+import {
+  cleanupTestApps,
+  loginCookie,
+  makeTestApp,
+  useInProcessGdal,
+} from "./helpers";
+import { resetSpawnWorkerForTests } from "../src/gdb/gdalProcess";
 
 interface CountRow {
   n: number;
@@ -34,9 +39,9 @@ const fake = vi.hoisted(() => ({
   exportThrowsNoGraph: false,
 }));
 
-vi.mock("../src/gdb/gdal", async (importOriginal) => {
-  const actual = await importOriginal<typeof GdalModule>();
-  const fakeGdal = {
+/** Build the fake gdal instance the in-process worker runs `runGdalRequest` against. */
+function makeFakeGdal() {
+  return {
     open: async (path: string) => ({ datasets: [{ path }] }),
     ogrinfo: async () => ({ layers: fake.ogrinfoLayers }),
     ogr2ogr: async (_dataset: unknown, args: string[], outputName: string) => {
@@ -58,8 +63,7 @@ vi.mock("../src/gdb/gdal", async (importOriginal) => {
     close: async () => undefined,
     drivers: { vector: {} },
   };
-  return { ...actual, getGdal: async () => fakeGdal };
-});
+}
 
 vi.mock("../src/core/native", async (importOriginal) => {
   const actual = await importOriginal<typeof NativeModule>();
@@ -222,8 +226,12 @@ beforeEach(() => {
   fake.layerOutputs.set("net_junction", JUNCTIONS_GEOJSON);
   fake.layerOutputs.set("net_path", PATHS_GEOJSON);
   fake.layerOutputs.set("Levels", LEVELS_GEOJSON);
+  useInProcessGdal(makeFakeGdal());
 });
 
+afterEach(() => {
+  resetSpawnWorkerForTests();
+});
 afterEach(cleanupTestApps);
 
 describe("extractFacilitiesGeoJson", () => {
