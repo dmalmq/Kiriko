@@ -861,7 +861,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
           paths: Type.String(),
         }),
         response: {
-          202: Type.Object({ jobId: Type.String(), versionId: Type.Number(), seq: Type.Number() }),
+          202: Type.Object({ jobId: Type.String(), versionId: Type.Number(), seq: Type.Number(), publicVersionId: Type.String({ pattern: "^[0-9a-f]{64}$" }) }),
           404: Type.Object({ error: Type.String() }),
         },
       },
@@ -908,6 +908,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         .prepare("SELECT MAX(seq) AS m FROM versions WHERE venue_id = ?")
         .get(venueId) as { m: number | null };
       const nextSeq = (maxRow.m ?? 0) + 1;
+      const createdPublicVersionId = newPublicVersionId();
       const info = db
         .prepare(
           `INSERT INTO versions
@@ -919,7 +920,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         .run(
           venueId,
           nextSeq,
-          newPublicVersionId(),
+          createdPublicVersionId,
           base.s,
           base.k,
           base.g,
@@ -935,7 +936,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         networkPathsHash: pathsBlob.hash,
         facilitiesGeoJsonHash: base.f ?? undefined,
       });
-      return reply.code(202).send({ jobId, versionId, seq: nextSeq });
+      return reply.code(202).send({ jobId, versionId, seq: nextSeq, publicVersionId: createdPublicVersionId });
     },
   );
 

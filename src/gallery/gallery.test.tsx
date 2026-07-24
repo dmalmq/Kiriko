@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { VenueSummary } from "./api";
 
 const me = vi.fn();
@@ -43,7 +43,10 @@ vi.mock("./api", async (importOriginal) => {
       logout: () => logout(),
       login: (...args: unknown[]) => login(...args),
     },
-    viewerHref: (...args: unknown[]) => viewerHrefSpy(...args),
+    viewerHref: (...args: unknown[]) => {
+      viewerHrefSpy(...args);
+      return "#";
+    },
   };
 });
 
@@ -93,8 +96,17 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+const preventNavigation = (event: Event) => {
+  event.preventDefault();
+};
+
+beforeEach(() => {
+  window.addEventListener("kiriko:navigate", preventNavigation);
+});
+
 
 afterEach(() => {
+  window.removeEventListener("kiriko:navigate", preventNavigation);
   vi.resetAllMocks();
 });
 
@@ -218,6 +230,201 @@ describe("GalleryPage", () => {
     await waitFor(() =>
       expect(screen.getByRole("status").textContent).toMatch(/skipped|スキップ/),
     );
+  });
+
+  it("treats a publish polling timeout as still processing, not a server failure", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([]);
+    inspectGdb.mockResolvedValue({ blobHash: "a".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
+    createVenue.mockResolvedValue({ id: 9, slug: "station", name: "Station", createdAt: "" });
+    publishGdb.mockResolvedValue({ jobId: "timeout-job", versionId: 1, seq: 1, excludedLayers: [] });
+    waitForJob.mockResolvedValueOnce({ status: "timeout" }).mockResolvedValueOnce({ status: "done" });
+
+    const user = userEvent.setup();
+    const { container } = render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("データセットがありません")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+
+    await user.upload(
+      container.querySelector('input[type="file"]') as HTMLInputElement,
+      new File([new Uint8Array([1, 2, 3])], "Station.gdb.zip", { type: "application/zip" }),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "Import" }));
+
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("timeout-job"));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain("still running");
+    expect(listVenues).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Import Geodatabase" }));
+    expect(inspectGdb).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledTimes(2));
+    expect(waitForJob).toHaveBeenLastCalledWith("timeout-job");
+    expect(publishGdb).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
+  });
+
+  it("cleans up a created GDB venue only after an accepted job reaches terminal error", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([]);
+    inspectGdb.mockResolvedValue({ blobHash: "a".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
+    createVenue
+      .mockResolvedValueOnce({ id: 9, slug: "station", name: "Station", createdAt: "" })
+      .mockResolvedValueOnce({ id: 10, slug: "station-retry", name: "Station Retry", createdAt: "" });
+    publishGdb
+      .mockResolvedValueOnce({ jobId: "create-error-job", versionId: 1, seq: 1, excludedLayers: [] })
+      .mockResolvedValueOnce({ jobId: "retry-job", versionId: 2, seq: 2, excludedLayers: [] });
+    waitForJob
+      .mockResolvedValueOnce({ status: "timeout" })
+      .mockResolvedValueOnce({ status: "error", error: "conversion failed" })
+      .mockReturnValue(new Promise<never>(() => {}));
+    deleteVenue.mockResolvedValue(undefined);
+
+    const user = userEvent.setup();
+    const { container } = render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("データセットがありません")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.upload(
+      container.querySelector('input[type="file"]') as HTMLInputElement,
+      new File([new Uint8Array([1, 2, 3])], "Station.gdb.zip", { type: "application/zip" }),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "Import" }));
+
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("create-error-job"));
+    expect(deleteVenue).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    await waitFor(() => expect(deleteVenue).toHaveBeenCalledWith(9));
+    expect(createVenue).toHaveBeenCalledTimes(1);
+    expect(publishGdb).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole("alert")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(createVenue).toHaveBeenCalledTimes(2));
+    expect(deleteVenue).toHaveBeenCalledTimes(1);
+    expect(publishGdb).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a slow accepted GDB submit locked through Cancel and Escape", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([]);
+    inspectGdb.mockResolvedValue({ blobHash: "a".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
+    createVenue.mockResolvedValue({ id: 9, slug: "station", name: "Station", createdAt: "" });
+    const accepted = deferred<{ jobId: string; versionId: number; seq: number; excludedLayers: [] }>();
+    publishGdb.mockReturnValue(accepted.promise);
+    waitForJob.mockResolvedValueOnce({ status: "timeout" }).mockResolvedValueOnce({ status: "done" });
+
+    const user = userEvent.setup();
+    const { container } = render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("データセットがありません")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.upload(
+      container.querySelector('input[type="file"]') as HTMLInputElement,
+      new File([new Uint8Array([1, 2, 3])], "Station.gdb.zip", { type: "application/zip" }),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(publishGdb).toHaveBeenCalledTimes(1));
+
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog", { name: "Review GDB layer mappings" })).toBeTruthy();
+
+    await act(async () => {
+      accepted.resolve({ jobId: "slow-accepted", versionId: 1, seq: 1, excludedLayers: [] });
+      await accepted.promise;
+    });
+
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("slow-accepted"));
+    expect(screen.getByRole("status").textContent).toContain("still running");
+    expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
+    expect(publishGdb).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledTimes(2));
+    expect(publishGdb).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes a created GDB venue even when the accepted terminal error is stale-owner", async () => {
+    me.mockResolvedValueOnce({ id: 1, username: "daniel", role: "admin" }).mockResolvedValueOnce(null);
+    listVenues.mockResolvedValue([]);
+    inspectGdb.mockResolvedValue({ blobHash: "a".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
+    createVenue.mockResolvedValue({ id: 9, slug: "station", name: "Station", createdAt: "" });
+    logout.mockResolvedValue(undefined);
+    publishGdb.mockResolvedValue({ jobId: "stale-error-job", versionId: 1, seq: 1, excludedLayers: [] });
+    const oldJob = deferred<{ status: "error"; error: string }>();
+    waitForJob.mockReturnValue(oldJob.promise);
+    deleteVenue.mockResolvedValue(undefined);
+
+    const user = userEvent.setup();
+    const { container } = render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("データセットがありません")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.upload(
+      container.querySelector('input[type="file"]') as HTMLInputElement,
+      new File([new Uint8Array([1, 2, 3])], "Station.gdb.zip", { type: "application/zip" }),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("stale-error-job"));
+
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Sign in to Kiriko" })).toBeTruthy());
+    await act(async () => {
+      oldJob.resolve({ status: "error", error: "conversion failed" });
+      await oldJob.promise;
+    });
+
+    await waitFor(() => expect(deleteVenue).toHaveBeenCalledWith(9));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps retry locked until created GDB venue cleanup settles", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([]);
+    inspectGdb.mockResolvedValue({ blobHash: "a".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
+    createVenue
+      .mockResolvedValueOnce({ id: 9, slug: "station", name: "Station", createdAt: "" })
+      .mockResolvedValueOnce({ id: 10, slug: "station-retry", name: "Station Retry", createdAt: "" });
+    publishGdb
+      .mockResolvedValueOnce({ jobId: "slow-delete-job", versionId: 1, seq: 1, excludedLayers: [] })
+      .mockResolvedValueOnce({ jobId: "retry-after-delete", versionId: 2, seq: 2, excludedLayers: [] });
+    waitForJob
+      .mockResolvedValueOnce({ status: "timeout" })
+      .mockResolvedValueOnce({ status: "error", error: "conversion failed" })
+      .mockReturnValue(new Promise<never>(() => {}));
+    const deletion = deferred<void>();
+    deleteVenue.mockReturnValue(deletion.promise);
+
+    const user = userEvent.setup();
+    const { container } = render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("データセットがありません")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.upload(
+      container.querySelector('input[type="file"]') as HTMLInputElement,
+      new File([new Uint8Array([1, 2, 3])], "Station.gdb.zip", { type: "application/zip" }),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("slow-delete-job"));
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    await waitFor(() => expect(deleteVenue).toHaveBeenCalledWith(9));
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((screen.getByRole("button", { name: "Check status" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    expect(createVenue).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      deletion.resolve();
+      await deletion.promise;
+    });
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(createVenue).toHaveBeenCalledTimes(2));
   });
 
   it("imports a geodatabase as a new version of an existing venue", async () => {
@@ -452,6 +659,116 @@ describe("GalleryPage add routing/facilities", () => {
     expect(createVenue).not.toHaveBeenCalled();
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
   });
+
+  it("checks the same accepted add-data job after timeout without re-augmenting", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "existing-station",
+        name: "Existing Station",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+      },
+    ]);
+    inspectGdbNetwork.mockResolvedValue({
+      networkBlobHash: "n".repeat(64),
+      nodeCount: 120,
+      edgeCount: 340,
+      floors: ["1F", "2F"],
+    });
+    augmentGdb.mockResolvedValue({ jobId: "augment-timeout", versionId: 2, seq: 2 });
+    waitForJob.mockResolvedValueOnce({ status: "timeout" }).mockResolvedValueOnce({ status: "done" });
+
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("Existing Station")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Add routing / facilities" }));
+    await user.upload(
+      screen.getByLabelText("Add routing network"),
+      new File([new Uint8Array([1, 2])], "net.gdb.zip", { type: "application/zip" }),
+    );
+    await waitFor(() => expect(screen.getByText(/120 nodes/)).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("augment-timeout"));
+    expect(screen.getByRole("status").textContent).toContain("still running");
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Import Geodatabase" }));
+    expect(inspectGdb).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledTimes(2));
+    expect(waitForJob).toHaveBeenLastCalledWith("augment-timeout");
+    expect(augmentGdb).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps a slow accepted add-data submit locked through Cancel and Escape", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "existing-station",
+        name: "Existing Station",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+      },
+    ]);
+    inspectGdbNetwork.mockResolvedValue({
+      networkBlobHash: "n".repeat(64),
+      nodeCount: 120,
+      edgeCount: 340,
+      floors: ["1F", "2F"],
+    });
+    const accepted = deferred<{ jobId: string; versionId: number; seq: number }>();
+    augmentGdb.mockReturnValue(accepted.promise);
+    waitForJob.mockResolvedValueOnce({ status: "timeout" }).mockResolvedValueOnce({ status: "done" });
+
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("Existing Station")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Add routing / facilities" }));
+    await user.upload(
+      screen.getByLabelText("Add routing network"),
+      new File([new Uint8Array([1, 2])], "net.gdb.zip", { type: "application/zip" }),
+    );
+    await waitFor(() => expect(screen.getByText(/120 nodes/)).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(augmentGdb).toHaveBeenCalledTimes(1));
+
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog", { name: "Add routing / facilities" })).toBeTruthy();
+
+    await act(async () => {
+      accepted.resolve({ jobId: "slow-augment", versionId: 2, seq: 2 });
+      await accepted.promise;
+    });
+
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("slow-augment"));
+    expect(screen.getByRole("status").textContent).toContain("still running");
+    expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
+    expect(augmentGdb).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledTimes(2));
+    expect(augmentGdb).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("GalleryPage edit mapping", () => {
@@ -539,6 +856,171 @@ describe("GalleryPage generate routing", () => {
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
   });
 
+
+  it("checks the same accepted generate-routing job after timeout without regenerating", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "venue-only",
+        name: "Venue Only",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: false,
+      },
+    ]);
+    generateNetwork.mockResolvedValue({ jobId: "generate-timeout", versionId: 2, seq: 2 });
+    waitForJob.mockResolvedValueOnce({ status: "timeout" }).mockResolvedValueOnce({ status: "done" });
+
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("Venue Only")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Generate routing" }));
+
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("generate-timeout"));
+    expect(screen.getByRole("status").textContent).toContain("still running");
+    await user.click(screen.getByRole("button", { name: "Import Geodatabase" }));
+    expect(screen.queryByRole("dialog", { name: "Review GDB layer mappings" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledTimes(2));
+    expect(waitForJob).toHaveBeenLastCalledWith("generate-timeout");
+    expect(generateNetwork).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
+  });
+
+
+  it("blocks top-level card actions while generate-routing is waiting for acceptance", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "venue-only",
+        name: "Venue Only",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: false,
+        hasGraph: true,
+      },
+    ]);
+    const accepted = deferred<{ jobId: string; versionId: number; seq: number }>();
+    generateNetwork.mockReturnValue(accepted.promise);
+    waitForJob.mockResolvedValueOnce({ status: "timeout" });
+    deleteVenue.mockResolvedValue(undefined);
+    inspectGdbNetwork.mockResolvedValue({ networkBlobHash: "n".repeat(64), nodeCount: 120, edgeCount: 340, floors: ["1F"] });
+    exportNetwork.mockResolvedValue({ blob: new Blob(), filename: "network.gdb.zip" });
+
+    const user = userEvent.setup();
+    const { container } = render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("Venue Only")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Generate routing" }));
+    await waitFor(() => expect(generateNetwork).toHaveBeenCalledWith(42));
+
+    const open = screen.getByRole("button", { name: "Open" }) as HTMLButtonElement;
+    const thumb = container.querySelector(".dataset-card__thumb") as HTMLButtonElement;
+    const del = screen.getByRole("button", { name: "Delete: Venue Only" }) as HTMLButtonElement;
+    const addData = screen.getByRole("button", { name: "Add routing / facilities" }) as HTMLButtonElement;
+    const exportButton = screen.getByRole("button", { name: "Export network" }) as HTMLButtonElement;
+    expect(open.disabled).toBe(true);
+    expect(thumb.disabled).toBe(true);
+    expect(del.disabled).toBe(true);
+    expect(addData.disabled).toBe(true);
+    expect(exportButton.disabled).toBe(true);
+
+    await user.click(open);
+    await user.click(thumb);
+    await user.click(del);
+    await user.click(addData);
+    await user.click(exportButton);
+    expect(viewerHrefSpy).not.toHaveBeenCalled();
+    expect(deleteVenue).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog", { name: "Delete dataset" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Add routing / facilities" })).toBeNull();
+    expect(inspectGdbNetwork).not.toHaveBeenCalled();
+    expect(exportNetwork).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Check status" })).toBeNull();
+
+    await act(async () => {
+      accepted.resolve({ jobId: "slow-route", versionId: 2, seq: 2 });
+      await accepted.promise;
+    });
+
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("slow-route"));
+    expect(screen.getByRole("status").textContent).toContain("still running");
+    expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
+    expect(generateNetwork).toHaveBeenCalledTimes(1);
+  });
+  it("blocks deleting a venue while its accepted generate-routing job is pending", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "venue-only",
+        name: "Venue Only",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: false,
+      },
+    ]);
+    generateNetwork.mockResolvedValue({ jobId: "generate-timeout", versionId: 2, seq: 2 });
+    waitForJob.mockResolvedValueOnce({ status: "timeout" }).mockResolvedValueOnce({ status: "done" });
+    deleteVenue.mockResolvedValue(undefined);
+
+    const user = userEvent.setup();
+    const { container } = render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("Venue Only")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Generate routing" }));
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("generate-timeout"));
+
+    const lockedDelete = screen.getByRole("button", { name: "Delete: Venue Only" }) as HTMLButtonElement;
+    expect(lockedDelete.disabled).toBe(true);
+    await user.click(lockedDelete);
+    expect(screen.queryByRole("alertdialog", { name: "Delete dataset" })).toBeNull();
+    expect(deleteVenue).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
+    const lockedOpen = screen.getByRole("button", { name: "Open" }) as HTMLButtonElement;
+    const lockedThumb = container.querySelector(".dataset-card__thumb") as HTMLButtonElement;
+    expect(lockedOpen.disabled).toBe(true);
+    expect(lockedThumb.disabled).toBe(true);
+    await user.click(lockedOpen);
+    await user.click(lockedThumb);
+    expect(viewerHrefSpy).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
+    const unlockedDelete = screen.getByRole("button", { name: "Delete: Venue Only" }) as HTMLButtonElement;
+    expect(unlockedDelete.disabled).toBe(false);
+    const unlockedOpen = screen.getByRole("button", { name: "Open" }) as HTMLButtonElement;
+    const unlockedThumb = container.querySelector(".dataset-card__thumb") as HTMLButtonElement;
+    expect(unlockedOpen.disabled).toBe(false);
+    expect(unlockedThumb.disabled).toBe(false);
+    await user.click(unlockedOpen);
+    expect(viewerHrefSpy).toHaveBeenCalledWith("venue-only", PUBLIC_ID, "en");
+    await user.click(unlockedDelete);
+    await user.click(within(screen.getByRole("alertdialog", { name: "Delete dataset" })).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteVenue).toHaveBeenCalledWith(42));
+  });
   it("hides Generate routing on a dataset that already has a real network", async () => {
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValue([
@@ -745,12 +1227,10 @@ describe("GalleryPage async GDB flow isolation", () => {
     expect(screen.queryByText(/2426 places/)).toBeNull();
   });
 
-  it("keeps old publish completion from closing or reloading a newer GDB flow", async () => {
+  it("keeps an accepted publish job locked instead of starting a newer GDB flow", async () => {
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValue([]);
-    inspectGdb
-      .mockResolvedValueOnce({ blobHash: "a".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan })
-      .mockResolvedValueOnce({ blobHash: "b".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
+    inspectGdb.mockResolvedValue({ blobHash: "a".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
     createVenue.mockResolvedValue({ id: 9, slug: "station", name: "Station", createdAt: "" });
     publishGdb.mockResolvedValue({ jobId: "old", versionId: 1, seq: 1, excludedLayers: [] });
     const oldJob = deferred<{ status: "done" }>();
@@ -765,33 +1245,31 @@ describe("GalleryPage async GDB flow isolation", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
     await user.click(screen.getByRole("button", { name: "Import" }));
     await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("old"));
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
     await user.click(screen.getByRole("button", { name: "Import Geodatabase" }));
-    await user.upload(input, new File([new Uint8Array([2])], "new.gdb.zip", { type: "application/zip" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
+    expect(inspectGdb).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       oldJob.resolve({ status: "done" });
       await oldJob.promise;
     });
 
-    expect(screen.getByRole("button", { name: "Import" })).toBeTruthy();
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("dialog", { name: "Review GDB layer mappings" })).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
   });
 
-  it("keeps old augment completion from resetting a newer GDB import flow", async () => {
+  it("keeps an accepted augment job locked instead of starting a newer GDB import flow", async () => {
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValue([{ ...VENUE, id: 42, slug: "venue", name: "Venue" }]);
     inspectGdbNetwork.mockResolvedValue({ networkBlobHash: "n".repeat(64), nodeCount: 120, edgeCount: 340, floors: ["1F"] });
     augmentGdb.mockResolvedValue({ jobId: "augment", versionId: 2, seq: 2 });
     const augmentJob = deferred<{ status: "done" }>();
     waitForJob.mockReturnValue(augmentJob.promise);
-    const newInspect = deferred<{ blobHash: string; inspection: typeof gdbInspection; suggestedPlan: typeof gdbPlan }>();
-    inspectGdb.mockReturnValue(newInspect.promise);
+    inspectGdb.mockResolvedValue({ blobHash: "b".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
 
     const user = userEvent.setup();
-    const { container } = render(<GalleryPage />);
+    render(<GalleryPage />);
     await waitFor(() => expect(screen.getByText("Venue")).toBeTruthy());
     await user.click(screen.getByRole("button", { name: "EN" }));
     await user.click(screen.getByRole("button", { name: "Add routing / facilities" }));
@@ -802,25 +1280,17 @@ describe("GalleryPage async GDB flow isolation", () => {
     await waitFor(() => expect(screen.getByText(/120 nodes/)).toBeTruthy());
     await user.click(screen.getByRole("button", { name: "Add" }));
     await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("augment"));
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
     await user.click(screen.getByRole("button", { name: "Import Geodatabase" }));
-    await user.upload(
-      container.querySelector('input[type="file"]') as HTMLInputElement,
-      new File([new Uint8Array([2])], "new.gdb.zip", { type: "application/zip" }),
-    );
-    await act(async () => {
-      newInspect.resolve({ blobHash: "b".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
-      await newInspect.promise;
-    });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
+    expect(inspectGdb).not.toHaveBeenCalled();
 
     await act(async () => {
       augmentJob.resolve({ status: "done" });
       await augmentJob.promise;
     });
 
-    expect(screen.getByRole("button", { name: "Import" })).toBeTruthy();
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("dialog", { name: "Add routing / facilities" })).toBeNull();
   });
 
   it("invalidates in-flight routing generation on sign-out", async () => {
@@ -1051,7 +1521,7 @@ describe("GalleryPage async lifecycle blockers", () => {
     expect(screen.queryByText("Could not load datasets")).toBeNull();
   });
 
-  it("keeps stale Generate routing completion from overwriting a newer export notice", async () => {
+  it("keeps a pre-accept Generate routing submission from starting a newer export", async () => {
     const venue = { ...VENUE, id: 42, slug: "venue", name: "Venue", hasNetwork: false, hasGraph: true };
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValue([venue]);
@@ -1070,15 +1540,18 @@ describe("GalleryPage async lifecycle blockers", () => {
     await waitFor(() => expect(screen.getByText("Venue")).toBeTruthy());
     await user.click(screen.getByRole("button", { name: "EN" }));
     await user.click(screen.getByRole("button", { name: "Generate routing" }));
-    await user.click(screen.getByRole("button", { name: "Export network" }));
-    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Network exported"));
+    const exportButton = screen.getByRole("button", { name: "Export network" }) as HTMLButtonElement;
+    expect(exportButton.disabled).toBe(true);
+    await user.click(exportButton);
+    expect(exportNetwork).not.toHaveBeenCalled();
+    expect(screen.getByRole("status").textContent).toBe("Generating routing…");
 
     await act(async () => {
       generation.resolve({ jobId: "route", versionId: 2, seq: 2 });
       await generation.promise;
     });
 
-    expect(screen.getByRole("status").textContent).toBe("Network exported");
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Routing generated"));
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
   });
 
@@ -1120,7 +1593,7 @@ describe("GalleryPage async lifecycle blockers", () => {
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Routing generated"));
   });
 
-  it("keeps stale Generate routing completion from overwriting a newer GDB import", async () => {
+  it("keeps a pre-accept Generate routing submission from starting a newer GDB import", async () => {
     const venue = { ...VENUE, id: 42, slug: "venue", name: "Venue", hasNetwork: false };
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValue([venue]);
@@ -1139,15 +1612,16 @@ describe("GalleryPage async lifecycle blockers", () => {
       container.querySelector('input[type="file"]') as HTMLInputElement,
       new File([new Uint8Array([1])], "venue.gdb.zip", { type: "application/zip" }),
     );
-    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
+    expect(inspectGdb).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Review GDB layer mappings" })).toBeNull();
+    expect(screen.getByRole("status").textContent).toBe("Generating routing…");
 
     await act(async () => {
       generation.resolve({ jobId: "route", versionId: 2, seq: 2 });
       await generation.promise;
     });
 
-    expect(screen.getByRole("button", { name: "Import" })).toBeTruthy();
-    expect(screen.queryByRole("status")).toBeNull();
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Routing generated"));
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
   });
 
@@ -1377,13 +1851,11 @@ describe("GalleryPage async lifecycle blockers", () => {
     expect(screen.queryByText("Could not load datasets")).toBeNull();
   });
 
-  it("refreshes after an old publish job finishes without touching a newer GDB flow", async () => {
+  it("keeps an accepted publish job locked until it finishes and refreshes", async () => {
     const refreshed = { ...VENUE, id: 43, slug: "refreshed", name: "Refreshed Venue" };
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValueOnce([]).mockResolvedValue([refreshed]);
-    inspectGdb
-      .mockResolvedValueOnce({ blobHash: "a".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan })
-      .mockResolvedValueOnce({ blobHash: "b".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
+    inspectGdb.mockResolvedValue({ blobHash: "a".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
     createVenue.mockResolvedValue({ id: 9, slug: "station", name: "Station", createdAt: "" });
     publishGdb.mockResolvedValue({ jobId: "old-publish", versionId: 1, seq: 1, excludedLayers: [] });
     const oldJob = deferred<{ status: "done" }>();
@@ -1398,10 +1870,8 @@ describe("GalleryPage async lifecycle blockers", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
     await user.click(screen.getByRole("button", { name: "Import" }));
     await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("old-publish"));
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
     await user.click(screen.getByRole("button", { name: "Import Geodatabase" }));
-    await user.upload(input, new File([new Uint8Array([2])], "new.gdb.zip", { type: "application/zip" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
+    expect(inspectGdb).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       oldJob.resolve({ status: "done" });
@@ -1410,11 +1880,11 @@ describe("GalleryPage async lifecycle blockers", () => {
 
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
     expect(screen.getByText("Refreshed Venue")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Import" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review GDB layer mappings" })).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
   });
 
-  it("refreshes after an old generate job finishes without touching a newer GDB flow", async () => {
+  it("keeps an accepted generate job locked until it finishes and refreshes", async () => {
     const venue = { ...VENUE, id: 42, slug: "venue", name: "Venue", hasNetwork: false };
     const refreshed = { ...venue, name: "Generated Fresh" };
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
@@ -1425,17 +1895,13 @@ describe("GalleryPage async lifecycle blockers", () => {
     inspectGdb.mockResolvedValue({ blobHash: "b".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
 
     const user = userEvent.setup();
-    const { container } = render(<GalleryPage />);
+    render(<GalleryPage />);
     await waitFor(() => expect(screen.getByText("Venue")).toBeTruthy());
     await user.click(screen.getByRole("button", { name: "EN" }));
     await user.click(screen.getByRole("button", { name: "Generate routing" }));
     await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("old-generate"));
     await user.click(screen.getByRole("button", { name: "Import Geodatabase" }));
-    await user.upload(
-      container.querySelector('input[type="file"]') as HTMLInputElement,
-      new File([new Uint8Array([1])], "venue.gdb.zip", { type: "application/zip" }),
-    );
-    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
+    expect(inspectGdb).not.toHaveBeenCalled();
 
     await act(async () => {
       oldJob.resolve({ status: "done" });
@@ -1444,11 +1910,10 @@ describe("GalleryPage async lifecycle blockers", () => {
 
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
     expect(screen.getByText("Generated Fresh")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Import" })).toBeTruthy();
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("status").textContent).toBe("Routing generated");
   });
 
-  it("refreshes after an old augment job error without overwriting a newer GDB flow", async () => {
+  it("keeps an accepted augment job locked until terminal error handling refreshes", async () => {
     const venue = { ...VENUE, id: 42, slug: "venue", name: "Venue" };
     const refreshed = { ...venue, name: "Augment Reconciled" };
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
@@ -1460,7 +1925,7 @@ describe("GalleryPage async lifecycle blockers", () => {
     inspectGdb.mockResolvedValue({ blobHash: "b".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
 
     const user = userEvent.setup();
-    const { container } = render(<GalleryPage />);
+    render(<GalleryPage />);
     await waitFor(() => expect(screen.getByText("Venue")).toBeTruthy());
     await user.click(screen.getByRole("button", { name: "EN" }));
     await user.click(screen.getByRole("button", { name: "Add routing / facilities" }));
@@ -1468,13 +1933,8 @@ describe("GalleryPage async lifecycle blockers", () => {
     await waitFor(() => expect(screen.getByText(/120 nodes/)).toBeTruthy());
     await user.click(screen.getByRole("button", { name: "Add" }));
     await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("old-augment"));
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
     await user.click(screen.getByRole("button", { name: "Import Geodatabase" }));
-    await user.upload(
-      container.querySelector('input[type="file"]') as HTMLInputElement,
-      new File([new Uint8Array([2])], "venue.gdb.zip", { type: "application/zip" }),
-    );
-    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeTruthy());
+    expect(inspectGdb).not.toHaveBeenCalled();
 
     await act(async () => {
       oldJob.resolve({ status: "error", error: "failed" });
@@ -1483,8 +1943,7 @@ describe("GalleryPage async lifecycle blockers", () => {
 
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
     expect(screen.getByText("Augment Reconciled")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Import" })).toBeTruthy();
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(await screen.findByRole("alert")).toBeTruthy();
   });
 
   it("does not orphan-clean a create-mode venue after publish returns a job id and polling rejects", async () => {
@@ -1518,7 +1977,9 @@ describe("GalleryPage async lifecycle blockers", () => {
     });
 
     expect(deleteVenue).not.toHaveBeenCalled();
-    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("still running");
   });
 
   it("still orphan-cleans a create-mode venue when publish fails before accepting a job", async () => {

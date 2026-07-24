@@ -162,6 +162,87 @@ export type GdbPublishResponse = {
   excludedLayers: Array<{ layer: string; reason: string }>;
 };
 
+export type WaitForJobResult =
+  | { status: "done" }
+  | { status: "error"; error: string }
+  | { status: "timeout" };
+
+export interface WaitForJobOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+export interface GdbImportNetworkResponse {
+  jobId: string;
+  versionId: number;
+  seq: number;
+  publicVersionId: string;
+}
+
+function abortError(): Error {
+  if (typeof DOMException !== "undefined") {
+    return new DOMException("Aborted", "AbortError");
+  }
+  const error = new Error("Aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw abortError();
+  }
+}
+
+function abortableDelay(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  throwIfAborted(signal);
+  // Executor form required: tsconfig lib predates Promise.withResolvers.
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      reject(abortError());
+    };
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+interface RequestDeadlineSignal {
+  signal: AbortSignal;
+  timedOut: () => boolean;
+  cleanup: () => void;
+}
+
+function requestDeadlineSignal(signal: AbortSignal | undefined, timeoutMs: number): RequestDeadlineSignal {
+  throwIfAborted(signal);
+  const controller = new AbortController();
+  let timedOut = false;
+  const onCallerAbort = () => {
+    controller.abort(abortError());
+  };
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort(abortError());
+  }, Math.max(0, timeoutMs));
+  signal?.addEventListener("abort", onCallerAbort, { once: true });
+  return {
+    signal: controller.signal,
+    timedOut: () => timedOut,
+    cleanup: () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     credentials: "same-origin",
@@ -252,20 +333,49 @@ export const api = {
 
   async waitForJob(
     jobId: string,
-  ): Promise<{ status: "done" } | { status: "error"; error: string }> {
-    const deadline = Date.now() + 60_000;
+    options: WaitForJobOptions = {},
+  ): Promise<WaitForJobResult> {
+    const timeoutMs = options.timeoutMs ?? 60_000;
+    const pollMs = 500;
+    const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const job = await request<{ status: string; error: string | null }>(`/api/jobs/${jobId}`);
+      const fetchRemaining = deadline - Date.now();
+      if (fetchRemaining <= 0) {
+        return { status: "timeout" };
+      }
+      const requestSignal = requestDeadlineSignal(options.signal, fetchRemaining);
+      let job: { status: string; error: string | null };
+      try {
+        job = await request<{ status: string; error: string | null }>(`/api/jobs/${jobId}`, {
+          signal: requestSignal.signal,
+        });
+      } catch (error) {
+        if (isAbortError(error)) {
+          if (requestSignal.timedOut()) {
+            return { status: "timeout" };
+          }
+          throw error;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          return { status: "timeout" };
+        }
+        await abortableDelay(Math.min(pollMs, remaining), options.signal);
+        continue;
+      } finally {
+        requestSignal.cleanup();
+      }
       if (job.status === "done") {
         return { status: "done" };
       }
       if (job.status === "error") {
         return { status: "error", error: job.error ?? "unknown error" };
       }
-      if (Date.now() > deadline) {
-        return { status: "error", error: "timed out" };
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        return { status: "timeout" };
       }
-      await new Promise((r) => setTimeout(r, 500));
+      await abortableDelay(Math.min(pollMs, remaining), options.signal);
     }
   },
 
@@ -432,7 +542,7 @@ export const api = {
     publicVersionId: string,
     junctions: string,
     paths: string,
-  ): Promise<{ jobId: string; versionId: number; seq: number }> {
+  ): Promise<GdbImportNetworkResponse> {
     const res = await fetch("/api/gdb/import-network", {
       method: "POST",
       credentials: "same-origin",
@@ -444,7 +554,7 @@ export const api = {
       try { parsed = (await res.json()) as GdbError; } catch { /* non-JSON */ }
       throw parsed;
     }
-    return (await res.json()) as { jobId: string; versionId: number; seq: number };
+    return (await res.json()) as GdbImportNetworkResponse;
   },
 
   async getGdbMapping(

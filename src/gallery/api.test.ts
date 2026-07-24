@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, datasetBundleUrl, gdbErrorMessage, publishErrorMessage, viewerHref } from "./api";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -165,6 +166,150 @@ describe("gdb api", () => {
   });
 });
 
+describe("waitForJob", () => {
+  it("polls queued/running jobs until they finish", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const fetchSpy = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: "queued", error: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: "running", error: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: "done", error: null }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = api.waitForJob("job-done");
+    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(result).resolves.toEqual({ status: "done" });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps polling through transient status fetch failures", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const fetchSpy = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError("network hiccup"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: "done", error: null }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = api.waitForJob("job-flaky", { timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(result).resolves.toEqual({ status: "done" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns terminal server errors without treating them as timeouts", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const structured = JSON.stringify({ code: "no_routable_network", message: "empty graph" });
+    const fetchSpy = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: "running", error: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: "error", error: structured }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = api.waitForJob("job-error");
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(result).resolves.toEqual({ status: "error", error: structured });
+  });
+
+  it("returns timeout as a non-terminal client result", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const fetchSpy = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ status: "running", error: null }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = api.waitForJob("job-timeout", { timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(result).resolves.toEqual({ status: "timeout" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("times out a stalled status fetch at the overall deadline", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const controller = new AbortController();
+    const addListener = vi.spyOn(controller.signal, "addEventListener");
+    const removeListener = vi.spyOn(controller.signal, "removeEventListener");
+    let fetchSignal: AbortSignal | undefined;
+    const fetchSpy = vi.fn<typeof fetch>((_url, init) => {
+      fetchSignal = init?.signal as AbortSignal | undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        fetchSignal?.addEventListener(
+          "abort",
+          () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          },
+          { once: true },
+        );
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = api.waitForJob("job-stalled", { timeoutMs: 1_000, signal: controller.signal });
+    const settled = vi.fn();
+    const rejected = vi.fn();
+    void result.then(settled, rejected);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await Promise.resolve();
+
+    try {
+      expect(fetchSignal?.aborted).toBe(true);
+      expect(settled).toHaveBeenCalledWith({ status: "timeout" });
+      expect(rejected).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(addListener).toHaveBeenCalledWith("abort", expect.any(Function), { once: true });
+      expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    } finally {
+      controller.abort();
+      await result.catch(() => {});
+    }
+  });
+
+  it("aborts the in-flight status fetch", async () => {
+    const controller = new AbortController();
+    let fetchSignal: AbortSignal | undefined;
+    const fetchSpy = vi.fn<typeof fetch>((_url, init) => {
+      fetchSignal = init?.signal as AbortSignal | undefined;
+      // Executor form required: tsconfig lib predates Promise.withResolvers.
+      return new Promise<Response>((_resolve, reject) => {
+        fetchSignal?.addEventListener("abort", () => {
+          reject(new DOMException("Aborted", "AbortError"));
+        });
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = api.waitForJob("job-abort-fetch", { signal: controller.signal });
+    await Promise.resolve();
+    expect(fetchSignal).not.toBe(controller.signal);
+    expect(fetchSignal?.aborted).toBe(false);
+    controller.abort();
+    expect(fetchSignal?.aborted).toBe(true);
+
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("aborts the polling delay without waiting for the next interval", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const controller = new AbortController();
+    const fetchSpy = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ status: "running", error: null }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = api.waitForJob("job-abort-delay", { signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("augmentGdb", () => {
   it("posts venueId + blob hashes and returns the accepted job", async () => {
     const fetchSpy = vi.fn(
@@ -224,13 +369,13 @@ describe("importNetwork", () => {
     const fetchSpy = vi.fn(
       (..._args: unknown[]) =>
         Promise.resolve(
-          new Response(JSON.stringify({ jobId: "j3", versionId: 7, seq: 4 }), { status: 202 }),
+          new Response(JSON.stringify({ jobId: "j3", versionId: 7, seq: 4, publicVersionId: "b".repeat(64) }), { status: 202 }),
         ),
     );
     vi.stubGlobal("fetch", fetchSpy);
     const id = "a".repeat(64);
     const out = await api.importNetwork("shinjuku", id, '{"j":1}', '{"p":1}');
-    expect(out).toEqual({ jobId: "j3", versionId: 7, seq: 4 });
+    expect(out).toEqual({ jobId: "j3", versionId: 7, seq: 4, publicVersionId: "b".repeat(64) });
     const call = fetchSpy.mock.calls[0]!;
     expect(call[0]).toBe("/api/gdb/import-network");
     const init = call[1] as RequestInit;

@@ -710,12 +710,14 @@ describe("POST /api/gdb/import-network", () => {
       payload: { slug, publicVersionId, junctions: EMPTY_JUNCTIONS, paths: EMPTY_PATHS },
     });
     expect(res.statusCode, res.body).toBe(202);
-    const body = res.json() as { jobId: string; versionId: number; seq: number };
+    const body = res.json() as { jobId: string; versionId: number; seq: number; publicVersionId: string };
     await app.queue.idle();
 
     const row = app.db
-      .prepare("SELECT net_junctions_blob_hash AS j, synthesized AS syn FROM versions WHERE id = ?")
-      .get(body.versionId) as { j: string | null; syn: number };
+      .prepare("SELECT public_id AS p, net_junctions_blob_hash AS j, synthesized AS syn FROM versions WHERE id = ?")
+      .get(body.versionId) as { p: string; j: string | null; syn: number };
+    expect(body.publicVersionId).toMatch(/^[0-9a-f]{64}$/);
+    expect(row.p).toBe(body.publicVersionId);
     expect(row.j).not.toBeNull();
     expect(row.syn).toBe(0);
     expect(fake.compileCalls[0]!.metadata["networkJunctionsGeoJson"]).toBe(EMPTY_JUNCTIONS);

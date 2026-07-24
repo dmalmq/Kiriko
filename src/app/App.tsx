@@ -60,7 +60,7 @@ import {
   type ViewerState,
 } from "../state/viewerReducer";
 import { kirikoTheme } from "../theme/presets";
-import { api, datasetBundleUrl, type ApiUser } from "../gallery/api";
+import { api, datasetBundleUrl, gdbErrorMessage, viewerHref, type ApiUser, type GdbError } from "../gallery/api";
 import { parseViewerParams } from "./viewerParams";
 
 const ui = {
@@ -86,6 +86,15 @@ const ui = {
   reviewFloors: { ja: "接続フロア", en: "floors linked" },
   editNetwork: { ja: "ネットワークを編集", en: "Edit network" },
   saveNetwork: { ja: "ネットワークを保存", en: "Save network" },
+  checkNetworkSave: { ja: "状況を確認", en: "Check status" },
+  networkSaveContinues: {
+    ja: "ネットワーク保存はサーバーで処理中です。しばらくしてから状況を確認してください。",
+    en: "Network save is still processing on the server. Check status again shortly.",
+  },
+  networkSaveCheckFailed: {
+    ja: "ネットワーク保存はサーバーで処理中ですが、状況を確認できませんでした。しばらくしてからもう一度確認してください。",
+    en: "Network save is still processing, but Kiriko could not check its status. Check status again shortly.",
+  },
   directionsPickOrigin: { ja: "地図をタップして出発地を指定", en: "Tap the map to set the origin" },
   directionsPickDestination: { ja: "地図をタップして目的地を指定", en: "Tap the map to set the destination" },
   directionsSearching: { ja: "経路を計算中", en: "Computing the route" },
@@ -194,6 +203,68 @@ type BundleProvenance = {
   facilities: FacilityDto[];
 };
 
+interface AcceptedNetworkSave {
+  jobId: string;
+  publicVersionId: string;
+}
+
+interface NetworkSaveState {
+  busy: boolean;
+  submitting: boolean;
+  accepted: AcceptedNetworkSave | null;
+  message: string | null;
+  error: string | null;
+}
+
+const PUBLIC_VERSION_ID = /^[0-9a-f]{64}$/;
+
+function parseGdbJobError(raw: string): GdbError {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { code: "gdb_conversion_failed", message: raw };
+  }
+  if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && "code" in parsed) {
+    const code = parsed.code;
+    if (typeof code === "string") {
+      const message = "message" in parsed ? parsed.message : undefined;
+      const details = "details" in parsed ? parsed.details : undefined;
+      if (details !== null && typeof details === "object" && !Array.isArray(details)) {
+        const checkedDetails = details as Record<string, unknown>;
+        return {
+          code,
+          message: typeof message === "string" ? message : raw,
+          details: checkedDetails,
+        };
+      }
+      return { code, message: typeof message === "string" ? message : raw };
+    }
+  }
+  return { code: "gdb_conversion_failed", message: raw };
+}
+
+function gdbErrorFromUnknown(error: unknown): GdbError {
+  if (error !== null && typeof error === "object" && "code" in error) {
+    const code = error.code;
+    if (typeof code === "string") {
+      const message = "message" in error ? error.message : undefined;
+      return { code, message: typeof message === "string" ? message : code };
+    }
+  }
+  return {
+    code: "gdb_conversion_failed",
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function navigateTo(href: string): void {
+  const event = new CustomEvent("kiriko:navigate", { cancelable: true, detail: { href } });
+  if (window.dispatchEvent(event)) {
+    window.location.assign(href);
+  }
+}
+
 type IssueMode =
   | { kind: "hidden" }
   | { kind: "identity_error" }
@@ -238,6 +309,7 @@ export function App() {
     ...initialViewerState,
     ...(p.locale !== null ? { locale: p.locale } : {}),
   }));
+  const mountedRef = useRef(true);
   const attemptTokenRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const retryAttemptRef = useRef<LoadAttempt | null>(null);
@@ -266,11 +338,37 @@ export function App() {
   );
   const [editNetwork, setEditNetwork] = useState(false);
   const [selectedJunction, setSelectedJunction] = useState<number | null>(null);
-  const [savingNetwork, setSavingNetwork] = useState(false);
+  const [networkSave, setNetworkSave] = useState<NetworkSaveState>({
+    busy: false,
+    submitting: false,
+    accepted: null,
+    message: null,
+    error: null,
+  });
+  const networkSaveAttemptRef = useRef(0);
+  const networkSaveAbortRef = useRef<AbortController | null>(null);
   const selectedJunctionSet = useMemo(
     () => (selectedJunction === null ? undefined : new Set([selectedJunction])),
     [selectedJunction],
   );
+  const networkSaveLocked = networkSave.busy || networkSave.submitting || networkSave.accepted !== null;
+  const networkSaveActionDisabled = networkSave.busy || networkSave.submitting || state.status === "loading";
+  const resetNetworkSave = useCallback(() => {
+    networkSaveAttemptRef.current += 1;
+    networkSaveAbortRef.current?.abort();
+    networkSaveAbortRef.current = null;
+    setNetworkSave({ busy: false, submitting: false, accepted: null, message: null, error: null });
+  }, []);
+  const pauseNetworkSavePolling = useCallback(() => {
+    networkSaveAttemptRef.current += 1;
+    networkSaveAbortRef.current?.abort();
+    networkSaveAbortRef.current = null;
+    setNetworkSave((current) =>
+      current.accepted === null
+        ? { busy: false, submitting: current.submitting, accepted: null, message: null, error: null }
+        : { busy: false, submitting: false, accepted: current.accepted, message: current.message, error: null },
+    );
+  }, []);
   const directionsTokenRef = useRef(0);
   // The admitted pin identity is the permanent 64-hex public version id, but
   // only when the loader also confirmed integrity (its seq matched the decoded
@@ -282,6 +380,8 @@ export function App() {
     bundleProvenance.seq !== null
       ? bundleProvenance.publicVersionId
       : null;
+  const networkSaveBaseRef = useRef({ dataset: params.dataset, admittedVersionId });
+  networkSaveBaseRef.current = { dataset: params.dataset, admittedVersionId };
   const issueMode: IssueMode = params.embed
     ? { kind: "hidden" as const }
     : bundleProvenance === null
@@ -390,7 +490,8 @@ export function App() {
     setSelectedFacility(null);
     setReviewActive(false);
     setReviewNetwork(null);
-  }, [bundleProvenance]);
+    resetNetworkSave();
+  }, [bundleProvenance, resetNetworkSave]);
 
   // Network-review overlay: load the generated network on demand the first
   // time review is switched on for this dataset (main-thread wasm export).
@@ -513,18 +614,116 @@ export function App() {
     const dataset = params.dataset;
     // The edited graph must be based on the EXACT admitted published version,
     // so a valid admitted public identity is required to save.
-    if (reviewNetwork === null || dataset === null || admittedVersionId === null || savingNetwork) {
+    if (reviewNetwork === null || dataset === null || admittedVersionId === null || networkSaveActionDisabled) {
       return;
     }
-    setSavingNetwork(true);
+
+    networkSaveAbortRef.current?.abort();
+    const controller = new AbortController();
+    networkSaveAbortRef.current = controller;
+    const token = networkSaveAttemptRef.current + 1;
+    networkSaveAttemptRef.current = token;
+    const isCurrent = () => token === networkSaveAttemptRef.current && !controller.signal.aborted;
+    let accepted = networkSave.accepted;
+    setNetworkSave({ busy: true, submitting: accepted === null, accepted, message: null, error: null });
+
     try {
-      const { junctions, paths } = serializeNetwork(reviewNetwork);
-      await api.importNetwork(dataset, admittedVersionId, junctions, paths);
-      window.location.assign(`/?dataset=${encodeURIComponent(dataset)}&review=1`);
-    } catch {
-      setSavingNetwork(false);
+      if (accepted === null) {
+        const { junctions, paths } = serializeNetwork(reviewNetwork);
+        const response = await api.importNetwork(dataset, admittedVersionId, junctions, paths);
+        accepted = { jobId: response.jobId, publicVersionId: response.publicVersionId };
+        if (!isCurrent()) {
+          const current = networkSaveBaseRef.current;
+          if (
+            mountedRef.current &&
+            current.dataset === dataset &&
+            current.admittedVersionId === admittedVersionId &&
+            PUBLIC_VERSION_ID.test(response.publicVersionId)
+          ) {
+            setNetworkSave((state) =>
+              state.accepted === null
+                ? { busy: false, submitting: false, accepted, message: null, error: null }
+                : state,
+            );
+          }
+          return;
+        }
+        setNetworkSave({ busy: true, submitting: false, accepted, message: null, error: null });
+      }
+
+      const job = await api.waitForJob(accepted.jobId, { signal: controller.signal });
+      if (!isCurrent()) {
+        return;
+      }
+      if (job.status === "done") {
+        setNetworkSave({ busy: false, submitting: false, accepted: null, message: null, error: null });
+        navigateTo(viewerHref(dataset, accepted.publicVersionId, locale, true));
+        return;
+      }
+      if (job.status === "timeout") {
+        setNetworkSave({
+          busy: false,
+          submitting: false,
+          accepted,
+          message: ui.networkSaveContinues[locale],
+          error: null,
+        });
+        return;
+      }
+      setNetworkSave({
+        busy: false,
+        submitting: false,
+        accepted: null,
+        message: null,
+        error: gdbErrorMessage(parseGdbJobError(job.error), locale),
+      });
+    } catch (error) {
+      if (!isCurrent() || isAbortError(error)) {
+        if (!isAbortError(error) && accepted === null) {
+          const current = networkSaveBaseRef.current;
+          if (
+            mountedRef.current &&
+            current.dataset === dataset &&
+            current.admittedVersionId === admittedVersionId
+          ) {
+            setNetworkSave((state) =>
+              state.accepted === null
+                ? {
+                    busy: false,
+                    submitting: false,
+                    accepted: null,
+                    message: null,
+                    error: gdbErrorMessage(gdbErrorFromUnknown(error), locale),
+                  }
+                : state,
+            );
+          }
+        }
+        return;
+      }
+      if (accepted !== null) {
+        setNetworkSave({
+          busy: false,
+          submitting: false,
+          accepted,
+          message: ui.networkSaveCheckFailed[locale],
+          error: null,
+        });
+        return;
+      }
+      setNetworkSave({
+        busy: false,
+        submitting: false,
+        accepted: null,
+        message: null,
+        error: gdbErrorMessage(gdbErrorFromUnknown(error), locale),
+      });
+    } finally {
+      if (token === networkSaveAttemptRef.current) {
+        networkSaveAbortRef.current = null;
+      }
     }
-  }, [params.dataset, admittedVersionId, reviewNetwork, savingNetwork]);
+  }, [params.dataset, admittedVersionId, reviewNetwork, networkSave, networkSaveActionDisabled, locale]);
 
   const routeToFacility = useCallback((facility: FacilityDto) => {
     setSelectedFacility(null);
@@ -842,6 +1041,7 @@ export function App() {
         loadVenue,
         ...(requestedLevel !== undefined ? { requestedLevel } : {}),
       };
+      pauseNetworkSavePolling();
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
@@ -879,7 +1079,7 @@ export function App() {
           }
         });
     },
-    [],
+    [pauseNetworkSavePolling],
   );
 
   const handleFile = useCallback(
@@ -947,7 +1147,11 @@ export function App() {
   }, [loadFromParams]);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
+      networkSaveAttemptRef.current += 1;
+      networkSaveAbortRef.current?.abort();
       abortRef.current?.abort();
       if (copiedTimerRef.current !== null) {
         clearTimeout(copiedTimerRef.current);
@@ -1147,7 +1351,7 @@ export function App() {
             onSelectFacility={setSelectedFacility}
             network={reviewActive ? reviewNetwork : null}
             selectedJunctions={selectedJunctionSet}
-            onNetworkPick={reviewActive && editNetwork ? onNetworkPick : undefined}
+            onNetworkPick={reviewActive && editNetwork && !networkSaveLocked ? onNetworkPick : undefined}
           />
         ) : null}
 
@@ -1352,6 +1556,7 @@ export function App() {
                     type="button"
                     className={editNetwork ? "chip chip--selected" : "chip"}
                     aria-pressed={editNetwork}
+                    disabled={networkSaveLocked}
                     onClick={() => {
                       setEditNetwork((v) => !v);
                       setSelectedJunction(null);
@@ -1364,13 +1569,23 @@ export function App() {
                   <button
                     type="button"
                     className="chip"
-                    disabled={savingNetwork}
+                    disabled={networkSaveActionDisabled}
                     onClick={() => {
                       void saveNetwork();
                     }}
                   >
-                    {ui.saveNetwork[locale]}
+                    {networkSave.accepted !== null && !networkSave.busy ? ui.checkNetworkSave[locale] : ui.saveNetwork[locale]}
                   </button>
+                ) : null}
+                {reviewActive && editNetwork && networkSave.message !== null ? (
+                  <span className="directions-bar__status" role="status">
+                    {networkSave.message}
+                  </span>
+                ) : null}
+                {reviewActive && editNetwork && networkSave.error !== null ? (
+                  <span className="directions-bar__status" role="alert">
+                    {networkSave.error}
+                  </span>
                 ) : null}
                 {directions.active ? (
                   <>
