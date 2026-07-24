@@ -15,6 +15,7 @@ const VenueSummarySchema = Type.Object({
   latest: Type.Union([
     Type.Object({
       seq: Type.Number(),
+      publicVersionId: Type.String(),
       status: Type.String(),
       stats: Type.Union([VersionStatsSchema, Type.Null()]),
       createdAt: Type.String(),

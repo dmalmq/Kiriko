@@ -10,6 +10,7 @@ const venue: VenueSummary = {
   createdAt: "2026-07-20 00:00:00",
   latest: {
     seq: 1,
+    publicVersionId: "a".repeat(64),
     status: "published",
     stats: { levels: 2, features: 10 },
     createdAt: "2026-07-20 00:00:00",

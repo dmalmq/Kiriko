@@ -180,7 +180,14 @@ function liveMessage(state: ViewerState): string {
 type BundleProvenance = {
   datasetId: string;
   version: number;
+  /** Permanent 64-hex public version identity; the pin key for every post-load fetch. */
   publicVersionId: string | null;
+  /**
+   * Server publication sequence. An integrity witness only: pinning uses the
+   * public identity, and provenance is pin-safe (see `admittedVersionId`) only
+   * when this equals the decoded §1 version. `null` blocks version-scoped surfaces.
+   */
+  seq: number | null;
   /** Whether the bundle carries a §5 network graph (Directions mode gate). */
   hasGraph: boolean;
   /** Point facilities from §7; empty when absent. */
@@ -265,13 +272,23 @@ export function App() {
     [selectedJunction],
   );
   const directionsTokenRef = useRef(0);
+  // The admitted pin identity is the permanent 64-hex public version id, but
+  // only when the loader also confirmed integrity (its seq matched the decoded
+  // §1 version). A null identity gates every version-scoped surface: pinned
+  // bundle fetches, graph operations, issue auth/SSE/UI, and share/embed links.
+  const admittedVersionId =
+    bundleProvenance !== null &&
+    bundleProvenance.publicVersionId !== null &&
+    bundleProvenance.seq !== null
+      ? bundleProvenance.publicVersionId
+      : null;
   const issueMode: IssueMode = params.embed
     ? { kind: "hidden" as const }
     : bundleProvenance === null
       ? { kind: "hidden" as const }
-      : bundleProvenance.publicVersionId === null
+      : admittedVersionId === null
         ? { kind: "identity_error" as const }
-        : { kind: "ready" as const, publicVersionId: bundleProvenance.publicVersionId };
+        : { kind: "ready" as const, publicVersionId: admittedVersionId };
   const issuePublicVersionId =
     issueMode.kind === "ready" ? issueMode.publicVersionId : null;
   const issueController = useIssueSync(issuePublicVersionId);
@@ -349,10 +366,20 @@ export function App() {
   const locale = state.locale;
   const venueState = activeVenue(state);
 
-  // Directions mode is gated on the decoded bundle's §5 graph (bundle loads
-  // only — a ZIP import has no graph section to route over).
+  // Every post-admission bundle fetch (directions, network overlay) pins to the
+  // admitted public identity, never mutable latest. Null when no dataset is
+  // loaded or no pin-safe identity was admitted.
+  const pinnedBundleUrl = useMemo(() => {
+    if (params.dataset === null || admittedVersionId === null) {
+      return null;
+    }
+    return datasetBundleUrl(params.dataset, admittedVersionId);
+  }, [params.dataset, admittedVersionId]);
+
+  // Directions mode is gated on the decoded bundle's §5 graph and an admitted
+  // pin-safe public identity (bundle loads only — a ZIP import has no graph).
   const directionsAvailable =
-    !embed && venueState !== null && bundleProvenance?.hasGraph === true && params.dataset !== null;
+    !embed && venueState !== null && bundleProvenance?.hasGraph === true && pinnedBundleUrl !== null;
 
   const [selectedFacility, setSelectedFacility] = useState<FacilityDto | null>(null);
 
@@ -371,12 +398,11 @@ export function App() {
     if (!reviewActive || reviewNetwork !== null) {
       return;
     }
-    const dataset = params.dataset;
-    if (dataset === null) {
+    if (pinnedBundleUrl === null) {
       return;
     }
     let cancelled = false;
-    void loadNetworkOverlay(datasetBundleUrl(dataset)).then(
+    void loadNetworkOverlay(pinnedBundleUrl).then(
       (parsed) => {
         if (!cancelled) setReviewNetwork(parsed);
       },
@@ -385,7 +411,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [reviewActive, reviewNetwork, params.dataset]);
+  }, [reviewActive, reviewNetwork, pinnedBundleUrl]);
 
   // Deep-link `?review=1` from the gallery opens straight into the overlay.
   useEffect(() => {
@@ -396,14 +422,13 @@ export function App() {
 
   const fireRoute = useCallback(
     (origin: RouteEndpoint, destination: RouteEndpoint) => {
-      const dataset = params.dataset;
-      if (dataset === null) {
+      if (pinnedBundleUrl === null) {
         return;
       }
       const token = directionsTokenRef.current + 1;
       directionsTokenRef.current = token;
       setDirections((current) => ({ ...current, destination, route: null, status: "loading" }));
-      void routeKirikoBundle(datasetBundleUrl(dataset), origin, destination).then(
+      void routeKirikoBundle(pinnedBundleUrl, origin, destination).then(
         (route) => {
           if (directionsTokenRef.current === token) {
             setDirections((current) => ({ ...current, route, status: "idle" }));
@@ -416,7 +441,7 @@ export function App() {
         },
       );
     },
-    [params.dataset],
+    [pinnedBundleUrl],
   );
 
   const onDirectionsPick = useCallback(
@@ -486,18 +511,20 @@ export function App() {
 
   const saveNetwork = useCallback(async () => {
     const dataset = params.dataset;
-    if (reviewNetwork === null || dataset === null || savingNetwork) {
+    // The edited graph must be based on the EXACT admitted published version,
+    // so a valid admitted public identity is required to save.
+    if (reviewNetwork === null || dataset === null || admittedVersionId === null || savingNetwork) {
       return;
     }
     setSavingNetwork(true);
     try {
       const { junctions, paths } = serializeNetwork(reviewNetwork);
-      await api.importNetwork(dataset, junctions, paths);
+      await api.importNetwork(dataset, admittedVersionId, junctions, paths);
       window.location.assign(`/?dataset=${encodeURIComponent(dataset)}&review=1`);
     } catch {
       setSavingNetwork(false);
     }
-  }, [params.dataset, reviewNetwork, savingNetwork]);
+  }, [params.dataset, admittedVersionId, reviewNetwork, savingNetwork]);
 
   const routeToFacility = useCallback((facility: FacilityDto) => {
     setSelectedFacility(null);
@@ -892,7 +919,9 @@ export function App() {
     }
     if (params.dataset !== null) {
       const dataset = params.dataset;
-      const bundleUrl = datasetBundleUrl(dataset);
+      // Pin the initial fetch to `?version=N` when present; otherwise admit
+      // mutable latest and record the exact sequence it returns.
+      const bundleUrl = datasetBundleUrl(dataset, params.version ?? undefined);
       runLoad(
         dataset,
         async (signal) => {
@@ -902,6 +931,7 @@ export function App() {
             provenance: {
               ...result.metadata,
               publicVersionId: result.publicVersionId,
+              seq: result.seq,
               hasGraph: result.hasGraph,
               facilities: result.facilities,
             },
@@ -966,6 +996,12 @@ export function App() {
       url.searchParams.set("level", venueState.selectedLevelId);
     }
     url.searchParams.set("lang", locale);
+    // Drop any inbound `version` and re-add only the admitted public identity,
+    // so a stale/unpinned load never leaks a wrong version into the shared link.
+    url.searchParams.delete("version");
+    if (admittedVersionId !== null) {
+      url.searchParams.set("version", admittedVersionId);
+    }
     void navigator.clipboard
       .writeText(url.toString())
       .then(() => {
@@ -980,7 +1016,7 @@ export function App() {
       .catch(() => {
         // Clipboard unavailable (permissions, insecure context) — no feedback.
       });
-  }, [venueState, locale]);
+  }, [venueState, locale, admittedVersionId]);
 
   const onMapDragOver = useCallback((event: DragEvent) => {
     if (!event.dataTransfer.types.includes("Files")) {
@@ -1044,12 +1080,23 @@ export function App() {
     !embed &&
     (state.status === "ready" || (state.status === "loading" && Boolean(state.previous)));
   const onRetry = retryAttemptRef.current !== null ? retryLatestLoad : openPicker;
+  // The embed "Open in Kiriko" badge links back to the full viewer. For a
+  // dataset load it must stay hidden until a pin-safe public identity is
+  // admitted, or a slow/failed load would expose a mutable-latest link. A
+  // `src` embed carries no server identity, so its badge is always safe.
+  const showEmbedBadge =
+    embed && !(params.src === null && params.dataset !== null && admittedVersionId === null);
 
   const viewerUrl = useMemo(() => {
     const url = new URL(window.location.href);
     url.searchParams.delete("embed");
+    // Drop any inbound `version` and re-add only the admitted public identity.
+    url.searchParams.delete("version");
+    if (admittedVersionId !== null) {
+      url.searchParams.set("version", admittedVersionId);
+    }
     return url.toString();
-  }, []);
+  }, [admittedVersionId]);
 
   // Compact: sheets are exclusive — an open rail panel hides the inspector
   // sheet (selection and its map highlight persist underneath).
@@ -1370,7 +1417,7 @@ export function App() {
           </>
         ) : null}
 
-        {embed ? (
+        {showEmbedBadge ? (
           <a className="kiriko-badge" href={viewerUrl} target="_blank" rel="noreferrer">
             <KirikoMark size={14} />
             <span>

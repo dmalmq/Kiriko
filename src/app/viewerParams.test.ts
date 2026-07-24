@@ -72,4 +72,16 @@ describe("parseViewerParams", () => {
     expect(parseViewerParams("?review=1", BASE).review).toBe(true);
     expect(parseViewerParams("", BASE).review).toBe(false);
   });
+
+  it("parses an optional 64-hex version identity, degrading invalid values to absent", () => {
+    const id = "a".repeat(64);
+    expect(parseViewerParams(`?version=${id}`, BASE).version).toBe(id);
+    expect(parseViewerParams(`?version=%20${id}%20`, BASE).version).toBe(id);
+    expect(parseViewerParams(`?version=${"A".repeat(64)}`, BASE).version).toBeNull(); // uppercase
+    expect(parseViewerParams(`?version=${"a".repeat(63)}`, BASE).version).toBeNull(); // too short
+    expect(parseViewerParams(`?version=${"a".repeat(65)}`, BASE).version).toBeNull(); // too long
+    expect(parseViewerParams("?version=3", BASE).version).toBeNull(); // legacy numeric seq
+    expect(parseViewerParams("?version=", BASE).version).toBeNull();
+    expect(parseViewerParams("", BASE).version).toBeNull();
+  });
 });

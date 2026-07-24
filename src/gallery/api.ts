@@ -19,6 +19,7 @@ export interface VenueRow {
 export interface VenueSummary extends VenueRow {
   latest: {
     seq: number;
+    publicVersionId: string;
     status: string;
     stats: { levels: number; features: number } | null;
     createdAt: string;
@@ -37,9 +38,35 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 }
+/** Permanent public version identity: a lowercase 64-hex string. */
+const PUBLIC_VERSION_ID = /^[0-9a-f]{64}$/;
 
-export function datasetBundleUrl(slug: string): string {
-  return `/v/default/${slug}/bundle`;
+export function datasetBundleUrl(slug: string, publicVersionId?: string): string {
+  const base = `/v/default/${slug}/bundle`;
+  return publicVersionId !== undefined && PUBLIC_VERSION_ID.test(publicVersionId)
+    ? `${base}@${publicVersionId}`
+    : base;
+}
+
+/**
+ * Canonical viewer deep-link for a published venue. Pins to `?version=<publicVersionId>`
+ * (the permanent 64-hex identity, never the reusable seq) when it is valid,
+ * always tags the current locale, and appends `review=1` for network review.
+ */
+export function viewerHref(
+  slug: string,
+  publicVersionId: string | null | undefined,
+  locale: LocaleCode,
+  review = false,
+): string {
+  const query = new URLSearchParams({ dataset: slug, lang: locale });
+  if (publicVersionId != null && PUBLIC_VERSION_ID.test(publicVersionId)) {
+    query.set("version", publicVersionId);
+  }
+  if (review) {
+    query.set("review", "1");
+  }
+  return `/?${query.toString()}`;
 }
 /**
  * Corrective copy for the stable structured error codes a failed publish job
@@ -402,6 +429,7 @@ export const api = {
 
   async importNetwork(
     slug: string,
+    publicVersionId: string,
     junctions: string,
     paths: string,
   ): Promise<{ jobId: string; versionId: number; seq: number }> {
@@ -409,7 +437,7 @@ export const api = {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ slug, junctions, paths }),
+      body: JSON.stringify({ slug, publicVersionId, junctions, paths }),
     });
     if (!res.ok) {
       let parsed: GdbError = { code: "gdb_conversion_failed", message: `${res.status}` };

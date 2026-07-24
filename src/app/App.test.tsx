@@ -150,6 +150,7 @@ function buildMinimalVenue(overrides?: Partial<LoadedVenue>): LoadedVenue {
 }
 
 const PUBLIC_VERSION_ID = "a".repeat(64);
+const DEFAULT_SEQ = 42;
 
 function bundleLoadResult(
   venue = buildMinimalVenue(),
@@ -157,11 +158,13 @@ function bundleLoadResult(
   hasGraph = false,
   hasFacilities = false,
   facilities: KirikoBundleLoadResult["facilities"] = [],
+  seq: number | null = DEFAULT_SEQ,
 ): KirikoBundleLoadResult {
   return {
     venue,
     metadata: { datasetId: "default/tokyo-station", version: 7 },
     publicVersionId,
+    seq,
     hasGraph,
     hasFacilities,
     facilities,
@@ -466,8 +469,11 @@ async function renderDataset(
   publicVersionId: string | null = PUBLIC_VERSION_ID,
   venue: LoadedVenue = buildMinimalVenue(),
   hasGraph = false,
+  seq: number | null = DEFAULT_SEQ,
 ) {
-  loadKirikoBundleMock.mockResolvedValue(bundleLoadResult(venue, publicVersionId, hasGraph));
+  loadKirikoBundleMock.mockResolvedValue(
+    bundleLoadResult(venue, publicVersionId, hasGraph, false, [], seq),
+  );
   window.history.replaceState(null, "", "/?dataset=tokyo-station&lang=en");
   const result = render(<App />);
   await waitFor(() => {
@@ -979,6 +985,120 @@ describe("App deep links", () => {
     expect(loadImdfArchiveMock).toHaveBeenCalledTimes(1);
     expect(loadKirikoBundleMock).not.toHaveBeenCalled();
   });
+
+  it("loads the pinned bundle URL when the deep link carries a 64-hex ?version", async () => {
+    const pinId = "b".repeat(64);
+    loadKirikoBundleMock.mockResolvedValue(bundleLoadResult());
+    window.history.replaceState(null, "", `/?dataset=tokyo-station&version=${pinId}&lang=en`);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    expect(loadKirikoBundleMock).toHaveBeenCalledWith(
+      `/v/default/tokyo-station/bundle@${pinId}`,
+      expect.any(AbortSignal),
+    );
+    expect(loadKirikoBundleMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores an invalid (non-64-hex) ?version and admits mutable latest", async () => {
+    loadKirikoBundleMock.mockResolvedValue(bundleLoadResult());
+    window.history.replaceState(null, "", "/?dataset=tokyo-station&version=5&lang=en");
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    expect(loadKirikoBundleMock).toHaveBeenCalledWith(
+      "/v/default/tokyo-station/bundle",
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("preserves the admitted public version id in the embed Open-in-Kiriko link", async () => {
+    loadKirikoBundleMock.mockResolvedValue(
+      bundleLoadResult(buildMinimalVenue(), PUBLIC_VERSION_ID, false, false, [], 9),
+    );
+    window.history.replaceState(null, "", "/?dataset=tokyo-station&embed=1&lang=en");
+
+    const { container } = render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    const badge = container.querySelector<HTMLAnchorElement>("a.kiriko-badge");
+    expect(badge).toBeTruthy();
+    const href = new URL(badge!.href);
+    expect(href.searchParams.get("version")).toBe(PUBLIC_VERSION_ID);
+    expect(href.searchParams.get("dataset")).toBe("tokyo-station");
+    expect(href.searchParams.has("embed")).toBe(false);
+  });
+
+  it("hides the embed badge (never a version-stripped mutable link) when the admission is not pin-safe", async () => {
+    // Admission succeeds but the header seq disagreed with the decoded version.
+    loadKirikoBundleMock.mockResolvedValue(
+      bundleLoadResult(buildMinimalVenue(), PUBLIC_VERSION_ID, false, false, [], null),
+    );
+    window.history.replaceState(null, "", `/?dataset=tokyo-station&version=${"c".repeat(64)}&embed=1&lang=en`);
+
+    const { container } = render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    expect(container.querySelector("a.kiriko-badge")).toBeNull();
+  });
+
+  it("overrides an inbound version with the admitted public id in the embed link", async () => {
+    loadKirikoBundleMock.mockResolvedValue(
+      bundleLoadResult(buildMinimalVenue(), PUBLIC_VERSION_ID, false, false, [], 9),
+    );
+    window.history.replaceState(null, "", `/?dataset=tokyo-station&version=${"c".repeat(64)}&embed=1&lang=en`);
+
+    const { container } = render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    const badge = container.querySelector<HTMLAnchorElement>("a.kiriko-badge");
+    const href = new URL(badge!.href);
+    expect(href.searchParams.get("version")).toBe(PUBLIC_VERSION_ID);
+  });
+
+  it("hides the dataset embed badge until admission, then shows it pinned to the public id", async () => {
+    let resolveLoad!: (result: KirikoBundleLoadResult) => void;
+    loadKirikoBundleMock.mockReturnValue(
+      new Promise<KirikoBundleLoadResult>((resolve) => {
+        resolveLoad = resolve;
+      }),
+    );
+    window.history.replaceState(null, "", "/?dataset=tokyo-station&embed=1&lang=en");
+
+    const { container } = render(<App />);
+    // Before admission the badge must not expose a mutable-latest link.
+    await waitFor(() => expect(loadKirikoBundleMock).toHaveBeenCalledTimes(1));
+    expect(container.querySelector("a.kiriko-badge")).toBeNull();
+
+    resolveLoad(bundleLoadResult(buildMinimalVenue(), PUBLIC_VERSION_ID, false, false, [], 9));
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    const badge = container.querySelector<HTMLAnchorElement>("a.kiriko-badge");
+    expect(badge).toBeTruthy();
+    expect(new URL(badge!.href).searchParams.get("version")).toBe(PUBLIC_VERSION_ID);
+  });
+
+  it("keeps the dataset embed badge hidden when admission fails", async () => {
+    loadKirikoBundleMock.mockRejectedValue(new VenueLoadError("bundle_integrity_failed", "bad bundle"));
+    window.history.replaceState(null, "", "/?dataset=tokyo-station&embed=1&lang=en");
+
+    const { container } = render(<App />);
+    await screen.findByRole("alert");
+    expect(container.querySelector("a.kiriko-badge")).toBeNull();
+  });
 });
 
 describe("App review issue integration", () => {
@@ -1009,6 +1129,22 @@ describe("App review issue integration", () => {
     expect(listReviewersMock).not.toHaveBeenCalled();
     expect(FakeEventSource.instances).toHaveLength(0);
     expect(document.querySelector(".map-stage__error")).toBeNull();
+  });
+
+  it("treats a seq/body integrity mismatch as an identity error and starts no issue or auth requests", async () => {
+    // publicVersionId is well-formed, but the loader admitted no pin-safe seq.
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), false, null);
+    const user = userEvent.setup();
+
+    const issuesToggle = screen.getByRole("button", { name: "Issues" });
+    expect(issuesToggle.getAttribute("aria-pressed")).toBe("false");
+    await user.click(issuesToggle);
+
+    expect(await screen.findByText("Issues aren't available for this dataset.")).toBeTruthy();
+    expect(getIssuesMock).not.toHaveBeenCalled();
+    expect(meMock).not.toHaveBeenCalled();
+    expect(listReviewersMock).not.toHaveBeenCalled();
+    expect(FakeEventSource.instances).toHaveLength(0);
   });
 
   it("loads public issues, resolves identity once, and counts active roots across floors", async () => {
@@ -1543,7 +1679,7 @@ describe("App directions mode", () => {
     await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
     await waitFor(() => {
       expect(routeKirikoBundleMock).toHaveBeenCalledWith(
-        "/v/default/tokyo-station/bundle",
+        `/v/default/tokyo-station/bundle@${PUBLIC_VERSION_ID}`,
         { longitude: 139.7671, latitude: 35.6811, ordinal: 0 },
         { longitude: 139.7671, latitude: 35.6811, ordinal: 0 },
       );
@@ -1579,7 +1715,7 @@ describe("App directions mode", () => {
 
     await user.click(screen.getByRole("button", { name: "Review network" }));
     await waitFor(() => {
-      expect(loadNetworkOverlayMock).toHaveBeenCalledWith("/v/default/tokyo-station/bundle");
+      expect(loadNetworkOverlayMock).toHaveBeenCalledWith(`/v/default/tokyo-station/bundle@${PUBLIC_VERSION_ID}`);
       expect(mapStub().getAttribute("data-network-present")).toBe("true");
     });
   });
@@ -1603,8 +1739,9 @@ describe("App directions mode", () => {
     await user.click(screen.getByRole("button", { name: "Save network" }));
 
     await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1));
-    const [slug, junctions, paths] = importSpy.mock.calls[0]!;
+    const [slug, publicVersionId, junctions, paths] = importSpy.mock.calls[0]!;
     expect(slug).toBe("tokyo-station");
+    expect(publicVersionId).toBe(PUBLIC_VERSION_ID);
     expect(JSON.parse(junctions).features).toHaveLength(2);
     expect(JSON.parse(paths).features).toHaveLength(2);
     importSpy.mockRestore();
@@ -1653,5 +1790,63 @@ describe("App directions mode", () => {
     await user.click(toggle);
     expect(mapStub().getAttribute("data-directions-active")).toBe("false");
     expect(mapStub().getAttribute("data-directions-origin")).toBe("");
+  });
+
+  it("pins Directions and Review network to the admitted public identity from a latest load", async () => {
+    const user = userEvent.setup();
+    routeKirikoBundleMock.mockResolvedValue(ROUTE_RESULT);
+    loadNetworkOverlayMock.mockResolvedValue({
+      junctions: [
+        { ordinal: 0, geometry: { type: "Point", coordinates: [139.7, 35.68] }, properties: { NODEID: 0, FLOOR: "F1" } },
+      ],
+      paths: [],
+    });
+    // Latest load; the loader admits the pin-safe public identity from the response.
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true, 9);
+    // Initial admission uses mutable latest; the sequence comes from that response.
+    expect(loadKirikoBundleMock).toHaveBeenCalledWith(
+      "/v/default/tokyo-station/bundle",
+      expect.any(AbortSignal),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Directions" }));
+    await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
+    await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
+    await waitFor(() => {
+      expect(routeKirikoBundleMock).toHaveBeenCalledWith(
+        `/v/default/tokyo-station/bundle@${PUBLIC_VERSION_ID}`,
+        { longitude: 139.7671, latitude: 35.6811, ordinal: 0 },
+        { longitude: 139.7671, latitude: 35.6811, ordinal: 0 },
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    await waitFor(() => {
+      expect(loadNetworkOverlayMock).toHaveBeenCalledWith(`/v/default/tokyo-station/bundle@${PUBLIC_VERSION_ID}`);
+    });
+  });
+
+  it("keeps the prior venue and pinned provenance after a failed replacement", async () => {
+    const user = userEvent.setup();
+    routeKirikoBundleMock.mockResolvedValue(ROUTE_RESULT);
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true, 9);
+    expect(screen.getByText("Test Station")).toBeTruthy();
+
+    // A failed local replacement must not clear the admitted venue or its pinned identity.
+    loadImdfArchiveMock.mockRejectedValueOnce(new VenueLoadError("invalid_archive", "bad local zip"));
+    await uploadViaHiddenInput(zipFile("replacement.zip"));
+    await screen.findByRole("alert");
+    expect(screen.getByText("Test Station")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Directions" }));
+    await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
+    await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
+    await waitFor(() => {
+      expect(routeKirikoBundleMock).toHaveBeenCalledWith(
+        `/v/default/tokyo-station/bundle@${PUBLIC_VERSION_ID}`,
+        expect.anything(),
+        expect.anything(),
+      );
+    });
   });
 });

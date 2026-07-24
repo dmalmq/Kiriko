@@ -677,7 +677,7 @@ describe("POST /api/gdb/import-network", () => {
     app: FastifyInstance,
     cookie: string,
     name: string,
-  ): Promise<{ venueId: number; slug: string }> {
+  ): Promise<{ venueId: number; slug: string; publicVersionId: string }> {
     const venueId = await createVenue(app, cookie, name);
     const blobHash = putBlob(app, await validGdbZipBytes("venue.gdb"));
     const r = await app.inject({
@@ -686,21 +686,28 @@ describe("POST /api/gdb/import-network", () => {
     });
     expect(r.statusCode).toBe(202);
     await app.queue.idle();
-    const row = app.db.prepare("SELECT slug FROM venues WHERE id = ?").get(venueId) as { slug: string };
-    return { venueId, slug: row.slug };
+    const venueRow = app.db.prepare("SELECT slug FROM venues WHERE id = ?").get(venueId) as { slug: string };
+    const pubRow = app.db
+      .prepare(
+        "SELECT public_id AS p FROM versions WHERE venue_id = ? AND status = 'published' ORDER BY seq DESC LIMIT 1",
+      )
+      .get(venueId) as { p: string };
+    return { venueId, slug: venueRow.slug, publicVersionId: pubRow.p };
   }
+
+  const EMPTY_JUNCTIONS = JSON.stringify({ type: "FeatureCollection", name: "net_junction", features: [] });
+  const EMPTY_PATHS = JSON.stringify({ type: "FeatureCollection", name: "net_path", features: [] });
+  const ABSENT_ID = "0".repeat(64);
 
   it("publishes an edited graph as a new real-network version", async () => {
     const { app } = await makeTestApp();
     const cookie = await loginCookie(app);
-    const { slug } = await publishBase(app, cookie, "Editable Venue");
+    const { slug, publicVersionId } = await publishBase(app, cookie, "Editable Venue");
 
-    const junctions = JSON.stringify({ type: "FeatureCollection", name: "net_junction", features: [] });
-    const paths = JSON.stringify({ type: "FeatureCollection", name: "net_path", features: [] });
     fake.compileCalls.length = 0;
     const res = await app.inject({
       method: "POST", url: "/api/gdb/import-network", headers: { cookie },
-      payload: { slug, junctions, paths },
+      payload: { slug, publicVersionId, junctions: EMPTY_JUNCTIONS, paths: EMPTY_PATHS },
     });
     expect(res.statusCode, res.body).toBe(202);
     const body = res.json() as { jobId: string; versionId: number; seq: number };
@@ -711,8 +718,60 @@ describe("POST /api/gdb/import-network", () => {
       .get(body.versionId) as { j: string | null; syn: number };
     expect(row.j).not.toBeNull();
     expect(row.syn).toBe(0);
-    expect(fake.compileCalls[0]!.metadata["networkJunctionsGeoJson"]).toBe(junctions);
+    expect(fake.compileCalls[0]!.metadata["networkJunctionsGeoJson"]).toBe(EMPTY_JUNCTIONS);
     expect(fake.compileCalls[0]!.metadata["synthesizeNetwork"]).toBeUndefined();
+  });
+
+  it("bases the edited graph on the admitted version identity, not mutable latest", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const { venueId, slug, publicVersionId: v1Id } = await publishBase(app, cookie, "Pinned Base");
+    // v2 augments the base with facilities and becomes the new latest.
+    const facilitiesBlobHash = putBlob(app, await validGdbZipBytes("facilities.gdb"));
+    const aug = await app.inject({
+      method: "POST", url: "/api/gdb/augment", headers: { cookie },
+      payload: { venueId, facilitiesBlobHash },
+    });
+    expect(aug.statusCode, aug.body).toBe(202);
+    await app.queue.idle();
+    const v1 = app.db.prepare("SELECT facilities_blob_hash AS f FROM versions WHERE public_id = ?").get(v1Id) as {
+      f: string | null;
+    };
+    expect(v1.f).toBeNull(); // the admitted base carries no facilities
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/import-network", headers: { cookie },
+      payload: { slug, publicVersionId: v1Id, junctions: EMPTY_JUNCTIONS, paths: EMPTY_PATHS },
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    const body = res.json() as { versionId: number };
+    await app.queue.idle();
+    const edited = app.db
+      .prepare("SELECT facilities_blob_hash AS f, net_junctions_blob_hash AS j FROM versions WHERE id = ?")
+      .get(body.versionId) as { f: string | null; j: string | null };
+    expect(edited.j).not.toBeNull(); // the edited graph is stored
+    expect(edited.f).toBeNull(); // carries v1's (absent) facilities, never latest v2's
+  });
+
+  it("404s an unknown or cross-venue base identity", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const { slug } = await publishBase(app, cookie, "Venue A");
+    const { publicVersionId: venueBId } = await publishBase(app, cookie, "Venue B");
+
+    const crossVenue = await app.inject({
+      method: "POST", url: "/api/gdb/import-network", headers: { cookie },
+      payload: { slug, publicVersionId: venueBId, junctions: EMPTY_JUNCTIONS, paths: EMPTY_PATHS },
+    });
+    expect(crossVenue.statusCode).toBe(404);
+    expect(crossVenue.json()).toMatchObject({ error: "no_base_version" });
+
+    const unknown = await app.inject({
+      method: "POST", url: "/api/gdb/import-network", headers: { cookie },
+      payload: { slug, publicVersionId: ABSENT_ID, junctions: EMPTY_JUNCTIONS, paths: EMPTY_PATHS },
+    });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json()).toMatchObject({ error: "no_base_version" });
   });
 
   it("404 no_base_version when the venue has no published version", async () => {
@@ -722,7 +781,7 @@ describe("POST /api/gdb/import-network", () => {
     const row = app.db.prepare("SELECT slug FROM venues WHERE id = ?").get(venueId) as { slug: string };
     const res = await app.inject({
       method: "POST", url: "/api/gdb/import-network", headers: { cookie },
-      payload: { slug: row.slug, junctions: "{}", paths: "{}" },
+      payload: { slug: row.slug, publicVersionId: ABSENT_ID, junctions: "{}", paths: "{}" },
     });
     expect(res.statusCode).toBe(404);
     expect(res.json()).toMatchObject({ error: "no_base_version" });

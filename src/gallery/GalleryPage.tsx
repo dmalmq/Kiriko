@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { KirikoMark } from "../components/icons";
 import type { GdbInspectResponse, GdbMappingPlan, NetworkInspectResponse, FacilitiesInspectResponse } from "../gdb/types";
 import type { LocaleCode } from "../imdf/types";
-import { api, gdbErrorMessage, type ApiUser, type GdbError, type VenueSummary } from "./api";
+import { api, gdbErrorMessage, viewerHref, type ApiUser, type GdbError, type VenueSummary } from "./api";
 import { AddDataDialog } from "./AddDataDialog";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 import { DatasetCard } from "./DatasetCard";
@@ -107,12 +107,12 @@ export function GalleryPage() {
     void reload();
   }, [reload]);
 
-  const openVenue = (slug: string) => {
-    window.location.assign(`/?dataset=${encodeURIComponent(slug)}`);
+  const openVenue = (venue: VenueSummary) => {
+    window.location.assign(viewerHref(venue.slug, venue.latest?.publicVersionId ?? null, locale));
   };
 
-  const openReview = (slug: string) => {
-    window.location.assign(`/?dataset=${encodeURIComponent(slug)}&review=1`);
+  const openReview = (venue: VenueSummary) => {
+    window.location.assign(viewerHref(venue.slug, venue.latest?.publicVersionId ?? null, locale, true));
   };
 
   const openCreateUpload = () => {
@@ -542,7 +542,7 @@ export function GalleryPage() {
                 venue={venue}
                 locale={locale}
                 onOpen={() => {
-                  openVenue(venue.slug);
+                  openVenue(venue);
                 }}
                 onDelete={() => {
                   setDeleting(venue);
@@ -580,7 +580,7 @@ export function GalleryPage() {
                         exportNetwork(venue);
                       },
                       onReviewNetwork: () => {
-                        openReview(venue.slug);
+                        openReview(venue);
                       },
                     }
                   : {})}

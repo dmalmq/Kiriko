@@ -16,6 +16,8 @@ const waitForJob = vi.fn();
 const deleteVenue = vi.fn();
 const generateNetwork = vi.fn();
 const exportNetwork = vi.fn();
+const viewerHrefSpy = vi.fn();
+const PUBLIC_ID = "a".repeat(64);
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
   return {
@@ -36,6 +38,7 @@ vi.mock("./api", async (importOriginal) => {
       generateNetwork: (...args: unknown[]) => generateNetwork(...args),
       exportNetwork: (...args: unknown[]) => exportNetwork(...args),
     },
+    viewerHref: (...args: unknown[]) => viewerHrefSpy(...args),
   };
 });
 
@@ -48,6 +51,7 @@ const VENUE: VenueSummary = {
   createdAt: "2026-07-17 00:00:00",
   latest: {
     seq: 2,
+    publicVersionId: PUBLIC_ID,
     status: "published",
     stats: { levels: 4, features: 3204 },
     createdAt: "2026-07-17 00:00:00",
@@ -91,6 +95,29 @@ describe("GalleryPage", () => {
     expect(screen.getByText(/4/)).toBeTruthy();
     expect(screen.getByText(/3,204|3204/)).toBeTruthy();
     expect(screen.getByText("tokyo-station")).toBeTruthy();
+  });
+
+  it("wires Open to the pinned viewer link with the current locale", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([VENUE]);
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("東京駅構内図")).toBeTruthy());
+
+    await user.click(screen.getByRole("button", { name: "開く" }));
+    expect(viewerHrefSpy).toHaveBeenCalledWith("tokyo-station", PUBLIC_ID, "ja");
+  });
+
+  it("wires Review network to the pinned review link with the current locale", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([{ ...VENUE, hasGraph: true }]);
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("東京駅構内図")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    expect(viewerHrefSpy).toHaveBeenCalledWith("tokyo-station", PUBLIC_ID, "en", true);
   });
 
   it("opens IMDF version upload for the selected venue", async () => {
@@ -188,6 +215,7 @@ describe("GalleryPage", () => {
         createdAt: "2026-07-20 00:00:00",
         latest: {
           seq: 1,
+          publicVersionId: PUBLIC_ID,
           status: "published",
           stats: { levels: 2, features: 9 },
           createdAt: "2026-07-20 00:00:00",
@@ -375,6 +403,7 @@ describe("GalleryPage add routing/facilities", () => {
         createdAt: "2026-07-20 00:00:00",
         latest: {
           seq: 1,
+          publicVersionId: PUBLIC_ID,
           status: "published",
           stats: { levels: 2, features: 9 },
           createdAt: "2026-07-20 00:00:00",
@@ -421,6 +450,7 @@ describe("GalleryPage edit mapping", () => {
         createdAt: "2026-07-20 00:00:00",
         latest: {
           seq: 1,
+          publicVersionId: PUBLIC_ID,
           status: "published",
           stats: { levels: 2, features: 9 },
           createdAt: "2026-07-20 00:00:00",
@@ -472,6 +502,7 @@ describe("GalleryPage generate routing", () => {
         createdAt: "2026-07-20 00:00:00",
         latest: {
           seq: 1,
+          publicVersionId: PUBLIC_ID,
           status: "published",
           stats: { levels: 2, features: 9 },
           createdAt: "2026-07-20 00:00:00",
@@ -503,6 +534,7 @@ describe("GalleryPage generate routing", () => {
         createdAt: "2026-07-20 00:00:00",
         latest: {
           seq: 1,
+          publicVersionId: PUBLIC_ID,
           status: "published",
           stats: { levels: 2, features: 9 },
           createdAt: "2026-07-20 00:00:00",
@@ -528,6 +560,7 @@ describe("GalleryPage export network", () => {
         createdAt: "2026-07-20 00:00:00",
         latest: {
           seq: 2,
+          publicVersionId: PUBLIC_ID,
           status: "published",
           stats: { levels: 3, features: 12 },
           createdAt: "2026-07-20 00:00:00",
@@ -564,6 +597,7 @@ describe("GalleryPage export network", () => {
         createdAt: "2026-07-20 00:00:00",
         latest: {
           seq: 1,
+          publicVersionId: PUBLIC_ID,
           status: "published",
           stats: { levels: 1, features: 3 },
           createdAt: "2026-07-20 00:00:00",

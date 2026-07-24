@@ -856,6 +856,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       schema: {
         body: Type.Object({
           slug: Type.String({ minLength: 1 }),
+          publicVersionId: Type.String({ pattern: "^[0-9a-f]{64}$" }),
           junctions: Type.String(),
           paths: Type.String(),
         }),
@@ -866,8 +867,9 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       },
     },
     async (request, reply) => {
-      const { slug, junctions, paths } = request.body as {
+      const { slug, publicVersionId, junctions, paths } = request.body as {
         slug: string;
+        publicVersionId: string;
         junctions: string;
         paths: string;
       };
@@ -879,15 +881,17 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         return reply.code(404).send({ error: "not_found" });
       }
       const venueId = venue.id;
-      // Reuse the latest published IMDF + carry-forward metadata, exactly like
-      // /augment; the edited graph replaces the network hashes.
+      // Base the edited graph on the EXACT admitted published version identity,
+      // not mutable latest: a concurrent publish must not silently reparent the
+      // save onto a different source/facilities set. Cross-venue or unknown
+      // identities never match (filtered by venue_id + public_id).
       const base = db
         .prepare(
           `SELECT source_blob_hash AS s, source_kind AS k, gdb_source_blob_hash AS g, gdb_plan_json AS p,
                   facilities_blob_hash AS f
-             FROM versions WHERE venue_id = ? AND status = 'published' ORDER BY seq DESC LIMIT 1`,
+             FROM versions WHERE venue_id = ? AND public_id = ? AND status = 'published' LIMIT 1`,
         )
-        .get(venueId) as
+        .get(venueId, publicVersionId) as
         | { s: string; k: string; g: string | null; p: string | null; f: string | null }
         | undefined;
       if (!base) {
