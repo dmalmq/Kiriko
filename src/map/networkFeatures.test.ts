@@ -119,4 +119,46 @@ describe("network editing", () => {
     expect(p.name).toBe("net_path");
     expect(p.features).toHaveLength(2);
   });
+
+  it("addEdge links the forward and reverse path with a reciprocal PATHID pair", () => {
+    const net = addEdge(base(), 0, 1);
+    const [fwd, rev] = net.paths;
+    // A proper reciprocal pair: each path's PATHID is the other's RPATHID, so
+    // the Rust importer can canonicalize the two directed features into one edge.
+    expect(typeof fwd!.properties.PATHID).toBe("number");
+    expect(typeof rev!.properties.PATHID).toBe("number");
+    expect(fwd!.properties.RPATHID).toBe(rev!.properties.PATHID);
+    expect(rev!.properties.RPATHID).toBe(fwd!.properties.PATHID);
+    expect(fwd!.properties.PATHID).not.toBe(fwd!.properties.RPATHID);
+  });
+
+  it("addEdge assigns PATHIDs that stay globally unique across edges", () => {
+    const seeded: ParsedNetwork = {
+      junctions: [jn(0, 139.7, 35.6, 0), jn(1, 139.7005, 35.6, 0), jn(2, 139.701, 35.6, 0)],
+      paths: [],
+    };
+    const net = addEdge(addEdge(seeded, 0, 1), 1, 2);
+    expect(net.paths).toHaveLength(4); // two undirected edges → four directed paths
+    // Two logical edges use four distinct path ids (1..4); the second edge
+    // never reuses the first edge's ids. Within a reciprocal pair the two ids
+    // are shared (swapped), so the distinct count is 4, not 8.
+    const distinct = new Set(net.paths.flatMap((p) => [p.properties.PATHID, p.properties.RPATHID]));
+    expect(distinct.size).toBe(4);
+  });
+
+  it("addEdge is a no-op when a junction has non-finite coordinates", () => {
+    const bad: ParsedNetwork = {
+      junctions: [
+        {
+          ordinal: 0,
+          geometry: { type: "Point", coordinates: [Number.NaN, 35.6] },
+          properties: { NODEID: 0, FLOOR: "F1" },
+        },
+        jn(1, 139.7005, 35.6, 0),
+      ],
+      paths: [],
+    };
+    // No NaN-cost path is ever emitted at the browser adapter boundary.
+    expect(addEdge(bad, 0, 1).paths).toHaveLength(0);
+  });
 });

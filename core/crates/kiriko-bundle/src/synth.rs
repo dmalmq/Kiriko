@@ -586,6 +586,13 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         }
     }
 
+    // Every weight above was accumulated in metres; convert to canonical
+    // `net_path.cost` units exactly once here so the embedded graph matches
+    // imported networks and re-export never re-scales it.
+    for e in &mut edges {
+        e.weight = kiriko_route::meters_to_cost(f64::from(e.weight));
+    }
+
     edges.sort_by(|a, b| {
         (a.from, a.to, a.weight.to_bits()).cmp(&(b.from, b.to, b.weight.to_bits()))
     });
@@ -760,8 +767,9 @@ mod tests {
         assert_eq!(build.graph.nodes.len(), 2);
         assert_eq!(build.graph.edges.len(), 1, "edges = {:?}", build.graph.edges);
         let e = &build.graph.edges[0];
-        // Coincident footprints → vertical weight ≈ stairs floor cost (5.0).
-        assert!((e.weight - 5.0).abs() < 1e-3, "weight = {}", e.weight);
+        // Coincident footprints → vertical weight ≈ stairs floor cost in canonical
+        // cost units (5.0 m × 1000 = 5000), NOT the raw 5.0 metres.
+        assert!((e.weight - 5000.0).abs() < 1.0, "weight = {}", e.weight);
         assert_eq!(e.ordinal, 0.0);
     }
 
@@ -795,5 +803,24 @@ mod tests {
         let b = synthesize_network(&build_doc());
         assert_eq!(a.graph, b.graph);
         assert_eq!(a.node_ids, b.node_ids);
+    }
+
+    #[test]
+    fn generated_edge_costs_are_metres_times_1000() {
+        // A walkway hub joined to a doorway: the generated weight is the
+        // great-circle metres between them converted to canonical cost units
+        // (× 1000) exactly once — not the raw metre value.
+        let features = vec![
+            feature("walk", FeatureType::Unit, "L0", Some("walkway"), polygon(&square(0.0005, 0.0005, 0.001))),
+            feature("op", FeatureType::Opening, "L0", None, linestring(&[[0.0, 0.0003], [0.0, 0.0005], [0.0, 0.0007]])),
+        ];
+        let build = synthesize_network(&document(&[("L0", 0.0)], features));
+        assert_eq!(build.graph.edges.len(), 1);
+        let e = &build.graph.edges[0];
+        // Walkway centroid (0.0005, 0.0005) ↔ opening midpoint (0.0, 0.0005).
+        let expected = (haversine_m([0.0, 0.0005], [0.0005, 0.0005]) * 1000.0) as f32;
+        assert!((e.weight - expected).abs() <= 1.0, "weight {} expected {}", e.weight, expected);
+        // Cost units dwarf the raw metre distance (~55 m here).
+        assert!(e.weight > 1000.0, "cost units must be millimetre-scale, got {}", e.weight);
     }
 }

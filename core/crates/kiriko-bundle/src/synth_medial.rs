@@ -577,6 +577,12 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         }
     }
 
+    // Convert every accumulated metre weight to canonical `net_path.cost`
+    // units exactly once, matching imported networks (see `synth`).
+    for e in &mut edges {
+        e.weight = kiriko_route::meters_to_cost(f64::from(e.weight));
+    }
+
     edges.sort_by(|a, b| (a.from, a.to, a.weight.to_bits()).cmp(&(b.from, b.to, b.weight.to_bits())));
     let node_ids: Vec<u64> = (0..nodes.len() as u64).collect();
     RouteGraphBuild {
@@ -882,7 +888,7 @@ mod tests {
             build.graph.nodes.iter().map(|n| n.ordinal as i64).collect();
         assert_eq!(ordinals.len(), 2, "both floors present");
         let max_edge = build.graph.edges.iter().fold(0.0_f32, |m, e| m.max(e.weight));
-        assert!(max_edge <= 30.0, "no teleport edges: max {max_edge} m");
+        assert!(max_edge <= 30_000.0, "no teleport edges: max {max_edge} cost units (30 m)");
 
         // Determinism: identical input → identical graph.
         let again = synthesize_network_medial(&doc);

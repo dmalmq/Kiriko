@@ -37,6 +37,9 @@ pub enum ExportError {
     Bundle(BundleError),
     /// The bundle carries no §5 routing graph (or an empty one).
     NoGraph,
+    /// A node or edge ordinal is not an integer, so the accepted GDB
+    /// floor-label grammar cannot represent it losslessly.
+    FractionalOrdinal(f64),
     /// Serialization of the assembled GeoJSON failed (should not happen).
     Serialize(String),
 }
@@ -47,6 +50,7 @@ impl ExportError {
         match self {
             ExportError::Bundle(e) => e.code.as_str(),
             ExportError::NoGraph => "no_graph",
+            ExportError::FractionalOrdinal(_) => "fractional_ordinal",
             ExportError::Serialize(_) => "export_serialize_failed",
         }
     }
@@ -56,6 +60,9 @@ impl ExportError {
         match self {
             ExportError::Bundle(e) => e.message.clone(),
             ExportError::NoGraph => "bundle carries no routing graph to export".to_string(),
+            ExportError::FractionalOrdinal(ord) => format!(
+                "graph ordinal {ord} is not an integer floor and cannot be exported losslessly"
+            ),
             ExportError::Serialize(m) => m.clone(),
         }
     }
@@ -85,13 +92,27 @@ pub fn ordinal_to_floor_label(ordinal: f64) -> String {
 /// Decode `bundle` and serialize its §5 routing graph to `net_junction` /
 /// `net_path` GeoJSON. Every undirected graph edge is emitted as a directed
 /// pair (forward + reverse) cross-referenced by `PATHID`/`RPATHID`, matching
-/// the reference networks. `cost` is the routing weight in integer
-/// millimetres; `TRAVELTIME` is seconds at [`WALK_SPEED_MPS`].
+/// the reference networks. `cost` is the edge's exact canonical weight (mm,
+/// preserved without rounding); each path's `FLOOR` is the edge's own ordinal;
+/// `TRAVELTIME` is seconds at [`WALK_SPEED_MPS`].
 pub fn export_network(bundle: &[u8]) -> Result<NetworkGeoJson, ExportError> {
     let document = decode_bundle(bundle).map_err(ExportError::Bundle)?;
     let graph = document.graph.ok_or(ExportError::NoGraph)?;
-    if graph.nodes.is_empty() {
+    // A routable network needs at least one edge; nodes alone are not exported.
+    if graph.nodes.is_empty() || graph.edges.is_empty() {
         return Err(ExportError::NoGraph);
+    }
+    // Fractional ordinals have no lossless GDB floor label; reject explicitly
+    // rather than silently rounding to an integer floor.
+    for n in &graph.nodes {
+        if n.ordinal.fract() != 0.0 {
+            return Err(ExportError::FractionalOrdinal(n.ordinal));
+        }
+    }
+    for e in &graph.edges {
+        if e.ordinal.fract() != 0.0 {
+            return Err(ExportError::FractionalOrdinal(e.ordinal));
+        }
     }
 
     // Undirected degree = reference `PATH_COUNT`.
@@ -136,7 +157,10 @@ pub fn export_network(bundle: &[u8]) -> Result<NetworkGeoJson, ExportError> {
     for e in &graph.edges {
         let poly = graph.edge_polyline(e);
         let length_m: f64 = poly.windows(2).map(|w| haversine_m(w[0], w[1])).sum();
-        let cost = (f64::from(e.weight) * 1000.0).round() as i64;
+        // The stored weight is already in canonical `net_path.cost` units (mm);
+        // preserve its exact finite, non-negative value (the importer reads it
+        // back as f64) — never round or re-multiply by 1000.
+        let cost = f64::from(e.weight);
         let travel_time = (length_m / WALK_SPEED_MPS).round() as i64;
         let from_ord = graph.nodes[e.from as usize].ordinal;
         let to_ord = graph.nodes[e.to as usize].ordinal;
@@ -147,10 +171,10 @@ pub fn export_network(bundle: &[u8]) -> Result<NetworkGeoJson, ExportError> {
 
         let reversed: Vec<[f64; 2]> = poly.iter().rev().copied().collect();
         path_features.push(path_feature(
-            e.from, e.to, cost, travel_time, from_ord, to_ord, vertical, fwd, rev, &poly,
+            e.from, e.to, cost, travel_time, from_ord, to_ord, e.ordinal, vertical, fwd, rev, &poly,
         ));
         path_features.push(path_feature(
-            e.to, e.from, cost, travel_time, to_ord, from_ord, vertical, rev, fwd, &reversed,
+            e.to, e.from, cost, travel_time, to_ord, from_ord, e.ordinal, vertical, rev, fwd, &reversed,
         ));
     }
     let paths = serde_json::to_string(&json!({
@@ -167,10 +191,11 @@ pub fn export_network(bundle: &[u8]) -> Result<NetworkGeoJson, ExportError> {
 fn path_feature(
     from: u32,
     to: u32,
-    cost: i64,
+    cost: f64,
     travel_time: i64,
     from_ord: f64,
     to_ord: f64,
+    edge_ord: f64,
     vertical: bool,
     path_id: i64,
     reverse_path_id: i64,
@@ -195,7 +220,7 @@ fn path_feature(
             "TRAVELTIME": travel_time,
             "RFLAG": 0,
             "BARRIER": 0,
-            "FLOOR": ordinal_to_floor_label(from_ord),
+            "FLOOR": ordinal_to_floor_label(edge_ord),
             "PATHID": path_id,
             "RPATHID": reverse_path_id,
             "HFLAG": i64::from(vertical),
@@ -259,8 +284,8 @@ mod tests {
                 RouteNode { lon: 139.70, lat: 35.69, ordinal: 1.0 },
             ],
             edges: vec![
-                RouteEdge { from: 0, to: 1, weight: 90.0, ordinal: 0.0, interior: Vec::new() },
-                RouteEdge { from: 0, to: 2, weight: 5.0, ordinal: 0.0, interior: Vec::new() },
+                RouteEdge { from: 0, to: 1, weight: 90_000.0, ordinal: 0.0, interior: Vec::new() },
+                RouteEdge { from: 0, to: 2, weight: 5_000.0, ordinal: 0.0, interior: Vec::new() },
             ],
         };
         let bundle = bundle_with_graph(graph);
@@ -282,7 +307,7 @@ mod tests {
         // Forward horizontal edge 0->1.
         assert_eq!(pf[0]["properties"]["FNODEID"], 0);
         assert_eq!(pf[0]["properties"]["TNODEID"], 1);
-        assert_eq!(pf[0]["properties"]["cost"], 90_000); // 90 m → mm
+        assert_eq!(pf[0]["properties"]["cost"].as_f64(), Some(90_000.0)); // stored weight (mm) written directly, no 2nd ×1000
         assert_eq!(pf[0]["properties"]["FFLOOR"], Json::Null); // horizontal
         // Vertical edge 0->2 carries FFLOOR/TFOOLR + passage_type.
         assert_eq!(pf[2]["properties"]["FNODEID"], 0);
@@ -310,5 +335,65 @@ mod tests {
         };
         let bundle = encode_bundle(&doc).unwrap();
         assert_eq!(export_network(&bundle).unwrap_err().code(), "no_graph");
+    }
+
+    #[test]
+    fn export_rejects_fractional_ordinal() {
+        // The accepted GDB floor-label grammar has no lossless representation
+        // for a fractional ordinal, so export must reject it explicitly rather
+        // than silently rounding it to an integer floor.
+        let graph = RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.70, lat: 35.69, ordinal: 0.5 },
+                RouteNode { lon: 139.701, lat: 35.69, ordinal: 0.5 },
+            ],
+            edges: vec![RouteEdge { from: 0, to: 1, weight: 100.0, ordinal: 0.5, interior: Vec::new() }],
+        };
+        let bundle = bundle_with_graph(graph);
+        assert_eq!(export_network(&bundle).unwrap_err().code(), "fractional_ordinal");
+    }
+
+    #[test]
+    fn export_preserves_edge_ordinal_differing_from_node_ordinals() {
+        // An edge whose own ordinal (F2 → 1) differs from BOTH endpoint node
+        // ordinals (F1 → 0) must round-trip on its own FLOOR, not the from-node's.
+        let g0 = RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.70, lat: 35.69, ordinal: 0.0 },
+                RouteNode { lon: 139.701, lat: 35.69, ordinal: 0.0 },
+            ],
+            edges: vec![RouteEdge { from: 0, to: 1, weight: 90_000.0, ordinal: 1.0, interior: Vec::new() }],
+        };
+        let net1 = export_network(&bundle_with_graph(g0.clone())).expect("first export");
+        let g1 = kiriko_route::build_route_graph(&net1.junctions, &net1.paths, &[0.0, 1.0])
+            .expect("re-import 1")
+            .graph;
+        assert_eq!(g1.edges[0].ordinal, 1.0, "edge keeps its own floor");
+        assert_eq!(g1, g0, "one cycle preserves the differing edge ordinal");
+        let net2 = export_network(&bundle_with_graph(g1.clone())).expect("second export");
+        let g2 = kiriko_route::build_route_graph(&net2.junctions, &net2.paths, &[0.0, 1.0])
+            .expect("re-import 2")
+            .graph;
+        assert_eq!(g2, g1, "second cycle is a fixed point");
+    }
+
+    #[test]
+    fn export_preserves_fractional_cost_across_round_trip() {
+        // A finite non-negative fractional cost must survive the GeoJSON
+        // exactly (the importer reads it as f64), never rounded to an integer.
+        let g0 = RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.70, lat: 35.69, ordinal: 0.0 },
+                RouteNode { lon: 139.701, lat: 35.69, ordinal: 0.0 },
+            ],
+            edges: vec![RouteEdge { from: 0, to: 1, weight: 100.5, ordinal: 0.0, interior: Vec::new() }],
+        };
+        let net = export_network(&bundle_with_graph(g0.clone())).expect("export");
+        let g1 = kiriko_route::build_route_graph(&net.junctions, &net.paths, &[0.0, 1.0])
+            .expect("re-import")
+            .graph;
+        assert_eq!(g1.edges.len(), 1);
+        assert_eq!(g1.edges[0].weight, 100.5, "fractional cost preserved exactly");
+        assert_eq!(g1, g0);
     }
 }

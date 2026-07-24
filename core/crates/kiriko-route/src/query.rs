@@ -11,6 +11,11 @@ pub struct Point3 {
     pub ordinal: f64,
 }
 
+/// `true` when every coordinate of a query endpoint is finite.
+fn endpoint_is_finite(p: &Point3) -> bool {
+    p.lon.is_finite() && p.lat.is_finite() && p.ordinal.is_finite()
+}
+
 /// One maximal run of the route on a single floor ordinal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteSegment {
@@ -145,6 +150,11 @@ fn snap_to_edge(graph: &RouteGraph, p: &Point3) -> Option<EdgeSnap> {
 /// that hug the edge geometry, or `None` when the projections are
 /// disconnected.
 pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> {
+    // Reject non-finite endpoint coordinates with a controlled `None` — never a
+    // panic or NaN-poisoned comparison (which would trap the WASM instance).
+    if !endpoint_is_finite(&origin) || !endpoint_is_finite(&dest) {
+        return None;
+    }
     let o = snap_to_edge(graph, &origin)?;
     let d = snap_to_edge(graph, &dest)?;
     let origin_projected = [o.projected[0], o.projected[1], o.ordinal];
@@ -488,6 +498,28 @@ mod tests {
         // Click on ordinal 0 sitting right over the B1 edge still snaps to the F1 edge.
         let s = snap_to_edge(&g, &Point3 { lon: 139.001, lat: 35.0, ordinal: 0.0 }).unwrap();
         assert_eq!(g.edges[s.edge_index].ordinal, 0.0);
+    }
+
+    #[test]
+    fn route_rejects_non_finite_endpoints() {
+        let graph = RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
+            ],
+            edges: vec![
+                RouteEdge { from: 0, to: 1, weight: 100.0, ordinal: 0.0, interior: vec![] },
+                RouteEdge { from: 1, to: 2, weight: 100.0, ordinal: 0.0, interior: vec![] },
+            ],
+        };
+        let ok = Point3 { lon: 139.0, lat: 35.0, ordinal: 0.0 };
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            // A controlled `None` — never a panic — for any non-finite coord.
+            assert!(route(&graph, Point3 { lon: bad, ..ok }, ok).is_none());
+            assert!(route(&graph, ok, Point3 { lat: bad, ..ok }).is_none());
+            assert!(route(&graph, ok, Point3 { ordinal: bad, ..ok }).is_none());
+        }
     }
 
 }

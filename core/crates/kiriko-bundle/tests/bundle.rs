@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use kiriko_bundle::{
     BundleDocument, BundleErrorCode, BundleMetadata, BundleStats, CompileError, compile_imdf,
-    compile_imdf_with_network, decode_bundle, encode_bundle, inspect_bundle,
+    compile_imdf_with_network, decode_bundle, encode_bundle, export_network, inspect_bundle,
 };
 
 fn metadata() -> BundleMetadata {
@@ -675,10 +675,17 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
     let mut digest = [0u8; 32];
     digest.copy_from_slice(&Sha256::digest(&compiled.bytes));
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    let expected_line = format!("{hex}  tests/fixtures/minimal.kvb\n");
+    // Parse the `<sha256>  <path>` line independent of the trailing line ending
+    // (LF vs CRLF varies by platform and git checkout) without weakening the
+    // exact hash or path assertions.
+    let mut fields = checksum_file.split_whitespace();
+    let file_hash = fields.next().expect("checksum file must carry a hash field");
+    let file_path = fields.next().expect("checksum file must carry a path field");
+    assert!(fields.next().is_none(), "checksum file must carry exactly two fields");
+    assert_eq!(file_hash, hex, "the committed sha256 must match the golden bytes");
     assert_eq!(
-        checksum_file, expected_line,
-        "the committed sha256 file must match the golden bytes"
+        file_path, "tests/fixtures/minimal.kvb",
+        "the committed sha256 line must name the golden bundle"
     );
 }
 
@@ -883,4 +890,67 @@ fn inspect_bundle_propagates_all_four_decode_error_codes() {
             .code,
         BundleErrorCode::BundleTooLarge
     );
+}
+
+// -- Task 1: network round-trip stability -----------------------------------
+
+fn bundle_with_graph(graph: kiriko_route::RouteGraph) -> Vec<u8> {
+    let doc = BundleDocument {
+        metadata: BundleMetadata {
+            dataset_id: "t/v".to_string(),
+            version: 1,
+        },
+        manifest: kiriko_model::model::ImdfManifest {
+            version: "1.0.0".to_string(),
+            language: "en".to_string(),
+            rest: BTreeMap::new(),
+        },
+        venue_id: "v".to_string(),
+        levels: vec![level_row("l0", 0.0), level_row("l1", 1.0)],
+        features: Vec::new(),
+        bounds_by_level: BTreeMap::new(),
+        warnings: Vec::new(),
+        stats: BundleStats {
+            levels: 2,
+            features: 0,
+        },
+        graph: Some(graph),
+        facilities: None,
+    };
+    encode_bundle(&doc).expect("bundle with graph encodes")
+}
+
+#[test]
+fn network_round_trip_is_stable_across_two_export_build_cycles() {
+    use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+    // Integer millimetre costs and integer ordinals: a horizontal edge on F1
+    // and a vertical edge up to F2.
+    let g0 = RouteGraph {
+        nodes: vec![
+            RouteNode { lon: 139.70, lat: 35.69, ordinal: 0.0 },
+            RouteNode { lon: 139.701, lat: 35.69, ordinal: 0.0 },
+            RouteNode { lon: 139.70, lat: 35.69, ordinal: 1.0 },
+        ],
+        edges: vec![
+            RouteEdge { from: 0, to: 1, weight: 90_000.0, ordinal: 0.0, interior: Vec::new() },
+            RouteEdge { from: 0, to: 2, weight: 5_000.0, ordinal: 0.0, interior: Vec::new() },
+        ],
+    };
+
+    let ordinals = [0.0, 1.0];
+    let net1 = export_network(&bundle_with_graph(g0.clone())).expect("first export");
+    let g1 = kiriko_route::build_route_graph(&net1.junctions, &net1.paths, &ordinals)
+        .expect("re-import cycle 1")
+        .graph;
+    // Reciprocal PATHID/RPATHID pairs collapse back to one logical edge each —
+    // no doubling across the round-trip.
+    assert_eq!(g1.edges.len(), g0.edges.len(), "edge count is stable");
+    assert_eq!(g1, g0, "costs, geometry, and integer ordinals survive one cycle");
+
+    let net2 = export_network(&bundle_with_graph(g1.clone())).expect("second export");
+    let g2 = kiriko_route::build_route_graph(&net2.junctions, &net2.paths, &ordinals)
+        .expect("re-import cycle 2")
+        .graph;
+    assert_eq!(g2, g1, "the second cycle is a fixed point");
+    assert_eq!(net2, net1, "re-export is identical");
 }

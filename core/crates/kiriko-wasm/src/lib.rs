@@ -235,6 +235,12 @@ fn to_js(response: &DecodeResponseDto) -> JsValue {
     })
 }
 
+/// A decoded bundle advertises a routable graph only when it carries at least
+/// one edge; a nodes-only graph never enables Directions or Network Review.
+fn has_routable_graph(document: &BundleDocument) -> bool {
+    document.graph.as_ref().is_some_and(|graph| !graph.is_empty())
+}
+
 /// Decode `bytes` (a `kvb1` bundle) into a structured JS value shaped as
 /// `{ ok, venue, error }`, where `venue`/`error` are `null` on the side
 /// that does not apply. Domain failures (an unrecognized format, version,
@@ -244,7 +250,7 @@ fn to_js(response: &DecodeResponseDto) -> JsValue {
 pub fn decode_bundle_js(bytes: &[u8]) -> JsValue {
     let response = match decode_bundle(bytes) {
         Ok(document) => {
-            let has_graph = document.graph.is_some();
+            let has_graph = has_routable_graph(&document);
             let has_facilities = document.facilities.is_some();
             DecodeResponseDto {
                 ok: true,
@@ -631,5 +637,37 @@ mod tests {
             .is_none(),
             "a bundle with no graph section must not route"
         );
+    }
+
+    #[test]
+    fn route_boundary_rejects_non_finite_endpoints_without_trapping() {
+        // The WASM route path must return a controlled `None` (serialized as
+        // `null`) for non-finite endpoint coordinates — never a panic that
+        // would trap the module instance.
+        let bundle = compile_with_graph();
+        let document = decode_bundle(&bundle).expect("bundle decodes");
+        let ok = Point3 { lon: 139.0, lat: 35.0, ordinal: 0.0 };
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(route_in_document(&document, Point3 { lon: bad, ..ok }, ok).is_none());
+            assert!(route_in_document(&document, ok, Point3 { lat: bad, ..ok }).is_none());
+            assert!(route_in_document(&document, ok, Point3 { ordinal: bad, ..ok }).is_none());
+        }
+    }
+
+    #[test]
+    fn nodes_only_graph_is_not_advertised_as_routable() {
+        use kiriko_route::{RouteGraph, RouteNode};
+        let mut document = decode_bundle(&compile_with_graph()).expect("bundle decodes");
+        // An edge-bearing decoded graph is routable.
+        assert!(has_routable_graph(&document));
+        // A decoded graph reduced to junction nodes only must NOT advertise
+        // routing (has_graph gates Directions / Network Review).
+        document.graph = Some(RouteGraph {
+            nodes: vec![RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 }],
+            edges: Vec::new(),
+        });
+        assert!(!has_routable_graph(&document), "nodes alone are not routable");
+        document.graph = None;
+        assert!(!has_routable_graph(&document));
     }
 }
