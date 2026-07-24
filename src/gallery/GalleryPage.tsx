@@ -76,6 +76,8 @@ type AddDataFlow =
       error: GdbError | null;
     };
 
+type TopLevelOwner = "gdb" | "add-data";
+
 export function GalleryPage() {
   const [locale, setLocale] = useState<LocaleCode>("ja");
   const [state, setState] = useState<GalleryState>({ phase: "loading" });
@@ -89,18 +91,92 @@ export function GalleryPage() {
   const [generatingId, setGeneratingId] = useState<number | null>(null);
   const gdbInputRef = useRef<HTMLInputElement>(null);
   const gdbTargetRef = useRef<GdbTarget>({ mode: "create" });
+  const aliveRef = useRef(true);
+  const reloadGenerationRef = useRef(0);
+  const sessionGenerationRef = useRef(0);
+  const gdbGenerationRef = useRef(0);
+  const gdbNetworkGenerationRef = useRef(0);
+  const gdbFacilitiesGenerationRef = useRef(0);
+  const gdbPublishGenerationRef = useRef(0);
+  const addDataGenerationRef = useRef(0);
+  const addDataNetworkGenerationRef = useRef(0);
+  const addDataFacilitiesGenerationRef = useRef(0);
+  const addDataPublishGenerationRef = useRef(0);
+  const routingGenerationRef = useRef(0);
+  const exportGenerationRef = useRef(0);
+  const noticeGenerationRef = useRef(0);
+
+  const invalidateGdbRequests = () => {
+    gdbGenerationRef.current += 1;
+    gdbNetworkGenerationRef.current += 1;
+    gdbFacilitiesGenerationRef.current += 1;
+    gdbPublishGenerationRef.current += 1;
+  };
+  const invalidateAddDataRequests = () => {
+    addDataGenerationRef.current += 1;
+    addDataNetworkGenerationRef.current += 1;
+    addDataFacilitiesGenerationRef.current += 1;
+    addDataPublishGenerationRef.current += 1;
+  };
+  const clearAsyncUi = () => {
+    setGdbFlow({ phase: "idle" });
+    setAddData({ phase: "idle" });
+    setGeneratingId(null);
+    setGdbNotice(null);
+    gdbTargetRef.current = { mode: "create" };
+    if (gdbInputRef.current) gdbInputRef.current.value = "";
+  };
+  const invalidateAsyncWork = () => {
+    invalidateGdbRequests();
+    invalidateAddDataRequests();
+    routingGenerationRef.current += 1;
+    exportGenerationRef.current += 1;
+    noticeGenerationRef.current += 1;
+  };
+  const beginTopLevelActivity = (owner?: TopLevelOwner) => {
+    // Top-level UI activity must not cancel authoritative reload/session results.
+    invalidateAsyncWork();
+    if (owner !== "gdb") {
+      setGdbFlow({ phase: "idle" });
+      gdbTargetRef.current = { mode: "create" };
+      if (gdbInputRef.current) gdbInputRef.current.value = "";
+    }
+    if (owner !== "add-data") {
+      setAddData({ phase: "idle" });
+    }
+    setGeneratingId(null);
+    setGdbNotice(null);
+  };
 
   const reload = useCallback(async () => {
+    const generation = ++reloadGenerationRef.current;
     try {
       const user = await api.me();
+      if (!aliveRef.current || generation !== reloadGenerationRef.current) return;
       if (user === null) {
+        sessionGenerationRef.current += 1;
+        invalidateAsyncWork();
+        clearAsyncUi();
         setState({ phase: "signed-out" });
         return;
       }
-      setState({ phase: "ready", user, venues: await api.listVenues() });
+      const venues = await api.listVenues();
+      if (!aliveRef.current || generation !== reloadGenerationRef.current) return;
+      setState({ phase: "ready", user, venues });
     } catch {
-      setState({ phase: "error" });
+      if (!aliveRef.current || generation !== reloadGenerationRef.current) return;
+      setState((current) => (current.phase === "ready" ? current : { phase: "error" }));
     }
+  }, []);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      sessionGenerationRef.current += 1;
+      reloadGenerationRef.current += 1;
+      invalidateAsyncWork();
+    };
   }, []);
 
   useEffect(() => {
@@ -135,18 +211,20 @@ export function GalleryPage() {
   };
 
   const startGdbImport = (target: GdbTarget = { mode: "create" }) => {
-    setGdbNotice(null);
+    beginTopLevelActivity();
     gdbTargetRef.current = target;
     gdbInputRef.current?.click();
   };
 
   const startEditMapping = (venue: VenueSummary) => {
-    setGdbNotice(null);
+    beginTopLevelActivity();
+    const generation = gdbGenerationRef.current;
     const target: GdbTarget = { mode: "edit-mapping", venueId: venue.id, venueName: venue.name };
     setGdbFlow({ phase: "inspecting", target });
     void (async () => {
       try {
         const mapping = await api.getGdbMapping(venue.id);
+        if (!aliveRef.current || generation !== gdbGenerationRef.current) return;
         setGdbFlow({
           phase: "review",
           target,
@@ -161,6 +239,7 @@ export function GalleryPage() {
           error: null,
         });
       } catch (err) {
+        if (!aliveRef.current || generation !== gdbGenerationRef.current) return;
         setGdbFlow({ phase: "error", target, message: gdbErrorMessage(err as GdbError, locale) });
       }
     })();
@@ -169,11 +248,13 @@ export function GalleryPage() {
   const onGdbFile = (file: File | undefined) => {
     if (!file) return;
     const target = gdbTargetRef.current;
-    setGdbNotice(null);
+    beginTopLevelActivity();
+    const generation = gdbGenerationRef.current;
     setGdbFlow({ phase: "inspecting", target });
     void (async () => {
       try {
         const data = await api.inspectGdb(file);
+        if (!aliveRef.current || generation !== gdbGenerationRef.current) return;
         let suggestedPlan = data.suggestedPlan;
         if (target.mode === "version") {
           suggestedPlan = { ...suggestedPlan, venueName: target.venueName };
@@ -188,6 +269,7 @@ export function GalleryPage() {
           error: null,
         });
       } catch (err) {
+        if (!aliveRef.current || generation !== gdbGenerationRef.current) return;
         setGdbFlow({
           phase: "error",
           target,
@@ -199,15 +281,27 @@ export function GalleryPage() {
 
   const onGdbNetworkFile = (file: File) => {
     if (gdbFlow.phase !== "review") return;
+    const flowGeneration = gdbGenerationRef.current;
+    const requestGeneration = ++gdbNetworkGenerationRef.current;
     void (async () => {
       try {
         const network = await api.inspectGdbNetwork(file);
         setGdbFlow((current) =>
-          current.phase === "review" ? { ...current, network, error: null } : current,
+          aliveRef.current &&
+          flowGeneration === gdbGenerationRef.current &&
+          requestGeneration === gdbNetworkGenerationRef.current &&
+          current.phase === "review"
+            ? { ...current, network, error: null }
+            : current,
         );
       } catch (err) {
         setGdbFlow((current) =>
-          current.phase === "review" ? { ...current, error: err as GdbError } : current,
+          aliveRef.current &&
+          flowGeneration === gdbGenerationRef.current &&
+          requestGeneration === gdbNetworkGenerationRef.current &&
+          current.phase === "review"
+            ? { ...current, error: err as GdbError }
+            : current,
         );
       }
     })();
@@ -215,15 +309,27 @@ export function GalleryPage() {
 
   const onGdbFacilityFile = (file: File) => {
     if (gdbFlow.phase !== "review") return;
+    const flowGeneration = gdbGenerationRef.current;
+    const requestGeneration = ++gdbFacilitiesGenerationRef.current;
     void (async () => {
       try {
         const facilities = await api.inspectGdbFacilities(file);
         setGdbFlow((current) =>
-          current.phase === "review" ? { ...current, facilities, error: null } : current,
+          aliveRef.current &&
+          flowGeneration === gdbGenerationRef.current &&
+          requestGeneration === gdbFacilitiesGenerationRef.current &&
+          current.phase === "review"
+            ? { ...current, facilities, error: null }
+            : current,
         );
       } catch (err) {
         setGdbFlow((current) =>
-          current.phase === "review" ? { ...current, error: err as GdbError } : current,
+          aliveRef.current &&
+          flowGeneration === gdbGenerationRef.current &&
+          requestGeneration === gdbFacilitiesGenerationRef.current &&
+          current.phase === "review"
+            ? { ...current, error: err as GdbError }
+            : current,
         );
       }
     })();
@@ -235,6 +341,14 @@ export function GalleryPage() {
     const target = gdbFlow.target;
     const network = gdbFlow.network;
     const facilities = gdbFlow.facilities;
+    beginTopLevelActivity("gdb");
+    const flowGeneration = gdbGenerationRef.current;
+    const publishGeneration = gdbPublishGenerationRef.current;
+    const sessionGeneration = sessionGenerationRef.current;
+    const isCurrent = () =>
+      aliveRef.current &&
+      flowGeneration === gdbGenerationRef.current &&
+      publishGeneration === gdbPublishGenerationRef.current;
     setGdbFlow({ phase: "review", target, data, network, facilities, busy: true, error: null });
     void (async () => {
       let createdVenueId: number | null = null;
@@ -246,31 +360,43 @@ export function GalleryPage() {
           const venue = await api.createVenue(plan.venueName.trim());
           createdVenueId = venue.id;
           venueId = venue.id;
+          if (!isCurrent()) {
+            await api.deleteVenue(createdVenueId).catch(() => {});
+            return;
+          }
         }
         const published = await api.publishGdb(venueId, data.blobHash, plan, network?.networkBlobHash ?? null, facilities?.facilitiesBlobHash ?? null);
+        createdVenueId = null;
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
         const job = await api.waitForJob(published.jobId);
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
         if (job.status === "done") {
-          const skipped = published.excludedLayers ?? [];
-          if (skipped.length > 0) {
-            const sample = skipped[0]!.layer;
-            setGdbNotice(ui.publishedWithSkips[locale](skipped.length, sample));
-          } else {
-            setGdbNotice(null);
+          if (isCurrent()) {
+            const skipped = published.excludedLayers ?? [];
+            if (skipped.length > 0) {
+              const sample = skipped[0]!.layer;
+              setGdbNotice(ui.publishedWithSkips[locale](skipped.length, sample));
+            } else {
+              setGdbNotice(null);
+            }
+            setGdbFlow({ phase: "idle" });
+            if (gdbInputRef.current) gdbInputRef.current.value = "";
+            gdbTargetRef.current = { mode: "create" };
           }
-          setGdbFlow({ phase: "idle" });
-          if (gdbInputRef.current) gdbInputRef.current.value = "";
-          gdbTargetRef.current = { mode: "create" };
           await reload();
         } else {
-          setGdbFlow({
-            phase: "review",
-            target,
-            data,
-            network,
-            facilities,
-            busy: false,
-            error: { code: "gdb_conversion_failed", message: job.error },
-          });
+          if (isCurrent()) {
+            setGdbFlow({
+              phase: "review",
+              target,
+              data,
+              network,
+              facilities,
+              busy: false,
+              error: { code: "gdb_conversion_failed", message: job.error },
+            });
+          }
+          await reload();
         }
       } catch (err) {
         // Orphan cleanup only for venues we just created in this attempt.
@@ -281,6 +407,7 @@ export function GalleryPage() {
             /* best effort */
           }
         }
+        if (!isCurrent()) return;
         setGdbFlow({
           phase: "review",
           target,
@@ -295,13 +422,14 @@ export function GalleryPage() {
   };
 
   const cancelGdbImport = () => {
+    invalidateGdbRequests();
     setGdbFlow({ phase: "idle" });
     gdbTargetRef.current = { mode: "create" };
     if (gdbInputRef.current) gdbInputRef.current.value = "";
   };
 
   const openAddData = (venue: VenueSummary) => {
-    setGdbNotice(null);
+    beginTopLevelActivity();
     setAddData({
       phase: "open",
       venueId: venue.id,
@@ -314,23 +442,55 @@ export function GalleryPage() {
   };
 
   const onAddDataNetwork = (file: File) => {
+    const flowGeneration = addDataGenerationRef.current;
+    const requestGeneration = ++addDataNetworkGenerationRef.current;
     void (async () => {
       try {
         const network = await api.inspectGdbNetwork(file);
-        setAddData((c) => (c.phase === "open" ? { ...c, network, error: null } : c));
+        setAddData((c) =>
+          aliveRef.current &&
+          flowGeneration === addDataGenerationRef.current &&
+          requestGeneration === addDataNetworkGenerationRef.current &&
+          c.phase === "open"
+            ? { ...c, network, error: null }
+            : c,
+        );
       } catch (err) {
-        setAddData((c) => (c.phase === "open" ? { ...c, error: err as GdbError } : c));
+        setAddData((c) =>
+          aliveRef.current &&
+          flowGeneration === addDataGenerationRef.current &&
+          requestGeneration === addDataNetworkGenerationRef.current &&
+          c.phase === "open"
+            ? { ...c, error: err as GdbError }
+            : c,
+        );
       }
     })();
   };
 
   const onAddDataFacilities = (file: File) => {
+    const flowGeneration = addDataGenerationRef.current;
+    const requestGeneration = ++addDataFacilitiesGenerationRef.current;
     void (async () => {
       try {
         const facilities = await api.inspectGdbFacilities(file);
-        setAddData((c) => (c.phase === "open" ? { ...c, facilities, error: null } : c));
+        setAddData((c) =>
+          aliveRef.current &&
+          flowGeneration === addDataGenerationRef.current &&
+          requestGeneration === addDataFacilitiesGenerationRef.current &&
+          c.phase === "open"
+            ? { ...c, facilities, error: null }
+            : c,
+        );
       } catch (err) {
-        setAddData((c) => (c.phase === "open" ? { ...c, error: err as GdbError } : c));
+        setAddData((c) =>
+          aliveRef.current &&
+          flowGeneration === addDataGenerationRef.current &&
+          requestGeneration === addDataFacilitiesGenerationRef.current &&
+          c.phase === "open"
+            ? { ...c, error: err as GdbError }
+            : c,
+        );
       }
     })();
   };
@@ -339,6 +499,14 @@ export function GalleryPage() {
     if (addData.phase !== "open") return;
     const { venueId, network, facilities } = addData;
     if (network === null && facilities === null) return;
+    beginTopLevelActivity("add-data");
+    const flowGeneration = addDataGenerationRef.current;
+    const publishGeneration = addDataPublishGenerationRef.current;
+    const sessionGeneration = sessionGenerationRef.current;
+    const isCurrent = () =>
+      aliveRef.current &&
+      flowGeneration === addDataGenerationRef.current &&
+      publishGeneration === addDataPublishGenerationRef.current;
     setAddData({ ...addData, busy: true, error: null });
     void (async () => {
       try {
@@ -346,54 +514,88 @@ export function GalleryPage() {
           ...(network ? { networkBlobHash: network.networkBlobHash } : {}),
           ...(facilities ? { facilitiesBlobHash: facilities.facilitiesBlobHash } : {}),
         });
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
         const job = await api.waitForJob(res.jobId);
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
         if (job.status === "done") {
-          setAddData({ phase: "idle" });
+          if (isCurrent()) {
+            setAddData({ phase: "idle" });
+          }
           await reload();
         } else {
-          setAddData((c) =>
-            c.phase === "open"
-              ? { ...c, busy: false, error: { code: "gdb_conversion_failed", message: job.error } }
-              : c,
-          );
+          if (isCurrent()) {
+            setAddData((c) =>
+              c.phase === "open"
+                ? { ...c, busy: false, error: { code: "gdb_conversion_failed", message: job.error } }
+                : c,
+            );
+          }
+          await reload();
         }
       } catch (err) {
-        setAddData((c) => (c.phase === "open" ? { ...c, busy: false, error: err as GdbError } : c));
+        setAddData((c) => (isCurrent() && c.phase === "open" ? { ...c, busy: false, error: err as GdbError } : c));
       }
     })();
   };
 
   const cancelAddData = () => {
+    invalidateAddDataRequests();
     setAddData({ phase: "idle" });
   };
 
   const generateRouting = (venue: VenueSummary) => {
     if (generatingId !== null) return;
+    beginTopLevelActivity();
+    const generation = routingGenerationRef.current;
+    const noticeGeneration = noticeGenerationRef.current;
+    const sessionGeneration = sessionGenerationRef.current;
     setGeneratingId(venue.id);
     setGdbNotice(ui.generatingRouting[locale]);
     void (async () => {
       try {
         const res = await api.generateNetwork(venue.id);
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
         const job = await api.waitForJob(res.jobId);
-        if (job.status === "done") {
-          setGdbNotice(ui.routingGenerated[locale]);
-          await reload();
-        } else {
-          setGdbNotice(gdbErrorMessage({ code: "gdb_conversion_failed", message: job.error }, locale));
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
+        if (noticeGeneration === noticeGenerationRef.current && generation === routingGenerationRef.current) {
+          if (job.status === "done") {
+            setGdbNotice(ui.routingGenerated[locale]);
+          } else {
+            setGdbNotice(gdbErrorMessage({ code: "gdb_conversion_failed", message: job.error }, locale));
+          }
         }
+        await reload();
       } catch (err) {
-        setGdbNotice(gdbErrorMessage(err as GdbError, locale));
+        if (
+          aliveRef.current &&
+          generation === routingGenerationRef.current &&
+          noticeGeneration === noticeGenerationRef.current
+        ) {
+          setGdbNotice(gdbErrorMessage(err as GdbError, locale));
+        }
       } finally {
-        setGeneratingId(null);
+        if (aliveRef.current && generation === routingGenerationRef.current) {
+          setGeneratingId(null);
+        }
       }
     })();
   };
 
   const exportNetwork = (venue: VenueSummary) => {
+    beginTopLevelActivity();
+    const generation = exportGenerationRef.current;
+    const noticeGeneration = noticeGenerationRef.current;
     setGdbNotice(ui.exportingNetwork[locale]);
     void (async () => {
       try {
         const { blob, filename } = await api.exportNetwork(venue.id);
+        if (
+          !aliveRef.current ||
+          generation !== exportGenerationRef.current ||
+          noticeGeneration !== noticeGenerationRef.current
+        ) {
+          return;
+        }
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement("a");
         anchor.href = url;
@@ -404,9 +606,20 @@ export function GalleryPage() {
         URL.revokeObjectURL(url);
         setGdbNotice(ui.networkExported[locale]);
       } catch (err) {
+        if (
+          !aliveRef.current ||
+          generation !== exportGenerationRef.current ||
+          noticeGeneration !== noticeGenerationRef.current
+        ) {
+          return;
+        }
+        const errObject = err !== null && typeof err === "object" ? err : null;
         const code =
-          (err as { code?: string; error?: string }).code ??
-          (err as { error?: string }).error;
+          errObject !== null && "code" in errObject && typeof errObject.code === "string"
+            ? errObject.code
+            : errObject !== null && "error" in errObject && typeof errObject.error === "string"
+              ? errObject.error
+              : undefined;
         setGdbNotice(
           code === "no_graph"
             ? ui.noGraphToExport[locale]
@@ -430,6 +643,10 @@ export function GalleryPage() {
               type="button"
               className="chip"
               onClick={() => {
+                sessionGenerationRef.current += 1;
+                reloadGenerationRef.current += 1;
+                invalidateAsyncWork();
+                clearAsyncUi();
                 void api.logout().then(reload);
               }}
             >
