@@ -377,6 +377,88 @@ describe("IndoorMap placement", () => {
     renderMap(baseProps({ issueReview: review({ placementMode: false }) }));
     expect(screen.queryByRole("button", { name: "Place at map center" })).toBeNull();
   });
+
+  it("anchors a placement click to the clicked feature's own level, not the representative", () => {
+    const placement = review({ placementMode: true });
+    const { map } = renderMap(baseProps({ levelId: "level-1", issueReview: placement }));
+
+    // Grouped same-ordinal floors all render, so the clicked feature can belong
+    // to a level other than the selected representative "level-1".
+    map.queryResult = [{ properties: { __feature_id: "unit-9", __level_id: "level-2" } }];
+    act(() => {
+      map.emit("click", { point: { x: 3, y: 4 }, lngLat: { lng: 139.5, lat: 35.4 } });
+    });
+
+    expect(placement.onPlaceIssue).toHaveBeenCalledWith({
+      levelId: "level-2",
+      longitude: 139.5,
+      latitude: 35.4,
+      featureId: "unit-9",
+    });
+  });
+
+  it("anchors a Place-at-center click to the queried feature's own level", () => {
+    const placement = review({ placementMode: true });
+    const { map } = renderMap(baseProps({ levelId: "level-1", issueReview: placement }));
+    map.center = { lng: 5, lat: 6 };
+    map.queryResult = [{ properties: { __feature_id: "unit-7", __level_id: "level-2" } }];
+
+    act(() => {
+      screen.getByRole("button", { name: "Place at map center" }).click();
+    });
+
+    expect(placement.onPlaceIssue).toHaveBeenCalledWith({
+      levelId: "level-2",
+      longitude: 5,
+      latitude: 6,
+      featureId: "unit-7",
+    });
+  });
+
+  it("falls back to the representative level for a bare Place-at-center click", () => {
+    const placement = review({ placementMode: true });
+    const { map } = renderMap(baseProps({ levelId: "level-1", issueReview: placement }));
+    map.center = { lng: 8, lat: 9 };
+    map.queryResult = [];
+
+    act(() => {
+      screen.getByRole("button", { name: "Place at map center" }).click();
+    });
+
+    expect(placement.onPlaceIssue).toHaveBeenCalledWith({
+      levelId: "level-1",
+      longitude: 8,
+      latitude: 9,
+      featureId: null,
+    });
+  });
+
+  it("anchors a marker placement to the marker feature's own venue level", async () => {
+    const placement = review({ placementMode: true });
+    const ele = feature("unit-ele", { levelId: "level-1", labels: { en: "Elevator A" } });
+    const venue = baseVenue([ele]);
+    renderMap(
+      baseProps({
+        venue,
+        levelId: "level-1",
+        layerVisibility: { ...defaultLayerVisibility, labels: true },
+        issueReview: placement,
+      }),
+    );
+
+    const marker = await screen.findByRole("button", { name: "Elevator A" });
+    // The feature actually belongs to a non-representative same-ordinal level;
+    // the anchor must follow the feature's venue level, not levelIdRef.
+    ele.levelId = "level-2";
+    await userEvent.click(marker);
+
+    expect(placement.onPlaceIssue).toHaveBeenCalledWith({
+      levelId: "level-2",
+      longitude: 139.7,
+      latitude: 35.6,
+      featureId: "unit-ele",
+    });
+  });
 });
 
 describe("IndoorMap anchor camera", () => {

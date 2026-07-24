@@ -135,6 +135,16 @@ function readFeatureId(
   return typeof raw === "string" && raw.length > 0 ? raw : null;
 }
 
+function readLevelId(
+  properties: GeoJSON.GeoJsonProperties | null | undefined,
+): string | null {
+  if (properties == null) {
+    return null;
+  }
+  const raw = properties["__level_id"];
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+
 function getIndoorSource(map: MapLibreMap): GeoJSONSource | null {
   const source = map.getSource(INDOOR_SOURCE_ID);
   if (source == null || source.type !== "geojson") {
@@ -480,7 +490,9 @@ export function IndoorMap({
     const review = issueReviewRef.current;
     if (review?.placementMode === true) {
       review.onPlaceIssue({
-        levelId: levelIdRef.current,
+        // Grouped floors render markers per building level; the clicked feature's
+        // own level is authoritative, falling back to the representative level.
+        levelId: venueRef.current.featuresById.get(featureId)?.levelId ?? levelIdRef.current,
         longitude: center[0],
         latitude: center[1],
         featureId,
@@ -505,7 +517,8 @@ export function IndoorMap({
       layers: [...CLICKABLE_LAYER_IDS],
     });
     review.onPlaceIssue({
-      levelId: levelIdRef.current,
+      // A feature under the map center owns its level; else the representative.
+      levelId: readLevelId(features[0]?.properties) ?? levelIdRef.current,
       longitude: center.lng,
       latitude: center.lat,
       featureId: readFeatureId(features[0]?.properties),
@@ -583,7 +596,9 @@ export function IndoorMap({
         // Placement captures the clicked point (plus any feature under it) and
         // suppresses ordinary feature selection.
         review.onPlaceIssue({
-          levelId: levelIdRef.current,
+          // The clicked feature's own level (grouped same-ordinal levels all
+          // render) beats the representative level; bare clicks use representative.
+          levelId: readLevelId(features[0]?.properties) ?? levelIdRef.current,
           longitude: event.lngLat.lng,
           latitude: event.lngLat.lat,
           featureId,
