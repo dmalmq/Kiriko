@@ -3,6 +3,7 @@ export interface AppConfig {
   sessionTtlDays: number;
   secureCookies: boolean;
   issueSseMaxConnections: number;
+  jobShutdownGraceMs?: number;
   issueSseMaxPerVersion: number;
   bootstrapUser?: string;
   bootstrapPassword?: string;
@@ -24,6 +25,7 @@ export function configFromEnv(): AppConfig & { port: number } {
     secureCookies: /^(1|true)$/i.test(process.env["KIRIKO_SECURE_COOKIES"] ?? ""),
     issueSseMaxConnections: positiveInt(process.env["KIRIKO_ISSUE_SSE_MAX_CONNECTIONS"], 512),
     issueSseMaxPerVersion: positiveInt(process.env["KIRIKO_ISSUE_SSE_MAX_PER_VERSION"], 128),
+    jobShutdownGraceMs: positiveInt(process.env["KIRIKO_JOB_SHUTDOWN_GRACE_MS"], 5_000),
     seedDevUsers: process.env["KIRIKO_SEED_DEV_USERS"] === "1",
     port: Number(process.env["KIRIKO_PORT"] ?? 8790),
   };

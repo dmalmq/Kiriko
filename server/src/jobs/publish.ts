@@ -28,6 +28,19 @@ class StaleVersionError extends Error {
 /** Thrown when a synthesize request compiles a bundle with no §5 graph. */
 class NoRoutableNetworkError extends Error {}
 
+class ShutdownAbortError extends Error {
+  constructor() {
+    super("publication job aborted by shutdown");
+    this.name = "ShutdownAbortError";
+  }
+}
+
+function throwIfShutdownAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    throw new ShutdownAbortError();
+  }
+}
+
 function staleVersionError(versionId: number): StructuredError {
   return { code: "stale_version", message: `version ${versionId} was replaced during compilation` };
 }
@@ -67,8 +80,8 @@ export function makePublishRunner(
   db: Database.Database,
   blobs: BlobStore,
   compile: PublishCompileFn = compileVenueBundle,
-) {
-  return async (payloadJson: string): Promise<{ versionId: number }> => {
+): (payloadJson: string, signal?: AbortSignal) => Promise<{ versionId: number }> {
+  return async (payloadJson: string, signal = new AbortController().signal): Promise<{ versionId: number }> => {
     const { versionId, networkJunctionsHash, networkPathsHash, facilitiesGeoJsonHash, synthesizeNetwork } =
       JSON.parse(payloadJson) as {
         versionId: number;
@@ -117,6 +130,7 @@ export function makePublishRunner(
     ] as const;
 
     try {
+      throwIfShutdownAborted(signal);
       const source = blobs.read(version.hash);
       const metadata: CompileVenueMetadata = {
         datasetId: `${version.tenantSlug}/${version.venueSlug}`,
@@ -137,7 +151,9 @@ export function makePublishRunner(
       if (synthesizeNetwork === true) {
         metadata.synthesizeNetwork = true;
       }
+      throwIfShutdownAborted(signal);
       const { bundle, stats } = await compile(source, metadata);
+      throwIfShutdownAborted(signal);
       if (synthesizeNetwork === true) {
         try {
           await exportVenueNetwork(bundle);
@@ -148,6 +164,7 @@ export function makePublishRunner(
           throw error;
         }
       }
+      throwIfShutdownAborted(signal);
       // Content-addressed: safe to persist even if this row turns out to
       // be stale below — the blob then simply has no referencing row.
       const { hash: bundleHash, size } = blobs.put(bundle);
@@ -166,6 +183,9 @@ export function makePublishRunner(
       }
       return { versionId };
     } catch (error) {
+      if (error instanceof ShutdownAbortError) {
+        throw error;
+      }
       // Domain (invalid IMDF), bridge (native/FFI), blob-store, DB, and
       // stale-identity failures all land here. The failure write is
       // scoped by the same identity predicate as the success write, and

@@ -53,13 +53,17 @@ export function registerUploadRoute(app: FastifyInstance): void {
         ((db.prepare("SELECT MAX(seq) AS m FROM versions WHERE venue_id = ?").get(id) as {
           m: number | null;
         }).m ?? 0) + 1;
-      const info = db
-        .prepare(
-          "INSERT INTO versions (venue_id, seq, public_id, source_blob_hash, source_kind) VALUES (?, ?, ?, ?, 'imdf')",
-        )
-        .run(id, nextSeq, newPublicVersionId(), hash);
-      const versionId = Number(info.lastInsertRowid);
-      const jobId = request.server.queue.enqueue("publish_imdf", { versionId });
+      const accepted = request.server.queue.enqueuePublication(
+        "publish_imdf",
+        {
+          venueId: id,
+          seq: nextSeq,
+          publicId: newPublicVersionId(),
+          sourceBlobHash: hash,
+          sourceKind: "imdf",
+        },
+      );
+      const { jobId, versionId } = accepted;
       return reply.code(202).send({ jobId, versionId, seq: nextSeq });
     },
   );

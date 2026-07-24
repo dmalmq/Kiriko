@@ -306,6 +306,33 @@ describe("POST /api/gdb/publish with networkBlobHash", () => {
     expect(version.sourceKind).toBe("gdb");
   });
 
+
+  it("rolls back the draft version when queue job insertion fails after network extraction", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await createVenue(app, cookie);
+    const blobHash = putBlob(app, await validGdbZipBytes("venue.gdb"));
+    const networkBlobHash = putBlob(app, await validGdbZipBytes("net.gdb"));
+    app.db.exec(`
+      CREATE TRIGGER fail_publication_job_insert
+      BEFORE INSERT ON jobs
+      WHEN NEW.kind = 'publish_imdf'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated job insert failure');
+      END;
+    `);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/gdb/publish",
+      headers: { cookie },
+      payload: { venueId, blobHash, networkBlobHash, plan: PUBLISH_PLAN },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect((app.db.prepare("SELECT COUNT(*) AS n FROM versions").get() as { n: number }).n).toBe(0);
+    expect((app.db.prepare("SELECT COUNT(*) AS n FROM jobs").get() as { n: number }).n).toBe(0);
+  });
   it("leaves a network-less publish exactly as before", async () => {
     const { app } = await makeTestApp();
     const cookie = await loginCookie(app);

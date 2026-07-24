@@ -166,6 +166,22 @@ function putBlob(app: FastifyInstance, bytes: Uint8Array): string {
   return hash;
 }
 
+function failPublishJobInserts(app: FastifyInstance): void {
+  app.db.exec(`
+    CREATE TRIGGER fail_publication_job_insert
+    BEFORE INSERT ON jobs
+    WHEN NEW.kind = 'publish_imdf'
+    BEGIN
+      SELECT RAISE(ABORT, 'simulated job insert failure');
+    END;
+  `);
+}
+
+function countVersions(app: FastifyInstance): number {
+  const row = app.db.prepare("SELECT COUNT(*) AS n FROM versions").get() as CountRow;
+  return row.n;
+}
+
 async function createVenue(app: FastifyInstance, cookie: string, name = "Facility Venue"): Promise<number> {
   const response = await app.inject({
     method: "POST",
@@ -527,6 +543,25 @@ describe("POST /api/gdb/augment", () => {
     expect(fake.compileCalls[0]!.metadata["networkJunctionsGeoJson"]).toBe(JUNCTIONS_GEOJSON);
   });
 
+
+  it("rolls back the draft version when queue job insertion fails", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const { venueId } = await publishBase(app, cookie);
+    const before = countVersions(app);
+    const networkBlobHash = putBlob(app, await validGdbZipBytes("net.gdb"));
+    failPublishJobInserts(app);
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/augment", headers: { cookie },
+      payload: { venueId, networkBlobHash },
+    });
+
+    expect(res.statusCode).toBe(500);
+    expect(countVersions(app)).toBe(before);
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM versions WHERE status = 'draft'").get()).toEqual({ n: 0 });
+  });
+
   it("400 when neither network nor facilities is provided", async () => {
     const { app } = await makeTestApp();
     const cookie = await loginCookie(app);
@@ -637,6 +672,24 @@ describe("POST /api/gdb/generate-network", () => {
     expect(fake.compileCalls[0]!.metadata["facilitiesGeoJson"]).toBe(FACILITIES_GEOJSON);
   });
 
+
+  it("rolls back the draft version when queue job insertion fails", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await publishBaseWithFacilities(app, cookie);
+    const before = countVersions(app);
+    failPublishJobInserts(app);
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+      payload: { venueId },
+    });
+
+    expect(res.statusCode).toBe(500);
+    expect(countVersions(app)).toBe(before);
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM versions WHERE status = 'draft'").get()).toEqual({ n: 0 });
+  });
+
   it("404 no_base_version when the venue has no published version", async () => {
     const { app } = await makeTestApp();
     const cookie = await loginCookie(app);
@@ -724,6 +777,23 @@ describe("POST /api/gdb/import-network", () => {
     expect(fake.compileCalls[0]!.metadata["synthesizeNetwork"]).toBeUndefined();
   });
 
+
+  it("rolls back the draft version when queue job insertion fails", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const { slug, publicVersionId } = await publishBase(app, cookie, "Atomic Import Venue");
+    const before = countVersions(app);
+    failPublishJobInserts(app);
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/import-network", headers: { cookie },
+      payload: { slug, publicVersionId, junctions: EMPTY_JUNCTIONS, paths: EMPTY_PATHS },
+    });
+
+    expect(res.statusCode).toBe(500);
+    expect(countVersions(app)).toBe(before);
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM versions WHERE status = 'draft'").get()).toEqual({ n: 0 });
+  });
   it("bases the edited graph on the admitted version identity, not mutable latest", async () => {
     const { app } = await makeTestApp();
     const cookie = await loginCookie(app);
