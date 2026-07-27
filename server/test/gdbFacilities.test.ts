@@ -454,6 +454,74 @@ describe("GDB publish persists reprocess inputs", () => {
   });
 });
 
+describe("GDB publish carries clipToSelection through TypeBox and the job payload", () => {
+  it("plan.clipToSelection: true survives validation, persistence, and the enqueued job payload", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await createVenue(app, cookie);
+    const blobHash = putBlob(app, await validGdbZipBytes("venue.gdb"));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/gdb/publish",
+      headers: { cookie },
+      payload: { venueId, blobHash, plan: { ...PUBLISH_PLAN, clipToSelection: true } },
+    });
+    expect(response.statusCode, response.body).toBe(202);
+    const { jobId, versionId } = response.json() as { jobId: string; versionId: number };
+    await app.queue.idle();
+
+    const version = app.db
+      .prepare("SELECT gdb_plan_json AS p FROM versions WHERE id = ?")
+      .get(versionId) as { p: string };
+    expect(JSON.parse(version.p).clipToSelection).toBe(true);
+
+    // The important half: proves TypeBox let the field through the route
+    // AND that it landed in the job payload (enqueuePublication's third
+    // argument), not silently dropped or attached to the version draft only.
+    const job = app.db
+      .prepare("SELECT payload_json AS p FROM jobs WHERE id = ?")
+      .get(jobId) as { p: string };
+    expect(JSON.parse(job.p).clipToSelection).toBe(true);
+
+    // Confirms the chain continues past this task's boundary into the
+    // publish runner (Task 4's `metadata.clipToVenue = true`).
+    expect(fake.compileCalls.length).toBe(1);
+    expect(fake.compileCalls[0]!.metadata["clipToVenue"]).toBe(true);
+  });
+
+  it("an omitted clipToSelection normalizes to false everywhere and behaves as before", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await createVenue(app, cookie);
+    const blobHash = putBlob(app, await validGdbZipBytes("venue.gdb"));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/gdb/publish",
+      headers: { cookie },
+      payload: { venueId, blobHash, plan: PUBLISH_PLAN },
+    });
+    expect(response.statusCode, response.body).toBe(202);
+    const { jobId, versionId } = response.json() as { jobId: string; versionId: number };
+    await app.queue.idle();
+
+    const version = app.db
+      .prepare("SELECT gdb_plan_json AS p, status AS status FROM versions WHERE id = ?")
+      .get(versionId) as { p: string; status: string };
+    expect(JSON.parse(version.p).clipToSelection).toBe(false);
+    expect(version.status).toBe("published");
+
+    const job = app.db
+      .prepare("SELECT payload_json AS p FROM jobs WHERE id = ?")
+      .get(jobId) as { p: string };
+    expect(JSON.parse(job.p).clipToSelection).toBe(false);
+
+    expect(fake.compileCalls.length).toBe(1);
+    expect(fake.compileCalls[0]!.metadata["clipToVenue"]).toBeUndefined();
+  });
+});
+
 describe("GDB publish inherits prior bundle inputs when omitted", () => {
   it("a re-publish without network reuses the prior published version's routing", async () => {
     const { app } = await makeTestApp();
