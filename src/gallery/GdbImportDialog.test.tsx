@@ -112,4 +112,42 @@ describe("GdbImportDialog", () => {
     expect(input.readOnly || input.disabled).toBe(true);
     expect(input.value).toBe("Station");
   });
+
+  it("excludes a whole building's layers and prunes it from the imported plan", () => {
+    const twoBuildingInspection: GdbInspection = {
+      sourceName: "Multi.gdb",
+      databases: [{ id: "gdb-1", name: "Multi.gdb" }],
+      layers: [
+        { key: { databaseId: "gdb-1", layerName: "Takanawa_1_Floor" }, databaseName: "Multi.gdb", featureCount: 3, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+        { key: { databaseId: "gdb-1", layerName: "Shinagawa_1_Floor" }, databaseName: "Multi.gdb", featureCount: 3, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+      ],
+      warnings: [],
+    };
+    const twoBuildingPlan: GdbMappingPlan = {
+      venueName: "Multi",
+      buildings: [
+        { id: "b1", name: "Takanawa" },
+        { id: "b2", name: "Shinagawa" },
+      ],
+      layers: [
+        { key: { databaseId: "gdb-1", layerName: "Takanawa_1_Floor" }, included: true, targetType: "level", buildingId: "b1", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+        { key: { databaseId: "gdb-1", layerName: "Shinagawa_1_Floor" }, included: true, targetType: "level", buildingId: "b2", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      ],
+    };
+    const onImport = vi.fn();
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Shinagawa" }));
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+
+    expect(onImport).toHaveBeenCalledTimes(1);
+    const submitted = onImport.mock.calls[0]![0] as GdbMappingPlan;
+    expect(submitted.layers.find((l) => l.buildingId === "b2")!.included).toBe(false);
+    expect(submitted.buildings.map((b) => b.id)).toEqual(["b1"]);
+  });
+
+  it("shows a building's Include checkbox checked when it has an included layer", () => {
+    render(<GdbImportDialog inspection={inspection} initialPlan={plan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    expect((screen.getByRole("checkbox", { name: "Include Station" }) as HTMLInputElement).checked).toBe(true);
+  });
 });

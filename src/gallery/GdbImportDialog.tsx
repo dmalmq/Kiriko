@@ -26,6 +26,7 @@ const ui = {
   title: { ja: "GDB レイヤーの割り当てを確認", en: "Review GDB layer mappings" },
   venueName: { ja: "会場名", en: "Venue name" },
   buildings: { ja: "建物", en: "Buildings" },
+  includeBuilding: { ja: "取り込む", en: "Include" },
   buildingNamePlaceholder: { ja: "建物名", en: "Building name" },
   addBuilding: { ja: "建物を追加", en: "Add building" },
   deleteBuilding: { ja: "削除", en: "Delete" },
@@ -355,6 +356,15 @@ export function GdbImportDialog({
     }));
   }
 
+  function setBuildingIncluded(buildingId: string, include: boolean): void {
+    setPlan((current) => ({
+      ...current,
+      layers: current.layers.map((row) =>
+        row.buildingId === buildingId ? { ...row, included: include } : row,
+      ),
+    }));
+  }
+
   function setRuleKind(row: GdbLayerPlan, kind: RuleKind): void {
     if (kind === "none") {
       updateRow(row.key, { levelRule: null });
@@ -465,6 +475,13 @@ export function GdbImportDialog({
               const assigned = plan.layers.some((l) => l.included && l.buildingId === building.id);
               return (
                 <li key={building.id} className="gdb-dialog__building-row">
+                  <input
+                    type="checkbox"
+                    className="gdb-dialog__checkbox"
+                    aria-label={`${ui.includeBuilding[locale]} ${building.name || building.id}`}
+                    checked={assigned}
+                    onChange={(event) => setBuildingIncluded(building.id, event.target.checked)}
+                  />
                   <input
                     type="text"
                     className="gdb-dialog__input"
