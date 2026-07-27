@@ -84,11 +84,16 @@ Network and facility `FLOOR`/`floor` labels map to venue level ordinals via `kir
 layers by building: each building gets a tri-state checkbox (checked/unchecked/
 indeterminate over its layers) plus included/total/feature counts, and a
 building-filter dropdown narrows the layer table to one building at a time.
-Unchecking a building sets every one of its layers to excluded; re-checking it
-restores the *server's originally suggested* inclusion per layer (frozen at
-dialog mount) rather than blanket-including everything, so heuristic
-exclusions (zero-feature layers, `_to_` cross-floor layers) don't come back as
-junk. Layers with no `buildingId` — outdoor/site-wide layers such as rail
+The checkbox derives its intent from the group's own state, not from the DOM
+event: a group with anything included becomes fully excluded, and a group with
+nothing included is restored. (This matters because a partially-included group
+renders unchecked+indeterminate, and clicking an unchecked box always reports
+`checked === true` — trusting the event would make partial buildings, which is
+most of them on a real dataset, impossible to deselect.) So unchecking a
+building sets every one of its layers to excluded; re-checking it restores the
+*server's originally suggested* inclusion per layer (frozen at dialog mount)
+rather than blanket-including everything, so heuristic exclusions (zero-feature
+layers, `_to_` cross-floor layers) don't come back as junk. Layers with no `buildingId` — outdoor/site-wide layers such as rail
 centerlines or road edges — sit in an **Unassigned / outdoor** group with the
 same checkbox/counts treatment. Selecting exactly one building prefills the
 venue-name field with that building's name (until the user types their own).
@@ -98,19 +103,41 @@ blob is content-addressed by hash, so re-running costs no re-upload.
 
 Because the network and point-facility GDBs carry no building field, a subset
 import can also **clip** them to the imported venue. The dialog has a clip
-checkbox that starts unchecked and auto-enables the first time any building is
-deselected (a sensible default once the network no longer matches the whole
-venue); once the user touches it explicitly, their choice sticks and further
-building toggles don't override it. That choice is `clipToSelection` on the
-persisted mapping plan (`versions.gdb_plan_json`), so it survives re-edit,
-augment, and generate-network. At the publish bridge it becomes
+checkbox that starts unchecked and auto-enables the first time any **building**
+is deselected (a sensible default once the network no longer matches the whole
+venue); unticking the Unassigned / outdoor bucket does not trigger it, since
+dropping outdoor layers doesn't change which buildings the venue covers. Once
+the user touches the checkbox explicitly, their choice sticks and further
+building toggles don't override it.
+
+That choice is `clipToSelection` on the persisted mapping plan
+(`versions.gdb_plan_json`). Persisting it is not enough on its own: the
+compiler reads the **job payload**, not the version row, so every re-publish
+path has to lift the flag out of the stored plan and pass it to
+`enqueuePublication`'s third argument. All three do —
+`/api/gdb/augment` (attaching a network/facility GDB later via **Add data**,
+which has no clip checkbox of its own), `/api/gdb/generate-network`, and
+`/api/gdb/import-network` — via `storedPlanClipsToSelection`
+(`server/src/gdb/routes.ts`). The deciding reason on the latter two is §7
+rather than §5: `facilities_blob_hash` points at the *raw, unclipped*
+extraction and is re-clipped at compile time, so carrying it forward without
+the flag would silently widen a clipped venue's facilities back to the whole
+site. (For a synthesized graph the §5 clip is a near no-op — synthesis derives
+the network from the same level/unit polygons the region is built from.)
+
+At the publish bridge the flag becomes
 `clipToVenue` on `CompileVenueMetadata` (`server/src/core/native.ts`), and
 Rust's `compile_imdf_with_network` (`core/crates/kiriko-bundle/src/codec.rs`)
 builds a `ClipRegion` (`core/crates/kiriko-bundle/src/clip.rs`) from the
-imported venue's **level and unit polygons only** — building polygons are
-skipped because they're synthesized bounding rectangles that overlap heavily
-for adjacent structures like Tokyo Station's, which would leak a neighbour's
-nodes. Polygons are bucketed by level ordinal (matched via `level.ordinal` for
+imported venue's **level and unit polygons only** — the synthesized
+**building** polygons are skipped because they are bounding rectangles that
+overlap heavily for adjacent structures like Tokyo Station's, which would leak
+a neighbour's nodes wholesale. Note this is a difference of degree, not kind:
+*synthetic* levels (`resolveOrCreateLevel` in `server/src/gdb/mapping.ts`, for
+ordinals with no source level feature) also get a `rectanglePolygon` over their
+assigned features, so the region is not purely real geometry and can
+over-include. See the outstanding-verification bullet under Known follow-ups.
+Polygons are bucketed by level ordinal (matched via `level.ordinal` for
 level features, `level_id → ordinal` for unit features); a node or facility
 counts as inside its own ordinal's region if it falls within the polygon, or
 within a `CLIP_BUFFER_M` = 2 m tolerance of its boundary (network nodes sit on
@@ -176,10 +203,20 @@ polygons.
   `Free_shuttle_bus_*ルート`) actually reach publish — i.e. have a non-null
   target type and are included by default in `suggestLayerPlan`
   (`server/src/gdb/mapping.ts`) — since only those matter for whether they
-  need explicit exclusion; and whether the 2 m `CLIP_BUFFER_M`
+  need explicit exclusion; whether the 2 m `CLIP_BUFFER_M`
   (`core/crates/kiriko-bundle/src/clip.rs`) is the right tolerance for that
-  data's node-to-polygon offsets, or needs raising. Do this before relying on
-  building-scoped import for that venue in production.
+  data's node-to-polygon offsets, or needs raising; and **how much
+  over-inclusion the synthetic-level rectangles cause**. `ClipRegion` indexes
+  every `FeatureType::Level` polygon, and a synthetic level (one created for an
+  ordinal with no source level feature) carries a bounding rectangle over its
+  assigned features — the same shape objection that keeps building polygons out
+  of the region. The effect is over-inclusion (a neighbour's nodes kept), never
+  corruption, so the behaviour is deliberately left as-is: measure the real
+  drop counts on the Tokyo data first — how many of that venue's levels are
+  synthetic, and how many extra nodes/facilities their rectangles retain —
+  before deciding whether to restrict the region to non-synthetic levels plus
+  units. Do all of this before relying on building-scoped import for that venue
+  in production.
 - **One-shot fan-out to N venues was deliberately deferred.** Selecting a
   subset of buildings imports one venue containing just that subset; there is
   no mode where a single publish creates a separate venue per building.
