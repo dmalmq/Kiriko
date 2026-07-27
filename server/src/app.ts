@@ -65,7 +65,8 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
     openapi: { info: { title: "Kiriko API", version: "0.1.0" } },
   });
 
-  const queue = new JobQueue(db, { publish_imdf: makePublishRunner(db, app.blobs) });
+  const queueOptions = config.jobShutdownGraceMs === undefined ? {} : { closeGraceMs: config.jobShutdownGraceMs };
+  const queue = new JobQueue(db, { publish_imdf: makePublishRunner(db, app.blobs) }, queueOptions);
   app.decorate("queue", queue);
 
   const issueRepository = new IssueRepository(db);
@@ -95,6 +96,7 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
 
   app.addHook("preClose", async () => {
     issueHub.close();
+    await queue.close();
   });
 
   app.addHook("onClose", async () => {

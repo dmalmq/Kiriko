@@ -4,7 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LoadedVenue, ViewerFeature } from "../imdf/types";
 import type { RouteResultDto } from "../bundle/wasm";
 import { kirikoTheme } from "../theme/presets";
-import { FACILITY_SOURCE_ID, INDOOR_SOURCE_ID, ROUTE_SOURCE_ID } from "./featureLayers";
+import {
+  FACILITY_SOURCE_ID,
+  INDOOR_SOURCE_ID,
+  LAYER_NETWORK_JUNCTION_HIT,
+  LAYER_NETWORK_PATH_HIT,
+  ROUTE_SOURCE_ID,
+} from "./featureLayers";
 import { defaultLayerVisibility } from "./layerGroups";
 import { IndoorMap, type IndoorMapProps } from "./IndoorMap";
 import type { MapIssuePin } from "./useIssuePins";
@@ -33,6 +39,7 @@ const mapState = vi.hoisted(() => {
     readonly routeSourceData: unknown[] = [];
     readonly facilitySourceData: unknown[] = [];
     queryResult: Array<{ properties: Record<string, unknown> }> = [];
+    queryByLayer: Record<string, Array<{ properties: Record<string, unknown> }>> = {};
     styleLoaded = true;
     sourceLoaded = true;
     center = { lng: 0, lat: 0 };
@@ -90,7 +97,14 @@ const mapState = vi.hoisted(() => {
       return this.canvas;
     }
 
-    queryRenderedFeatures(): Array<{ properties: Record<string, unknown> }> {
+    queryRenderedFeatures(
+      _point?: unknown,
+      options?: { layers?: string[] },
+    ): Array<{ properties: Record<string, unknown> }> {
+      for (const layer of options?.layers ?? []) {
+        const hit = this.queryByLayer[layer];
+        if (hit !== undefined) return hit;
+      }
       return this.queryResult;
     }
 
@@ -376,6 +390,88 @@ describe("IndoorMap placement", () => {
   it("hides the Place at map center control outside placement mode", () => {
     renderMap(baseProps({ issueReview: review({ placementMode: false }) }));
     expect(screen.queryByRole("button", { name: "Place at map center" })).toBeNull();
+  });
+
+  it("anchors a placement click to the clicked feature's own level, not the representative", () => {
+    const placement = review({ placementMode: true });
+    const { map } = renderMap(baseProps({ levelId: "level-1", issueReview: placement }));
+
+    // Grouped same-ordinal floors all render, so the clicked feature can belong
+    // to a level other than the selected representative "level-1".
+    map.queryResult = [{ properties: { __feature_id: "unit-9", __level_id: "level-2" } }];
+    act(() => {
+      map.emit("click", { point: { x: 3, y: 4 }, lngLat: { lng: 139.5, lat: 35.4 } });
+    });
+
+    expect(placement.onPlaceIssue).toHaveBeenCalledWith({
+      levelId: "level-2",
+      longitude: 139.5,
+      latitude: 35.4,
+      featureId: "unit-9",
+    });
+  });
+
+  it("anchors a Place-at-center click to the queried feature's own level", () => {
+    const placement = review({ placementMode: true });
+    const { map } = renderMap(baseProps({ levelId: "level-1", issueReview: placement }));
+    map.center = { lng: 5, lat: 6 };
+    map.queryResult = [{ properties: { __feature_id: "unit-7", __level_id: "level-2" } }];
+
+    act(() => {
+      screen.getByRole("button", { name: "Place at map center" }).click();
+    });
+
+    expect(placement.onPlaceIssue).toHaveBeenCalledWith({
+      levelId: "level-2",
+      longitude: 5,
+      latitude: 6,
+      featureId: "unit-7",
+    });
+  });
+
+  it("falls back to the representative level for a bare Place-at-center click", () => {
+    const placement = review({ placementMode: true });
+    const { map } = renderMap(baseProps({ levelId: "level-1", issueReview: placement }));
+    map.center = { lng: 8, lat: 9 };
+    map.queryResult = [];
+
+    act(() => {
+      screen.getByRole("button", { name: "Place at map center" }).click();
+    });
+
+    expect(placement.onPlaceIssue).toHaveBeenCalledWith({
+      levelId: "level-1",
+      longitude: 8,
+      latitude: 9,
+      featureId: null,
+    });
+  });
+
+  it("anchors a marker placement to the marker feature's own venue level", async () => {
+    const placement = review({ placementMode: true });
+    const ele = feature("unit-ele", { levelId: "level-1", labels: { en: "Elevator A" } });
+    const venue = baseVenue([ele]);
+    renderMap(
+      baseProps({
+        venue,
+        levelId: "level-1",
+        layerVisibility: { ...defaultLayerVisibility, labels: true },
+        issueReview: placement,
+      }),
+    );
+
+    const marker = await screen.findByRole("button", { name: "Elevator A" });
+    // The feature actually belongs to a non-representative same-ordinal level;
+    // the anchor must follow the feature's venue level, not levelIdRef.
+    ele.levelId = "level-2";
+    await userEvent.click(marker);
+
+    expect(placement.onPlaceIssue).toHaveBeenCalledWith({
+      levelId: "level-2",
+      longitude: 139.7,
+      latitude: 35.6,
+      featureId: "unit-ele",
+    });
   });
 });
 
@@ -722,5 +818,138 @@ describe("IndoorMap facilities", () => {
     });
 
     expect(onSelectFacility).toHaveBeenCalledWith(facilities[0]);
+  });
+});
+
+function editing(
+  overrides: Partial<NonNullable<IndoorMapProps["networkEditing"]>> = {},
+): NonNullable<IndoorMapProps["networkEditing"]> {
+  return {
+    tool: "select",
+    selection: null,
+    pendingNodeId: null,
+    onPick: vi.fn(),
+    centerActionLabel: "Pick at map center",
+    ...overrides,
+  };
+}
+
+describe("IndoorMap network editing", () => {
+  it("reports a junction pick when a junction hit is under the click", () => {
+    const net = editing();
+    const { map } = renderMap(baseProps({ networkEditing: net }));
+    map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [{ properties: { NODEID: 5 } }];
+    act(() => {
+      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 2 } });
+    });
+    expect(net.onPick).toHaveBeenCalledWith({ kind: "junction", nodeId: 5 });
+  });
+
+  it("reports a connection pick when only a path hit is under the click", () => {
+    const net = editing();
+    const { map } = renderMap(baseProps({ networkEditing: net }));
+    map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [];
+    map.queryByLayer[LAYER_NETWORK_PATH_HIT] = [{ properties: { PATHID: 1, RPATHID: 2 } }];
+    act(() => {
+      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 2 } });
+    });
+    expect(net.onPick).toHaveBeenCalledWith({
+      kind: "connection",
+      connectionId: { pathId: 1, reversePathId: 2 },
+    });
+  });
+
+  it("prefers a junction over a connection under the same click", () => {
+    const net = editing();
+    const { map } = renderMap(baseProps({ networkEditing: net }));
+    map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [{ properties: { NODEID: 8 } }];
+    map.queryByLayer[LAYER_NETWORK_PATH_HIT] = [{ properties: { PATHID: 1, RPATHID: 2 } }];
+    act(() => {
+      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 2 } });
+    });
+    expect(net.onPick).toHaveBeenCalledWith({ kind: "junction", nodeId: 8 });
+  });
+
+  it("reports a bare coordinate when nothing is under the click", () => {
+    const net = editing({ tool: "add-junction" });
+    const { map } = renderMap(baseProps({ networkEditing: net }));
+    act(() => {
+      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 139.5, lat: 35.4 } });
+    });
+    expect(net.onPick).toHaveBeenCalledWith({ kind: "map", longitude: 139.5, latitude: 35.4 });
+  });
+
+  it("move-junction reports a coordinate even over a junction hit", () => {
+    const net = editing({ tool: "move-junction", pendingNodeId: 3 });
+    const { map } = renderMap(baseProps({ networkEditing: net }));
+    map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [{ properties: { NODEID: 9 } }];
+    act(() => {
+      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 3, lat: 4 } });
+    });
+    expect(net.onPick).toHaveBeenCalledWith({ kind: "map", longitude: 3, latitude: 4 });
+  });
+
+  it("suppresses ordinary feature selection while editing", () => {
+    const onSelectFeature = vi.fn();
+    const net = editing();
+    const { map } = renderMap(baseProps({ networkEditing: net, onSelectFeature }));
+    map.queryResult = [{ properties: { __feature_id: "unit-3" } }];
+    act(() => {
+      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 1 } });
+    });
+    expect(onSelectFeature).not.toHaveBeenCalled();
+    expect(net.onPick).toHaveBeenCalled();
+  });
+
+  it("routes the map-center action through the same semantic pick", () => {
+    const net = editing();
+    const { map } = renderMap(baseProps({ networkEditing: net }));
+    map.center = { lng: 10, lat: 20 };
+    map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [{ properties: { NODEID: 7 } }];
+    act(() => {
+      screen.getByRole("button", { name: "Pick at map center" }).click();
+    });
+    expect(net.onPick).toHaveBeenCalledWith({ kind: "junction", nodeId: 7 });
+  });
+
+  it("shows the network map-center action only while editing", () => {
+    renderMap(baseProps({ networkEditing: editing({ centerActionLabel: "接続点を選択" }) }));
+    expect(screen.getByRole("button", { name: "接続点を選択" })).toBeTruthy();
+  });
+
+  it("uses a crosshair cursor for add and move tools", () => {
+    const { map } = renderMap(baseProps({ networkEditing: editing({ tool: "add-junction" }) }));
+    act(() => {
+      map.emit("mousemove", { point: { x: 1, y: 1 } });
+    });
+    expect(map.canvas.style.cursor).toBe("crosshair");
+  });
+
+  it("uses a not-allowed cursor over empty map in delete tool", () => {
+    const { map } = renderMap(baseProps({ networkEditing: editing({ tool: "delete" }) }));
+    act(() => {
+      map.emit("mousemove", { point: { x: 1, y: 1 } });
+    });
+    expect(map.canvas.style.cursor).toBe("not-allowed");
+  });
+
+  it("uses a pointer cursor over network data in select tool", () => {
+    const { map } = renderMap(baseProps({ networkEditing: editing({ tool: "select" }) }));
+    map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [{ properties: { NODEID: 1 } }];
+    act(() => {
+      map.emit("mousemove", { point: { x: 1, y: 1 } });
+    });
+    expect(map.canvas.style.cursor).toBe("pointer");
+  });
+
+  it("restores ordinary selection after editing ends", () => {
+    const onSelectFeature = vi.fn();
+    const { map, rerender } = renderMap(baseProps({ networkEditing: editing(), onSelectFeature }));
+    rerender(baseProps({ networkEditing: null, onSelectFeature }));
+    map.queryResult = [{ properties: { __feature_id: "unit-3" } }];
+    act(() => {
+      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 1 } });
+    });
+    expect(onSelectFeature).toHaveBeenCalledWith("unit-3");
   });
 });

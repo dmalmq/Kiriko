@@ -63,10 +63,17 @@ import { loadKirikoBundle } from "./loadKirikoBundle";
 
 const SRC = "/v/default/minimal/bundle";
 
-function okResponse(buffer: ArrayBuffer, publicVersionId?: string): Response {
+function okResponse(
+  buffer: ArrayBuffer,
+  publicVersionId?: string,
+  seq?: number | string,
+): Response {
   const headers = new Headers();
   if (publicVersionId !== undefined) {
     headers.set("Kiriko-Version-Id", publicVersionId);
+  }
+  if (seq !== undefined) {
+    headers.set("Kiriko-Version-Seq", String(seq));
   }
   return {
     ok: true,
@@ -120,6 +127,7 @@ describe("loadKirikoBundle", () => {
       hasGraph: true,
       hasFacilities: false,
       facilities: [],
+      seq: null,
     });
     expect(hydrateVenueMock).toHaveBeenCalledWith(dto);
     expect(worker.terminate).toHaveBeenCalledTimes(1);
@@ -153,8 +161,82 @@ describe("loadKirikoBundle", () => {
       hasGraph: false,
       hasFacilities: false,
       facilities: [],
+      seq: null,
     });
     expect(createdWorkers[0]!.terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it("admits the response sequence when the header matches the decoded version", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(okResponse(new ArrayBuffer(4), "a".repeat(64), 5)),
+    );
+    hydrateVenueMock.mockReturnValueOnce({ venue: { id: "v1" } });
+
+    const promise = loadKirikoBundle(SRC);
+    await vi.waitFor(() => expect(createdWorkers).toHaveLength(1));
+    createdWorkers[0]!.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "loaded",
+          venue: { venueId: "v1", datasetId: "default/minimal", version: 5 },
+        },
+      }),
+    );
+
+    await expect(promise).resolves.toMatchObject({
+      publicVersionId: "a".repeat(64),
+      seq: 5,
+    });
+  });
+
+  it("does not admit a pin-safe sequence when the header disagrees with the decoded version", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(okResponse(new ArrayBuffer(4), "a".repeat(64), 5)),
+    );
+    hydrateVenueMock.mockReturnValueOnce({ venue: { id: "v1" } });
+
+    const promise = loadKirikoBundle(SRC);
+    await vi.waitFor(() => expect(createdWorkers).toHaveLength(1));
+    createdWorkers[0]!.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "loaded",
+          venue: { venueId: "v1", datasetId: "default/minimal", version: 7 },
+        },
+      }),
+    );
+
+    await expect(promise).resolves.toMatchObject({ seq: null });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["zero", "0"],
+    ["negative", "-3"],
+    ["fractional", "2.5"],
+    ["non-numeric", "abc"],
+    ["empty", ""],
+  ])("never admits a pin-safe sequence for a %s header", async (_label, seq) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(okResponse(new ArrayBuffer(4), "a".repeat(64), seq)),
+    );
+    hydrateVenueMock.mockReturnValueOnce({ venue: { id: "v1" } });
+
+    const promise = loadKirikoBundle(SRC);
+    await vi.waitFor(() => expect(createdWorkers).toHaveLength(1));
+    createdWorkers[0]!.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "loaded",
+          venue: { venueId: "v1", datasetId: "default/minimal", version: 1 },
+        },
+      }),
+    );
+
+    await expect(promise).resolves.toMatchObject({ seq: null });
   });
 
   it("creates a new worker for each call", async () => {
@@ -515,6 +597,7 @@ describe("loadKirikoBundle", () => {
       hasGraph: false,
       hasFacilities: false,
       facilities: [],
+      seq: null,
     });
     expect(worker.terminate).toHaveBeenCalledTimes(1);
 
@@ -620,6 +703,7 @@ describe("loadKirikoBundle", () => {
       hasGraph: false,
       hasFacilities: false,
       facilities: [],
+      seq: null,
     });
     expect(r2).toEqual({
       venue: { n: 2 },
@@ -628,6 +712,7 @@ describe("loadKirikoBundle", () => {
       hasGraph: false,
       hasFacilities: false,
       facilities: [],
+      seq: null,
     });
     expect(createdWorkers[0]).not.toBe(createdWorkers[1]);
     expect(createdWorkers[0]!.terminate).toHaveBeenCalledTimes(1);

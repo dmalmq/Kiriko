@@ -61,7 +61,9 @@ Network and facility `FLOOR`/`floor` labels map to venue level ordinals via `kir
 - `<letters>B<n>` deep basements (`KB3`, `SB4` — Keiyo/Sobu lines) → `-n`; a single trailing `F` is tolerated (`SB4F` → -4)
 - case-insensitive; roof (`R`/`RF`), empty, or junk → unmapped → node/facility dropped with a warning.
 
-**Both parsers must stay aligned.** When they diverged, facilities on `KB*/SB*` floors were silently dropped and `M2` facilities landed on a phantom ordinal `1.5` the venue never has.
+**Both parsers must stay aligned.** When they diverged, facilities on `KB*/SB*` floors were silently dropped and `M2` facilities landed on a phantom ordinal `1.5` the venue never has. `parseFloorToken` was also 1-based (`F1` → 1) against `floor_to_ordinal`'s 0-based `F1` → 0 until it was corrected; a level parser that is off by one puts whole floors on the wrong ordinal.
+
+**Level ordinals come from the floor label, not the source `ordinal` attribute.** `resolveLevelOrdinal` tries `levelRule` (the `floor` field) → `short_name` → `name` → **then** the layer's `ordinal` field, which is a last resort only for rows whose labels do not parse. The source attribute cannot be trusted: across the JR East databases it mixes conventions — `F2` is `ordinal` 2 in `JRTakanawaGatewaySta_2_Floor` but `ordinal` 1 in `LinkPillar1_2_Floor`, while the `floor` field is a consistent `F<n>` everywhere. Trusting the attribute merged Takanawa 1F and LinkPillar 2F onto ordinal 1, and because the floor selector and the network-review overlay both filter by ordinal alone, they drew two different physical floors at once.
 
 ## Icons
 
@@ -77,6 +79,64 @@ Network and facility `FLOOR`/`floor` labels map to venue level ordinals via `kir
 - `POST /api/gdb/inspect-network` — network GDB → `{ networkBlobHash, nodeCount, edgeCount, floors }`.
 - `POST /api/gdb/inspect-facilities` — point-facility GDB → `{ facilitiesBlobHash, facilityCount, floors }` (extracts the `Facility_Merge` layer).
 - `POST /api/gdb/publish` — `{ venueId, blobHash, plan, networkBlobHash?, facilitiesBlobHash? }`. Server converts venue layers → synthesized IMDF, extracts `net_junction`/`net_path` and `Facility_Merge` → GeoJSON, and threads all of it into `compileImdf` (napi). The Rust core builds the graph and facilities and embeds them in the bundle.
+
+**Building-scoped import.** The review dialog (`src/gallery/GdbImportDialog.tsx`) groups
+layers by building: each building gets a tri-state checkbox (checked/unchecked/
+indeterminate over its layers) plus included/total/feature counts, and a
+building-filter dropdown narrows the layer table to one building at a time.
+Unchecking a building sets every one of its layers to excluded; re-checking it
+restores the *server's originally suggested* inclusion per layer (frozen at
+dialog mount) rather than blanket-including everything, so heuristic
+exclusions (zero-feature layers, `_to_` cross-floor layers) don't come back as
+junk. Layers with no `buildingId` — outdoor/site-wide layers such as rail
+centerlines or road edges — sit in an **Unassigned / outdoor** group with the
+same checkbox/counts treatment. Selecting exactly one building prefills the
+venue-name field with that building's name (until the user types their own).
+Selecting a subset imports one venue containing just those buildings; to split
+a GDB into several venues, re-run the import once per building — the source
+blob is content-addressed by hash, so re-running costs no re-upload.
+
+Because the network and point-facility GDBs carry no building field, a subset
+import can also **clip** them to the imported venue. The dialog has a clip
+checkbox that starts unchecked and auto-enables the first time any building is
+deselected (a sensible default once the network no longer matches the whole
+venue); once the user touches it explicitly, their choice sticks and further
+building toggles don't override it. That choice is `clipToSelection` on the
+persisted mapping plan (`versions.gdb_plan_json`), so it survives re-edit,
+augment, and generate-network. At the publish bridge it becomes
+`clipToVenue` on `CompileVenueMetadata` (`server/src/core/native.ts`), and
+Rust's `compile_imdf_with_network` (`core/crates/kiriko-bundle/src/codec.rs`)
+builds a `ClipRegion` (`core/crates/kiriko-bundle/src/clip.rs`) from the
+imported venue's **level and unit polygons only** — building polygons are
+skipped because they're synthesized bounding rectangles that overlap heavily
+for adjacent structures like Tokyo Station's, which would leak a neighbour's
+nodes. Polygons are bucketed by level ordinal (matched via `level.ordinal` for
+level features, `level_id → ordinal` for unit features); a node or facility
+counts as inside its own ordinal's region if it falls within the polygon, or
+within a `CLIP_BUFFER_M` = 2 m tolerance of its boundary (network nodes sit on
+corridor centrelines digitized independently of the venue polygons, so a node
+can land up to about a metre outside the unit it belongs to). A graph edge
+survives clipping only if both endpoints do.
+
+There are no new `WarningCode` variants for this — clipping reuses the
+existing `route_build` (`WarningCode::RouteBuild`) and `facility_build`
+(`WarningCode::FacilityBuild`) codes, with the detail riding in the message
+text. `codec.rs` emits, when clipping is enabled: `clip_region_empty: …` (up
+front, once, if the imported venue has no level/unit polygons to clip
+against at all) under `route_build`; `network_clipped: dropped N nodes and M
+edges outside the imported venue` under `route_build` whenever the graph
+build or synth branch drops anything, immediately followed by
+`network_clip_empty: clipping removed every routable edge; no routing graph
+was embedded` under `route_build` if clipping empties the graph entirely (in
+which case §5 is omitted from the bundle); and `facilities_clipped: dropped N
+facilities outside the imported venue` under `facility_build` whenever
+facility clipping drops anything.
+
+**The clip depends on correct ordinals.** It matches nodes and facilities to
+polygons purely by ordinal, so `buildFloorSynonyms`/`parseFloorToken`
+(`server/src/gdb/mapping.ts`) and `kiriko_route::floor_to_ordinal` must stay
+aligned — an off-by-one there tests every node against the wrong floor's
+polygons.
 
 **KVB bundle sections** (`kiriko-bundle`, `core/crates/kiriko-bundle/src/format.rs`):
 - `1 manifest`, `2 geometry`, `3 stores` — always (IMDF).
@@ -105,6 +165,28 @@ Network and facility `FLOOR`/`floor` labels map to venue level ordinals via `kir
 
 ## Known follow-ups
 
+- **Real-dataset verification of building-scoped import is outstanding.** The
+  building-scoped import and network/facility clipping described above (see
+  "Building-scoped import" under Kiriko pipeline) are covered by fixture-based
+  unit and integration tests only. Nobody has yet run the real ~15-building JR
+  East Tokyo Station venue GDB through the review dialog with a single
+  building selected, attached the network and point-facility GDBs, and
+  published. Still to check against that dataset: which unprefixed/outdoor
+  layers (rail centerlines `軌道の中心線_*`, road edges `道路縁`/`道路構成線`,
+  `Free_shuttle_bus_*ルート`) actually reach publish — i.e. have a non-null
+  target type and are included by default in `suggestLayerPlan`
+  (`server/src/gdb/mapping.ts`) — since only those matter for whether they
+  need explicit exclusion; and whether the 2 m `CLIP_BUFFER_M`
+  (`core/crates/kiriko-bundle/src/clip.rs`) is the right tolerance for that
+  data's node-to-polygon offsets, or needs raising. Do this before relying on
+  building-scoped import for that venue in production.
+- **One-shot fan-out to N venues was deliberately deferred.** Selecting a
+  subset of buildings imports one venue containing just that subset; there is
+  no mode where a single publish creates a separate venue per building.
+  Splitting a multi-building GDB into several venues means re-running the
+  import once per building — the source blob is content-addressed by hash, so
+  each re-run costs no re-upload, only a repeat of the review-and-publish
+  steps.
 - **Floor merge (viewer):** GDB import synthesizes one IMDF level per `(building, ordinal)` (`resolveOrCreateLevel` in `server/src/gdb/mapping.ts`, keyed by `buildingUuid\0ordinal`). This is correct IMDF modeling (a level belongs to one building), but a multi-building venue like Tokyo Station (~15 buildings) yields ~15 separate `1F` entries. The **viewer floor selector should group levels by ordinal** and show one floor per ordinal, rendering every building's geometry at that ordinal together. Fix belongs in the viewer/level model, not the importer. (Next phase after point-facility POIs.)
 - **Route total units:** viewer labels the A\* total `m` though it is `net_path.cost` units.
 - Deferred routing semantics: `passage_type`, `direction`/one-way, `barrier`/`gate`, time windows, accessibility profiles.

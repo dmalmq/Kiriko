@@ -15,6 +15,12 @@ export interface KirikoBundleLoadResult {
     version: number;
   };
   publicVersionId: string | null;
+  /**
+   * Server publication sequence from `Kiriko-Version-Seq`. Positive integer
+   * when the response identifies its exact version; `null` when the header is
+   * missing or malformed. A `null` sequence is never pin-safe provenance.
+   */
+  seq: number | null;
   /** Whether the bundle carries a §5 network graph (Directions mode gate). */
   hasGraph: boolean;
   /** Whether the bundle carries a §7 facilities section (marker UI gate). */
@@ -140,6 +146,13 @@ export async function loadKirikoBundle(
       ? publicVersionIdHeader
       : null;
 
+  // Provenance is pin-safe only when this header agrees with the decoded §1
+  // dataset version (publish embeds the DB seq as that version). Parse the
+  // header now; the equality check happens once the venue is decoded.
+  const seqHeader = response.headers.get("Kiriko-Version-Seq")?.trim() ?? "";
+  const seqNum = /^\d+$/.test(seqHeader) ? Number(seqHeader) : Number.NaN;
+  const headerSeq = Number.isSafeInteger(seqNum) && seqNum > 0 ? seqNum : null;
+
   let buffer: ArrayBuffer;
   try {
     buffer = await response.arrayBuffer();
@@ -233,6 +246,7 @@ export async function loadKirikoBundle(
             version: data.venue.version,
           },
           publicVersionId,
+          seq: headerSeq !== null && headerSeq === data.venue.version ? headerSeq : null,
           hasGraph: data.hasGraph === true,
           hasFacilities: data.hasFacilities === true,
           facilities: Array.isArray(data.facilities) ? data.facilities : [],

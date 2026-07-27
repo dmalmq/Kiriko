@@ -54,7 +54,20 @@ fn floor_cost(category: &str) -> f64 {
 }
 
 fn is_walkway(category: &str) -> bool {
-    matches!(category, "walkway" | "corridor" | "sidewalk" | "ramp")
+    matches!(
+        category,
+        "walkway"
+            | "walkway.island"
+            | "movingwalkway"
+            | "footbridge"
+            | "ramp"
+            | "steps"
+            | "lobby"
+            | "platform"
+            | "unenclosedarea"
+            | "corridor"
+            | "sidewalk"
+    )
 }
 
 fn is_transit(category: &str) -> bool {
@@ -261,8 +274,11 @@ pub(crate) fn point_boundary_dist_m(p: [f64; 2], geom: &Value) -> Option<f64> {
     best.is_finite().then_some(best)
 }
 
-/// For a `LineString`/`MultiLineString`, the vertex nearest the half-length
-/// point along the polyline (`MultiLineString` uses its longest part).
+/// For a `LineString`/`MultiLineString`, the point at half the arc length
+/// along the polyline (`MultiLineString` uses its longest part), interpolated
+/// within the straddling segment rather than snapped to a vertex — a doorway
+/// is usually a single segment whose midpoint is not a vertex at all, and
+/// snapping would park the junction on a wall corner.
 /// Falls back to the first vertex; `None` for other geometry or no vertices.
 pub(crate) fn linestring_midpoint(geom: &Value) -> Option<[f64; 2]> {
     let obj = geom.as_object()?;
@@ -293,17 +309,21 @@ pub(crate) fn linestring_midpoint(geom: &Value) -> Option<[f64; 2]> {
     }
     let target = total / 2.0;
     let mut acc = 0.0;
-    let mut best_idx = 0;
-    let mut best_diff = target; // vertex 0 sits at arc length 0.
-    for i in 1..verts.len() {
-        acc += haversine_m(verts[i - 1], verts[i]);
-        let diff = (acc - target).abs();
-        if diff < best_diff {
-            best_diff = diff;
-            best_idx = i;
+    for w in verts.windows(2) {
+        let seg = haversine_m(w[0], w[1]);
+        if acc + seg >= target {
+            // Fraction along this segment where the half-length point falls.
+            // Linear in lon/lat: exact for the straight, metre-scale segments
+            // openings are made of.
+            let t = if seg > 0.0 { (target - acc) / seg } else { 0.0 };
+            return Some([
+                w[0][0] + (w[1][0] - w[0][0]) * t,
+                w[0][1] + (w[1][1] - w[0][1]) * t,
+            ]);
         }
+        acc += seg;
     }
-    Some(verts[best_idx])
+    verts.last().copied()
 }
 
 /// A node-bearing unit on one floor: a walkway or a transit unit. `transit`
@@ -573,6 +593,13 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         }
     }
 
+    // Every weight above was accumulated in metres; convert to canonical
+    // `net_path.cost` units exactly once here so the embedded graph matches
+    // imported networks and re-export never re-scales it.
+    for e in &mut edges {
+        e.weight = kiriko_route::meters_to_cost(f64::from(e.weight));
+    }
+
     edges.sort_by(|a, b| {
         (a.from, a.to, a.weight.to_bits()).cmp(&(b.from, b.to, b.weight.to_bits()))
     });
@@ -711,6 +738,16 @@ mod tests {
     }
 
     #[test]
+    fn midpoint_of_two_vertex_doorway_is_between_the_jambs() {
+        // The common IMDF doorway: a single straight segment. Neither endpoint
+        // is the midpoint, so snapping to a vertex parks the junction on a
+        // wall corner and every edge through the door fans into that corner.
+        let line = linestring(&[[0.0, 0.0], [0.0, 0.001]]);
+        let m = linestring_midpoint(&line).unwrap();
+        assert_eq!(m, [0.0, 0.0005]);
+    }
+
+    #[test]
     fn opening_connects_two_walkways_and_rooms_are_not_nodes() {
         // Walkway square east of x=0; rooms (ignored) west; opening on x=0 edge.
         let features = vec![
@@ -747,8 +784,9 @@ mod tests {
         assert_eq!(build.graph.nodes.len(), 2);
         assert_eq!(build.graph.edges.len(), 1, "edges = {:?}", build.graph.edges);
         let e = &build.graph.edges[0];
-        // Coincident footprints → vertical weight ≈ stairs floor cost (5.0).
-        assert!((e.weight - 5.0).abs() < 1e-3, "weight = {}", e.weight);
+        // Coincident footprints → vertical weight ≈ stairs floor cost in canonical
+        // cost units (5.0 m × 1000 = 5000), NOT the raw 5.0 metres.
+        assert!((e.weight - 5000.0).abs() < 1.0, "weight = {}", e.weight);
         assert_eq!(e.ordinal, 0.0);
     }
 
@@ -782,5 +820,24 @@ mod tests {
         let b = synthesize_network(&build_doc());
         assert_eq!(a.graph, b.graph);
         assert_eq!(a.node_ids, b.node_ids);
+    }
+
+    #[test]
+    fn generated_edge_costs_are_metres_times_1000() {
+        // A walkway hub joined to a doorway: the generated weight is the
+        // great-circle metres between them converted to canonical cost units
+        // (× 1000) exactly once — not the raw metre value.
+        let features = vec![
+            feature("walk", FeatureType::Unit, "L0", Some("walkway"), polygon(&square(0.0005, 0.0005, 0.001))),
+            feature("op", FeatureType::Opening, "L0", None, linestring(&[[0.0, 0.0003], [0.0, 0.0005], [0.0, 0.0007]])),
+        ];
+        let build = synthesize_network(&document(&[("L0", 0.0)], features));
+        assert_eq!(build.graph.edges.len(), 1);
+        let e = &build.graph.edges[0];
+        // Walkway centroid (0.0005, 0.0005) ↔ opening midpoint (0.0, 0.0005).
+        let expected = (haversine_m([0.0, 0.0005], [0.0005, 0.0005]) * 1000.0) as f32;
+        assert!((e.weight - expected).abs() <= 1.0, "weight {} expected {}", e.weight, expected);
+        // Cost units dwarf the raw metre distance (~55 m here).
+        assert!(e.weight > 1000.0, "cost units must be millimetre-scale, got {}", e.weight);
     }
 }

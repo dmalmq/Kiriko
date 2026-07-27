@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { BlobStore } from "../blobs/store";
-import { compileVenueBundle, CoreCompileError, type CompileVenueMetadata } from "../core/native";
+import { compileVenueBundle, CoreCompileError, CoreExportError, exportVenueNetwork, type CompileVenueMetadata } from "../core/native";
 
 /** Persisted into `versions.error` (and mirrored into `jobs.error`) verbatim as JSON. */
 interface StructuredError {
@@ -25,6 +25,22 @@ class StaleVersionError extends Error {
   }
 }
 
+/** Thrown when a synthesize request compiles a bundle with no §5 graph. */
+class NoRoutableNetworkError extends Error {}
+
+class ShutdownAbortError extends Error {
+  constructor() {
+    super("publication job aborted by shutdown");
+    this.name = "ShutdownAbortError";
+  }
+}
+
+function throwIfShutdownAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    throw new ShutdownAbortError();
+  }
+}
+
 function staleVersionError(versionId: number): StructuredError {
   return { code: "stale_version", message: `version ${versionId} was replaced during compilation` };
 }
@@ -37,6 +53,12 @@ function toStructuredError(error: unknown): StructuredError {
   }
   if (error instanceof StaleVersionError) {
     return { code: "stale_version", message: error.message };
+  }
+  if (error instanceof NoRoutableNetworkError) {
+    return {
+      code: "no_routable_network",
+      message: "No routable space found. Check that walkable units (walkway, platform, etc.) are mapped.",
+    };
   }
   return { code: "internal_error", message: error instanceof Error ? error.message : String(error) };
 }
@@ -58,15 +80,16 @@ export function makePublishRunner(
   db: Database.Database,
   blobs: BlobStore,
   compile: PublishCompileFn = compileVenueBundle,
-) {
-  return async (payloadJson: string): Promise<{ versionId: number }> => {
-    const { versionId, networkJunctionsHash, networkPathsHash, facilitiesGeoJsonHash, synthesizeNetwork } =
+): (payloadJson: string, signal?: AbortSignal) => Promise<{ versionId: number }> {
+  return async (payloadJson: string, signal = new AbortController().signal): Promise<{ versionId: number }> => {
+    const { versionId, networkJunctionsHash, networkPathsHash, facilitiesGeoJsonHash, synthesizeNetwork, clipToSelection } =
       JSON.parse(payloadJson) as {
         versionId: number;
         networkJunctionsHash?: string;
         networkPathsHash?: string;
         facilitiesGeoJsonHash?: string;
         synthesizeNetwork?: boolean;
+        clipToSelection?: boolean;
       };
     const version = db
       .prepare(
@@ -108,6 +131,7 @@ export function makePublishRunner(
     ] as const;
 
     try {
+      throwIfShutdownAborted(signal);
       const source = blobs.read(version.hash);
       const metadata: CompileVenueMetadata = {
         datasetId: `${version.tenantSlug}/${version.venueSlug}`,
@@ -128,7 +152,34 @@ export function makePublishRunner(
       if (synthesizeNetwork === true) {
         metadata.synthesizeNetwork = true;
       }
+      // A building-scoped GDB import asks the compiler to drop network nodes
+      // and facilities outside the buildings that were actually imported.
+      if (clipToSelection === true) {
+        metadata.clipToVenue = true;
+      }
+      throwIfShutdownAborted(signal);
       const { bundle, stats } = await compile(source, metadata);
+      throwIfShutdownAborted(signal);
+      if (synthesizeNetwork === true) {
+        try {
+          await exportVenueNetwork(bundle);
+        } catch (error) {
+          if (error instanceof CoreExportError) {
+            if (error.code === "no_graph") {
+              throw new NoRoutableNetworkError("synthesized graph is empty");
+            }
+            if (error.code === "fractional_ordinal") {
+              // The synthesized graph is present and routable; only GDB export
+              // cannot label fractional IMDF ordinals such as mezzanines.
+            } else {
+              throw error;
+            }
+          } else {
+            throw error;
+          }
+        }
+      }
+      throwIfShutdownAborted(signal);
       // Content-addressed: safe to persist even if this row turns out to
       // be stale below — the blob then simply has no referencing row.
       const { hash: bundleHash, size } = blobs.put(bundle);
@@ -147,6 +198,9 @@ export function makePublishRunner(
       }
       return { versionId };
     } catch (error) {
+      if (error instanceof ShutdownAbortError) {
+        throw error;
+      }
       // Domain (invalid IMDF), bridge (native/FFI), blob-store, DB, and
       // stale-identity failures all land here. The failure write is
       // scoped by the same identity predicate as the success write, and

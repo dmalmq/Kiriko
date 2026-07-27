@@ -233,6 +233,60 @@ describe("recompileLegacyPublished", () => {
     }));
 });
 
+describe("app startup: durable job recovery", () => {
+  it("replays a queued publication from the same dataDir once and leaves no stranded drafts after reopen", () =>
+    withTempDataDir("kiriko-queued-recovery-", async (dataDir) => {
+      const config = {
+        dataDir,
+        sessionTtlDays: 30,
+        secureCookies: false,
+        issueSseMaxConnections: 512,
+        issueSseMaxPerVersion: 128,
+        bootstrapUser: TEST_USER,
+        bootstrapPassword: TEST_PASSWORD,
+      };
+      let app = await buildApp(config);
+      const cookie = await loginCookie(app);
+      const venue = (
+        await app.inject({ method: "POST", url: "/api/venues", headers: { cookie }, payload: { name: "Recovered Venue" } })
+      ).json().venue as { id: number };
+      const source = await buildMinimalImdfZip();
+      const blob = app.blobs.put(source);
+      app.db.prepare("INSERT OR IGNORE INTO blobs (hash, size) VALUES (?, ?)").run(blob.hash, blob.size);
+      const version = app.db
+        .prepare("INSERT INTO versions (venue_id, seq, public_id, source_blob_hash, source_kind) VALUES (?, 1, ?, ?, 'imdf')")
+        .run(venue.id, newTestPublicVersionId(), blob.hash);
+      const versionId = Number(version.lastInsertRowid);
+      app.db.prepare("INSERT INTO jobs (id, kind, version_id, payload_json) VALUES ('recover-me', 'publish_imdf', ?, ?)").run(
+        versionId,
+        JSON.stringify({ versionId }),
+      );
+      await app.close();
+
+      app = await buildApp(config);
+      await app.queue.idle();
+      const recovered = app.db
+        .prepare(
+          `SELECT j.status AS jobStatus, j.updated_at AS updatedAt, v.status AS versionStatus
+           FROM jobs j JOIN versions v ON v.id = j.version_id
+           WHERE j.id = 'recover-me'`,
+        )
+        .get() as { jobStatus: string; updatedAt: string; versionStatus: string };
+      expect(recovered).toMatchObject({ jobStatus: "done", versionStatus: "published" });
+      expect(app.db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE status IN ('queued','running')").get()).toEqual({ n: 0 });
+      expect(app.db.prepare("SELECT COUNT(*) AS n FROM versions WHERE status = 'draft'").get()).toEqual({ n: 0 });
+      await app.close();
+
+      app = await buildApp(config);
+      await app.queue.idle();
+      expect(
+        app.db.prepare("SELECT status, updated_at AS updatedAt FROM jobs WHERE id = 'recover-me'").get(),
+      ).toEqual({ status: "done", updatedAt: recovered.updatedAt });
+      await app.close();
+    }));
+});
+
+
 // -- Integration-level coverage through the real `buildApp` wiring: proves
 // -- the backfill actually runs before routes exist (a rejected `buildApp`
 // -- promise never yields a listenable app) and that it is fail-closed

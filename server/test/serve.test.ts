@@ -40,6 +40,8 @@ async function uploadAndWait(app: FastifyInstance, cookie: string, venueId: numb
 }
 
 describe("bundle route: publication-state semantics", () => {
+  const ABSENT_ID = "0".repeat(64);
+
   it("404s for an unknown venue", async () => {
     const { app } = await makeTestApp();
     const res = await app.inject({ method: "GET", url: "/v/default/nope/bundle" });
@@ -54,11 +56,11 @@ describe("bundle route: publication-state semantics", () => {
 
     const latest = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle` });
     expect(latest.statusCode).toBe(404);
-    const pinned = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@1` });
+    const pinned = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@${ABSENT_ID}` });
     expect(pinned.statusCode).toBe(404);
   });
 
-  it("selects the highest published seq as latest, unaffected by a later failed attempt", async () => {
+  it("selects the highest published seq as latest and pins by permanent public identity", async () => {
     const { app } = await makeTestApp();
     const cookie = await loginCookie(app);
     const venue = await createVenue(app, cookie, "Latest Selection");
@@ -67,15 +69,16 @@ describe("bundle route: publication-state semantics", () => {
 
     const latest = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle` });
     expect(latest.statusCode).toBe(200);
-    const pinned1 = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@1` });
-    expect(pinned1.statusCode).toBe(200);
-    expect(latest.headers["etag"]).toBe(pinned1.headers["etag"]); // latest is seq 1, the only published one
+    const publicId = latest.headers["kiriko-version-id"] as string;
+    const pinned = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@${publicId}` });
+    expect(pinned.statusCode).toBe(200);
+    expect(latest.headers["etag"]).toBe(pinned.headers["etag"]); // latest is seq 1, the only published one
 
-    const pinned2 = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@2` });
-    expect(pinned2.statusCode).toBe(404); // seq 2 failed; never published
+    const unknown = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@${ABSENT_ID}` });
+    expect(unknown.statusCode).toBe(404); // no published version carries this identity
   });
 
-  it("returns exact content-type/cache-control for latest and pinned, honors If-None-Match with 304, 404s an out-of-range seq", async () => {
+  it("returns exact content-type/cache-control for latest and pinned, honors If-None-Match with 304, 404s an unknown identity, 400s a malformed one", async () => {
     const { app } = await makeTestApp();
     const cookie = await loginCookie(app);
     const venue = await createVenue(app, cookie, "Header Matrix");
@@ -87,36 +90,75 @@ describe("bundle route: publication-state semantics", () => {
     expect(latest.headers["cache-control"]).toBe(LATEST_CACHE_CONTROL);
     const latestEtag = latest.headers["etag"] as string;
     expect(latestEtag).toMatch(/^"[0-9a-f]{64}"$/);
-    expect(latest.headers["kiriko-version-id"]).toMatch(/^[0-9a-f]{64}$/);
+    const publicId = latest.headers["kiriko-version-id"] as string;
+    expect(publicId).toMatch(/^[0-9a-f]{64}$/);
     const latestCached = await app.inject({
       method: "GET",
       url: `/v/default/${venue.slug}/bundle`,
       headers: { "if-none-match": latestEtag },
     });
     expect(latestCached.statusCode).toBe(304);
-    expect(latestCached.headers["kiriko-version-id"]).toBe(latest.headers["kiriko-version-id"]);
+    expect(latestCached.headers["kiriko-version-id"]).toBe(publicId);
 
-    const pinned = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@1` });
+    const pinned = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@${publicId}` });
     expect(pinned.statusCode).toBe(200);
     expect(pinned.headers["content-type"]).toBe("application/vnd.kiriko.bundle");
     expect(pinned.headers["cache-control"]).toBe(PINNED_CACHE_CONTROL);
     const pinnedEtag = pinned.headers["etag"] as string;
-    expect(pinnedEtag).toMatch(/^"[0-9a-f]{64}"$/);
-    expect(pinnedEtag).toBe(latestEtag); // only one published version, so latest === seq 1
-    expect(pinned.headers["kiriko-version-id"]).toBe(latest.headers["kiriko-version-id"]);
+    expect(pinnedEtag).toBe(latestEtag); // only one published version, so latest === this identity
+    expect(pinned.headers["kiriko-version-id"]).toBe(publicId);
     const pinnedCached = await app.inject({
       method: "GET",
-      url: `/v/default/${venue.slug}/bundle@1`,
+      url: `/v/default/${venue.slug}/bundle@${publicId}`,
       headers: { "if-none-match": pinnedEtag },
     });
     expect(pinnedCached.statusCode).toBe(304);
-    expect(pinnedCached.headers["kiriko-version-id"]).toBe(latest.headers["kiriko-version-id"]);
+    expect(pinnedCached.headers["kiriko-version-id"]).toBe(publicId);
 
-    const outOfRange = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@99` });
-    expect(outOfRange.statusCode).toBe(404);
+    const unknown = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@${ABSENT_ID}` });
+    expect(unknown.statusCode).toBe(404);
+    const malformed = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@not-hex` });
+    expect(malformed.statusCode).toBe(400);
   });
 
-  it("does not reuse a deleted version's public identity when its numeric row id is recreated", async () => {
+  it("emits a stable Kiriko-Version-Seq header on latest, pinned, and 304 responses", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venue = await createVenue(app, cookie, "Seq Header");
+    await uploadAndWait(app, cookie, venue.id, await buildMinimalImdfZip()); // seq 1: published
+    await uploadAndWait(app, cookie, venue.id, await buildMinimalImdfZip()); // seq 2: published
+
+    const idForSeq = (seq: number): string => {
+      const row = app.db
+        .prepare("SELECT public_id AS p FROM versions WHERE venue_id = ? AND seq = ?")
+        .get(venue.id, seq) as { p: string };
+      return row.p;
+    };
+
+    const latest = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle` });
+    expect(latest.statusCode).toBe(200);
+    expect(latest.headers["kiriko-version-seq"]).toBe("2");
+    expect(latest.headers["kiriko-version-id"]).toBe(idForSeq(2));
+
+    const pinned1 = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@${idForSeq(1)}` });
+    expect(pinned1.statusCode).toBe(200);
+    expect(pinned1.headers["kiriko-version-seq"]).toBe("1");
+
+    const pinned2 = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@${idForSeq(2)}` });
+    expect(pinned2.statusCode).toBe(200);
+    expect(pinned2.headers["kiriko-version-seq"]).toBe("2");
+
+    const latestEtag = latest.headers["etag"] as string;
+    const cached = await app.inject({
+      method: "GET",
+      url: `/v/default/${venue.slug}/bundle`,
+      headers: { "if-none-match": latestEtag },
+    });
+    expect(cached.statusCode).toBe(304);
+    expect(cached.headers["kiriko-version-seq"]).toBe("2");
+  });
+
+  it("gives a recreated venue a distinct pinned identity; the deleted identity's URL 404s (immutable URLs never name new bytes)", async () => {
     const { app } = await makeTestApp();
     const cookie = await loginCookie(app);
     const venue = await createVenue(app, cookie, "Recreated Identity");
@@ -124,30 +166,50 @@ describe("bundle route: publication-state semantics", () => {
     await uploadAndWait(app, cookie, venue.id, zip);
 
     const original = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle` });
-    const deletedPublicId = original.headers["kiriko-version-id"];
+    const deletedPublicId = original.headers["kiriko-version-id"] as string;
     expect(deletedPublicId).toMatch(/^[0-9a-f]{64}$/);
-    const deletedVersionRow = app.db.prepare("SELECT id FROM versions WHERE venue_id = ?").get(venue.id) as {
-      id: number;
-    };
-    const deletedVersionId = deletedVersionRow.id;
+    // The original identity's pinned URL resolves while it exists.
+    const beforeDelete = await app.inject({
+      method: "GET",
+      url: `/v/default/${venue.slug}/bundle@${deletedPublicId}`,
+    });
+    expect(beforeDelete.statusCode).toBe(200);
+    const deletedRow = app.db
+      .prepare("SELECT id FROM versions WHERE venue_id = ?")
+      .get(venue.id) as { id: number };
+    const deletedVersionId = deletedRow.id;
 
     app.db.prepare("DELETE FROM venues WHERE id = ?").run(venue.id);
     const replacementVenue = await createVenue(app, cookie, "Recreated Identity");
-    expect(replacementVenue).toEqual(venue);
+    expect(replacementVenue).toEqual(venue); // same slug and reclaimed numeric row id
     await uploadAndWait(app, cookie, replacementVenue.id, zip);
-    const replacementVersionRow = app.db
+    const replacementRow = app.db
       .prepare("SELECT id FROM versions WHERE venue_id = ?")
       .get(replacementVenue.id) as { id: number };
-    const replacementVersionId = replacementVersionRow.id;
-    expect(replacementVersionId).toBe(deletedVersionId);
+    const replacementVersionId = replacementRow.id;
+    expect(replacementVersionId).toBe(deletedVersionId); // reused numeric row id
 
     const recreated = await app.inject({
       method: "GET",
       url: `/v/default/${replacementVenue.slug}/bundle`,
     });
     expect(recreated.statusCode).toBe(200);
-    expect(recreated.headers["kiriko-version-id"]).toMatch(/^[0-9a-f]{64}$/);
-    expect(recreated.headers["kiriko-version-id"]).not.toBe(deletedPublicId);
+    const newPublicId = recreated.headers["kiriko-version-id"] as string;
+    expect(newPublicId).toMatch(/^[0-9a-f]{64}$/);
+    expect(newPublicId).not.toBe(deletedPublicId); // distinct permanent identity
+
+    // The deleted identity's immutable URL must never resolve to the new bytes.
+    const stalePin = await app.inject({
+      method: "GET",
+      url: `/v/default/${replacementVenue.slug}/bundle@${deletedPublicId}`,
+    });
+    expect(stalePin.statusCode).toBe(404);
+    // The new identity has its own resolvable pinned URL.
+    const newPin = await app.inject({
+      method: "GET",
+      url: `/v/default/${replacementVenue.slug}/bundle@${newPublicId}`,
+    });
+    expect(newPin.statusCode).toBe(200);
   });
 });
 
@@ -174,8 +236,14 @@ describe("bundle serving: byte content", () => {
     await uploadAndWait(app, cookie, venue.id, await buildMinimalImdfZip());
     await uploadAndWait(app, cookie, venue.id, await buildMinimalImdfZip({ extraEntries: { "note.txt": "v2" } }));
 
-    const pinned1 = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@1` });
-    const pinned2 = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@2` });
+    const idForSeq = (seq: number): string => {
+      const row = app.db
+        .prepare("SELECT public_id AS p FROM versions WHERE venue_id = ? AND seq = ?")
+        .get(venue.id, seq) as { p: string };
+      return row.p;
+    };
+    const pinned1 = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@${idForSeq(1)}` });
+    const pinned2 = await app.inject({ method: "GET", url: `/v/default/${venue.slug}/bundle@${idForSeq(2)}` });
     expect(Buffer.from(pinned1.rawPayload.subarray(0, 4))).toEqual(KVB_MAGIC);
     expect(Buffer.from(pinned2.rawPayload.subarray(0, 4))).toEqual(KVB_MAGIC);
     expect(Buffer.from(pinned1.rawPayload.subarray(0, 2))).not.toEqual(ZIP_MAGIC);

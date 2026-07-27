@@ -9,6 +9,7 @@ import maplibregl, {
   type GeoJSONSource,
   type Map as MapLibreMap,
   type MapMouseEvent,
+  type PointLike,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { FacilityDto, RouteEndpoint, RouteResultDto } from "../bundle/wasm";
@@ -21,14 +22,20 @@ import {
   CLICKABLE_LAYER_IDS,
   FACILITY_SOURCE_ID,
   LAYER_FACILITY_SYMBOL,
-  LAYER_NETWORK_JUNCTION,
-  LAYER_NETWORK_PATH,
+  LAYER_NETWORK_JUNCTION_HIT,
+  LAYER_NETWORK_PATH_HIT,
   ROUTE_SOURCE_ID,
   NETWORK_SOURCE_ID,
 } from "./featureLayers";
 import { LAYER_GROUP_IDS, type LayerVisibility } from "./layerGroups";
 import { buildRouteFeatures } from "./routeFeatures";
-import { buildNetworkFeatures, type ParsedNetwork } from "./networkFeatures";
+import {
+  buildNetworkFeatures,
+  type NetworkConnectionId,
+  type NetworkRenderState,
+  type ParsedNetwork,
+} from "./networkFeatures";
+import type { NetworkEditTool, NetworkMapPick, NetworkSelection } from "./networkEditor";
 import { buildFacilityFeatures } from "./facilityFeatures";
 import { FACILITY_PIN_IMAGE, MARKER_ICON_URLS } from "./facilityIcons";
 import { useFeatureMarkers } from "./useFeatureMarkers";
@@ -86,6 +93,22 @@ export interface DirectionsMapProps {
   onPickPoint: (point: { longitude: number; latitude: number }) => void;
 }
 
+/**
+ * Network-editing projection owned by App. While present, map taps report
+ * semantic {@link NetworkMapPick}s through `onPick` (junction/connection when a
+ * hit layer is under the pointer, otherwise a bare coordinate) and ordinary
+ * feature selection is suppressed. Add/Move tools always report a coordinate so
+ * points can be placed precisely; other tools hit-test junctions then paths.
+ */
+export interface NetworkEditingMapProps {
+  tool: NetworkEditTool;
+  selection: NetworkSelection;
+  pendingNodeId: number | null;
+  onPick: (pick: NetworkMapPick) => void;
+  /** Localized label for the keyboard-operable map-center pick action. */
+  centerActionLabel: string;
+}
+
 export interface IndoorMapProps {
   venue: LoadedVenue;
   levelId: string;
@@ -107,10 +130,8 @@ export interface IndoorMapProps {
   onSelectFacility?: (facility: FacilityDto) => void;
   /** Parsed generated network for floor-by-floor review; null when off. */
   network?: ParsedNetwork | null;
-  /** Junction NODEIDs to highlight while editing the review network. */
-  selectedJunctions?: ReadonlySet<number> | undefined;
-  /** Review edit mode: report a picked network junction or edge on map click. */
-  onNetworkPick?: ((pick: { junctionId: number } | { edge: [number, number] }) => void) | undefined;
+  /** Active network-editing controller; null when not editing. */
+  networkEditing?: NetworkEditingMapProps | null;
 }
 
 const FIT_PADDING = 48;
@@ -132,6 +153,16 @@ function readFeatureId(
     return null;
   }
   const raw = properties["__feature_id"];
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+
+function readLevelId(
+  properties: GeoJSON.GeoJsonProperties | null | undefined,
+): string | null {
+  if (properties == null) {
+    return null;
+  }
+  const raw = properties["__level_id"];
   return typeof raw === "string" && raw.length > 0 ? raw : null;
 }
 
@@ -188,7 +219,7 @@ function setNetworkSourceData(
   venue: LoadedVenue,
   levelId: string,
   network: ParsedNetwork | null | undefined,
-  selectedJunctions: ReadonlySet<number> | undefined,
+  render: NetworkRenderState | undefined,
 ): void {
   const source = getNetworkSource(map);
   if (source == null) {
@@ -196,8 +227,69 @@ function setNetworkSourceData(
   }
   const ordinal = activeOrdinalFor(venue, levelId);
   source.setData(
-    buildNetworkFeatures(ordinal === null ? null : network ?? null, ordinal ?? 0, selectedJunctions),
+    buildNetworkFeatures(ordinal === null ? null : network ?? null, ordinal ?? 0, render),
   );
+}
+
+/** Per-floor highlight state from the App-owned editing projection. */
+function networkRenderState(editing: NetworkEditingMapProps): NetworkRenderState {
+  const { selection, tool, pendingNodeId } = editing;
+  return {
+    selectedJunctionId: selection?.kind === "junction" ? selection.nodeId : null,
+    selectedConnection: selection?.kind === "connection" ? selection.connectionId : null,
+    // Amber pending marker is a connect-origin affordance only.
+    pendingJunctionId: tool === "connect" ? pendingNodeId : null,
+  };
+}
+
+/**
+ * Resolve a click/center point to a semantic network pick. Move (and, for a
+ * bare click, Add) want a coordinate; every other tool hit-tests the wide
+ * junction layer, then the wide path layer, before falling back to a coordinate.
+ */
+function networkPickAt(
+  map: MapLibreMap,
+  point: PointLike,
+  lngLat: { lng: number; lat: number },
+  tool: NetworkEditTool,
+): NetworkMapPick {
+  if (tool !== "move-junction") {
+    const junctionHits = map.queryRenderedFeatures(point, { layers: [LAYER_NETWORK_JUNCTION_HIT] });
+    const nodeId = junctionHits[0]?.properties?.["NODEID"];
+    if (typeof nodeId === "number") {
+      return { kind: "junction", nodeId };
+    }
+    const pathHits = map.queryRenderedFeatures(point, { layers: [LAYER_NETWORK_PATH_HIT] });
+    const props = pathHits[0]?.properties;
+    const pathId = props?.["PATHID"];
+    const reversePathId = props?.["RPATHID"];
+    if (typeof pathId === "number" && typeof reversePathId === "number") {
+      const connectionId: NetworkConnectionId = { pathId, reversePathId };
+      return { kind: "connection", connectionId };
+    }
+  }
+  return { kind: "map", longitude: lngLat.lng, latitude: lngLat.lat };
+}
+
+/** Cursor feedback for the active editing tool over the wide hit layers. */
+function updateNetworkCursor(
+  map: MapLibreMap,
+  point: PointLike,
+  tool: NetworkEditTool,
+): void {
+  const canvas = map.getCanvas();
+  if (tool === "add-junction" || tool === "move-junction") {
+    canvas.style.cursor = "crosshair";
+    return;
+  }
+  const overData =
+    map.queryRenderedFeatures(point, { layers: [LAYER_NETWORK_JUNCTION_HIT] }).length > 0 ||
+    map.queryRenderedFeatures(point, { layers: [LAYER_NETWORK_PATH_HIT] }).length > 0;
+  if (tool === "delete") {
+    canvas.style.cursor = overData ? "pointer" : "not-allowed";
+    return;
+  }
+  canvas.style.cursor = overData ? "pointer" : "";
 }
 
 function getFacilitySource(map: MapLibreMap): GeoJSONSource | null {
@@ -438,8 +530,7 @@ export function IndoorMap({
   facilities = [],
   onSelectFacility,
   network,
-  selectedJunctions,
-  onNetworkPick,
+  networkEditing = null,
 }: IndoorMapProps): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -459,11 +550,11 @@ export function IndoorMap({
   const onControlsRef = useRef(onControls);
   const issueReviewRef = useRef(issueReview);
   const directionsRef = useRef(directions);
-  const onNetworkPickRef = useRef(onNetworkPick);
+  const networkEditingRef = useRef(networkEditing);
   const [mapInstance, setMapInstance] = useState<MapLibreMap | null>(null);
 
   onSelectRef.current = onSelectFeature;
-  onNetworkPickRef.current = onNetworkPick;
+  networkEditingRef.current = networkEditing;
   venueRef.current = venue;
   levelIdRef.current = levelId;
   selectedIdRef.current = selectedFeatureId;
@@ -480,7 +571,9 @@ export function IndoorMap({
     const review = issueReviewRef.current;
     if (review?.placementMode === true) {
       review.onPlaceIssue({
-        levelId: levelIdRef.current,
+        // Grouped floors render markers per building level; the clicked feature's
+        // own level is authoritative, falling back to the representative level.
+        levelId: venueRef.current.featuresById.get(featureId)?.levelId ?? levelIdRef.current,
         longitude: center[0],
         latitude: center[1],
         featureId,
@@ -505,11 +598,22 @@ export function IndoorMap({
       layers: [...CLICKABLE_LAYER_IDS],
     });
     review.onPlaceIssue({
-      levelId: levelIdRef.current,
+      // A feature under the map center owns its level; else the representative.
+      levelId: readLevelId(features[0]?.properties) ?? levelIdRef.current,
       longitude: center.lng,
       latitude: center.lat,
       featureId: readFeatureId(features[0]?.properties),
     });
+  }, []);
+
+  const onNetworkCenterPick = useCallback(() => {
+    const map = mapRef.current;
+    const editing = networkEditingRef.current;
+    if (map == null || editing == null) {
+      return;
+    }
+    const center = map.getCenter();
+    editing.onPick(networkPickAt(map, map.project([center.lng, center.lat]), center, editing.tool));
   }, []);
 
   useFeatureMarkers({
@@ -583,7 +687,9 @@ export function IndoorMap({
         // Placement captures the clicked point (plus any feature under it) and
         // suppresses ordinary feature selection.
         review.onPlaceIssue({
-          levelId: levelIdRef.current,
+          // The clicked feature's own level (grouped same-ordinal levels all
+          // render) beats the representative level; bare clicks use representative.
+          levelId: readLevelId(features[0]?.properties) ?? levelIdRef.current,
           longitude: event.lngLat.lng,
           latitude: event.lngLat.lat,
           featureId,
@@ -598,23 +704,12 @@ export function IndoorMap({
         return;
       }
 
-      const netPick = onNetworkPickRef.current;
-      if (netPick != null) {
-        const hits = map.queryRenderedFeatures(event.point, {
-          layers: [LAYER_NETWORK_JUNCTION, LAYER_NETWORK_PATH],
-        });
-        const props = hits[0]?.properties;
-        const nodeId = props?.["NODEID"];
-        if (typeof nodeId === "number") {
-          netPick({ junctionId: nodeId });
-          return;
-        }
-        const fromId = props?.["FNODEID"];
-        const toId = props?.["TNODEID"];
-        if (typeof fromId === "number" && typeof toId === "number") {
-          netPick({ edge: [fromId, toId] });
-          return;
-        }
+      const editing = networkEditingRef.current;
+      if (editing != null) {
+        // Editing suppresses ordinary feature/facility selection and reports a
+        // semantic pick (junction/connection/coordinate) to the App reducer.
+        editing.onPick(networkPickAt(map, event.point, event.lngLat, editing.tool));
+        return;
       }
       const facilityHit = map.queryRenderedFeatures(event.point, {
         layers: [LAYER_FACILITY_SYMBOL],
@@ -631,6 +726,11 @@ export function IndoorMap({
     };
 
     const onMouseMove = (event: MapMouseEvent): void => {
+      const editing = networkEditingRef.current;
+      if (editing != null) {
+        updateNetworkCursor(map, event.point, editing.tool);
+        return;
+      }
       const features = map.queryRenderedFeatures(event.point, {
         layers: [...CLICKABLE_LAYER_IDS],
       });
@@ -916,14 +1016,16 @@ export function IndoorMap({
   }, [directions, venue, levelId]);
 
   // Network-review overlay: re-filter the generated network to the active
-  // floor whenever it, the floor, or the venue changes; empty when off.
+  // floor and apply editing highlights whenever they, the floor, or the venue
+  // change; empty when off.
   useEffect(() => {
     const map = mapRef.current;
     if (map == null || !map.isStyleLoaded()) {
       return;
     }
-    setNetworkSourceData(map, venue, levelId, network, selectedJunctions);
-  }, [network, selectedJunctions, venue, levelId]);
+    const render = networkEditing != null ? networkRenderState(networkEditing) : undefined;
+    setNetworkSourceData(map, venue, levelId, network, render);
+  }, [network, networkEditing, venue, levelId]);
 
   // Facility symbols: refresh per active floor (and when the facility set or
   // venue changes). Icons are registered once on load.
@@ -973,6 +1075,10 @@ export function IndoorMap({
       {issueReview?.placementMode === true ? (
         <button type="button" className="issue-place-center" onClick={onPlaceAtCenter}>
           {PLACE_AT_CENTER_LABEL[locale]}
+        </button>
+      ) : networkEditing != null ? (
+        <button type="button" className="issue-place-center" onClick={onNetworkCenterPick}>
+          {networkEditing.centerActionLabel}
         </button>
       ) : null}
     </>

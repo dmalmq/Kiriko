@@ -1,154 +1,214 @@
-# Kiriko Platform Architecture
+# Kiriko Platform Architecture and Application Specification
 
-**Date:** 2026-07-17
-**Status:** Approved design; implementation contract reconciled through Phase Three on 2026-07-18
-**Scope:** System architecture for the Kiriko platform — backend, shared client core, web app, embeds, and customer SDKs. This spec records implemented boundaries separately from future phases; each phase retains its own detailed plan.
+**Originally approved:** 2026-07-17  
+**Current-state reconciliation:** 2026-07-24  
+**Status:** Approved living specification; implementation claims reconciled against the repository through 2026-07-24  
+**Scope:** Product boundary, implemented application behavior, system architecture, data contracts, and full product direction for Kiriko.
 
-## 1. Context
+## 1. Product definition
 
-Kiriko is now a React/MapLibre IMDF review application backed by Fastify, SQLite, immutable KVB bundles, and version-pinned map issues (see `PRODUCT.md`, `DESIGN.md`). The longer-term vision remains a Forma/ACC-style platform for indoor GIS: review datasets with pinned issues, embed venue maps into websites, and sell SDKs for map and indoor-navigation applications — from simple shopping-center maps to advanced in-station navigation. JRE Consultants already sells station map access, store information, and beacon/wifi positioning; Kiriko is the platform that future versions of those offerings build on.
+Kiriko is a web platform for preparing, publishing, viewing, reviewing, and navigating indoor GIS datasets. Its current product is a bilingual React/MapLibre application backed by Fastify, SQLite, immutable KVB venue bundles, and a shared Rust core.
 
-### Constraints (decided during brainstorming)
+The primary users are BIM/GIS producers at JRE Consultants who prepare IMDF and File Geodatabase (GDB) station data. Secondary users are client stakeholders and reviewers who open a shared venue, inspect floors and attributes, and discuss map-pinned issues without desktop GIS software.
 
-- **Hosting:** internal office server first, designed container-ready so it can move to cloud without rework. No cloud-only dependencies.
-- **Team:** one developer plus AI agents. Minimal operational surface; boring, debuggable technology; no polyglot sprawl unless it pays for itself.
-- **On-device requirements:** both positioning (beacon/wifi fusion) and routing run on the phone. Navigation must work in crowded underground concourses regardless of connectivity. This mandates a real shared native core.
-- **Relationship to existing commercial systems:** parallel for now. Kiriko owns its own data model; integrating the existing map/store/beacon products is a future importer, not a present constraint.
-- **Core language:** Rust. Best-in-class WASM output, first-class Swift/Kotlin bindings via UniFFI, and the backend can reuse the same crate server-side.
-- **Backend language:** TypeScript (Option B below).
+The long-term product remains “Forma/ACC for indoor GIS”: one governed venue dataset can support internal review, public embeds, web applications, mobile navigation SDKs, and eventually on-device positioning.
 
-### The two-decision framing
+### 1.1 Product outcomes
 
-"What backend works best with WASM, Kotlin, and iOS" is two independent decisions:
+- A producer can publish a new venue or immutable version from IMDF or GDB source data.
+- A reviewer can open a link, understand the indoor map, and leave version-pinned feedback.
+- A producer can attach, generate, inspect, edit, export, and republish routing data without mutating an existing version.
+- A user can calculate a floor-aware route and route to imported point facilities when the bundle carries the required data.
+- Future web and mobile products consume the same versioned venue bundle and Rust-owned domain logic rather than reimplementing venue interpretation.
 
-1. **The backend service** — stores and serves data. All client platforms speak HTTP/JSON to it; its language is chosen for team velocity and ops, not for client compatibility.
-2. **The shared client core** — code that runs *inside* the web app (WASM), Android (Kotlin), and iOS (Swift): venue-data handling, routing, positioning. This is the strategically valuable IP of the SDK business and the place where "write once, run on three platforms" matters.
+### 1.2 Product and design constraints
 
-### Options considered
+- The map is the product; application chrome remains quiet and secondary.
+- Japanese and English are peers in UI copy, search, labels, and layout.
+- Published data is immutable and content-addressed.
+- Venue interpretation belongs in the Rust core. The TypeScript server moves bytes, applies access rules, and orchestrates jobs.
+- Rendering uses MapLibre. Kiriko owns data preparation, collaboration, routing, and future positioning—not a proprietary renderer.
+- The initial deployment target is one internal office server. The architecture must remain container-ready and free of cloud-only dependencies.
+- Operational complexity must fit one developer plus AI agents: one service process, SQLite, a disk blob store, and an in-process queue until measured load requires more.
 
-- **A — All-Rust (Axum backend + core):** maximum coherence, single binary; but CRUD/auth/uploads in Rust is the slowest-iterating choice and everything blocks on Rust fluency.
-- **B — Thin TypeScript backend + Rust core (chosen):** TS for HTTP/auth/CRUD (the developer's daily language, same shape as the 3D Tiles Viewer server already in operation), Rust for everything that touches venue data — reused server-side via a Node addon so no logic is duplicated across languages.
-- **C — C#/.NET backend + Rust core:** strongest language for the service but a third ecosystem sharing nothing with the frontend or core; weaker Rust interop than Node.
+## 2. Status model and current capability
 
-## 2. System overview
+This document uses four status labels:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  kiriko-server (TypeScript · Fastify · SQLite · disk store) │
-│  auth · datasets · issues · publish pipeline · registry     │
-│         └── calls kiriko-core via Node addon for:           │
-│             inspect source → compile deterministic bundle    │
-└──────────────┬──────────────────────────────┬───────────────┘
-               │ HTTP/JSON (OpenAPI)          │ venue bundles (static, CDN-able)
-   ┌───────────┴───────────┐      ┌───────────┴──────────────────────┐
-   │ Kiriko web app        │      │ SDKs                             │
-   │ (React, existing)     │      │  web:     kiriko-core → WASM     │
-   │ viewer/review/gallery │      │  Android: kiriko-core → UniFFI   │
-   │ + embeds (?embed=1)   │      │  iOS:     kiriko-core → UniFFI   │
-   └───────────────────────┘      │  + MapLibre GL JS / Native       │
-                                  └──────────────────────────────────┘
-```
+- **Implemented:** present in application code with a test, route, migration, or executable integration path.
+- **Next:** required to operate the current web product as a dependable production service.
+- **Planned:** accepted product direction whose implementation is not yet present.
+- **Exploratory:** dependent on customer validation, hardware data, or research.
 
-Principles:
-
-- **kiriko-core (Rust) is the single source of truth** for everything that interprets venue data. If the server "understands" a venue file, it does so by calling the core.
-- **kiriko-server (TS) moves bytes and enforces auth.** It never parses geometry itself.
-- **Rendering is MapLibre on every platform** (GL JS on web, MapLibre Native on iOS/Android). Kiriko builds the data, routing, and positioning that feed a renderer — not a renderer.
-- **Embeds are the existing web app in embed mode**, served from the same origin. No separate embed runtime.
-- **The venue bundle is the product's atom** (§5): one immutable file consumed identically by web app, embeds, SDKs, and server.
-
-## 3. kiriko-core (Rust workspace)
-
-| Crate | Purpose | Ships in |
+| Capability | Status | Current boundary |
 |---|---|---|
-| `kiriko-model` | Pure shared venue model, strict IMDF import, canonicalization, and validation warnings; no binding dependencies | shared core |
-| `kiriko-bundle` | Pure shared KVB1 encode/decode, versioning, integrity, and deterministic compilation; no binding dependencies | shared core |
-| `kiriko-node` | napi-rs adapter exposing asynchronous IMDF compilation plus synchronous source/bundle anchor inspection to the TypeScript server | server |
-| `kiriko-wasm` | wasm-bindgen adapter exposing bundle decoding to the browser bundle worker | web |
-| `kiriko-route` | Walkable-network extraction (openings, corridors, conveyances), A* with floor changes, accessibility profiles (e.g. avoid stairs) | server (build graph), clients (query routes) |
-| `kiriko-position` | Beacon/wifi fingerprint model + fusion filter → position estimate. **Stub crate until fingerprint data exists**; the boundary exists from day one | mobile SDKs |
-| `kiriko-ffi` | UniFFI definitions → generated Swift package + Kotlin/Android bindings | mobile |
+| Authenticated dataset gallery | Implemented | Session login/logout/current-user, venue listing, create/delete, and bilingual dataset cards |
+| IMDF publication | Implemented | Create venue or upload a new immutable version; strict Rust import and deterministic KVB compilation |
+| Local/source IMDF viewing | Implemented | Local picker, drag/drop, and explicit `?src=` ZIP loads remain browser-side and are not review resources |
+| GDB publication | Implemented | Inspect, suggested mapping, mapping review/edit, WGS84 conversion, IMDF synthesis, and publication |
+| GDB reprocessing | Implemented | Upload a new GDB version, edit stored mapping, add or inherit network/facility inputs |
+| Indoor viewer | Implemented | Floor grouping, search, layers, warnings, selection/inspection, responsive layout, and bilingual rendering |
+| Review issues | Implemented | Version-pinned issues, replies, pins, status, assignment, due dates, permissions, optimistic concurrency, and SSE synchronization |
+| Explicit-network routing | Implemented | Import `net_junction`/`net_path`, embed KVB §5, route in WASM, and render floor-aware corridor geometry |
+| Generated routing | Implemented | Synthesize a graph from walkable venue geometry; fail publication when no routable graph is produced |
+| Point facilities | Implemented | Import `point_facility_network`, embed KVB §7, render floor-aware markers, and route to anchored facilities |
+| Network QA and editing | Implemented | Connectivity summary, floor overlay, add/delete edges, save as a new version, export/import network GDB |
+| Embed mode | Implemented | Same viewer runtime with reduced chrome and no review-issue activity |
+| Production operations baseline | Next | Repeatable deployment, TLS/proxy configuration, backups, restore drill, monitoring, and production runbook |
+| Scoped machine API keys and public platform API | Planned | Tenant/venue/capability scopes for embeds and SDK clients |
+| Packaged `@kiriko/web` SDK | Planned | Stable public wrapper around KVB/WASM/MapLibre capabilities |
+| iOS and Android SDKs | Planned | UniFFI core bindings plus MapLibre Native integration |
+| Beacon/Wi-Fi positioning | Exploratory | Requires representative station fingerprint and device data before algorithm or API commitments |
 
-Key property for the current core: **the server compiles strict IMDF once and every dataset-backed web viewer decodes that immutable KVB through WASM.** Future routing work will add publish-time graph building and on-device querying without changing that ownership boundary.
+## 3. System overview
 
-The deliberate duplication boundary is limited by provenance: published datasets always fetch `.kvb` and decode through `kiriko-wasm`, while direct local uploads, dropped files, and explicit `?src=` ZIP URLs continue through `src/imdf/imdf.worker.ts` and the TypeScript normalizer. Golden-fixture conformance tests keep the Rust and TypeScript projections aligned. Local/source loads have no public version identity and therefore start no review issue API or SSE work; the server never exposes retained source ZIPs as public read routes.
-
-## 4. kiriko-server (TypeScript)
-
-One Node process (Fastify, Node.js 24 deployment floor with Node.js 26 compatibility), one SQLite database, one content-addressed blob directory. Runs under systemd on the office server today; one container on any platform tomorrow.
-
-### Implemented data model (SQLite)
-
-```
-users         id · username · password_hash · role (admin | member | viewer)
-tenants       id · name · slug
-venues        id · tenant_id · slug · name · created_by · created_at
-versions      id · venue_id · seq · public_id (permanent random 64-hex identity)
-              · source_blob_hash · bundle_hash · status
-              · source_kind · stats_json · error · created_at
-blobs         hash · size · created_at
-comment_state version_id · revision · next_pin_number
-comments      id · version_id · parent_id · author_id
-              · create_request_id · create_request_hash · pin_number
-              · level_id · longitude · latitude · feature_id
-              · body_markdown · status · assignee_id · due_date
-              · row_version · created_at · updated_at · deleted_at
-```
-
-Root comments are map-anchored review issues; child comments are replies. `versions.public_id`, not a venue slug, sequence, or bundle hash, is the review resource identity. It is generated at version-row creation and never reused, including after venue deletion and slug recreation. `comment_state.revision` is the version-scoped monotonic collection revision, while `comments.row_version` is the optimistic-concurrency token for one issue or reply.
-
-### Storage layout
-
-Source uploads and compiled bundles occupy independent content-addressed blobs:
-
-```
-data/kiriko.db
-blobs/sha256/<aa>/<hash>     ← retained source IMDF/GDB ZIPs
-blobs/sha256/<aa>/<hash>     ← compiled KVB bundles
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│ kiriko-server                                                    │
+│ TypeScript · Fastify · SQLite · content-addressed disk blobs      │
+│ sessions · venues/versions · issues · GDB orchestration · jobs    │
+│                              │                                   │
+│                     @kiriko/node (N-API)                          │
+│              strict import · KVB compile · graph export           │
+└──────────────┬──────────────────────────────┬────────────────────┘
+               │ HTTP/JSON + SSE              │ immutable .kvb
+               ▼                              ▼
+┌──────────────────────────────┐   ┌───────────────────────────────┐
+│ Current web application      │   │ Future distribution          │
+│ React · MapLibre GL JS       │   │ @kiriko/web                  │
+│ gallery · viewer · review    │   │ iOS / Android SDKs           │
+│ GDB workflows · embeds       │   │ customer applications        │
+│ @kiriko/wasm decode/route    │   │ all backed by kiriko-core    │
+└──────────────────────────────┘   └───────────────────────────────┘
 ```
 
-Each version records both `source_blob_hash` and `bundle_hash`; publishing compiles from the retained source and never treats source bytes as a bundle. Bundles are immutable, and both successful publish and legacy backfill update a version transactionally only if the compiled source identity still matches that version. Publishing never overwrites; rollback is repointing.
+The backend and shared client core are separate decisions:
 
-### Implemented API surface
+1. The **TypeScript backend** owns HTTP, authentication, persistence, uploads, and job orchestration.
+2. The **Rust core** owns deterministic venue interpretation, bundle encoding/decoding, route-graph construction/query, facility projection, and graph export.
 
-Fastify validates the JSON contracts exposed in its generated OpenAPI document. The current web client uses:
+Clients communicate with the server through HTTP and consume immutable bundles. Backend language does not constrain customer SDK language; the Rust core is the portability boundary.
 
+## 4. Web application
+
+### 4.1 Gallery
+
+The gallery is the producer workspace. Implemented actions include:
+
+- sign in and sign out;
+- filter datasets;
+- create and delete venues;
+- upload an IMDF dataset or a new IMDF version;
+- import a GDB dataset or a new GDB version;
+- reopen and edit the latest retained GDB mapping;
+- add or replace a routing-network GDB and/or point-facility GDB;
+- generate routing from the venue’s own walkable geometry;
+- export an embedded routing graph as a GDB ZIP;
+- open the viewer directly in network-review mode.
+
+Every publish-like action creates a new version. The UI does not mutate a published bundle in place.
+
+### 4.2 Viewer
+
+The viewer supports:
+
+- dataset-backed KVB loads, local IMDF ZIPs, dropped files, and explicit source URLs;
+- latest and sequence-pinned dataset URLs;
+- one visible floor control per ordinal while retaining real IMDF level identities underneath;
+- floor-aware geometry, bounds, issue pins, facilities, routing, and network overlays;
+- localized search across venue features;
+- layer visibility, warning inspection, feature selection, and attribute inspection;
+- map-pinned review issues for eligible published dataset loads;
+- directions between two map points when KVB §5 exists;
+- route-to-facility when a KVB §7 facility has a graph anchor;
+- connectivity review and edge editing for embedded networks;
+- compact/mobile layout, keyboard focus states, reduced-motion behavior, and Japanese/English UI.
+
+Published dataset provenance is explicit. Review APIs start only after the exact bundle response provides a permanent public version identity. Embed, local ZIP, dropped-file, and `?src=` loads never start issue API or SSE work.
+
+### 4.3 Embed mode
+
+`?embed=1` runs the existing viewer with embed chrome and behavior; it is not a second runtime. Embed mode can load a dataset or source URL and preselect a level. Review issues and producer-only network controls remain hidden.
+
+## 5. Shared Rust core
+
+The workspace currently contains:
+
+| Crate | Implemented responsibility | Runtime |
+|---|---|---|
+| `kiriko-model` | Strict IMDF archive import, canonical venue model, geometry normalization, and validation warnings | native |
+| `kiriko-bundle` | Deterministic KVB1 codec, optional network/facility sections, generated network, and graph export | native shared core |
+| `kiriko-route` | Explicit route-graph construction, floor mapping, edge-projection snapping, and A* route query | native + WASM through adapters |
+| `kiriko-facilities` | Point-facility import and optional routing-anchor resolution | native shared core |
+| `kiriko-node` | N-API adapter for asynchronous compilation, source/bundle inspection, and network export | server |
+| `kiriko-wasm` | Browser bundle decode, route query, facilities projection, and network export | web |
+
+There are no implemented UniFFI, iOS, Android, or positioning crates in the current workspace. Those are future distribution phases, not current architecture claims.
+
+### 5.1 Source ownership
+
+Published dataset viewers always fetch KVB and decode it through `kiriko-wasm`. Direct local uploads, drops, and `?src=` ZIP URLs continue through the browser IMDF worker and TypeScript normalizer. This is a deliberate provenance boundary:
+
+- published loads have immutable version identity and can participate in review;
+- local/source loads have no server-backed version identity and remain issue-free;
+- golden and conformance fixtures keep the Rust and TypeScript venue projections aligned.
+
+## 6. Ingestion, compilation, and versioning
+
+### 6.1 IMDF
+
+```text
+IMDF ZIP
+  → content-addressed source blob
+  → draft version + publish job
+  → kiriko-node strict import and canonicalization
+  → deterministic KVB
+  → content-addressed bundle blob
+  → transactional version publication
 ```
-POST /api/auth/login
-POST /api/auth/logout
-GET  /api/auth/me
-GET/POST /api/venues
-DELETE   /api/venues/:id
-POST /api/venues/:id/versions
-GET  /api/jobs/:id
-GET  /v/:tenant/:venue/bundle
-GET  /v/:tenant/:venue/bundle@:seq
 
-GET/POST /api/review/versions/:publicVersionId/issues
-GET      /api/review/versions/:publicVersionId/issues/events
-GET      /api/reviewers
-POST     /api/issues/:issueId/replies
-PATCH/DELETE /api/issues/:issueId
-PATCH/DELETE /api/replies/:replyId
+An existing venue accepts the same upload path as a new immutable version. A failed compilation leaves the version failed and never replaces the latest published bundle.
+
+### 6.2 File Geodatabase
+
+GDB ingestion is a reviewed conversion pipeline:
+
+```text
+.gdb.zip
+  → archive validation and GDAL inspection
+  → server-suggested building/layer/floor/category mapping
+  → bilingual mapping review
+  → selected-layer WGS84 GeoJSON conversion
+  → strict IMDF synthesis
+  → normal IMDF/KVB publish job
 ```
 
-Both latest and pinned bundle responses carry `Kiriko-Version-Id: <versions.public_id>`, including conditional `304` responses. The latest route revalidates; the pinned route is immutable. `ETag` remains the bundle content hash and is intentionally distinct from the permanent review identity. Issue reads are public for an existing version; mutations and reviewer lookup require a session. Mutations use client request IDs for idempotent creation and `expectedVersion` for optimistic concurrency. The SSE stream carries only monotonic revision notifications, so clients always refetch canonical state and coalesce bursts.
+Internal A/B/C category codes are mapped to IMDF categories during conversion. Structurally unsuitable layers can be excluded automatically with an explicit response. Raw GDB source identity and the normalized mapping plan are retained on the version so a producer can reopen and refine the mapping later.
 
-### Publish pipeline
+### 6.3 Routing and facilities inputs
 
-Upload → source blob store → in-process job queue (no Redis) → **`kiriko-node`**: inspect the source anchor, parse + validate strict IMDF, compile deterministic KVB → write bundle blob → transactionally publish only the matching version/source anchor. Legacy rows use the same compiler and identity guard during startup backfill. GDB ingest and routing-graph construction remain future work.
+A GDB publish can include:
 
-### Auth
+- an optional routing archive containing `net_junction` and `net_path`; and
+- an optional facilities archive containing `point_facility_network`.
 
-Sessions for humans, scoped API keys for machines (SDKs, customer-site embeds). Key scopes: per-tenant + per-venue read, tiered by capability (§6). Publishing requires a human session. SSO/OIDC deferred until an enterprise customer requires it; it bolts onto the session layer.
+The server extracts and stores normalized GeoJSON blobs, then the Rust compiler embeds non-empty results in KVB §5 and §7. Reprocessing resolves each omitted optional input from the latest published version so a mapping-only republish does not silently drop routing or facilities.
 
-### Ops posture
+Alternatively, the producer can generate a route graph from the latest venue geometry. The generator uses recognized walkable/circulation categories, including station platforms. A generated version is marked `synthesized`; a generation that produces no graph fails with `no_routable_network` instead of publishing a misleading success.
 
-Single process; SQLite with Litestream-style continuous backup to a second disk/NAS; logs to stdout. Deliberate simplifications, with the seams where scale-up screws in later: queue behind an interface (→ external queue), storage behind a driver (→ S3), DB access behind a repository layer (→ Postgres). None of these are needed at office scale.
+### 6.4 Immutability and provenance
 
-## 5. The venue bundle (`.kvb`)
+- `versions.public_id` is a permanent random 256-bit lowercase hexadecimal identity.
+- A public ID is never reused, including after venue deletion and slug recreation.
+- Source and bundle blobs are independently content-addressed by SHA-256.
+- Publishing updates a version only when its source identity still matches, preventing stale jobs from publishing over replacements.
+- Latest bundle URLs revalidate; sequence-pinned URLs are immutable.
+- `ETag` is the bundle hash. `Kiriko-Version-Id` is the review identity. They are intentionally different.
+- Raw retained source archives are not exposed through public read routes.
 
-KVB1 is a deterministic, content-addressed container. Its 52-byte envelope is:
+## 7. KVB1 venue bundle
+
+KVB1 is the product’s immutable distribution atom. The fixed 52-byte envelope is:
 
 ```text
 0..4   magic = 4b 56 42 00 ("KVB\0")
@@ -157,48 +217,195 @@ KVB1 is a deterministic, content-addressed container. Its 52-byte envelope is:
 8..12  flags = little-endian u32; bit 0 means zstd
 12..20 uncompressed payload length = little-endian u64
 20..52 SHA-256 of the uncompressed payload
-52..   exactly one zstd frame
+52..   exactly one deterministic zstd frame
 ```
 
-The uncompressed payload starts with a little-endian `u16` section count followed by fixed 20-byte directory rows `(id: u16, version: u16, offset: u64, length: u64)`, sorted by strictly ascending ID. KVB1 assigns IDs `1 manifest`, `2 geometry`, `3 stores`, `4 style`, `5 graph`, and `6 beacons`. Phase Two requires and emits sections 1–3 only; IDs 4–6 are reserved and are not emitted. Section payload version is `1`. The decoder rejects missing, duplicate, overlapping, out-of-bounds, or unsupported required sections; rejects unknown envelope major versions before section interpretation; and caps declared uncompressed payloads at 512 MiB.
+The payload begins with a section count and fixed 20-byte directory rows `(id, version, offset, length)` sorted by ascending ID.
 
-The zstd frame is produced at level 9 with checksum and pledged content size enabled and no worker threads. The decoder verifies the declared length and SHA-256 before decoding section payloads. Changing serialization or compression dependencies/settings requires a bundle-version decision and a reviewed golden update.
+| ID | Section | Requirement | Current content |
+|---:|---|---|---|
+| 1 | manifest | required | metadata, IMDF manifest, levels, bounds, warnings, stats |
+| 2 | geometry | required | canonical non-occupant venue features |
+| 3 | stores | required | canonical occupant features |
+| 4 | style | reserved | not emitted |
+| 5 | graph | optional | route nodes, weighted floor-aware edges, and corridor bend points |
+| 6 | beacons | reserved | not emitted |
+| 7 | facilities | optional | named point facilities, icons, floor ordinals, and optional graph anchors |
 
-Published clients download one immutable `.kvb`, cache by hash, revalidate the latest URL by ETag, and decode it through `kiriko-bundle` via the platform adapter.
+The decoder rejects unsupported envelope versions, malformed directories, invalid section versions, out-of-bounds or overlapping sections, corrupt hashes, non-finite coordinates, and declared payloads above the configured safety cap. Required sections remain backward-compatible with older KVB1 bundles that lack optional sections.
 
-## 6. SDKs
+## 8. Server and persistence
 
-Three packages, one shape — thin idiomatic wrappers around the same core:
+Kiriko server is one Fastify process on Node.js 24–26, one SQLite database, one content-addressed blob directory, and one in-process job queue.
 
-- **`@kiriko/web`** (npm): WASM core + MapLibre GL JS integration layer (bundle → sources/layers, level switching, route drawing). Customer tiers: **iframe embed** (zero-code, the `?embed=1` app) and the **JS SDK** for full map applications.
-- **`KirikoKit`** (Swift Package, SPM): UniFFI-generated Swift + async/await API client (OpenAPI-generated) + MapLibre Native helpers.
-- **`com.kiriko:sdk`** (Maven/AAR): UniFFI Kotlin bindings + coroutines API client + MapLibre Native helpers.
+### 8.1 Persistence
 
-**Capability tiers map to API-key scopes** — the commercial lever:
-Tier 1 map display → Tier 2 store info + search → Tier 3 on-device routing → Tier 4 positioning. A customer starts on an iframe embed and upgrades tiers without replatforming.
+```text
+users          username · password hash · role
+sessions       token hash · user · expiry
+tenants        name · slug
+venues         tenant · slug · name · creator · creation time
+versions       venue · sequence · permanent public id
+               source/bundle hashes · status · source kind · stats/error
+               retained GDB source + mapping
+               network/facility blob hashes · synthesized flag
+jobs           kind · status · payload/result/error
+blobs          hash · size · creation time
+comment_state  version revision · next pin number
+comments       versioned root issues and one-level replies
+```
 
-## 7. Testing strategy
+The on-disk layout is:
 
-- **Rust core:** strict-import, geometry, canonicalization, KVB integrity/determinism, native/WASM binding, and golden-file round-trip tests. Native inspection verifies source and bundle anchors without compiling on request.
-- **Conformance vectors:** the minimal IMDF fixture and committed KVB golden prove byte-identical native compilation and equivalent TypeScript local-ZIP projection.
-- **Server:** repository/service/API tests against real SQLite files cover source-identity pinning, permanent public version IDs, transactionality, mutation permissions/idempotency/concurrency, bounded SSE streams, and stale publish-job isolation.
-- **Web app:** Vitest covers provenance admission, monotonic revision synchronization, Markdown safety, issue state, map pins/camera, auth recovery, and accessibility. Playwright exercises the live publish/bundle/review lifecycle in Chromium and Firefox, proves anonymous and authenticated contexts converge by SSE-triggered canonical refetch, verifies version changes and delete/recreate cycles cannot reuse review identity, and proves embed/local/source provenance starts zero issue requests.
+```text
+data/kiriko.db
+data/blobs/sha256/<first-two-hex>/<sha256>
+```
 
-## 8. Phasing
+SQLite migrations are additive. The current schema includes the initial platform tables, version-pinned review issues, retained GDB reprocessing inputs, and the synthesized-network marker.
 
-Phases 1–3 are implemented; later phases remain planned:
+### 8.2 Implemented HTTP surface
 
-1. **kiriko-server MVP — complete:** auth, venue/version upload and publishing, blob storage, gallery, and viewer entry.
-2. **kiriko-core v0 — complete:** strict `kiriko-model`, deterministic `kiriko-bundle`, napi-rs compile/inspect bindings, WASM bundle decoding, dataset cutover, and removal of public raw-archive routes.
-3. **Version-pinned review issues — complete:** permanent version identity, transactional issue/reply repository, permissions and anchor checks, bounded SSE revision signals, provenance-safe web synchronization, Markdown issue panel, map pins/placement/camera, responsive/auth/accessibility integration, and Chromium/Firefox acceptance.
-4. **kiriko-route + `@kiriko/web` — planned:** routing on web; embeds get directions; GDB ingest joins the publish pipeline (server-side GDAL).
-5. **Mobile SDKs — planned:** UniFFI bindings, KirikoKit + Android SDK: map + stores + routing.
-6. **kiriko-position — planned:** when station fingerprint data exists to calibrate against.
+```text
+GET  /healthz
+GET  /api/openapi.json
 
-## 9. Risks and open questions
+POST /api/auth/login
+POST /api/auth/logout
+GET  /api/auth/me
 
-- **Rust learning curve:** mitigated by starting the core small (model + bundle codec) while the TS backend carries product velocity; agents author Rust well and the compiler catches integration mistakes.
-- **UniFFI + WASM from one crate set** requires discipline about which crates use which std features; the workspace splits bindings into dedicated crates for this reason.
-- **Positioning quality** (kiriko-position) is a research effort dependent on fingerprint data access — intentionally unscheduled.
-- **MapLibre Native API churn** on iOS/Android is outside our control; SDK helpers wrap it thinly so churn stays in the helper layer.
-- **Bundle format evolution:** `kvb` carries a format version from day one; the decoder rejects newer majors; the server can recompile bundles from retained source uploads at any time.
+GET/POST /api/venues
+DELETE   /api/venues/:id
+POST     /api/venues/:id/versions
+GET      /api/jobs/:id
+
+GET /v/:tenant/:venue/bundle
+GET /v/:tenant/:venue/bundle@:seq
+
+POST /api/gdb/inspect
+POST /api/gdb/inspect-network
+POST /api/gdb/inspect-facilities
+POST /api/gdb/publish
+POST /api/gdb/augment
+POST /api/gdb/generate-network
+POST /api/gdb/export-network
+POST /api/gdb/import-network
+GET  /api/venues/:id/gdb-mapping
+
+GET/POST    /api/review/versions/:publicVersionId/issues
+GET         /api/review/versions/:publicVersionId/issues/events
+GET         /api/reviewers
+POST        /api/issues/:issueId/replies
+PATCH/DELETE /api/issues/:issueId
+PATCH/DELETE /api/replies/:replyId
+```
+
+Fastify route schemas generate `/api/openapi.json`. GDB inspection and all mutations require a human session. Published bundle reads and issue collection reads are public. Machine API keys are not yet implemented.
+
+### 8.3 Review synchronization
+
+Root comments are map-anchored issues; child comments are replies. `comment_state.revision` is a version-scoped monotonic collection revision and each comment has an optimistic-concurrency row version.
+
+Mutations support idempotent request IDs and expected-version checks. The SSE stream carries revision notifications only; clients coalesce notifications and refetch canonical state. Connection limits are configurable globally and per public version.
+
+## 9. Routing, facilities, and network review
+
+### 9.1 Explicit route graph
+
+`kiriko-route` maps GDB floor labels to venue ordinals, validates junction/path references, preserves path bend points, and builds deterministic weighted edges. Browser routing projects each endpoint onto the nearest appropriate edge, handles same-edge routes directly, runs A* through virtual endpoints for longer routes, and returns maximal same-floor route segments.
+
+The viewer renders real corridor geometry, per-floor route segments, and click-to-network connectors. It does not draw straight chords through walls when source path geometry contains bends.
+
+### 9.2 Generated route graph
+
+When no explicit network is available, `kiriko-bundle` can derive a graph from walkable IMDF geometry. The preferred build uses a medial-axis network when the `netgen` feature is present. Generated and imported graphs share KVB §5 and the same query/export path.
+
+### 9.3 Facilities
+
+`kiriko-facilities` imports named point facilities with floor, icon, and optional route-node linkage. Facilities remain visible even when an anchor cannot be resolved; route-to-facility is available only for anchored items.
+
+### 9.4 Review and editing
+
+The network overlay reports connectivity, islands, and linked floors. In edit mode a producer can select junctions to add an edge or select an edge to delete it. Saving serializes the edited graph and publishes it as a new immutable venue version. Export packages the current graph as a re-importable GDB ZIP.
+
+## 10. Authentication and authorization
+
+Implemented human authentication uses server-side sessions stored by token hash. Roles are `admin`, `member`, and `viewer`.
+
+- Anonymous users can read published bundles and existing issue collections.
+- Authenticated users can create issues and replies subject to role and ownership rules.
+- Members/admins can manage issue status, due dates, and broader assignments.
+- Producer gallery, upload, GDB, network, and reviewer-directory operations require a session.
+- Secure-cookie behavior is configurable and must be enabled behind production TLS.
+
+OIDC/SSO, tenant administration UI, API keys, and customer-facing capability scopes are planned rather than implemented.
+
+## 11. Quality and verification
+
+- **Rust:** strict IMDF import, canonicalization, KVB integrity/determinism, graph/facility encoding, graph generation, route queries, graph export, N-API, and WASM adapters.
+- **Server:** real SQLite migration/repository tests, blob identity, job isolation, GDB validation/conversion/reprocessing, network/facility publication, issue permissions/idempotency/concurrency, and SSE capacity.
+- **Web:** Vitest for load provenance, bundle hydration, search, floor grouping, map layers, facilities, routes, network editing/connectivity, gallery flows, issue state, Markdown safety, accessibility, and responsive UI.
+- **End to end:** Playwright covers gallery publication, local/source/embed viewing, issue collaboration and identity isolation, cross-browser viewer behavior, visual baselines, and measured viewer performance.
+
+Current performance acceptance in the executable browser suite includes:
+
+- fresh local upload to map-ready-and-idle P95 at or below 3 seconds;
+- warm floor change P95 at or below 150 ms;
+- a one-second drag sustaining at least 30 frames with no long task above 100 ms.
+
+These thresholds are regression budgets for the tested fixtures and workstation class, not universal customer SLAs.
+
+## 12. Operations posture
+
+### 12.1 Implemented
+
+- one process and in-process queue;
+- environment-based data directory, port, secure-cookie, bootstrap-user, development-user, and SSE-capacity configuration;
+- content-addressed disk storage;
+- startup migrations and legacy bundle recompilation;
+- stdout-compatible Fastify logging;
+- health and OpenAPI endpoints.
+
+### 12.2 Required before dependable production operation
+
+- repeatable service/container deployment and reverse-proxy TLS configuration;
+- secure production bootstrap and credential rotation procedure;
+- scheduled SQLite and blob backup with a tested restore drill;
+- log retention, disk/queue/failed-job monitoring, and alert ownership;
+- source/blob retention and deletion policy;
+- documented upgrade, rollback, and KVB compatibility procedure;
+- production smoke test using a representative station dataset.
+
+External queues, S3, and Postgres remain scale-up options, not near-term requirements. They should be introduced only after measured office-server limits justify the extra operational surface.
+
+## 13. Product roadmap boundary
+
+The platform roadmap is maintained in `docs/superpowers/plans/2026-07-24-kiriko-platform-roadmap.md`. Its sequence is:
+
+1. **Shipped web baseline:** current gallery, publication, viewer, issues, GDB, routing, facilities, and network workflows.
+2. **Production-ready shared web platform:** operations, security hardening, version/share administration, and release acceptance.
+3. **Public platform API and web SDK:** scoped machine credentials, stable contracts, packaged `@kiriko/web`, and supported embed tiers.
+4. **Mobile map and routing SDKs:** shared Rust core through UniFFI plus thin MapLibre Native wrappers.
+5. **Positioning research and productization:** fingerprint data collection, algorithm evaluation, privacy/battery constraints, then an explicit go/no-go.
+
+Each future phase requires its own approved design and executable implementation plan. The roadmap records product order and release gates; it does not make unimplemented interfaces part of the current contract.
+
+## 14. Risks and standing decisions
+
+- **GDB variability:** customer schemas differ. Keep suggestions reviewable, preserve raw source/mapping, fail explicitly, and avoid silent semantic guesses.
+- **Bundle evolution:** KVB major/version checks and retained source blobs permit controlled recompilation. Any serialization or compression change requires a format decision and golden update.
+- **Rust portability:** keep domain crates free of N-API, WASM, and future UniFFI concerns; bindings stay in adapter crates.
+- **Generated-route quality:** generation provides a useful fallback, not guaranteed survey-grade navigation. Connectivity review and export/edit workflows remain part of acceptance.
+- **Mobile scope:** MapLibre Native churn stays behind thin platform wrappers. Shared domain behavior remains in Rust.
+- **Positioning uncertainty:** do not schedule or advertise accuracy before representative station fingerprints and device trials exist.
+- **Operational simplicity:** do not pre-build Redis, Postgres, Kubernetes, or multi-region storage. Preserve replaceable seams and scale from evidence.
+
+## 15. Documentation hierarchy
+
+- `PRODUCT.md` — audience, purpose, positioning, and design principles.
+- `DESIGN.md` — visual and interaction system.
+- This document — authoritative current platform/application specification.
+- `docs/superpowers/plans/2026-07-24-kiriko-platform-roadmap.md` — forward sequence and release gates.
+- Dated feature specs and implementation plans — decision and execution history for individual slices.
+
+When a dated feature document conflicts with this reconciled specification about current implementation status, this document wins. Feature documents remain authoritative for the detailed decision that introduced their behavior unless superseded explicitly.

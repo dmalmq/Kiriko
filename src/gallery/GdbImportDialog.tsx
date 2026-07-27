@@ -32,6 +32,9 @@ const ui = {
   deleteBuilding: { ja: "削除", en: "Delete" },
   layers: { ja: "レイヤー", en: "Layers" },
   filter: { ja: "レイヤーを絞り込み", en: "Filter layers" },
+  filterByBuilding: { ja: "建物で絞り込み", en: "Filter by building" },
+  allBuildings: { ja: "すべての建物", en: "All buildings" },
+  unassigned: { ja: "未割り当て / 屋外", en: "Unassigned / outdoor" },
   prev: { ja: "前へ", en: "Previous" },
   next: { ja: "次へ", en: "Next" },
   colInclude: { ja: "取込", en: "Include" },
@@ -59,11 +62,22 @@ const ui = {
   import: { ja: "取り込む", en: "Import" },
   addNetwork: { ja: "ルーティングネットワークを追加", en: "Add routing network" },
   addFacilities: { ja: "地点施設を追加", en: "Add point facilities" },
+  clipToSelection: {
+    ja: "ルーティングと地点施設を選択した建物で切り取る",
+    en: "Clip routing and POIs to selected buildings",
+  },
 } as const;
 
 const summaryText = {
   ja: (layers: number, features: number) => `取込対象: ${layers} レイヤー / ${features} 地物`,
   en: (layers: number, features: number) => `Including ${layers} layers, ${features} features`,
+};
+
+const buildingCountsText = {
+  ja: (included: number, total: number, features: number) =>
+    `${included} / ${total} レイヤー、${features} 地物`,
+  en: (included: number, total: number, features: number) =>
+    `${included} / ${total} layers, ${features} features`,
 };
 
 const pageText = {
@@ -236,6 +250,9 @@ export interface GdbImportDialogProps {
   facilities?: FacilitiesInspectResponse | null;
   /** When provided, an "Add point facilities" file picker is shown. */
   onAddFacilities?: (file: File) => void;
+  actionLabel?: string | undefined;
+  canSubmit?: boolean | undefined;
+  cancelDisabled?: boolean | undefined;
   onImport: (plan: GdbMappingPlan) => void;
   onCancel: () => void;
 }
@@ -259,7 +276,7 @@ function pruneUnusedBuildings(plan: GdbMappingPlan): GdbMappingPlan {
   const buildings = plan.buildings.every((building) => used.has(building.id))
     ? plan.buildings
     : plan.buildings.filter((building) => used.has(building.id));
-  return { ...plan, layers, buildings };
+  return { ...plan, layers, buildings, clipToSelection: plan.clipToSelection === true };
 }
 
 export function GdbImportDialog({
@@ -275,13 +292,24 @@ export function GdbImportDialog({
   onAddFacilities,
   onImport,
   onCancel,
+  actionLabel,
+  canSubmit,
+  cancelDisabled = false,
 }: GdbImportDialogProps) {
   // The dialog owns the edited plan so a retryable conversion error (a changed
   // `error` prop) never resets manual choices.
   const [plan, setPlan] = useState<GdbMappingPlan>(initialPlan);
   const [filter, setFilter] = useState("");
+  const [buildingFilter, setBuildingFilter] = useState<string>("");
   const [page, setPage] = useState(0);
+  // Once the user touches the clip checkbox their choice is final; deselecting
+  // another building must not silently flip it back.
+  const [clipTouched, setClipTouched] = useState(false);
+  // The venue name auto-fills from a single-building selection until the user
+  // types; after that their text is never overwritten.
+  const [venueNameTouched, setVenueNameTouched] = useState(false);
 
+  const cancelLocked = cancelDisabled;
   const dialogRef = useRef<HTMLDialogElement>(null);
   const venueInputRef = useRef<HTMLInputElement>(null);
   const headingId = "gdb-import-dialog-title";
@@ -293,6 +321,17 @@ export function GdbImportDialog({
     }
     return map;
   }, [inspection]);
+
+  // The server's suggestion, frozen at mount. Re-ticking a building restores
+  // this rather than blanket-including, so heuristic exclusions (zero-feature
+  // layers, `_to_` cross-floor layers) do not come back as junk.
+  const suggestedIncluded = useMemo(() => {
+    const map = new Map<string, boolean>();
+    for (const row of initialPlan.layers) {
+      map.set(gdbLayerKeyString(row.key), row.included);
+    }
+    return map;
+  }, [initialPlan]);
 
   // Open modally and focus the venue name. App owns post-close focus (map /
   // remounted GDB control / Retry) because the pre-inspect invoker is often
@@ -317,23 +356,27 @@ export function GdbImportDialog({
     if (!dialog) return;
     const handleCancel = (event: Event) => {
       event.preventDefault();
-      onCancel();
+      if (!cancelLocked) onCancel();
     };
     dialog.addEventListener("cancel", handleCancel);
     return () => dialog.removeEventListener("cancel", handleCancel);
-  }, [onCancel]);
+  }, [cancelLocked, onCancel]);
 
   const filtered = useMemo(() => {
     const needle = filter.trim().toLowerCase();
-    if (!needle) return plan.layers;
     return plan.layers.filter((row) => {
+      if (buildingFilter === "__unassigned" && row.buildingId !== null) return false;
+      if (buildingFilter !== "" && buildingFilter !== "__unassigned" && row.buildingId !== buildingFilter) {
+        return false;
+      }
+      if (!needle) return true;
       const descriptor = descriptorByKey.get(gdbLayerKeyString(row.key));
       return (
         row.key.layerName.toLowerCase().includes(needle) ||
         (descriptor?.databaseName.toLowerCase().includes(needle) ?? false)
       );
     });
-  }, [filter, plan.layers, descriptorByKey]);
+  }, [filter, buildingFilter, plan.layers, descriptorByKey]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / ROWS_PER_PAGE));
   const safePage = Math.min(page, pageCount - 1);
@@ -344,7 +387,7 @@ export function GdbImportDialog({
   const includedFeatureCount = includedRows.reduce((sum, row) => {
     return sum + (descriptorByKey.get(gdbLayerKeyString(row.key))?.featureCount ?? 0);
   }, 0);
-  const canImport = issues.length === 0 && !busy;
+  const canImport = !busy && (canSubmit ?? issues.length === 0);
 
   function updateRow(key: GdbLayerPlan["key"], patch: Partial<GdbLayerPlan>): void {
     const keyString = gdbLayerKeyString(key);
@@ -356,13 +399,38 @@ export function GdbImportDialog({
     }));
   }
 
-  function setBuildingIncluded(buildingId: string, include: boolean): void {
-    setPlan((current) => ({
-      ...current,
-      layers: current.layers.map((row) =>
-        row.buildingId === buildingId ? { ...row, included: include } : row,
-      ),
-    }));
+  function setBuildingIncluded(buildingId: string | null, include: boolean): void {
+    setPlan((current) => {
+      const layers = current.layers.map((row) =>
+        row.buildingId === buildingId
+          ? {
+              ...row,
+              included: include
+                ? (suggestedIncluded.get(gdbLayerKeyString(row.key)) ?? false)
+                : false,
+            }
+          : row,
+      );
+      // Suggest the venue name once exactly one building has any included
+      // layer, computed from the layers as they will be AFTER this toggle —
+      // never once the user has typed, and never while the field is locked.
+      const selected = current.buildings.filter((b) =>
+        layers.some((row) => row.included && row.buildingId === b.id),
+      );
+      const venueName =
+        !venueNameTouched && !venueNameLocked && selected.length === 1 && selected[0]!.name
+          ? selected[0]!.name
+          : current.venueName;
+      return {
+        ...current,
+        venueName,
+        // Excluding a building leaves the network GDB — which has no building
+        // field — still describing the whole site, so clipping becomes the
+        // sensible default until the user says otherwise.
+        clipToSelection: !include && !clipTouched ? true : current.clipToSelection === true,
+        layers,
+      };
+    });
   }
 
   function setRuleKind(row: GdbLayerPlan, kind: RuleKind): void {
@@ -435,11 +503,31 @@ export function GdbImportDialog({
     );
   }
 
+  /** Layers of one building, or of the unassigned bucket when `id` is null. */
+  function rowsForBuilding(id: string | null): GdbLayerPlan[] {
+    return plan.layers.filter((row) => row.buildingId === id);
+  }
+
+  function groupCounts(id: string | null): { included: number; total: number; features: number } {
+    const rows = rowsForBuilding(id);
+    return {
+      included: rows.filter((row) => row.included).length,
+      total: rows.length,
+      features: rows.reduce(
+        (sum, row) => sum + (descriptorByKey.get(gdbLayerKeyString(row.key))?.featureCount ?? 0),
+        0,
+      ),
+    };
+  }
+
   return (
     <dialog
       ref={dialogRef}
       className="gdb-dialog"
       aria-labelledby={headingId}
+      onClick={(event) => {
+        if (event.target === dialogRef.current && !cancelLocked) onCancel();
+      }}
     >
       <form
         method="dialog"
@@ -466,20 +554,26 @@ export function GdbImportDialog({
               readOnly={venueNameLocked}
               onChange={(event) => {
                 if (venueNameLocked) return;
+                setVenueNameTouched(true);
                 setPlan((c) => ({ ...c, venueName: event.target.value }));
               }}
             />
           </label>
           <ul className="gdb-dialog__buildings">
             {plan.buildings.map((building) => {
-              const assigned = plan.layers.some((l) => l.included && l.buildingId === building.id);
+              const counts = groupCounts(building.id);
+              const assigned = counts.included > 0;
+              const allIncluded = counts.total > 0 && counts.included === counts.total;
               return (
                 <li key={building.id} className="gdb-dialog__building-row">
                   <input
                     type="checkbox"
                     className="gdb-dialog__checkbox"
                     aria-label={`${ui.includeBuilding[locale]} ${building.name || building.id}`}
-                    checked={assigned}
+                    checked={allIncluded}
+                    ref={(node) => {
+                      if (node) node.indeterminate = assigned && !allIncluded;
+                    }}
                     onChange={(event) => setBuildingIncluded(building.id, event.target.checked)}
                   />
                   <input
@@ -490,6 +584,9 @@ export function GdbImportDialog({
                     value={building.name}
                     onChange={(event) => renameBuilding(building.id, event.target.value)}
                   />
+                  <span className="gdb-dialog__counts">
+                    {buildingCountsText[locale](counts.included, counts.total, counts.features)}
+                  </span>
                   <button
                     type="button"
                     className="gdb-dialog__btn"
@@ -502,6 +599,33 @@ export function GdbImportDialog({
                 </li>
               );
             })}
+            {plan.layers.some((row) => row.buildingId === null) && (
+              <li className="gdb-dialog__building-row">
+                <input
+                  type="checkbox"
+                  className="gdb-dialog__checkbox"
+                  aria-label={`${ui.includeBuilding[locale]} ${ui.unassigned[locale]}`}
+                  checked={
+                    rowsForBuilding(null).length > 0 &&
+                    rowsForBuilding(null).every((row) => row.included)
+                  }
+                  ref={(node) => {
+                    if (node) {
+                      const counts = groupCounts(null);
+                      node.indeterminate = counts.included > 0 && counts.included < counts.total;
+                    }
+                  }}
+                  onChange={(event) => setBuildingIncluded(null, event.target.checked)}
+                />
+                <span>{ui.unassigned[locale]}</span>
+                <span className="gdb-dialog__counts">
+                  {(() => {
+                    const counts = groupCounts(null);
+                    return buildingCountsText[locale](counts.included, counts.total, counts.features);
+                  })()}
+                </span>
+              </li>
+            )}
           </ul>
           <button type="button" className="gdb-dialog__btn" onClick={addBuilding}>
             {ui.addBuilding[locale]}
@@ -521,6 +645,23 @@ export function GdbImportDialog({
               setPage(0);
             }}
           />
+          <select
+            className="gdb-dialog__select"
+            aria-label={ui.filterByBuilding[locale]}
+            value={buildingFilter}
+            onChange={(event) => {
+              setBuildingFilter(event.target.value);
+              setPage(0);
+            }}
+          >
+            <option value="">{ui.allBuildings[locale]}</option>
+            {plan.buildings.map((building) => (
+              <option key={building.id} value={building.id}>
+                {building.name || building.id}
+              </option>
+            ))}
+            <option value="__unassigned">{ui.unassigned[locale]}</option>
+          </select>
           <table className="gdb-dialog__table" aria-label={ui.layers[locale]}>
             <thead>
               <tr>
@@ -725,6 +866,19 @@ export function GdbImportDialog({
           <p className="gdb-dialog__summary">
             {summaryText[locale](includedRows.length, includedFeatureCount)}
           </p>
+          <label className="gdb-dialog__field">
+            <input
+              type="checkbox"
+              className="gdb-dialog__checkbox"
+              aria-label={ui.clipToSelection[locale]}
+              checked={plan.clipToSelection === true}
+              onChange={(event) => {
+                setClipTouched(true);
+                setPlan((current) => ({ ...current, clipToSelection: event.target.checked }));
+              }}
+            />
+            <span>{ui.clipToSelection[locale]}</span>
+          </label>
           {onAddNetwork ? (
             <label className="gdb-dialog__btn gdb-dialog__network-add">
               {ui.addNetwork[locale]}
@@ -814,7 +968,7 @@ export function GdbImportDialog({
             </div>
           ) : null}
           <div className="gdb-dialog__actions">
-            <button type="button" className="gdb-dialog__btn" onClick={onCancel}>
+            <button type="button" className="gdb-dialog__btn" onClick={onCancel} disabled={cancelDisabled}>
               {ui.cancel[locale]}
             </button>
             <button
@@ -822,7 +976,7 @@ export function GdbImportDialog({
               className="gdb-dialog__btn gdb-dialog__btn--primary"
               disabled={!canImport}
             >
-              {ui.import[locale]}
+              {actionLabel ?? ui.import[locale]}
             </button>
           </div>
         </section>

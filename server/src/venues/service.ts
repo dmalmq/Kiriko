@@ -13,7 +13,13 @@ export interface VenueRow {
 }
 
 export interface VenueSummary extends VenueRow {
-  latest: { seq: number; status: string; stats: VersionStats | null; createdAt: string } | null;
+  latest: {
+    seq: number;
+    publicVersionId: string;
+    status: string;
+    stats: VersionStats | null;
+    createdAt: string;
+  } | null;
   editableMapping: boolean;
   hasNetwork: boolean;
   hasGraph: boolean;
@@ -61,7 +67,7 @@ export function listVenues(db: Database.Database, tenantId: number): VenueSummar
     )
     .all(tenantId) as VenueRow[];
   const latestStmt = db.prepare(
-    `SELECT seq, status, stats_json AS statsJson, created_at AS createdAt
+    `SELECT seq, public_id AS publicId, status, stats_json AS statsJson, created_at AS createdAt
      FROM versions WHERE venue_id = ? AND status = 'published'
      ORDER BY seq DESC LIMIT 1`,
   );
@@ -76,13 +82,14 @@ export function listVenues(db: Database.Database, tenantId: number): VenueSummar
     const net = networkStmt.get(venue.id) as { j: string | null; syn: number } | undefined;
     const hasNetwork = net?.j != null;
     const latest = latestStmt.get(venue.id) as
-      | { seq: number; status: string; statsJson: string | null; createdAt: string }
+      | { seq: number; publicId: string; status: string; statsJson: string | null; createdAt: string }
       | undefined;
     return {
       ...venue,
       latest: latest
         ? {
             seq: latest.seq,
+            publicVersionId: latest.publicId,
             status: latest.status,
             stats: latest.statsJson ? (JSON.parse(latest.statsJson) as VersionStats) : null,
             createdAt: latest.createdAt,

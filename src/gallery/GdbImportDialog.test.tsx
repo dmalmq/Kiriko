@@ -150,4 +150,195 @@ describe("GdbImportDialog", () => {
     render(<GdbImportDialog inspection={inspection} initialPlan={plan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
     expect((screen.getByRole("checkbox", { name: "Include Station" }) as HTMLInputElement).checked).toBe(true);
   });
+
+  const twoBuildingPlan: GdbMappingPlan = {
+    venueName: "Station",
+    buildings: [
+      { id: "b1", name: "North" },
+      { id: "b2", name: "South" },
+    ],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, included: true, targetType: "level", buildingId: "b1", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      { key: { databaseId: "gdb-1", layerName: "South_1_Floor" }, included: true, targetType: "level", buildingId: "b2", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+    ],
+  };
+
+  const twoBuildingInspection: GdbInspection = {
+    sourceName: "Station.gdb",
+    databases: [{ id: "gdb-1", name: "Station.gdb" }],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, databaseName: "Station.gdb", featureCount: 3, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+      { key: { databaseId: "gdb-1", layerName: "South_1_Floor" }, databaseName: "Station.gdb", featureCount: 5, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+    ],
+    warnings: [],
+  };
+
+  it("leaves clipping off when every building stays selected", () => {
+    const onImport = vi.fn();
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    expect(onImport.mock.calls[0]![0].clipToSelection).toBe(false);
+  });
+
+  it("auto-enables clipping the first time a building is deselected", () => {
+    const onImport = vi.fn();
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
+    // Exact match: a loose /include south/i regex would also match the layer
+    // row's "Include South_1_Floor" checkbox.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    expect(onImport.mock.calls[0]![0].clipToSelection).toBe(true);
+  });
+
+  it("respects a manual clip choice over the auto-enable", () => {
+    const onImport = vi.fn();
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
+    // Turn clipping on then off by hand; a later deselection must not re-enable it.
+    fireEvent.click(screen.getByLabelText(/clip routing/i));
+    fireEvent.click(screen.getByLabelText(/clip routing/i));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    expect(onImport.mock.calls[0]![0].clipToSelection).toBe(false);
+  });
+
+  const threeBuildingPlan: GdbMappingPlan = {
+    venueName: "Station",
+    buildings: [
+      { id: "b1", name: "North" },
+      { id: "b2", name: "South" },
+      { id: "b3", name: "East" },
+    ],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, included: true, targetType: "level", buildingId: "b1", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      { key: { databaseId: "gdb-1", layerName: "South_1_Floor" }, included: true, targetType: "level", buildingId: "b2", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      { key: { databaseId: "gdb-1", layerName: "East_1_Floor" }, included: true, targetType: "level", buildingId: "b3", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+    ],
+  };
+
+  const threeBuildingInspection: GdbInspection = {
+    sourceName: "Station.gdb",
+    databases: [{ id: "gdb-1", name: "Station.gdb" }],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, databaseName: "Station.gdb", featureCount: 3, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+      { key: { databaseId: "gdb-1", layerName: "South_1_Floor" }, databaseName: "Station.gdb", featureCount: 5, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+      { key: { databaseId: "gdb-1", layerName: "East_1_Floor" }, databaseName: "Station.gdb", featureCount: 7, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+    ],
+    warnings: [],
+  };
+
+  it("treats a manual uncheck as a touch, so a later deselection does not re-enable clipping", () => {
+    const onImport = vi.fn();
+    render(<GdbImportDialog inspection={threeBuildingInspection} initialPlan={threeBuildingPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
+    // Auto-enable fires on the first deselection (clipTouched is still false here).
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(true);
+    // The user manually unchecks it — this must count as a touch even though
+    // the box goes from checked to unchecked, not unchecked to checked.
+    fireEvent.click(screen.getByLabelText(/clip routing/i));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(false);
+    // A mutant that only records a touch on check-to-true would treat this
+    // deselection as untouched and flip clipping back on; the real
+    // implementation must leave it off.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include East" }));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    expect(onImport.mock.calls[0]![0].clipToSelection).toBe(false);
+  });
+
+  const partialPlan: GdbMappingPlan = {
+    venueName: "Station",
+    buildings: [{ id: "b1", name: "North" }],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, included: true, targetType: "level", buildingId: "b1", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      { key: { databaseId: "gdb-1", layerName: "North_1_to_2_detail" }, included: false, targetType: "detail", buildingId: "b1", levelRule: { kind: "layer-name" }, idField: null, ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+    ],
+  };
+
+  const partialInspection: GdbInspection = {
+    sourceName: "Station.gdb",
+    databases: [{ id: "gdb-1", name: "Station.gdb" }],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, databaseName: "Station.gdb", featureCount: 3, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+      { key: { databaseId: "gdb-1", layerName: "North_1_to_2_detail" }, databaseName: "Station.gdb", featureCount: 2, geometryFamily: "line", fields: [{ name: "id", type: "String" }] },
+    ],
+    warnings: [],
+  };
+
+  it("renders a partially included building as indeterminate", () => {
+    render(<GdbImportDialog inspection={partialInspection} initialPlan={partialPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    // Exact match: a loose /include north/i regex would also match the layer
+    // row's "Include North_1_Floor" checkbox.
+    const box = screen.getByRole("checkbox", { name: "Include North" }) as HTMLInputElement;
+    expect(box.indeterminate).toBe(true);
+    expect(box.checked).toBe(false);
+  });
+
+  it("restores the suggested inclusion instead of blanket-including on re-tick", () => {
+    const onImport = vi.fn();
+    render(<GdbImportDialog inspection={partialInspection} initialPlan={partialPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
+    const box = screen.getByRole("checkbox", { name: "Include North" });
+    fireEvent.click(box); // -> all excluded
+    fireEvent.click(box); // -> restore suggestion, NOT all included
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    const submitted = onImport.mock.calls[0]![0] as GdbMappingPlan;
+    expect(submitted.layers.find((l) => l.key.layerName === "North_1_Floor")!.included).toBe(true);
+    // The cross-floor layer was excluded by the server heuristic and must stay so.
+    expect(submitted.layers.find((l) => l.key.layerName === "North_1_to_2_detail")!.included).toBe(false);
+  });
+
+  it("shows included and total layer counts per building", () => {
+    render(<GdbImportDialog inspection={partialInspection} initialPlan={partialPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    // Counts sum feature totals across ALL of a building's rows (included or
+    // not), matching groupCounts: North_1_Floor (3) + North_1_to_2_detail (2).
+    expect(screen.getByText("1 / 2 layers, 5 features")).toBeTruthy();
+  });
+
+  it("filters the layer table to one building", () => {
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/filter by building/i), { target: { value: "b2" } });
+    expect(screen.queryByText("North_1_Floor")).toBeNull();
+    expect(screen.getByText("South_1_Floor")).toBeTruthy();
+  });
+
+  it("groups layers with no building into an unassigned row", () => {
+    const withOrphan: GdbMappingPlan = {
+      ...twoBuildingPlan,
+      layers: [
+        ...twoBuildingPlan.layers,
+        { key: { databaseId: "gdb-1", layerName: "road_edge" }, included: false, targetType: null, buildingId: null, levelRule: null, idField: null, ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      ],
+    };
+    const inspectionWithOrphan: GdbInspection = {
+      ...twoBuildingInspection,
+      layers: [
+        ...twoBuildingInspection.layers,
+        { key: { databaseId: "gdb-1", layerName: "road_edge" }, databaseName: "Station.gdb", featureCount: 9, geometryFamily: "line", fields: [] },
+      ],
+    };
+    render(<GdbImportDialog inspection={inspectionWithOrphan} initialPlan={withOrphan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    expect(screen.getByLabelText(/include unassigned/i)).toBeTruthy();
+    expect(screen.getByText("0 / 1 layers, 9 features")).toBeTruthy();
+  });
+
+  it("suggests the building name when exactly one building is selected", () => {
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    // Exact match: a loose /include south/i regex would also match the layer
+    // row's "Include South_1_Floor" checkbox.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
+    expect((screen.getByLabelText(/venue name/i) as HTMLInputElement).value).toBe("North");
+  });
+
+  it("never overwrites a hand-edited venue name", () => {
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/venue name/i), { target: { value: "My Venue" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
+    expect((screen.getByLabelText(/venue name/i) as HTMLInputElement).value).toBe("My Venue");
+  });
+
+  it("leaves the venue name alone when several buildings remain selected", () => {
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    expect((screen.getByLabelText(/venue name/i) as HTMLInputElement).value).toBe("Station");
+  });
 });

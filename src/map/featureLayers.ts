@@ -67,6 +67,9 @@ export const LAYER_FACILITY_SYMBOL = "indoor-facility-symbol";
 export const NETWORK_SOURCE_ID = "indoor-network";
 export const LAYER_NETWORK_PATH = "indoor-network-path";
 export const LAYER_NETWORK_JUNCTION = "indoor-network-junction";
+/** Wide, near-invisible hit targets for precise network editing clicks. */
+export const LAYER_NETWORK_PATH_HIT = "indoor-network-path-hit";
+export const LAYER_NETWORK_JUNCTION_HIT = "indoor-network-junction-hit";
 
 /** Layers that participate in click / hover hit-testing. */
 export const CLICKABLE_LAYER_IDS: readonly string[] = [
@@ -657,6 +660,30 @@ export function buildFacilityLayers(): AnyLayer[] {
  */
 export function buildNetworkLayers(): AnyLayer[] {
   return [
+    // Wide, near-invisible hit targets sit beneath the thin visible overlay so
+    // editing clicks land on 1.5px paths / 2.5px junctions reliably.
+    {
+      id: LAYER_NETWORK_PATH_HIT,
+      type: "line",
+      source: NETWORK_SOURCE_ID,
+      filter: ["==", ["get", "kind"], "path"],
+      paint: {
+        "line-color": "#000000",
+        "line-width": 12,
+        "line-opacity": 0.01,
+      },
+    },
+    {
+      id: LAYER_NETWORK_JUNCTION_HIT,
+      type: "circle",
+      source: NETWORK_SOURCE_ID,
+      filter: ["==", ["get", "kind"], "junction"],
+      paint: {
+        "circle-radius": 10,
+        "circle-color": "#000000",
+        "circle-opacity": 0.01,
+      },
+    },
     {
       id: LAYER_NETWORK_PATH,
       type: "line",
@@ -666,6 +693,18 @@ export function buildNetworkLayers(): AnyLayer[] {
         "line-color": "#d81b8c",
         "line-width": 1.5,
         "line-opacity": 0.85,
+      },
+    },
+    {
+      // Selected connection highlight (Ai Indigo), over the base path overlay.
+      id: "indoor-network-path-selected",
+      type: "line",
+      source: NETWORK_SOURCE_ID,
+      filter: ["all", ["==", ["get", "kind"], "path"], ["==", ["get", "selected"], true]],
+      paint: {
+        "line-color": "#4F46E5",
+        "line-width": 3,
+        "line-opacity": 0.9,
       },
     },
     {
@@ -681,15 +720,29 @@ export function buildNetworkLayers(): AnyLayer[] {
       },
     },
     {
+      // Selected junction (Ai Indigo, white ring).
       id: "indoor-network-selected",
       type: "circle",
       source: NETWORK_SOURCE_ID,
-      filter: ["==", ["get", "selected"], true],
+      filter: ["all", ["==", ["get", "kind"], "junction"], ["==", ["get", "selected"], true]],
       paint: {
         "circle-radius": 5,
-        "circle-color": "#ffd400",
+        "circle-color": "#4F46E5",
         "circle-stroke-width": 1.5,
-        "circle-stroke-color": "#000000",
+        "circle-stroke-color": "#ffffff",
+      },
+    },
+    {
+      // Pending connection origin (Amber) while picking the second endpoint.
+      id: "indoor-network-pending",
+      type: "circle",
+      source: NETWORK_SOURCE_ID,
+      filter: ["all", ["==", ["get", "kind"], "junction"], ["==", ["get", "pending"], true]],
+      paint: {
+        "circle-radius": 6,
+        "circle-color": "#D97706",
+        "circle-stroke-width": 2,
+        "circle-stroke-color": "#ffffff",
       },
     },
   ];

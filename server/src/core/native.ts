@@ -46,6 +46,13 @@ export interface CompileVenueMetadata {
    * supplied.
    */
   synthesizeNetwork?: boolean;
+  /**
+   * When `true`, the compiler drops network nodes and facilities that fall
+   * outside the imported venue's level/unit polygons. Set by a GDB import that
+   * selected a subset of a multi-building dataset, where the network and
+   * facility GDBs still describe the whole site.
+   */
+  clipToVenue?: boolean;
 }
 
 /**
@@ -76,6 +83,7 @@ export type NativeCompileFn = (
   networkPathsGeoJson?: string,
   facilitiesGeoJson?: string,
   synthesizeNetwork?: boolean,
+  clipToVenue?: boolean,
 ) => Promise<unknown>;
 
 const WARNING_CODES: Record<ViewerWarningCode, true> = {
@@ -258,6 +266,7 @@ export async function compileVenueBundle(
         metadata.networkPathsGeoJson,
         metadata.facilitiesGeoJson,
         metadata.synthesizeNetwork,
+        metadata.clipToVenue,
       ),
     );
     if (response.ok) {

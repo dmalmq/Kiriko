@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IndoorMapProps } from "../map/IndoorMap";
@@ -150,6 +150,7 @@ function buildMinimalVenue(overrides?: Partial<LoadedVenue>): LoadedVenue {
 }
 
 const PUBLIC_VERSION_ID = "a".repeat(64);
+const DEFAULT_SEQ = 42;
 
 function bundleLoadResult(
   venue = buildMinimalVenue(),
@@ -157,11 +158,13 @@ function bundleLoadResult(
   hasGraph = false,
   hasFacilities = false,
   facilities: KirikoBundleLoadResult["facilities"] = [],
+  seq: number | null = DEFAULT_SEQ,
 ): KirikoBundleLoadResult {
   return {
     venue,
     metadata: { datasetId: "default/tokyo-station", version: 7 },
     publicVersionId,
+    seq,
     hasGraph,
     hasFacilities,
     facilities,
@@ -359,6 +362,10 @@ vi.mock("../map/IndoorMap", () => ({
           props.directions?.route != null ? JSON.stringify(props.directions.route.segments) : ""
         }
         data-network-present={String(props.network != null)}
+        data-network-path-count={String(props.network?.paths.length ?? 0)}
+        data-network-editing={String(props.networkEditing != null)}
+        data-network-tool={props.networkEditing?.tool ?? ""}
+        data-network-selection={props.networkEditing?.selection?.kind ?? ""}
       >
         <button
           type="button"
@@ -436,12 +443,23 @@ vi.mock("../map/IndoorMap", () => ({
               key={`net-pick-${id}`}
               type="button"
               data-testid={`net-pick-${id}`}
-              onClick={() => props.onNetworkPick?.({ junctionId: id })}
+              onClick={() => props.networkEditing?.onPick({ kind: "junction", nodeId: id })}
             >
               {`pick ${id}`}
             </button>
           );
         })}
+        {props.networkEditing != null ? (
+          <button
+            type="button"
+            data-testid="net-map-pick"
+            onClick={() =>
+              props.networkEditing?.onPick({ kind: "map", longitude: 139.702, latitude: 35.681 })
+            }
+          >
+            net map pick
+          </button>
+        ) : null}
       </div>
     );
   },
@@ -456,6 +474,34 @@ function zipFile(name = "venue.zip"): File {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  // Executor form required: tsconfig lib predates Promise.withResolvers.
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function collectNavigationEvents() {
+  const hrefs: string[] = [];
+  const onNavigate = (event: Event) => {
+    if (event instanceof CustomEvent && typeof event.detail.href === "string") {
+      hrefs.push(event.detail.href);
+    }
+    event.preventDefault();
+  };
+  window.addEventListener("kiriko:navigate", onNavigate);
+  return {
+    hrefs,
+    stop: () => {
+      window.removeEventListener("kiriko:navigate", onNavigate);
+    },
+  };
+}
+
 async function uploadViaHiddenInput(file: File): Promise<void> {
   const input = document.querySelector<HTMLInputElement>('input[type="file"]');
   expect(input).toBeTruthy();
@@ -466,8 +512,11 @@ async function renderDataset(
   publicVersionId: string | null = PUBLIC_VERSION_ID,
   venue: LoadedVenue = buildMinimalVenue(),
   hasGraph = false,
+  seq: number | null = DEFAULT_SEQ,
 ) {
-  loadKirikoBundleMock.mockResolvedValue(bundleLoadResult(venue, publicVersionId, hasGraph));
+  loadKirikoBundleMock.mockResolvedValue(
+    bundleLoadResult(venue, publicVersionId, hasGraph, false, [], seq),
+  );
   window.history.replaceState(null, "", "/?dataset=tokyo-station&lang=en");
   const result = render(<App />);
   await waitFor(() => {
@@ -979,6 +1028,120 @@ describe("App deep links", () => {
     expect(loadImdfArchiveMock).toHaveBeenCalledTimes(1);
     expect(loadKirikoBundleMock).not.toHaveBeenCalled();
   });
+
+  it("loads the pinned bundle URL when the deep link carries a 64-hex ?version", async () => {
+    const pinId = "b".repeat(64);
+    loadKirikoBundleMock.mockResolvedValue(bundleLoadResult());
+    window.history.replaceState(null, "", `/?dataset=tokyo-station&version=${pinId}&lang=en`);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    expect(loadKirikoBundleMock).toHaveBeenCalledWith(
+      `/v/default/tokyo-station/bundle@${pinId}`,
+      expect.any(AbortSignal),
+    );
+    expect(loadKirikoBundleMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores an invalid (non-64-hex) ?version and admits mutable latest", async () => {
+    loadKirikoBundleMock.mockResolvedValue(bundleLoadResult());
+    window.history.replaceState(null, "", "/?dataset=tokyo-station&version=5&lang=en");
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    expect(loadKirikoBundleMock).toHaveBeenCalledWith(
+      "/v/default/tokyo-station/bundle",
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("preserves the admitted public version id in the embed Open-in-Kiriko link", async () => {
+    loadKirikoBundleMock.mockResolvedValue(
+      bundleLoadResult(buildMinimalVenue(), PUBLIC_VERSION_ID, false, false, [], 9),
+    );
+    window.history.replaceState(null, "", "/?dataset=tokyo-station&embed=1&lang=en");
+
+    const { container } = render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    const badge = container.querySelector<HTMLAnchorElement>("a.kiriko-badge");
+    expect(badge).toBeTruthy();
+    const href = new URL(badge!.href);
+    expect(href.searchParams.get("version")).toBe(PUBLIC_VERSION_ID);
+    expect(href.searchParams.get("dataset")).toBe("tokyo-station");
+    expect(href.searchParams.has("embed")).toBe(false);
+  });
+
+  it("hides the embed badge (never a version-stripped mutable link) when the admission is not pin-safe", async () => {
+    // Admission succeeds but the header seq disagreed with the decoded version.
+    loadKirikoBundleMock.mockResolvedValue(
+      bundleLoadResult(buildMinimalVenue(), PUBLIC_VERSION_ID, false, false, [], null),
+    );
+    window.history.replaceState(null, "", `/?dataset=tokyo-station&version=${"c".repeat(64)}&embed=1&lang=en`);
+
+    const { container } = render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    expect(container.querySelector("a.kiriko-badge")).toBeNull();
+  });
+
+  it("overrides an inbound version with the admitted public id in the embed link", async () => {
+    loadKirikoBundleMock.mockResolvedValue(
+      bundleLoadResult(buildMinimalVenue(), PUBLIC_VERSION_ID, false, false, [], 9),
+    );
+    window.history.replaceState(null, "", `/?dataset=tokyo-station&version=${"c".repeat(64)}&embed=1&lang=en`);
+
+    const { container } = render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    const badge = container.querySelector<HTMLAnchorElement>("a.kiriko-badge");
+    const href = new URL(badge!.href);
+    expect(href.searchParams.get("version")).toBe(PUBLIC_VERSION_ID);
+  });
+
+  it("hides the dataset embed badge until admission, then shows it pinned to the public id", async () => {
+    let resolveLoad!: (result: KirikoBundleLoadResult) => void;
+    loadKirikoBundleMock.mockReturnValue(
+      new Promise<KirikoBundleLoadResult>((resolve) => {
+        resolveLoad = resolve;
+      }),
+    );
+    window.history.replaceState(null, "", "/?dataset=tokyo-station&embed=1&lang=en");
+
+    const { container } = render(<App />);
+    // Before admission the badge must not expose a mutable-latest link.
+    await waitFor(() => expect(loadKirikoBundleMock).toHaveBeenCalledTimes(1));
+    expect(container.querySelector("a.kiriko-badge")).toBeNull();
+
+    resolveLoad(bundleLoadResult(buildMinimalVenue(), PUBLIC_VERSION_ID, false, false, [], 9));
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    const badge = container.querySelector<HTMLAnchorElement>("a.kiriko-badge");
+    expect(badge).toBeTruthy();
+    expect(new URL(badge!.href).searchParams.get("version")).toBe(PUBLIC_VERSION_ID);
+  });
+
+  it("keeps the dataset embed badge hidden when admission fails", async () => {
+    loadKirikoBundleMock.mockRejectedValue(new VenueLoadError("bundle_integrity_failed", "bad bundle"));
+    window.history.replaceState(null, "", "/?dataset=tokyo-station&embed=1&lang=en");
+
+    const { container } = render(<App />);
+    await screen.findByRole("alert");
+    expect(container.querySelector("a.kiriko-badge")).toBeNull();
+  });
 });
 
 describe("App review issue integration", () => {
@@ -1009,6 +1172,22 @@ describe("App review issue integration", () => {
     expect(listReviewersMock).not.toHaveBeenCalled();
     expect(FakeEventSource.instances).toHaveLength(0);
     expect(document.querySelector(".map-stage__error")).toBeNull();
+  });
+
+  it("treats a seq/body integrity mismatch as an identity error and starts no issue or auth requests", async () => {
+    // publicVersionId is well-formed, but the loader admitted no pin-safe seq.
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), false, null);
+    const user = userEvent.setup();
+
+    const issuesToggle = screen.getByRole("button", { name: "Issues" });
+    expect(issuesToggle.getAttribute("aria-pressed")).toBe("false");
+    await user.click(issuesToggle);
+
+    expect(await screen.findByText("Issues aren't available for this dataset.")).toBeTruthy();
+    expect(getIssuesMock).not.toHaveBeenCalled();
+    expect(meMock).not.toHaveBeenCalled();
+    expect(listReviewersMock).not.toHaveBeenCalled();
+    expect(FakeEventSource.instances).toHaveLength(0);
   });
 
   it("loads public issues, resolves identity once, and counts active roots across floors", async () => {
@@ -1480,13 +1659,24 @@ describe("App directions mode", () => {
   ];
   const ROUTE_RESULT = {
     segments: ROUTE_SEGMENTS,
-    totalWeight: 120,
+    totalWeight: 55_000,
     originProjected: [139.7671, 35.6811, 0],
     destProjected: [139.7674, 35.6813, 0],
   };
 
   function mapStub() {
     return screen.getByTestId("indoor-map-stub");
+  }
+
+  function editableNetwork() {
+    return {
+      junctions: [
+        { ordinal: 0, geometry: { type: "Point", coordinates: [139.7, 35.68] }, properties: { NODEID: 0, FLOOR: "F1" } },
+        { ordinal: 0, geometry: { type: "Point", coordinates: [139.7005, 35.68] }, properties: { NODEID: 1, FLOOR: "F1" } },
+        { ordinal: 0, geometry: { type: "Point", coordinates: [139.701, 35.68] }, properties: { NODEID: 2, FLOOR: "F1" } },
+      ],
+      paths: [],
+    };
   }
 
   beforeEach(() => {
@@ -1496,7 +1686,18 @@ describe("App directions mode", () => {
     routeKirikoBundleMock.mockReset();
     loadNetworkOverlayMock.mockReset();
     resetIssueMocks();
+    // Network editing is a producer action; default these tests to a member so
+    // the Edit control is enabled once the overlay loads.
+    meMock.mockResolvedValue({ id: 1, username: "daniel", role: "member" });
   });
+
+  // Enter edit and select the Connect tool once the overlay is loaded.
+  async function startNetworkEdit(user: UserEvent): Promise<void> {
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    await waitFor(() => expect(mapStub().getAttribute("data-network-present")).toBe("true"));
+    await user.click(screen.getByRole("button", { name: "Edit network" }));
+    await user.click(await screen.findByRole("button", { name: "Connect" }));
+  }
 
   afterEach(() => {
     vi.clearAllMocks();
@@ -1543,7 +1744,7 @@ describe("App directions mode", () => {
     await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
     await waitFor(() => {
       expect(routeKirikoBundleMock).toHaveBeenCalledWith(
-        "/v/default/tokyo-station/bundle",
+        `/v/default/tokyo-station/bundle@${PUBLIC_VERSION_ID}`,
         { longitude: 139.7671, latitude: 35.6811, ordinal: 0 },
         { longitude: 139.7671, latitude: 35.6811, ordinal: 0 },
       );
@@ -1552,7 +1753,7 @@ describe("App directions mode", () => {
     await waitFor(() => {
       expect(JSON.parse(mapStub().getAttribute("data-directions-route")!)).toEqual(ROUTE_SEGMENTS);
     });
-    expect(screen.getByText(/120\s*m/)).toBeTruthy();
+    expect(screen.getByText(/55\s*m/)).toBeTruthy();
   });
 
   it("hides Review network when the bundle has no graph", async () => {
@@ -1579,35 +1780,504 @@ describe("App directions mode", () => {
 
     await user.click(screen.getByRole("button", { name: "Review network" }));
     await waitFor(() => {
-      expect(loadNetworkOverlayMock).toHaveBeenCalledWith("/v/default/tokyo-station/bundle");
+      expect(loadNetworkOverlayMock).toHaveBeenCalledWith(`/v/default/tokyo-station/bundle@${PUBLIC_VERSION_ID}`);
       expect(mapStub().getAttribute("data-network-present")).toBe("true");
     });
   });
 
-  it("edits the review network and saves it through importNetwork", async () => {
+  it("waits for edited-network publication before navigating to the returned public version", async () => {
     const user = userEvent.setup();
-    loadNetworkOverlayMock.mockResolvedValue({
-      junctions: [
-        { ordinal: 0, geometry: { type: "Point", coordinates: [139.7, 35.68] }, properties: { NODEID: 0, FLOOR: "F1" } },
-        { ordinal: 0, geometry: { type: "Point", coordinates: [139.7005, 35.68] }, properties: { NODEID: 1, FLOOR: "F1" } },
-      ],
-      paths: [],
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    const accepted = deferred<{ jobId: string; versionId: number; seq: number; publicVersionId: string }>();
+    const job = deferred<{ status: "done" }>();
+    const importSpy = vi.spyOn(api, "importNetwork").mockReturnValue(accepted.promise);
+    const waitSpy = vi.spyOn(api, "waitForJob").mockReturnValue(job.promise);
+    const navigation = collectNavigationEvents();
+    const newPublicVersionId = "b".repeat(64);
+    try {
+      await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+
+      await startNetworkEdit(user);
+      await user.click(await screen.findByTestId("net-pick-0"));
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
+
+      await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1));
+      const [slug, publicVersionId, junctions, paths] = importSpy.mock.calls[0]!;
+      expect(slug).toBe("tokyo-station");
+      expect(publicVersionId).toBe(PUBLIC_VERSION_ID);
+      expect(JSON.parse(junctions).features).toHaveLength(3);
+      expect(JSON.parse(paths).features).toHaveLength(2);
+      expect(navigation.hrefs).toEqual([]);
+
+      accepted.resolve({ jobId: "job-new", versionId: 9, seq: 3, publicVersionId: newPublicVersionId });
+      await waitFor(() =>
+        expect(waitSpy).toHaveBeenCalledWith(
+          "job-new",
+          expect.objectContaining({ signal: expect.any(AbortSignal) }),
+        ),
+      );
+      expect(navigation.hrefs).toEqual([]);
+
+      job.resolve({ status: "done" });
+      await waitFor(() =>
+        expect(navigation.hrefs).toEqual([
+          `/?dataset=tokyo-station&lang=en&version=${newPublicVersionId}&review=1`,
+        ]),
+      );
+    } finally {
+      navigation.stop();
+      importSpy.mockRestore();
+      waitSpy.mockRestore();
+    }
+  });
+
+  it("keeps the edited graph and shows localized structured copy after terminal save failure", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    const importSpy = vi
+      .spyOn(api, "importNetwork")
+      .mockResolvedValueOnce({ jobId: "job-error", versionId: 9, seq: 3, publicVersionId: "c".repeat(64) })
+      .mockResolvedValueOnce({ jobId: "job-retry", versionId: 10, seq: 4, publicVersionId: "d".repeat(64) });
+    const waitSpy = vi
+      .spyOn(api, "waitForJob")
+      .mockResolvedValueOnce({
+        status: "error",
+        error: JSON.stringify({ code: "no_routable_network", message: "empty graph" }),
+      })
+      // Executor form required: tsconfig lib predates Promise.withResolvers.
+      .mockReturnValue(new Promise<never>(() => {}));
+    const navigation = collectNavigationEvents();
+    try {
+      await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+
+      await startNetworkEdit(user);
+      await user.click(await screen.findByTestId("net-pick-0"));
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
+
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain("No routable network");
+      const saveButton = screen.getByRole("button", { name: "Save as new version" }) as HTMLButtonElement;
+      expect(saveButton.disabled).toBe(false);
+      expect(navigation.hrefs).toEqual([]);
+
+      await user.click(saveButton);
+      await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(2));
+      const [, , retryJunctions, retryPaths] = importSpy.mock.calls[1]!;
+      expect(JSON.parse(retryJunctions).features).toHaveLength(3);
+      expect(JSON.parse(retryPaths).features).toHaveLength(2);
+    } finally {
+      navigation.stop();
+      importSpy.mockRestore();
+      waitSpy.mockRestore();
+    }
+  });
+
+  it("keeps a timeout as an accepted job and checks it later without resubmitting or editing the pending snapshot", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    const newPublicVersionId = "e".repeat(64);
+    const importSpy = vi
+      .spyOn(api, "importNetwork")
+      .mockResolvedValue({ jobId: "job-timeout", versionId: 9, seq: 3, publicVersionId: newPublicVersionId });
+    const waitSpy = vi
+      .spyOn(api, "waitForJob")
+      .mockResolvedValueOnce({ status: "timeout" })
+      .mockResolvedValueOnce({ status: "done" });
+    const navigation = collectNavigationEvents();
+    try {
+      await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+
+      await startNetworkEdit(user);
+      await user.click(await screen.findByTestId("net-pick-0"));
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
+
+      await screen.findByRole("button", { name: "Check status" });
+      expect(importSpy).toHaveBeenCalledTimes(1);
+      expect(waitSpy.mock.calls[0]?.[0]).toBe("job-timeout");
+      expect(navigation.hrefs).toEqual([]);
+      expect(mapStub().getAttribute("data-network-path-count")).toBe("2");
+
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(await screen.findByTestId("net-pick-2"));
+      expect(mapStub().getAttribute("data-network-path-count")).toBe("2");
+
+      await user.click(screen.getByRole("button", { name: "Check status" }));
+      await waitFor(() => expect(waitSpy).toHaveBeenCalledTimes(2));
+      expect(waitSpy.mock.calls[1]?.[0]).toBe("job-timeout");
+      expect(importSpy).toHaveBeenCalledTimes(1);
+      await waitFor(() =>
+        expect(navigation.hrefs).toEqual([
+          `/?dataset=tokyo-station&lang=en&version=${newPublicVersionId}&review=1`,
+        ]),
+      );
+    } finally {
+      navigation.stop();
+      importSpy.mockRestore();
+      waitSpy.mockRestore();
+    }
+  });
+
+  it("keeps the accepted job after a transient status-check rejection and checks the same job on retry", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    const newPublicVersionId = "1".repeat(64);
+    const importSpy = vi
+      .spyOn(api, "importNetwork")
+      .mockResolvedValue({ jobId: "job-flaky-status", versionId: 9, seq: 3, publicVersionId: newPublicVersionId });
+    const waitSpy = vi
+      .spyOn(api, "waitForJob")
+      .mockRejectedValueOnce(new TypeError("temporary status fetch failure"))
+      .mockResolvedValueOnce({ status: "done" });
+    const navigation = collectNavigationEvents();
+    try {
+      await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+      await startNetworkEdit(user);
+      await user.click(await screen.findByTestId("net-pick-0"));
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
+
+      await screen.findByRole("button", { name: "Check status" });
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(importSpy).toHaveBeenCalledTimes(1);
+      expect(waitSpy.mock.calls[0]?.[0]).toBe("job-flaky-status");
+
+      await user.click(screen.getByRole("button", { name: "Check status" }));
+      await waitFor(() => expect(waitSpy).toHaveBeenCalledTimes(2));
+      expect(waitSpy.mock.calls[1]?.[0]).toBe("job-flaky-status");
+      expect(importSpy).toHaveBeenCalledTimes(1);
+      await waitFor(() =>
+        expect(navigation.hrefs).toEqual([
+          `/?dataset=tokyo-station&lang=en&version=${newPublicVersionId}&review=1`,
+        ]),
+      );
+    } finally {
+      navigation.stop();
+      importSpy.mockRestore();
+      waitSpy.mockRestore();
+    }
+  });
+
+  it("aborts save polling when a slow replacement starts and ignores the old job done", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    vi.spyOn(api, "importNetwork").mockResolvedValue({
+      jobId: "job-slow-replace",
+      versionId: 9,
+      seq: 3,
+      publicVersionId: "2".repeat(64),
     });
-    const importSpy = vi.spyOn(api, "importNetwork").mockResolvedValue({ jobId: "j", versionId: 9, seq: 3 });
-    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    const job = deferred<{ status: "done" }>();
+    let signal: AbortSignal | undefined;
+    const waitSpy = vi.spyOn(api, "waitForJob").mockImplementation((_jobId, opts) => {
+      signal = opts?.signal;
+      return job.promise;
+    });
+    const replacement = deferred<LoadedVenue>();
+    const navigation = collectNavigationEvents();
+    try {
+      await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+      await startNetworkEdit(user);
+      await user.click(await screen.findByTestId("net-pick-0"));
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
+      await waitFor(() => expect(waitSpy).toHaveBeenCalledWith("job-slow-replace", expect.anything()));
 
-    await user.click(screen.getByRole("button", { name: "Review network" }));
-    await user.click(await screen.findByRole("button", { name: "Edit network" }));
-    await user.click(await screen.findByTestId("net-pick-0"));
-    await user.click(await screen.findByTestId("net-pick-1"));
-    await user.click(screen.getByRole("button", { name: "Save network" }));
+      loadImdfArchiveMock.mockReturnValueOnce(replacement.promise);
+      await uploadViaHiddenInput(zipFile("slow-replacement.zip"));
+      await waitFor(() => expect(signal?.aborted).toBe(true));
+      await act(async () => {
+        job.resolve({ status: "done" });
+        await job.promise;
+      });
 
-    await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1));
-    const [slug, junctions, paths] = importSpy.mock.calls[0]!;
-    expect(slug).toBe("tokyo-station");
-    expect(JSON.parse(junctions).features).toHaveLength(2);
-    expect(JSON.parse(paths).features).toHaveLength(2);
-    importSpy.mockRestore();
+      expect(navigation.hrefs).toEqual([]);
+      expect(screen.getByText("Test Station")).toBeTruthy();
+    } finally {
+      navigation.stop();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("keeps the accepted save job after a failed replacement and checks it without resubmitting", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    const newPublicVersionId = "3".repeat(64);
+    const importSpy = vi.spyOn(api, "importNetwork").mockResolvedValue({
+      jobId: "job-failed-replace",
+      versionId: 9,
+      seq: 3,
+      publicVersionId: newPublicVersionId,
+    });
+    const firstJob = deferred<{ status: "done" }>();
+    let signal: AbortSignal | undefined;
+    const waitSpy = vi
+      .spyOn(api, "waitForJob")
+      .mockImplementationOnce((_jobId, opts) => {
+        signal = opts?.signal;
+        return firstJob.promise;
+      })
+      .mockResolvedValueOnce({ status: "done" });
+    const replacement = deferred<LoadedVenue>();
+    const navigation = collectNavigationEvents();
+    try {
+      await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+      await startNetworkEdit(user);
+      await user.click(await screen.findByTestId("net-pick-0"));
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
+      await waitFor(() => expect(waitSpy).toHaveBeenCalledWith("job-failed-replace", expect.anything()));
+
+      loadImdfArchiveMock.mockReturnValueOnce(replacement.promise);
+      await uploadViaHiddenInput(zipFile("bad-replacement.zip"));
+      await waitFor(() => expect(signal?.aborted).toBe(true));
+      const loadingCheckButton = screen.getByRole("button", { name: "Check status" }) as HTMLButtonElement;
+      expect(loadingCheckButton.disabled).toBe(true);
+      await user.click(loadingCheckButton);
+      expect(waitSpy).toHaveBeenCalledTimes(1);
+      expect(navigation.hrefs).toEqual([]);
+      await act(async () => {
+        firstJob.resolve({ status: "done" });
+        await firstJob.promise;
+        replacement.reject(new VenueLoadError("invalid_archive", "bad local zip"));
+        await replacement.promise.catch(() => {});
+      });
+
+      expect(navigation.hrefs).toEqual([]);
+      expect(await screen.findByRole("alert")).toBeTruthy();
+      await user.click(screen.getByRole("button", { name: "Check status" }));
+      await waitFor(() => expect(waitSpy).toHaveBeenCalledTimes(2));
+      expect(waitSpy.mock.calls[1]?.[0]).toBe("job-failed-replace");
+      expect(importSpy).toHaveBeenCalledTimes(1);
+      await waitFor(() =>
+        expect(navigation.hrefs).toEqual([
+          `/?dataset=tokyo-station&lang=en&version=${newPublicVersionId}&review=1`,
+        ]),
+      );
+    } finally {
+      navigation.stop();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("records a late accepted save after replacement starts and checks it after replacement failure", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    const accepted = deferred<{ jobId: string; versionId: number; seq: number; publicVersionId: string }>();
+    const newPublicVersionId = "4".repeat(64);
+    const importSpy = vi.spyOn(api, "importNetwork").mockReturnValue(accepted.promise);
+    const waitSpy = vi.spyOn(api, "waitForJob").mockResolvedValueOnce({ status: "done" });
+    const replacement = deferred<LoadedVenue>();
+    const navigation = collectNavigationEvents();
+    try {
+      await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+      await startNetworkEdit(user);
+      await user.click(await screen.findByTestId("net-pick-0"));
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
+      await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1));
+
+      loadImdfArchiveMock.mockReturnValueOnce(replacement.promise);
+      await uploadViaHiddenInput(zipFile("late-accept-fail.zip"));
+      accepted.resolve({ jobId: "job-late-accepted", versionId: 9, seq: 3, publicVersionId: newPublicVersionId });
+      await accepted.promise;
+      expect(waitSpy).not.toHaveBeenCalled();
+      expect(navigation.hrefs).toEqual([]);
+
+      await act(async () => {
+        replacement.reject(new VenueLoadError("invalid_archive", "bad local zip"));
+        await replacement.promise.catch(() => {});
+      });
+      expect(await screen.findByRole("alert")).toBeTruthy();
+      await user.click(screen.getByRole("button", { name: "Check status" }));
+      await waitFor(() => expect(waitSpy).toHaveBeenCalledWith("job-late-accepted", expect.anything()));
+      expect(importSpy).toHaveBeenCalledTimes(1);
+      await waitFor(() =>
+        expect(navigation.hrefs).toEqual([
+          `/?dataset=tokyo-station&lang=en&version=${newPublicVersionId}&review=1`,
+        ]),
+      );
+    } finally {
+      navigation.stop();
+      importSpy.mockRestore();
+      waitSpy.mockRestore();
+    }
+  });
+
+  it("keeps an unresolved save submission locked across failed replacement until its late 202", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    const accepted = deferred<{ jobId: string; versionId: number; seq: number; publicVersionId: string }>();
+    const newPublicVersionId = "6".repeat(64);
+    const importSpy = vi.spyOn(api, "importNetwork").mockReturnValue(accepted.promise);
+    const waitSpy = vi.spyOn(api, "waitForJob").mockResolvedValueOnce({ status: "done" });
+    const replacement = deferred<LoadedVenue>();
+    const navigation = collectNavigationEvents();
+    try {
+      await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+      await startNetworkEdit(user);
+      await user.click(await screen.findByTestId("net-pick-0"));
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
+      await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1));
+
+      loadImdfArchiveMock.mockReturnValueOnce(replacement.promise);
+      await uploadViaHiddenInput(zipFile("unresolved-submit.zip"));
+      await act(async () => {
+        replacement.reject(new VenueLoadError("invalid_archive", "bad local zip"));
+        await replacement.promise.catch(() => {});
+      });
+      expect(await screen.findByRole("alert")).toBeTruthy();
+      const lockedSave = screen.getByRole("button", { name: "Save as new version" }) as HTMLButtonElement;
+      expect(lockedSave.disabled).toBe(true);
+      await user.click(lockedSave);
+      expect(importSpy).toHaveBeenCalledTimes(1);
+      expect(waitSpy).not.toHaveBeenCalled();
+      expect(navigation.hrefs).toEqual([]);
+
+      accepted.resolve({ jobId: "job-late-after-failure", versionId: 9, seq: 3, publicVersionId: newPublicVersionId });
+      await accepted.promise;
+      await user.click(await screen.findByRole("button", { name: "Check status" }));
+      await waitFor(() => expect(waitSpy).toHaveBeenCalledWith("job-late-after-failure", expect.anything()));
+      expect(importSpy).toHaveBeenCalledTimes(1);
+      await waitFor(() =>
+        expect(navigation.hrefs).toEqual([
+          `/?dataset=tokyo-station&lang=en&version=${newPublicVersionId}&review=1`,
+        ]),
+      );
+    } finally {
+      navigation.stop();
+      importSpy.mockRestore();
+      waitSpy.mockRestore();
+    }
+  });
+
+  it("drops a late accepted save when replacement succeeds", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    const accepted = deferred<{ jobId: string; versionId: number; seq: number; publicVersionId: string }>();
+    const importSpy = vi.spyOn(api, "importNetwork").mockReturnValue(accepted.promise);
+    const waitSpy = vi.spyOn(api, "waitForJob").mockResolvedValue({ status: "done" });
+    const replacement = deferred<LoadedVenue>();
+    const navigation = collectNavigationEvents();
+    try {
+      await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+      await startNetworkEdit(user);
+      await user.click(await screen.findByTestId("net-pick-0"));
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
+      await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1));
+
+      const localVenue = buildMinimalVenue({
+        venue: {
+          ...VENUE_FEATURE,
+          labels: { ja: "新しい会場", en: "Replacement Venue" },
+        },
+      });
+      loadImdfArchiveMock.mockReturnValueOnce(replacement.promise);
+      await uploadViaHiddenInput(zipFile("late-accept-success.zip"));
+      accepted.resolve({ jobId: "job-old-late", versionId: 9, seq: 3, publicVersionId: "5".repeat(64) });
+      await accepted.promise;
+      await act(async () => {
+        replacement.resolve(localVenue);
+        await replacement.promise;
+      });
+
+      await waitFor(() => expect(screen.getByText("Replacement Venue")).toBeTruthy());
+      expect(screen.queryByRole("button", { name: "Check status" })).toBeNull();
+      expect(waitSpy).not.toHaveBeenCalled();
+      expect(navigation.hrefs).toEqual([]);
+    } finally {
+      navigation.stop();
+      importSpy.mockRestore();
+      waitSpy.mockRestore();
+    }
+  });
+
+  it("aborts edited-network polling on unmount and suppresses late navigation", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    vi.spyOn(api, "importNetwork").mockResolvedValue({
+      jobId: "job-unmount",
+      versionId: 9,
+      seq: 3,
+      publicVersionId: "f".repeat(64),
+    });
+    const job = deferred<{ status: "done" }>();
+    let signal: AbortSignal | undefined;
+    const waitSpy = vi.spyOn(api, "waitForJob").mockImplementation((_jobId, opts) => {
+      signal = opts?.signal;
+      return job.promise;
+    });
+    const navigation = collectNavigationEvents();
+    try {
+      const { unmount } = await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+      await startNetworkEdit(user);
+      await user.click(await screen.findByTestId("net-pick-0"));
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
+      await waitFor(() => expect(waitSpy).toHaveBeenCalledWith("job-unmount", expect.anything()));
+
+      unmount();
+      expect(signal?.aborted).toBe(true);
+      await act(async () => {
+        job.resolve({ status: "done" });
+        await job.promise;
+      });
+      expect(navigation.hrefs).toEqual([]);
+    } finally {
+      navigation.stop();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("aborts edited-network polling when venue provenance is replaced and suppresses late navigation", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    vi.spyOn(api, "importNetwork").mockResolvedValue({
+      jobId: "job-replaced",
+      versionId: 9,
+      seq: 3,
+      publicVersionId: "f".repeat(64),
+    });
+    const job = deferred<{ status: "done" }>();
+    let signal: AbortSignal | undefined;
+    const waitSpy = vi.spyOn(api, "waitForJob").mockImplementation((_jobId, opts) => {
+      signal = opts?.signal;
+      return job.promise;
+    });
+    const navigation = collectNavigationEvents();
+    try {
+      await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+      await startNetworkEdit(user);
+      await user.click(await screen.findByTestId("net-pick-0"));
+      await user.click(await screen.findByTestId("net-pick-1"));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
+      await waitFor(() => expect(waitSpy).toHaveBeenCalledWith("job-replaced", expect.anything()));
+
+      const localVenue = buildMinimalVenue({
+        venue: {
+          ...VENUE_FEATURE,
+          labels: { ja: "ローカル会場", en: "Local Venue" },
+        },
+      });
+      loadImdfArchiveMock.mockResolvedValueOnce(localVenue);
+      await uploadViaHiddenInput(zipFile("local.zip"));
+      await waitFor(() => expect(screen.getByText("Local Venue")).toBeTruthy());
+      expect(signal?.aborted).toBe(true);
+
+      await act(async () => {
+        job.resolve({ status: "done" });
+        await job.promise;
+      });
+      expect(navigation.hrefs).toEqual([]);
+      expect(screen.getByText("Local Venue")).toBeTruthy();
+    } finally {
+      navigation.stop();
+      vi.restoreAllMocks();
+    }
   });
 
   it("shows a no-path message when the worker resolves null", async () => {
@@ -1653,5 +2323,146 @@ describe("App directions mode", () => {
     await user.click(toggle);
     expect(mapStub().getAttribute("data-directions-active")).toBe("false");
     expect(mapStub().getAttribute("data-directions-origin")).toBe("");
+  });
+
+  it("pins Directions and Review network to the admitted public identity from a latest load", async () => {
+    const user = userEvent.setup();
+    routeKirikoBundleMock.mockResolvedValue(ROUTE_RESULT);
+    loadNetworkOverlayMock.mockResolvedValue({
+      junctions: [
+        { ordinal: 0, geometry: { type: "Point", coordinates: [139.7, 35.68] }, properties: { NODEID: 0, FLOOR: "F1" } },
+      ],
+      paths: [],
+    });
+    // Latest load; the loader admits the pin-safe public identity from the response.
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true, 9);
+    // Initial admission uses mutable latest; the sequence comes from that response.
+    expect(loadKirikoBundleMock).toHaveBeenCalledWith(
+      "/v/default/tokyo-station/bundle",
+      expect.any(AbortSignal),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Directions" }));
+    await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
+    await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
+    await waitFor(() => {
+      expect(routeKirikoBundleMock).toHaveBeenCalledWith(
+        `/v/default/tokyo-station/bundle@${PUBLIC_VERSION_ID}`,
+        { longitude: 139.7671, latitude: 35.6811, ordinal: 0 },
+        { longitude: 139.7671, latitude: 35.6811, ordinal: 0 },
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    await waitFor(() => {
+      expect(loadNetworkOverlayMock).toHaveBeenCalledWith(`/v/default/tokyo-station/bundle@${PUBLIC_VERSION_ID}`);
+    });
+  });
+
+  it("keeps the prior venue and pinned provenance after a failed replacement", async () => {
+    const user = userEvent.setup();
+    routeKirikoBundleMock.mockResolvedValue(ROUTE_RESULT);
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true, 9);
+    expect(screen.getByText("Test Station")).toBeTruthy();
+
+    // A failed local replacement must not clear the admitted venue or its pinned identity.
+    loadImdfArchiveMock.mockRejectedValueOnce(new VenueLoadError("invalid_archive", "bad local zip"));
+    await uploadViaHiddenInput(zipFile("replacement.zip"));
+    await screen.findByRole("alert");
+    expect(screen.getByText("Test Station")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Directions" }));
+    await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
+    await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
+    await waitFor(() => {
+      expect(routeKirikoBundleMock).toHaveBeenCalledWith(
+        `/v/default/tokyo-station/bundle@${PUBLIC_VERSION_ID}`,
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+  });
+
+  it("resumes network editing after an anonymous member signs in", async () => {
+    const user = userEvent.setup();
+    meMock.mockResolvedValue(null);
+    loginMock.mockResolvedValue({ id: 2, username: "producer", role: "member" });
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    await waitFor(() => expect(mapStub().getAttribute("data-network-present")).toBe("true"));
+    await user.click(screen.getByRole("button", { name: "Edit network" }));
+
+    expect(screen.getByRole("dialog", { name: "Sign in to Kiriko" })).toBeTruthy();
+    await user.type(screen.getByLabelText("Username"), "producer");
+    await user.type(screen.getByLabelText("Password"), "pw");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => expect(mapStub().getAttribute("data-network-editing")).toBe("true"));
+    expect(screen.getByRole("button", { name: "Add point" })).toBeTruthy();
+    expect(loginMock).toHaveBeenCalledWith("producer", "pw");
+  });
+
+  it("denies viewer network edits without entering editor mode", async () => {
+    const user = userEvent.setup();
+    meMock.mockResolvedValue({ id: 3, username: "viewer", role: "viewer" });
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    await waitFor(() => expect(mapStub().getAttribute("data-network-present")).toBe("true"));
+    await user.click(screen.getByRole("button", { name: "Edit network" }));
+
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Only members and admins can edit network data.",
+    );
+    expect(mapStub().getAttribute("data-network-editing")).toBe("false");
+    expect(screen.queryByRole("button", { name: "Add point" })).toBeNull();
+  });
+
+  it("keeps editing disabled after a network load error until retry succeeds", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock
+      .mockRejectedValueOnce(new Error("overlay failed"))
+      .mockResolvedValueOnce(editableNetwork());
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Network could not be loaded.");
+    expect((screen.getByRole("button", { name: "Edit network" }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(mapStub().getAttribute("data-network-present")).toBe("true"));
+    expect((screen.getByRole("button", { name: "Edit network" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("hides directions while editing and restores them after discarding edits", async () => {
+    const user = userEvent.setup();
+    routeKirikoBundleMock.mockResolvedValue(ROUTE_RESULT);
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    expect(screen.getByRole("button", { name: "Directions" })).toBeTruthy();
+
+    await startNetworkEdit(user);
+    expect(screen.queryByRole("button", { name: "Directions" })).toBeNull();
+    await user.click(await screen.findByTestId("net-pick-0"));
+    await user.click(await screen.findByTestId("net-pick-1"));
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("2");
+
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
+    await user.click(screen.getByRole("button", { name: "Redo" }));
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("2");
+
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
+    await user.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(screen.queryByRole("button", { name: "Connect" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Directions" })).toBeTruthy();
   });
 });

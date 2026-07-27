@@ -1,7 +1,14 @@
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildMinimalImdfZip } from "../../tests/fixtures/buildMinimalImdfZip";
-import { CoreCompileError, type CompileVenueMetadata, type ImdfStats, type ViewerWarning } from "../src/core/native";
+import {
+  compileVenueBundle,
+  CoreCompileError,
+  type CompileVenueMetadata,
+  type ImdfStats,
+  type NativeCompileResponse,
+  type ViewerWarning,
+} from "../src/core/native";
 import { makePublishRunner } from "../src/jobs/publish";
 import { cleanupTestApps, loginCookie, makeTestApp, newTestPublicVersionId } from "./helpers";
 
@@ -9,6 +16,20 @@ afterEach(cleanupTestApps);
 
 const KVB_MAGIC = Buffer.from([0x4b, 0x56, 0x42, 0x00]); // "KVB\0"
 const LEVEL_1F = "b1000001-0000-4000-8000-0000000000b1";
+
+/**
+ * A minimal well-formed native envelope, matching the fake-response shape
+ * `coreNative.test.ts` uses for `compileVenueBundle`'s injected native
+ * function: just enough for `validateNativeResponse` to accept it.
+ */
+function okNativeResponse(): NativeCompileResponse {
+  return {
+    ok: true,
+    bundle: Buffer.alloc(0),
+    statsJson: JSON.stringify({ levels: 0, features: 0 }),
+    warningsJson: "[]",
+  };
+}
 
 function syntheticUnitId(i: number): string {
   return `f${i.toString(16).padStart(7, "0")}-0000-4000-8000-${i.toString(16).padStart(12, "0")}`;
@@ -225,6 +246,112 @@ describe("upload + publish", () => {
       headers: { cookie },
     });
     expect(job.json().status).toBe("done");
+  });
+
+  it("rolls back the draft version when queue job insertion fails", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venue = await createVenue(app, cookie);
+    app.db.exec(`
+      CREATE TRIGGER fail_publication_job_insert
+      BEFORE INSERT ON jobs
+      WHEN NEW.kind = 'publish_imdf'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated job insert failure');
+      END;
+    `);
+    const { payload, headers } = multipartZip(await buildMinimalImdfZip());
+
+    const upload = await app.inject({
+      method: "POST",
+      url: `/api/venues/${venue.id}/versions`,
+      headers: { ...headers, cookie },
+      payload,
+    });
+
+    expect(upload.statusCode).toBe(500);
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM versions WHERE venue_id = ?").get(venue.id)).toEqual({ n: 0 });
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM jobs").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("compileVenueBundle clipToVenue bridge", () => {
+  it("passes metadata.clipToVenue through to the native compiler as the eighth positional argument", async () => {
+    const calls: unknown[][] = [];
+    const fakeCompile = async (...args: unknown[]) => {
+      calls.push(args);
+      return okNativeResponse();
+    };
+    await compileVenueBundle(Buffer.from("x"), { datasetId: "t/v", version: 1, clipToVenue: true }, fakeCompile);
+    expect(calls[0]![7]).toBe(true);
+  });
+
+  it("leaves the eighth positional argument undefined when metadata.clipToVenue is absent", async () => {
+    const calls: unknown[][] = [];
+    const fakeCompile = async (...args: unknown[]) => {
+      calls.push(args);
+      return okNativeResponse();
+    };
+    await compileVenueBundle(Buffer.from("x"), { datasetId: "t/v", version: 1 }, fakeCompile);
+    expect(calls[0]![7]).toBeUndefined();
+  });
+});
+
+describe("clipToSelection job payload threading", () => {
+  async function insertDraftVersion(
+    app: FastifyInstance,
+    cookie: string,
+  ): Promise<{ venue: { id: number; slug: string }; versionId: number }> {
+    const venue = await createVenue(app, cookie);
+    const source = await buildMinimalImdfZip();
+    const { hash: sourceHash } = app.blobs.put(source);
+    app.db.prepare("INSERT OR IGNORE INTO blobs (hash, size) VALUES (?, ?)").run(sourceHash, source.byteLength);
+    const insert = app.db
+      .prepare(
+        "INSERT INTO versions (venue_id, seq, public_id, source_blob_hash, source_kind) VALUES (?, 1, ?, ?, 'imdf')",
+      )
+      .run(venue.id, newTestPublicVersionId(), sourceHash);
+    return { venue, versionId: Number(insert.lastInsertRowid) };
+  }
+
+  it("sets metadata.clipToVenue to true when the job payload's clipToSelection is true", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const { versionId } = await insertDraftVersion(app, cookie);
+
+    let capturedMetadata: CompileVenueMetadata | undefined;
+    const compile = async (_source: Buffer, metadata: CompileVenueMetadata) => {
+      capturedMetadata = metadata;
+      return {
+        bundle: Buffer.from([0x4b, 0x56, 0x42, 0x00]),
+        stats: { levels: 0, features: 0 },
+        warnings: [],
+      };
+    };
+    const runner = makePublishRunner(app.db, app.blobs, compile);
+    await runner(JSON.stringify({ versionId, clipToSelection: true }));
+
+    expect(capturedMetadata?.clipToVenue).toBe(true);
+  });
+
+  it("leaves metadata.clipToVenue undefined when the job payload omits clipToSelection", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const { versionId } = await insertDraftVersion(app, cookie);
+
+    let capturedMetadata: CompileVenueMetadata | undefined;
+    const compile = async (_source: Buffer, metadata: CompileVenueMetadata) => {
+      capturedMetadata = metadata;
+      return {
+        bundle: Buffer.from([0x4b, 0x56, 0x42, 0x00]),
+        stats: { levels: 0, features: 0 },
+        warnings: [],
+      };
+    };
+    const runner = makePublishRunner(app.db, app.blobs, compile);
+    await runner(JSON.stringify({ versionId }));
+
+    expect(capturedMetadata?.clipToVenue).toBeUndefined();
   });
 });
 
@@ -560,5 +687,36 @@ describe("publish failure paths", () => {
     expect(row.status).toBe("failed");
     expect(row.bundleHash).toBeNull();
     expect(app.blobs.has(row.sourceHash)).toBe(true);
+  });
+
+  it("skips publish and failure writes when shutdown aborts after compile returns", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venue = await createVenue(app, cookie);
+    const source = await buildMinimalImdfZip();
+    const { hash: sourceHash } = app.blobs.put(source);
+    app.db.prepare("INSERT OR IGNORE INTO blobs (hash, size) VALUES (?, ?)").run(sourceHash, source.byteLength);
+    const insert = app.db
+      .prepare(
+        "INSERT INTO versions (venue_id, seq, public_id, source_blob_hash, source_kind) VALUES (?, 1, ?, ?, 'imdf')",
+      )
+      .run(venue.id, newTestPublicVersionId(), sourceHash);
+    const versionId = Number(insert.lastInsertRowid);
+    const controller = new AbortController();
+    const compile = async (_source: Buffer, _metadata: CompileVenueMetadata) => {
+      controller.abort();
+      return {
+        bundle: Buffer.from([0x4b, 0x56, 0x42, 0x00, 0xaa]),
+        stats: { levels: 1, features: 1 },
+        warnings: [],
+      };
+    };
+    const runner = makePublishRunner(app.db, app.blobs, compile);
+
+    await expect(runner(JSON.stringify({ versionId }), controller.signal)).rejects.toThrow(/shutdown/i);
+
+    expect(
+      app.db.prepare("SELECT status, bundle_hash AS bundleHash, error FROM versions WHERE id = ?").get(versionId),
+    ).toEqual({ status: "draft", bundleHash: null, error: null });
   });
 });

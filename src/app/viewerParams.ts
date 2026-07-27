@@ -8,6 +8,8 @@ export interface ViewerParams {
   dataset: string | null;
   forceViewer: boolean;
   review: boolean;
+  /** Optional 64-hex permanent public version identity that pins the viewer. */
+  version: string | null;
 }
 
 function safeSrc(raw: string | null, base?: string): string | null {
@@ -46,5 +48,8 @@ export function parseViewerParams(search: string, base?: string): ViewerParams {
   const reviewRaw = params.get("review");
   const review = reviewRaw !== null && (reviewRaw === "" || /^(1|true)$/i.test(reviewRaw));
 
-  return { src: safeSrc(params.get("src"), base), level, embed, locale, dataset, forceViewer, review };
+  const versionRaw = params.get("version")?.trim() ?? "";
+  const version = /^[0-9a-f]{64}$/.test(versionRaw) ? versionRaw : null;
+
+  return { src: safeSrc(params.get("src"), base), level, embed, locale, dataset, forceViewer, review, version };
 }

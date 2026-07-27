@@ -15,6 +15,7 @@
 
 #![deny(rust_2018_idioms)]
 
+mod clip;
 mod codec;
 mod error;
 mod export;

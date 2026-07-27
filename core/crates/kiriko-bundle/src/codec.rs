@@ -70,7 +70,7 @@ pub fn compile_imdf(
     source: &[u8],
     metadata: BundleMetadata,
 ) -> Result<CompiledBundle, CompileError> {
-    compile_imdf_with_network(source, metadata, None, None, None, false)
+    compile_imdf_with_network(source, metadata, None, None, None, false, false)
 }
 
 /// Import `source` (a raw IMDF `.zip`) with `kiriko-model`, optionally build
@@ -100,8 +100,16 @@ pub fn compile_imdf_with_network(
     paths_geojson: Option<&str>,
     facilities_geojson: Option<&str>,
     synthesize_network: bool,
+    clip_to_venue: bool,
 ) -> Result<CompiledBundle, CompileError> {
     let venue = import_imdf(source)?;
+    // Built before `document` consumes `venue`. `None` when clipping is off, so
+    // an unclipped compile does no extra geometry work at all.
+    let clip_region = if clip_to_venue {
+        Some(crate::clip::ClipRegion::from_venue(&venue))
+    } else {
+        None
+    };
     let stats = BundleStats {
         levels: venue.levels.len() as u32,
         features: venue.features.len() as u32,
@@ -119,12 +127,24 @@ pub fn compile_imdf_with_network(
         facilities: None,
     };
 
+    // Clipping was requested but the imported venue carries no level/unit
+    // polygons to clip against: every node/facility would be dropped below,
+    // silently. Warn once up front so that isn't mistaken for a bug.
+    if clip_region.as_ref().is_some_and(crate::clip::ClipRegion::is_empty) {
+        document.warnings.push(ViewerWarning {
+            code: WarningCode::RouteBuild,
+            message: "clip_region_empty: the imported venue has no level or unit polygons to clip \
+                      against; building or synthesizing a network with clipping enabled will drop \
+                      everything"
+                .to_string(),
+            feature_id: None,
+            archive_entry: None,
+        });
+    }
+
     if let (Some(junctions), Some(paths)) = (junctions_geojson, paths_geojson) {
         let ordinals: Vec<f64> = document.levels.iter().map(|l| l.ordinal).collect();
         let build = kiriko_route::build_route_graph(junctions, paths, &ordinals)?;
-        if !build.graph.is_empty() {
-            document.graph = Some(build.graph);
-        }
         document
             .warnings
             .extend(build.warnings.into_iter().map(|w| ViewerWarning {
@@ -133,14 +153,41 @@ pub fn compile_imdf_with_network(
                 feature_id: None,
                 archive_entry: None,
             }));
+        let graph = if let Some(region) = &clip_region {
+            let (clipped, dropped_nodes, dropped_edges) =
+                crate::clip::clip_graph(&build.graph, region);
+            if dropped_nodes > 0 || dropped_edges > 0 {
+                document.warnings.push(ViewerWarning {
+                    code: WarningCode::RouteBuild,
+                    message: format!(
+                        "network_clipped: dropped {dropped_nodes} nodes and {dropped_edges} edges outside the imported venue"
+                    ),
+                    feature_id: None,
+                    archive_entry: None,
+                });
+            }
+            if clipped.is_empty() {
+                document.warnings.push(ViewerWarning {
+                    code: WarningCode::RouteBuild,
+                    message:
+                        "network_clip_empty: clipping removed every routable edge; no routing graph was embedded"
+                            .to_string(),
+                    feature_id: None,
+                    archive_entry: None,
+                });
+            }
+            clipped
+        } else {
+            build.graph
+        };
+        if !graph.is_empty() {
+            document.graph = Some(graph);
+        }
     } else if synthesize_network {
         #[cfg(feature = "netgen")]
         let build = crate::synth_medial::synthesize_network_medial(&document);
         #[cfg(not(feature = "netgen"))]
         let build = crate::synth::synthesize_network(&document);
-        if !build.graph.is_empty() {
-            document.graph = Some(build.graph);
-        }
         document
             .warnings
             .extend(build.warnings.into_iter().map(|w| ViewerWarning {
@@ -149,6 +196,36 @@ pub fn compile_imdf_with_network(
                 feature_id: None,
                 archive_entry: None,
             }));
+        let graph = if let Some(region) = &clip_region {
+            let (clipped, dropped_nodes, dropped_edges) =
+                crate::clip::clip_graph(&build.graph, region);
+            if dropped_nodes > 0 || dropped_edges > 0 {
+                document.warnings.push(ViewerWarning {
+                    code: WarningCode::RouteBuild,
+                    message: format!(
+                        "network_clipped: dropped {dropped_nodes} nodes and {dropped_edges} edges outside the imported venue"
+                    ),
+                    feature_id: None,
+                    archive_entry: None,
+                });
+            }
+            if clipped.is_empty() {
+                document.warnings.push(ViewerWarning {
+                    code: WarningCode::RouteBuild,
+                    message:
+                        "network_clip_empty: clipping removed every routable edge; no routing graph was embedded"
+                            .to_string(),
+                    feature_id: None,
+                    archive_entry: None,
+                });
+            }
+            clipped
+        } else {
+            build.graph
+        };
+        if !graph.is_empty() {
+            document.graph = Some(graph);
+        }
     }
 
     if let Some(facilities_geojson) = facilities_geojson {
@@ -169,9 +246,6 @@ pub fn compile_imdf_with_network(
         let graph = document.graph.as_ref().unwrap_or(&empty_graph);
         let (facilities, build_warnings) =
             kiriko_facilities::build_facilities(facilities_geojson, graph)?;
-        if !facilities.items.is_empty() {
-            document.facilities = Some(facilities);
-        }
         document
             .warnings
             .extend(build_warnings.into_iter().map(|w| ViewerWarning {
@@ -180,6 +254,25 @@ pub fn compile_imdf_with_network(
                 feature_id: None,
                 archive_entry: None,
             }));
+        let facilities = if let Some(region) = &clip_region {
+            let (clipped, dropped) = crate::clip::clip_facilities(&facilities, region);
+            if dropped > 0 {
+                document.warnings.push(ViewerWarning {
+                    code: WarningCode::FacilityBuild,
+                    message: format!(
+                        "facilities_clipped: dropped {dropped} facilities outside the imported venue"
+                    ),
+                    feature_id: None,
+                    archive_entry: None,
+                });
+            }
+            clipped
+        } else {
+            facilities
+        };
+        if !facilities.items.is_empty() {
+            document.facilities = Some(facilities);
+        }
     }
 
     let bytes = encode_bundle(&document)?;

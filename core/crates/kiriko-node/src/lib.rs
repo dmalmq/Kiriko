@@ -59,6 +59,7 @@ pub struct CompileTask {
     network_paths_geojson: Option<String>,
     facilities_geojson: Option<String>,
     synthesize_network: Option<bool>,
+    clip_to_venue: Option<bool>,
 }
 
 #[napi]
@@ -78,6 +79,7 @@ impl Task for CompileTask {
             self.network_paths_geojson.as_deref(),
             self.facilities_geojson.as_deref(),
             self.synthesize_network.unwrap_or(false),
+            self.clip_to_venue.unwrap_or(false),
         ) {
             Ok(compiled) => CompileOutcome::Success(compiled),
             Err(err) => CompileOutcome::Failure(err),
@@ -179,6 +181,7 @@ pub fn compile_imdf(
     network_paths_geojson: Option<String>,
     facilities_geojson: Option<String>,
     synthesize_network: Option<bool>,
+    clip_to_venue: Option<bool>,
 ) -> AsyncTask<CompileTask> {
     AsyncTask::new(CompileTask {
         source: source.to_vec(),
@@ -188,6 +191,7 @@ pub fn compile_imdf(
         network_paths_geojson,
         facilities_geojson,
         synthesize_network,
+        clip_to_venue,
     })
 }
 

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use kiriko_bundle::{
     BundleDocument, BundleErrorCode, BundleMetadata, BundleStats, CompileError, compile_imdf,
-    compile_imdf_with_network, decode_bundle, encode_bundle, inspect_bundle,
+    compile_imdf_with_network, decode_bundle, encode_bundle, export_network, inspect_bundle,
 };
 
 fn metadata() -> BundleMetadata {
@@ -66,6 +66,7 @@ fn compile_with_network_embeds_graph_section() {
         Some(NETWORK_PATHS),
         None,
         false,
+        false,
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -100,6 +101,7 @@ fn compile_with_malformed_network_is_a_route_error() {
         Some(NETWORK_PATHS),
         None,
         false,
+        false,
     )
     .expect_err("malformed network GeoJSON must fail the compile");
     assert_eq!(err.code_str(), "route_build_failed");
@@ -109,7 +111,7 @@ fn compile_with_malformed_network_is_a_route_error() {
 #[test]
 fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, true)
+    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, true, false)
         .expect("fixture compiles with synthesis");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     let graph = document
@@ -122,7 +124,7 @@ fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
 #[test]
 fn compile_with_synthesis_disabled_and_no_network_has_no_graph() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, false)
+    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, false, false)
         .expect("fixture compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     assert!(document.graph.is_none());
@@ -148,6 +150,7 @@ fn compile_with_facilities_embeds_facilities_section() {
         Some(NETWORK_JUNCTIONS),
         Some(NETWORK_PATHS),
         Some(FACILITIES),
+        false,
         false,
     )
     .expect("fixture + network + facilities compiles");
@@ -205,6 +208,7 @@ fn compile_without_facilities_has_no_facilities_section() {
         Some(NETWORK_PATHS),
         None,
         false,
+        false,
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -221,8 +225,9 @@ fn compile_without_facilities_has_no_facilities_section() {
 #[test]
 fn compile_with_facilities_but_no_network_warns_once_and_leaves_anchors_unset() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, Some(FACILITIES), false)
-        .expect("fixture + facilities compiles without a network");
+    let compiled =
+        compile_imdf_with_network(&source, metadata(), None, None, Some(FACILITIES), false, false)
+            .expect("fixture + facilities compiles without a network");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
 
     let facilities = document
@@ -249,10 +254,113 @@ fn compile_with_facilities_but_no_network_warns_once_and_leaves_anchors_unset() 
 #[test]
 fn compile_with_malformed_facilities_is_a_facility_error() {
     let source = support::build_minimal_imdf_zip();
-    let err = compile_imdf_with_network(&source, metadata(), None, None, Some("not geojson"), false)
-        .expect_err("malformed facilities GeoJSON must fail the compile");
+    let err = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        Some("not geojson"),
+        false,
+        false,
+    )
+    .expect_err("malformed facilities GeoJSON must fail the compile");
     assert_eq!(err.code_str(), "facility_build_failed");
     assert!(matches!(err, CompileError::Facility(_)));
+}
+
+// -- Building-scoped clipping (gdb-building-scoped-network-clipping Task 3) -
+
+// Two junctions inside the minimal fixture's 1F level polygon
+// (139.7660,35.6800)-(139.7680,35.6820), plus a small chain of six junctions
+// placed far outside every level/unit polygon in the fixture. The far chain
+// is large enough that clipping it away shrinks the compiled bundle by more
+// than the added clip-warning text costs, so the byte-count assertion below
+// is a genuine signal, not noise.
+const CLIP_JUNCTIONS: &str = r#"{"type":"FeatureCollection","features":[
+  {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.7665,35.6805]}},
+  {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.7670,35.6810]}},
+  {"type":"Feature","properties":{"NODEID":3,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.900,35.900]}},
+  {"type":"Feature","properties":{"NODEID":4,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.901,35.901]}},
+  {"type":"Feature","properties":{"NODEID":5,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.902,35.902]}},
+  {"type":"Feature","properties":{"NODEID":6,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.903,35.903]}},
+  {"type":"Feature","properties":{"NODEID":7,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.904,35.904]}},
+  {"type":"Feature","properties":{"NODEID":8,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.905,35.905]}}]}"#;
+const CLIP_PATHS: &str = r#"{"type":"FeatureCollection","features":[
+  {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":200,"FLOOR":"F1"},
+   "geometry":{"type":"LineString","coordinates":[[139.7665,35.6805],[139.7670,35.6810]]}},
+  {"type":"Feature","properties":{"FNODEID":2,"TNODEID":3,"cost":200,"FLOOR":"F1"},
+   "geometry":{"type":"LineString","coordinates":[[139.7670,35.6810],[139.900,35.900]]}},
+  {"type":"Feature","properties":{"FNODEID":3,"TNODEID":4,"cost":200,"FLOOR":"F1"},
+   "geometry":{"type":"LineString","coordinates":[[139.900,35.900],[139.901,35.901]]}},
+  {"type":"Feature","properties":{"FNODEID":4,"TNODEID":5,"cost":200,"FLOOR":"F1"},
+   "geometry":{"type":"LineString","coordinates":[[139.901,35.901],[139.902,35.902]]}},
+  {"type":"Feature","properties":{"FNODEID":5,"TNODEID":6,"cost":200,"FLOOR":"F1"},
+   "geometry":{"type":"LineString","coordinates":[[139.902,35.902],[139.903,35.903]]}},
+  {"type":"Feature","properties":{"FNODEID":6,"TNODEID":7,"cost":200,"FLOOR":"F1"},
+   "geometry":{"type":"LineString","coordinates":[[139.903,35.903],[139.904,35.904]]}},
+  {"type":"Feature","properties":{"FNODEID":7,"TNODEID":8,"cost":200,"FLOOR":"F1"},
+   "geometry":{"type":"LineString","coordinates":[[139.904,35.904],[139.905,35.905]]}}]}"#;
+
+#[test]
+fn clipping_drops_network_nodes_outside_the_venue() {
+    let source = support::build_minimal_imdf_zip();
+
+    let unclipped = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(CLIP_JUNCTIONS),
+        Some(CLIP_PATHS),
+        None,
+        false,
+        false,
+    )
+    .expect("fixture + network compiles unclipped");
+    let clipped = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(CLIP_JUNCTIONS),
+        Some(CLIP_PATHS),
+        None,
+        false,
+        true,
+    )
+    .expect("fixture + network compiles clipped");
+
+    // The clipped bundle must be strictly smaller and carry a RouteBuild
+    // warning naming the drop.
+    assert!(
+        clipped.bytes.len() < unclipped.bytes.len(),
+        "clipping must drop bytes from the compiled bundle"
+    );
+    assert!(
+        clipped
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("clipped")),
+        "expected a clip warning, got {:?}",
+        clipped.warnings
+    );
+
+    let unclipped_document = decode_bundle(&unclipped.bytes).expect("unclipped bundle decodes");
+    let unclipped_graph = unclipped_document
+        .graph
+        .expect("unclipped compile embeds a graph section");
+    assert_eq!(unclipped_graph.nodes.len(), 8, "all eight junctions survive unclipped");
+
+    let clipped_document = decode_bundle(&clipped.bytes).expect("clipped bundle decodes");
+    let clipped_graph = clipped_document
+        .graph
+        .expect("clipped compile still embeds a graph section for the surviving nodes");
+    assert_eq!(
+        clipped_graph.nodes.len(),
+        2,
+        "the far-outside junction chain must be dropped by clipping"
+    );
+    assert_eq!(
+        clipped_graph.edges.len(),
+        1,
+        "every edge reaching a dropped junction must be dropped too"
+    );
 }
 
 // -- Step 1: format byte-layout tests -------------------------------------
@@ -675,10 +783,17 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
     let mut digest = [0u8; 32];
     digest.copy_from_slice(&Sha256::digest(&compiled.bytes));
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    let expected_line = format!("{hex}  tests/fixtures/minimal.kvb\n");
+    // Parse the `<sha256>  <path>` line independent of the trailing line ending
+    // (LF vs CRLF varies by platform and git checkout) without weakening the
+    // exact hash or path assertions.
+    let mut fields = checksum_file.split_whitespace();
+    let file_hash = fields.next().expect("checksum file must carry a hash field");
+    let file_path = fields.next().expect("checksum file must carry a path field");
+    assert!(fields.next().is_none(), "checksum file must carry exactly two fields");
+    assert_eq!(file_hash, hex, "the committed sha256 must match the golden bytes");
     assert_eq!(
-        checksum_file, expected_line,
-        "the committed sha256 file must match the golden bytes"
+        file_path, "tests/fixtures/minimal.kvb",
+        "the committed sha256 line must name the golden bundle"
     );
 }
 
@@ -883,4 +998,67 @@ fn inspect_bundle_propagates_all_four_decode_error_codes() {
             .code,
         BundleErrorCode::BundleTooLarge
     );
+}
+
+// -- Task 1: network round-trip stability -----------------------------------
+
+fn bundle_with_graph(graph: kiriko_route::RouteGraph) -> Vec<u8> {
+    let doc = BundleDocument {
+        metadata: BundleMetadata {
+            dataset_id: "t/v".to_string(),
+            version: 1,
+        },
+        manifest: kiriko_model::model::ImdfManifest {
+            version: "1.0.0".to_string(),
+            language: "en".to_string(),
+            rest: BTreeMap::new(),
+        },
+        venue_id: "v".to_string(),
+        levels: vec![level_row("l0", 0.0), level_row("l1", 1.0)],
+        features: Vec::new(),
+        bounds_by_level: BTreeMap::new(),
+        warnings: Vec::new(),
+        stats: BundleStats {
+            levels: 2,
+            features: 0,
+        },
+        graph: Some(graph),
+        facilities: None,
+    };
+    encode_bundle(&doc).expect("bundle with graph encodes")
+}
+
+#[test]
+fn network_round_trip_is_stable_across_two_export_build_cycles() {
+    use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+    // Integer millimetre costs and integer ordinals: a horizontal edge on F1
+    // and a vertical edge up to F2.
+    let g0 = RouteGraph {
+        nodes: vec![
+            RouteNode { lon: 139.70, lat: 35.69, ordinal: 0.0 },
+            RouteNode { lon: 139.701, lat: 35.69, ordinal: 0.0 },
+            RouteNode { lon: 139.70, lat: 35.69, ordinal: 1.0 },
+        ],
+        edges: vec![
+            RouteEdge { from: 0, to: 1, weight: 90_000.0, ordinal: 0.0, interior: Vec::new() },
+            RouteEdge { from: 0, to: 2, weight: 5_000.0, ordinal: 0.0, interior: Vec::new() },
+        ],
+    };
+
+    let ordinals = [0.0, 1.0];
+    let net1 = export_network(&bundle_with_graph(g0.clone())).expect("first export");
+    let g1 = kiriko_route::build_route_graph(&net1.junctions, &net1.paths, &ordinals)
+        .expect("re-import cycle 1")
+        .graph;
+    // Reciprocal PATHID/RPATHID pairs collapse back to one logical edge each —
+    // no doubling across the round-trip.
+    assert_eq!(g1.edges.len(), g0.edges.len(), "edge count is stable");
+    assert_eq!(g1, g0, "costs, geometry, and integer ordinals survive one cycle");
+
+    let net2 = export_network(&bundle_with_graph(g1.clone())).expect("second export");
+    let g2 = kiriko_route::build_route_graph(&net2.junctions, &net2.paths, &ordinals)
+        .expect("re-import cycle 2")
+        .graph;
+    assert_eq!(g2, g1, "the second cycle is a fixed point");
+    assert_eq!(net2, net1, "re-export is identical");
 }
