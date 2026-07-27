@@ -22,7 +22,7 @@
  */
 import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
-import { requireSession } from "../auth/guard";
+import { requireProducerSession, requireSession } from "../auth/guard";
 import { inspectGdbArchive, convertGdbLayers } from "./convert";
 import { extractFacilitiesGeoJson } from "./facilities";
 import { GdbConversionError, normalizeGdbPlan, resolveGdbImdfWithExclusions, suggestGdbMapping } from "./mapping";
@@ -44,6 +44,30 @@ import { exportVenueNetwork, CoreExportError } from "../core/native";
 import { packageNetworkGdbZip } from "./exportGdb";
 
 const TENANT_ID = 1;
+
+/**
+ * Read `clipToSelection` off a persisted `versions.gdb_plan_json`.
+ *
+ * Re-publish paths carry the base version's stored plan forward into the new
+ * version row, but the row is not what the compiler reads — `publish.ts`
+ * destructures the *job payload*. Any path that means to honour the original
+ * building-scoped clip choice must lift it out of the stored plan and put it
+ * in the payload explicitly.
+ *
+ * Anything that is not a plan object carrying a literal `true` means no
+ * clipping: IMDF-sourced versions have no plan at all (`null`), and a plan
+ * written before this flag existed simply omits it.
+ */
+function storedPlanClipsToSelection(planJson: string | null): boolean {
+  if (planJson === null) return false;
+  try {
+    const parsed: unknown = JSON.parse(planJson);
+    if (typeof parsed !== "object" || parsed === null) return false;
+    return (parsed as { clipToSelection?: unknown }).clipToSelection === true;
+  } catch {
+    return false;
+  }
+}
 
 // The GDAL process queue (gdalProcess.ts) now enforces a real, cancelling
 // per-operation deadline, so route-level GDAL calls no longer need an
@@ -92,6 +116,7 @@ const GdbMappingPlanSchema = Type.Object({
     Type.Object({ id: Type.String(), name: Type.String({ minLength: 1, maxLength: 200 }) }),
   ),
   layers: Type.Array(GdbLayerPlanSchema),
+  clipToSelection: Type.Optional(Type.Boolean()),
 });
 
 const GdbPublishSchema = Type.Object({
@@ -106,6 +131,12 @@ const ErrorSchema = Type.Object({
   error: Type.String(),
   code: Type.String(),
   details: Type.Optional(Type.Unknown()),
+});
+
+const AuthErrorSchema = Type.Object({
+  error: Type.String(),
+  code: Type.String(),
+  message: Type.String(),
 });
 
 interface ErrorBody {
@@ -550,6 +581,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
           networkJunctionsHash,
           networkPathsHash,
           facilitiesGeoJsonHash,
+          clipToSelection: plan.clipToSelection === true,
         },
       );
       const { jobId, versionId } = accepted;
@@ -667,6 +699,13 @@ export function registerGdbRoutes(app: FastifyInstance): void {
           networkJunctionsHash,
           networkPathsHash,
           facilitiesGeoJsonHash,
+          // Add-data has no clip checkbox of its own — the network/facility GDB
+          // being attached here is exactly the case the venue's original clip
+          // choice was made for (a full-site network with no building field).
+          // Lift that choice out of the stored plan into the payload, or the
+          // whole site's graph gets embedded unclipped while the version row
+          // still claims `clipToSelection: true`.
+          clipToSelection: storedPlanClipsToSelection(base.p),
         },
       );
       const { jobId, versionId } = accepted;
@@ -733,6 +772,20 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         {
           facilitiesGeoJsonHash: base.f ?? undefined,
           synthesizeNetwork: true,
+          // DECISION: forward the venue's stored clip choice.
+          //
+          // For the *graph* this is very nearly a no-op: synthesis derives the
+          // network from the venue's own level/unit geometry, and `ClipRegion`
+          // is built from those same polygons, so a synthesized node is inside
+          // the region by construction.
+          //
+          // The deciding factor is §7. `facilities_blob_hash` points at the
+          // *raw, unclipped* extraction from the facility GDB — clipping
+          // happens at compile time in `codec.rs`, not when the blob is
+          // stored. Carrying that blob forward without the flag would rebuild
+          // §7 over the whole site and silently widen the venue's facilities
+          // relative to the version being regenerated from.
+          clipToSelection: storedPlanClipsToSelection(base.p),
         },
       );
       const { jobId, versionId } = accepted;
@@ -806,7 +859,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
   app.post(
     "/api/gdb/import-network",
     {
-      preHandler: requireSession,
+      preHandler: requireProducerSession,
       // Edited graphs can be large; raise the body limit for this route only.
       bodyLimit: 64 * 1024 * 1024,
       schema: {
@@ -817,6 +870,8 @@ export function registerGdbRoutes(app: FastifyInstance): void {
           paths: Type.String(),
         }),
         response: {
+          401: AuthErrorSchema,
+          403: AuthErrorSchema,
           202: Type.Object({ jobId: Type.String(), versionId: Type.Number(), seq: Type.Number(), publicVersionId: Type.String({ pattern: "^[0-9a-f]{64}$" }) }),
           404: Type.Object({ error: Type.String() }),
         },
@@ -883,6 +938,21 @@ export function registerGdbRoutes(app: FastifyInstance): void {
           networkJunctionsHash: junctionsBlob.hash,
           networkPathsHash: pathsBlob.hash,
           facilitiesGeoJsonHash: base.f ?? undefined,
+          // DECISION: forward the venue's stored clip choice.
+          //
+          // The competing view — "a hand-edited graph should be taken as-is" —
+          // loses on two counts. First, `clipToSelection` is a single flag
+          // covering both §5 and §7, and §7 here is rebuilt from the *raw,
+          // unclipped* `facilities_blob_hash`; dropping the flag would widen
+          // the venue's facilities back to the whole site behind the editor's
+          // back. Second, the graph being re-imported was exported from this
+          // venue's own already-clipped bundle (`/api/gdb/export-network`
+          // reads §5), so re-clipping is near-idempotent: the only nodes it
+          // can drop are ones placed more than `CLIP_BUFFER_M` outside every
+          // level/unit polygon of the venue — exactly the out-of-venue
+          // geometry the flag exists to remove. A clipped venue stays clipped
+          // across a graph edit.
+          clipToSelection: storedPlanClipsToSelection(base.p),
         },
       );
       const { jobId, versionId } = accepted;

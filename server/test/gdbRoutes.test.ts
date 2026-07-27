@@ -1,6 +1,23 @@
 import { TextReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
+import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanupTestApps, loginCookie, makeTestApp } from "./helpers";
+import { createSession } from "../src/auth/sessions";
+
+const PUBLIC_ID = "a".repeat(64);
+
+function networkImportPayload() {
+  return {
+    slug: "missing-station",
+    publicVersionId: PUBLIC_ID,
+    junctions: JSON.stringify({ type: "FeatureCollection", features: [] }),
+    paths: JSON.stringify({ type: "FeatureCollection", features: [] }),
+  };
+}
+
+function cookieFor(app: FastifyInstance, userId: number): string {
+  return `kiriko_session=${createSession(app.db, userId, 30)}`;
+}
 
 async function fakeGdbZip(): Promise<Uint8Array> {
   const writer = new ZipWriter(new Uint8ArrayWriter());
@@ -44,6 +61,50 @@ describe("GDB routes", () => {
     expect(response.json()).toMatchObject({
       code: "invalid_geodatabase",
     });
+  });
+
+  it("allows only members and admins to import edited network graphs", async () => {
+    const { app } = await makeTestApp();
+    app.db.prepare(
+      "INSERT INTO users (id, username, password_hash, role) VALUES (2, 'viewer', 'x', 'viewer')",
+    ).run();
+    const viewerCookie = cookieFor(app, 2);
+    const memberCookie = await loginCookie(app);
+    const payload = networkImportPayload();
+
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: "/api/gdb/import-network",
+      payload,
+    });
+    expect(unauthorized.statusCode).toBe(401);
+    expect(unauthorized.json()).toEqual({
+      error: "unauthorized",
+      code: "unauthorized",
+      message: "Authentication is required.",
+    });
+
+    const forbidden = await app.inject({
+      method: "POST",
+      url: "/api/gdb/import-network",
+      headers: { cookie: viewerCookie },
+      payload,
+    });
+    expect(forbidden.statusCode).toBe(403);
+    expect(forbidden.json()).toEqual({
+      error: "forbidden",
+      code: "forbidden",
+      message: "Only members and admins can edit network data.",
+    });
+
+    const allowed = await app.inject({
+      method: "POST",
+      url: "/api/gdb/import-network",
+      headers: { cookie: memberCookie },
+      payload,
+    });
+    expect(allowed.statusCode).toBe(404);
+    expect(allowed.json()).toEqual({ error: "not_found" });
   });
 });
 

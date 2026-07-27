@@ -504,6 +504,7 @@ mod tests {
             Some(NETWORK_PATHS),
             None,
             false,
+            false,
         )
         .expect("fixture + network compiles")
         .bytes
@@ -525,6 +526,7 @@ mod tests {
             Some(NETWORK_JUNCTIONS),
             Some(NETWORK_PATHS),
             Some(FACILITIES),
+            false,
             false,
         )
         .expect("fixture + network + facilities compiles")

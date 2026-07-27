@@ -10,13 +10,10 @@
  *   3. Open the public-id-pinned viewer; compute a route from two map taps.
  *   4. Open Network Review; assert connectivity stats render from the real
  *      WASM network export.
- *   5. Establish an unedited baseline by saving the network once (no edit),
- *      then edit the network (delete edges via the edit UI) and save again.
- *      The edited graph carries strictly fewer directed `net_path` features and
- *      the same node set — the edit is reflected in the serialized graph the
- *      client POSTs to the real import-network endpoint.
- *   6. Reopen the returned pinned version; assert its connectivity renders,
- *      is stable across reads, and remains routable.
+ *   5. Enter Network Edit, add a point at map center with the real toolbar,
+ *      verify undo/redo affordances, then save the changed graph. The
+ *      client POSTs the edited network to the real import-network endpoint and
+ *      navigates to the newly published immutable public version.
  */
 import { expect, test, type Page, type Request } from "@playwright/test";
 import {
@@ -88,30 +85,11 @@ async function openReview(page: Page): Promise<void> {
   await expect(page.locator(".review-report")).toBeVisible({ timeout: 30_000 });
 }
 
-/**
- * Delete edges by clicking densely along the corridor the route just traversed.
- * That band provably carries `net_path` edges (the router drew a line through
- * it), so exact taps land on rendered lines and delete undirected edges; the
- * sparse 2.5px junction dots are rarely hit, so deletions dominate. A few
- * parallel rows widen the swept area without leaving the walkable interior.
- */
-async function deleteEdgesAcrossFloor(page: Page): Promise<void> {
-  const box = await mapCanvas(page).boundingBox();
-  if (box === null) throw new Error("map canvas has no bounding box");
-  const steps = 24;
-  for (const yFrac of [0.5, 0.56, 0.62, 0.68, 0.74]) {
-    const y = box.y + box.height * yFrac;
-    for (let i = 0; i <= steps; i += 1) {
-      const x = box.x + box.width * (0.36 + (0.3 * i) / steps);
-      await page.mouse.click(x, y);
-    }
-  }
-}
 
 /**
- * Click Save network, capturing both the serialized graph the client POSTs and
- * the pinned public version id the server returns. Then wait for the app to
- * navigate to that pinned, review-mode version once publication completes.
+ * Click Save as new version, capturing both the serialized graph the client
+ * POSTs and the pinned public version id the server returns. Then wait for the
+ * app to navigate to that pinned, review-mode version once publication completes.
  */
 async function saveNetwork(page: Page): Promise<SavedNetwork> {
   const responsePromise = page.waitForResponse(
@@ -120,7 +98,7 @@ async function saveNetwork(page: Page): Promise<SavedNetwork> {
       response.request().method() === "POST",
     { timeout: 60_000 },
   );
-  await page.getByRole("button", { name: "Save network" }).click();
+  await page.getByRole("button", { name: "Save as new version" }).click();
   const response = await responsePromise;
   expect(response.status()).toBe(202);
 
@@ -185,31 +163,27 @@ test.describe("graph-bearing network review + edit", () => {
       expect(baselineReport).toMatch(/connected\s+\d+%/);
       expect(baselineReport).toMatch(/\d+\s+islands/);
 
-      // Baseline: save the network once with no edit to capture the unedited
-      // serialized edge/node counts.
+      // Edit pass: add one point through the real toolbar and pointer path.
+      // Undo/redo prove the editor history is wired in the browser; saving then
+      // exercises the full round-trip — edited graph serialized, published as a
+      // NEW immutable version, and reopened.
       await page.getByRole("button", { name: "Edit network" }).click();
-      const baseline = await saveNetwork(page);
-      expect(baseline.junctions).toBeGreaterThan(0);
-      expect(baseline.paths).toBeGreaterThan(0);
+      await expect(page.getByRole("button", { name: "Directions" })).toBeHidden();
+      await page.getByRole("button", { name: "Add point" }).click();
+      const editBox = await mapCanvas(page).boundingBox();
+      if (editBox === null) throw new Error("map canvas has no bounding box");
+      await page.mouse.click(editBox.x + editBox.width * 0.08, editBox.y + editBox.height * 0.88);
+      await expect(page.locator(".network-editor-toolbar__summary")).toContainText("1 point added");
 
-      // Edit pass: enter edit mode and exercise the pointer edit path, then
-      // save again. The full round-trip — edited graph serialized, published as
-      // a NEW immutable version, and reopened — is the load-bearing assertion.
-      // The node set never changes under edge-only edits, and deletions never
-      // add paths. NOTE: asserting a *specific* edge deletion here would require
-      // pixel-precise hit-testing of 1.5px `net_path` lines, which is not
-      // deterministic headless (unlike Directions, whose taps snap any lon/lat
-      // in WASM). The exact add/delete-edge mutation is covered deterministically
-      // by unit tests (`src/app/App.test.tsx` network edit/save and
-      // `src/map/networkFeatures.test.ts` addEdge/deleteEdge).
-      await openReview(page);
-      await page.getByRole("button", { name: "Edit network" }).click();
-      await deleteEdgesAcrossFloor(page);
+      await page.getByRole("button", { name: "Undo" }).click();
+      await expect(page.locator(".network-editor-toolbar__summary")).toHaveText("No changes yet");
+      await expect(page.getByRole("button", { name: "Save as new version" })).toBeDisabled();
+      await page.getByRole("button", { name: "Redo" }).click();
+      await expect(page.locator(".network-editor-toolbar__summary")).toContainText("1 point added");
+
       const edited = await saveNetwork(page);
-
-      expect(edited.publicVersionId).not.toBe(baseline.publicVersionId);
-      expect(edited.junctions).toBe(baseline.junctions);
-      expect(edited.paths).toBeLessThanOrEqual(baseline.paths);
+      expect(edited.junctions).toBeGreaterThan(0);
+      expect(edited.paths).toBeGreaterThan(0);
 
       // Reopened pinned version: connectivity renders from the real overlay,
       // is stable across reads, and the edited graph is still routable.

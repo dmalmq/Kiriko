@@ -166,6 +166,41 @@ describe("venues", () => {
     expect(missing.statusCode).toBe(404);
   });
 
+  it("deletes a venue whose publication job still references its draft version", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/venues",
+      headers: { cookie },
+      payload: { name: "Queued Publication" },
+    });
+    expect(created.statusCode).toBe(201);
+    const venue = created.json().venue as { id: number };
+    const versionId = Number(
+      app.db
+        .prepare(
+          `INSERT INTO versions (venue_id, seq, public_id, source_blob_hash, status)
+           VALUES (?, 1, ?, ?, 'draft')`,
+        )
+        .run(venue.id, "f".repeat(64), "source".repeat(11).slice(0, 64)).lastInsertRowid,
+    );
+    app.db.prepare("INSERT INTO jobs (id, kind, version_id, payload_json) VALUES ('queued-delete', 'publish_imdf', ?, ?)").run(
+      versionId,
+      JSON.stringify({ versionId }),
+    );
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/api/venues/${venue.id}`,
+      headers: { cookie },
+    });
+    expect(del.statusCode, del.body).toBe(204);
+    expect(
+      app.db.prepare("SELECT status, version_id AS versionId FROM jobs WHERE id = 'queued-delete'").get(),
+    ).toEqual({ status: "queued", versionId: null });
+  });
+
   it("returns every permanent public version ID from the deletion transaction and rolls back together", async () => {
     const { app } = await makeTestApp();
     app.db.prepare("INSERT INTO venues (id, tenant_id, slug, name) VALUES (10, 1, 'station', 'Station')").run();

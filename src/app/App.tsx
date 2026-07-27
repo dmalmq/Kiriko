@@ -24,12 +24,22 @@ import { routeKirikoBundle } from "../bundle/routeKirikoBundle";
 import type { FacilityDto, RouteEndpoint, RouteResultDto } from "../bundle/wasm";
 import { loadNetworkOverlay } from "../bundle/loadNetworkOverlay";
 import {
-  addEdge,
-  deleteEdge,
   networkConnectivity,
   serializeNetwork,
   type ParsedNetwork,
 } from "../map/networkFeatures";
+import {
+  createNetworkEditorState,
+  hasNetworkChanges,
+  networkEditorReducer,
+  networkSaveProblem,
+  summarizeNetworkChanges,
+  type NetworkEditorAction,
+  type NetworkMapPick,
+  type NetworkEditorState,
+} from "../map/networkEditor";
+import { NetworkEditorToolbar } from "../components/NetworkEditorToolbar";
+import { NetworkInspectorPanel } from "../components/NetworkInspectorPanel";
 import { ZoomCluster } from "../components/ZoomCluster";
 import { SignInModal } from "../gallery/SignInModal";
 import { VenueLoadError } from "../errors/VenueLoadError";
@@ -104,6 +114,17 @@ const ui = {
   facilityRouteHere: { ja: "ここへの経路", en: "Route here" },
   facilityClose: { ja: "閉じる", en: "Close" },
   facilityUnnamed: { ja: "施設", en: "Facility" },
+  networkCenterPick: { ja: "地図の中心で選択", en: "Pick at map center" },
+  networkLoadFailed: { ja: "ネットワークを読み込めませんでした。", en: "Network could not be loaded." },
+  networkRetry: { ja: "再試行", en: "Retry" },
+  editViewerDenied: {
+    ja: "ネットワークデータを編集できるのはメンバーと管理者のみです。",
+    en: "Only members and admins can edit network data.",
+  },
+  editDesktopOnly: {
+    ja: "ネットワーク編集はデスクトップで利用できます。",
+    en: "Network editing is available on desktop.",
+  },
 } as const;
 
 const COMPACT_MQ = "(max-width: 899px)";
@@ -217,6 +238,7 @@ interface NetworkSaveState {
 }
 
 const PUBLIC_VERSION_ID = /^[0-9a-f]{64}$/;
+const ROUTE_COST_UNITS_PER_METER = 1000;
 
 function parseGdbJobError(raw: string): GdbError {
   let parsed: unknown;
@@ -332,12 +354,22 @@ export function App() {
   const [directions, setDirections] = useState<DirectionsState>(INITIAL_DIRECTIONS);
   const [reviewActive, setReviewActive] = useState(false);
   const [reviewNetwork, setReviewNetwork] = useState<ParsedNetwork | null>(null);
+  const [networkLoadState, setNetworkLoadState] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [networkLoadAttempt, setNetworkLoadAttempt] = useState(0);
+  const [editor, setEditor] = useState<NetworkEditorState | null>(null);
+  const [discardArmed, setDiscardArmed] = useState(false);
+  const dispatchEditor = useCallback((action: NetworkEditorAction) => {
+    setEditor((current) => (current === null ? current : networkEditorReducer(current, action)));
+  }, []);
+  // The published overlay is the immutable baseline; the editor's working copy
+  // (when editing) is what renders, reports connectivity, and serializes.
+  const editedNetwork = editor?.present ?? reviewNetwork;
   const reviewReport = useMemo(
-    () => (reviewNetwork ? networkConnectivity(reviewNetwork) : null),
-    [reviewNetwork],
+    () => (editedNetwork ? networkConnectivity(editedNetwork) : null),
+    [editedNetwork],
   );
-  const [editNetwork, setEditNetwork] = useState(false);
-  const [selectedJunction, setSelectedJunction] = useState<number | null>(null);
   const [networkSave, setNetworkSave] = useState<NetworkSaveState>({
     busy: false,
     submitting: false,
@@ -347,10 +379,6 @@ export function App() {
   });
   const networkSaveAttemptRef = useRef(0);
   const networkSaveAbortRef = useRef<AbortController | null>(null);
-  const selectedJunctionSet = useMemo(
-    () => (selectedJunction === null ? undefined : new Set([selectedJunction])),
-    [selectedJunction],
-  );
   const networkSaveLocked = networkSave.busy || networkSave.submitting || networkSave.accepted !== null;
   const networkSaveActionDisabled = networkSave.busy || networkSave.submitting || state.status === "loading";
   const resetNetworkSave = useCallback(() => {
@@ -481,6 +509,38 @@ export function App() {
   const directionsAvailable =
     !embed && venueState !== null && bundleProvenance?.hasGraph === true && pinnedBundleUrl !== null;
 
+  // Active floor for network editing: new points land here, and the toolbar
+  // names it. A ref keeps the map's onPick callback stable across floor changes.
+  const activeLevel =
+    venueState?.loadedVenue.levels.find((level) => level.id === venueState.selectedLevelId) ?? null;
+  const activeOrdinal =
+    venueState !== null
+      ? ordinalOfLevel(venueState.loadedVenue.levels, venueState.selectedLevelId) ?? 0
+      : 0;
+  const activeFloorLabel =
+    activeLevel !== null && venueState !== null
+      ? localizedLabel(
+          activeLevel.shortName,
+          locale,
+          activeLevel.id,
+          venueState.loadedVenue.manifest.language,
+        )
+      : "";
+  const activeOrdinalRef = useRef(activeOrdinal);
+  activeOrdinalRef.current = activeOrdinal;
+  const changeSummary = editor !== null ? summarizeNetworkChanges(editor) : null;
+  const editorDirty = changeSummary !== null && hasNetworkChanges(changeSummary);
+  // A status check retries an accepted job; a fresh save needs real, valid
+  // changes. Both are blocked while a save is in flight or a venue is loading
+  // (networkSaveActionDisabled), mirroring saveNetwork's own guard.
+  const networkCheckStatus = networkSave.accepted !== null && !networkSave.busy;
+  const networkSaveBlocker =
+    editedNetwork !== null ? networkSaveProblem(editedNetwork) : "missing_junction";
+  const networkCanSave =
+    !networkSaveActionDisabled &&
+    (networkCheckStatus ||
+      (editorDirty && networkSaveBlocker === null && networkSave.accepted === null));
+
   const [selectedFacility, setSelectedFacility] = useState<FacilityDto | null>(null);
 
   // A new venue (or dropping back to no bundle) resets any in-flight picks.
@@ -490,11 +550,17 @@ export function App() {
     setSelectedFacility(null);
     setReviewActive(false);
     setReviewNetwork(null);
+    setNetworkLoadState("idle");
+    setNetworkLoadAttempt(0);
+    setEditor(null);
+    setDiscardArmed(false);
     resetNetworkSave();
   }, [bundleProvenance, resetNetworkSave]);
 
   // Network-review overlay: load the generated network on demand the first
   // time review is switched on for this dataset (main-thread wasm export).
+  // Tracks explicit load state so Edit can gate on a ready graph and a failure
+  // is retryable instead of silent. `networkLoadAttempt` bumps to force a retry.
   useEffect(() => {
     if (!reviewActive || reviewNetwork !== null) {
       return;
@@ -503,16 +569,21 @@ export function App() {
       return;
     }
     let cancelled = false;
+    setNetworkLoadState("loading");
     void loadNetworkOverlay(pinnedBundleUrl).then(
       (parsed) => {
-        if (!cancelled) setReviewNetwork(parsed);
+        if (cancelled) return;
+        setReviewNetwork(parsed);
+        setNetworkLoadState("ready");
       },
-      () => undefined,
+      () => {
+        if (!cancelled) setNetworkLoadState("error");
+      },
     );
     return () => {
       cancelled = true;
     };
-  }, [reviewActive, reviewNetwork, pinnedBundleUrl]);
+  }, [reviewActive, reviewNetwork, pinnedBundleUrl, networkLoadAttempt]);
 
   // Deep-link `?review=1` from the gallery opens straight into the overlay.
   useEffect(() => {
@@ -589,32 +660,41 @@ export function App() {
   }, []);
 
   const toggleReview = useCallback(() => {
-    setReviewActive((current) => !current);
-  }, []);
+    if (!reviewActive) {
+      setReviewActive(true);
+      return;
+    }
+    // Turning review off while editing dirty arms the discard confirmation
+    // rather than silently dropping edits.
+    if (editor !== null && editorDirty) {
+      setDiscardArmed(true);
+      return;
+    }
+    setEditor(null);
+    setDiscardArmed(false);
+    setReviewActive(false);
+  }, [reviewActive, editor, editorDirty]);
 
   const onNetworkPick = useCallback(
-    (pick: { junctionId: number } | { edge: [number, number] }) => {
-      if ("edge" in pick) {
-        setSelectedJunction(null);
-        setReviewNetwork((net) => (net === null ? net : deleteEdge(net, pick.edge[0], pick.edge[1])));
-        return;
-      }
-      if (selectedJunction === null) {
-        setSelectedJunction(pick.junctionId);
-        return;
-      }
-      const first = selectedJunction;
-      setSelectedJunction(null);
-      setReviewNetwork((net) => (net === null ? net : addEdge(net, first, pick.junctionId)));
+    (pick: NetworkMapPick) => {
+      dispatchEditor({ type: "pick", pick, activeOrdinal: activeOrdinalRef.current });
     },
-    [selectedJunction],
+    [dispatchEditor],
   );
 
   const saveNetwork = useCallback(async () => {
     const dataset = params.dataset;
     // The edited graph must be based on the EXACT admitted published version,
     // so a valid admitted public identity is required to save.
-    if (reviewNetwork === null || dataset === null || admittedVersionId === null || networkSaveActionDisabled) {
+    if (editedNetwork === null || dataset === null || admittedVersionId === null || networkSaveActionDisabled) {
+      return;
+    }
+    // A fresh submission needs real, saveable changes; a status check on an
+    // already-accepted job bypasses that gate so the user can keep retrying.
+    if (
+      networkSave.accepted === null &&
+      (!editorDirty || networkSaveProblem(editedNetwork) !== null)
+    ) {
       return;
     }
 
@@ -629,7 +709,7 @@ export function App() {
 
     try {
       if (accepted === null) {
-        const { junctions, paths } = serializeNetwork(reviewNetwork);
+        const { junctions, paths } = serializeNetwork(editedNetwork);
         const response = await api.importNetwork(dataset, admittedVersionId, junctions, paths);
         accepted = { jobId: response.jobId, publicVersionId: response.publicVersionId };
         if (!isCurrent()) {
@@ -723,7 +803,15 @@ export function App() {
         networkSaveAbortRef.current = null;
       }
     }
-  }, [params.dataset, admittedVersionId, reviewNetwork, networkSave, networkSaveActionDisabled, locale]);
+  }, [
+    params.dataset,
+    admittedVersionId,
+    editedNetwork,
+    editorDirty,
+    networkSave,
+    networkSaveActionDisabled,
+    locale,
+  ]);
 
   const routeToFacility = useCallback((facility: FacilityDto) => {
     setSelectedFacility(null);
@@ -884,7 +972,11 @@ export function App() {
     setAuthAttempt((current) => current + 1);
   }, []);
 
-  const requestIssueSignIn = useCallback(() => {
+  const [editDenied, setEditDenied] = useState(false);
+  const pendingEditRef = useRef(false);
+  const enterEditRef = useRef<(() => void) | null>(null);
+
+  const requestSignIn = useCallback(() => {
     const publicVersionId = issuePublicVersionIdRef.current;
     if (publicVersionId === null) {
       return;
@@ -897,7 +989,7 @@ export function App() {
     setSignInOpen(true);
   }, []);
 
-  const handleIssueSignedIn = useCallback((user: ApiUser) => {
+  const handleSignedIn = useCallback((user: ApiUser) => {
     const publicVersionId = issuePublicVersionIdRef.current;
     if (publicVersionId === null) {
       setSignInOpen(false);
@@ -910,6 +1002,16 @@ export function App() {
     setReviewers([]);
     setAuthError(false);
     setSignInOpen(false);
+
+    // Resume a network-edit request that opened the sign-in modal.
+    if (pendingEditRef.current) {
+      pendingEditRef.current = false;
+      if (user.role === "viewer") {
+        setEditDenied(true);
+      } else {
+        enterEditRef.current?.();
+      }
+    }
 
     void issueApi.listReviewers().then(
       (nextReviewers) => {
@@ -930,6 +1032,133 @@ export function App() {
       },
     );
   }, []);
+
+  const beginNetworkEdit = useCallback(() => {
+    if (reviewNetwork === null || networkLoadState !== "ready") {
+      return;
+    }
+    setEditDenied(false);
+    setDirections(INITIAL_DIRECTIONS);
+    setSelectedFacility(null);
+    dispatch({ type: "select_feature", featureId: null });
+    setDiscardArmed(false);
+    setEditor(createNetworkEditorState(reviewNetwork));
+  }, [reviewNetwork, networkLoadState]);
+  enterEditRef.current = beginNetworkEdit;
+
+  const enterNetworkEdit = useCallback(() => {
+    const role = currentUser?.role ?? null;
+    if (role === null) {
+      // Anonymous: open sign-in and resume the edit once authenticated.
+      pendingEditRef.current = true;
+      requestSignIn();
+      return;
+    }
+    if (role === "viewer") {
+      setEditDenied(true);
+      return;
+    }
+    beginNetworkEdit();
+  }, [currentUser, requestSignIn, beginNetworkEdit]);
+
+  const requestDiscard = useCallback(() => {
+    // Clean exit is immediate; a dirty exit arms the inline confirmation.
+    if (editor !== null && editorDirty) {
+      setDiscardArmed(true);
+    } else {
+      setEditor(null);
+      setDiscardArmed(false);
+    }
+  }, [editor, editorDirty]);
+
+  const confirmDiscard = useCallback(() => {
+    setEditor(null);
+    setDiscardArmed(false);
+  }, []);
+
+  const cancelDiscard = useCallback(() => {
+    setDiscardArmed(false);
+  }, []);
+
+  const startNetworkMove = useCallback(
+    (nodeId: number) => {
+      dispatchEditor({ type: "start_move", nodeId });
+    },
+    [dispatchEditor],
+  );
+
+  // A change of auth or review state retires any stale edit-denied message.
+  useEffect(() => {
+    setEditDenied(false);
+  }, [currentUser, reviewActive]);
+
+  // Editor keyboard shortcuts, owned by the toolbar interaction (not inputs).
+  useEffect(() => {
+    if (editor === null) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      const target = event.target as HTMLElement | null;
+      if (target !== null) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable) {
+          return;
+        }
+      }
+      const mod = event.ctrlKey || event.metaKey;
+      if (mod && (event.key === "z" || event.key === "Z")) {
+        event.preventDefault();
+        dispatchEditor({ type: event.shiftKey ? "redo" : "undo" });
+        return;
+      }
+      if (mod) {
+        return;
+      }
+      if (event.key === "Escape") {
+        if (discardArmed) {
+          setDiscardArmed(false);
+        } else {
+          dispatchEditor({ type: "cancel_pending" });
+        }
+        return;
+      }
+      switch (event.key.toLowerCase()) {
+        case "s":
+          dispatchEditor({ type: "set_tool", tool: "select" });
+          break;
+        case "p":
+          dispatchEditor({ type: "set_tool", tool: "add-junction" });
+          break;
+        case "c":
+          dispatchEditor({ type: "set_tool", tool: "connect" });
+          break;
+        case "d":
+          dispatchEditor({ type: "set_tool", tool: "delete" });
+          break;
+        case "delete":
+        case "backspace":
+          dispatchEditor({ type: "delete_selection" });
+          break;
+        default:
+          break;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [editor, discardArmed, dispatchEditor]);
+
+  // Warn before unloading the tab with unsaved network edits.
+  useEffect(() => {
+    if (!editorDirty) {
+      return;
+    }
+    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [editorDirty]);
 
   const selectIssueFromQueue = useCallback(
     (issueId: string) => {
@@ -1349,9 +1578,18 @@ export function App() {
             onControls={onControls}
             facilities={bundleProvenance?.facilities ?? []}
             onSelectFacility={setSelectedFacility}
-            network={reviewActive ? reviewNetwork : null}
-            selectedJunctions={selectedJunctionSet}
-            onNetworkPick={reviewActive && editNetwork && !networkSaveLocked ? onNetworkPick : undefined}
+            network={reviewActive ? editedNetwork : null}
+            networkEditing={
+              editor !== null && !networkSaveLocked
+                ? {
+                    tool: editor.tool,
+                    selection: editor.selection,
+                    pendingNodeId: editor.pendingNodeId,
+                    onPick: onNetworkPick,
+                    centerActionLabel: ui.networkCenterPick[locale],
+                  }
+                : null
+            }
           />
         ) : null}
 
@@ -1470,7 +1708,7 @@ export function App() {
                   identityError={issueMode.kind === "identity_error"}
                   authError={authError}
                   onRetryAuth={retryIssueAuth}
-                  onRequestSignIn={requestIssueSignIn}
+                  onRequestSignIn={requestSignIn}
                   onBeginPlacement={beginIssuePlacement}
                   onCancelPlacement={cancelIssuePlacement}
                 />
@@ -1526,7 +1764,7 @@ export function App() {
 
         {showMap ? (
           <>
-            {directionsAvailable ? (
+            {directionsAvailable && editor === null ? (
               <div className="directions-bar">
                 <button
                   type="button"
@@ -1551,40 +1789,42 @@ export function App() {
                     {reviewReport.floorsInLargest} {ui.reviewFloors[locale]}
                   </span>
                 ) : null}
-                {reviewActive ? (
-                  <button
-                    type="button"
-                    className={editNetwork ? "chip chip--selected" : "chip"}
-                    aria-pressed={editNetwork}
-                    disabled={networkSaveLocked}
-                    onClick={() => {
-                      setEditNetwork((v) => !v);
-                      setSelectedJunction(null);
-                    }}
-                  >
-                    {ui.editNetwork[locale]}
-                  </button>
+                {reviewActive && editor === null ? (
+                  compact ? (
+                    <span className="network-edit-desktop-only">{ui.editDesktopOnly[locale]}</span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="chip"
+                      disabled={networkLoadState !== "ready"}
+                      onClick={enterNetworkEdit}
+                    >
+                      {ui.editNetwork[locale]}
+                    </button>
+                  )
                 ) : null}
-                {reviewActive && editNetwork ? (
-                  <button
-                    type="button"
-                    className="chip"
-                    disabled={networkSaveActionDisabled}
-                    onClick={() => {
-                      void saveNetwork();
-                    }}
-                  >
-                    {networkSave.accepted !== null && !networkSave.busy ? ui.checkNetworkSave[locale] : ui.saveNetwork[locale]}
-                  </button>
-                ) : null}
-                {reviewActive && editNetwork && networkSave.message !== null ? (
+                {reviewActive && editor === null && networkLoadState === "loading" ? (
                   <span className="directions-bar__status" role="status">
-                    {networkSave.message}
+                    {ui.loading[locale]}
                   </span>
                 ) : null}
-                {reviewActive && editNetwork && networkSave.error !== null ? (
+                {reviewActive && editor === null && networkLoadState === "error" ? (
+                  <>
+                    <span className="directions-bar__status" role="alert">
+                      {ui.networkLoadFailed[locale]}
+                    </span>
+                    <button
+                      type="button"
+                      className="chip"
+                      onClick={() => setNetworkLoadAttempt((n) => n + 1)}
+                    >
+                      {ui.networkRetry[locale]}
+                    </button>
+                  </>
+                ) : null}
+                {reviewActive && editor === null && editDenied ? (
                   <span className="directions-bar__status" role="alert">
-                    {networkSave.error}
+                    {ui.editViewerDenied[locale]}
                   </span>
                 ) : null}
                 {directions.active ? (
@@ -1597,7 +1837,7 @@ export function App() {
                           : directions.destination !== null && directions.route === null
                             ? ui.directionsNoPath[locale]
                             : directions.route !== null
-                              ? `${Math.round(directions.route.totalWeight)} m`
+                              ? `${Math.round(directions.route.totalWeight / ROUTE_COST_UNITS_PER_METER)} m`
                               : directions.origin === null
                                 ? ui.directionsPickOrigin[locale]
                                 : ui.directionsPickDestination[locale]}
@@ -1610,6 +1850,44 @@ export function App() {
                   </>
                 ) : null}
               </div>
+            ) : null}
+            {editor !== null ? (
+              <NetworkEditorToolbar
+                locale={locale}
+                tool={editor.tool}
+                summary={summarizeNetworkChanges(editor)}
+                activeFloorLabel={activeFloorLabel}
+                notice={editor.notice}
+                saveProblem={networkSaveProblem(editor.present)}
+                canUndo={editor.past.length > 0}
+                canRedo={editor.future.length > 0}
+                locked={networkSaveLocked}
+                canSave={networkCanSave}
+                checkStatus={networkCheckStatus}
+                saveMessage={networkSave.message}
+                saveError={networkSave.error}
+                discardArmed={discardArmed}
+                onSetTool={(tool) => dispatchEditor({ type: "set_tool", tool })}
+                onUndo={() => dispatchEditor({ type: "undo" })}
+                onRedo={() => dispatchEditor({ type: "redo" })}
+                onRequestDiscard={requestDiscard}
+                onCancelDiscard={cancelDiscard}
+                onConfirmDiscard={confirmDiscard}
+                onSave={() => {
+                  void saveNetwork();
+                }}
+              />
+            ) : null}
+            {editor !== null && editor.selection !== null ? (
+              <NetworkInspectorPanel
+                network={editor.present}
+                selection={editor.selection}
+                locale={locale}
+                locked={networkSaveLocked}
+                onClose={() => dispatchEditor({ type: "clear_selection" })}
+                onMove={startNetworkMove}
+                onDelete={() => dispatchEditor({ type: "delete_selection" })}
+              />
             ) : null}
             <FloorStack
               levels={venueState.loadedVenue.levels}
@@ -1694,7 +1972,7 @@ export function App() {
           onCancel={() => {
             setSignInOpen(false);
           }}
-          onSignedIn={handleIssueSignedIn}
+          onSignedIn={handleSignedIn}
         />
       ) : null}
     </div>

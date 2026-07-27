@@ -125,13 +125,21 @@ export function gdbTargetTypesForGeometry(family: GdbGeometryFamily): GdbTargetT
 // Floor ordinal parsing
 // ---------------------------------------------------------------------------
 
-/** floor number -> textual forms, mirroring the proven Cesium parser. */
+/**
+ * floor ordinal -> textual forms, mirroring the proven Cesium parser.
+ *
+ * Ordinals are **0-based**, per `docs/gdb-data-reference.md` and Rust
+ * `kiriko_route::floor_to_ordinal`: `F1` (ground) is ordinal 0, so a floor
+ * designation `n` maps to `n - 1`. Basements keep `B<n> \u2192 -n`. Keeping the
+ * two parsers aligned is what stops network/facility floors from landing on
+ * ordinals the venue does not have.
+ */
 function buildFloorSynonyms(): Map<number, string[]> {
   const map = new Map<number, string[]>();
   for (let n = 1; n <= 60; n += 1) {
     const variants = [`${n}f`, `f${n}`, `${n}\u968e`, `${n}fl`, `${n}floor`, `floor${n}`, `${n}`];
     if (n === 1) variants.push("gf", `g\u968e`, "ground");
-    map.set(n, variants);
+    map.set(n - 1, variants);
   }
   for (let n = 1; n <= 10; n += 1) {
     map.set(-n, [
@@ -141,7 +149,10 @@ function buildFloorSynonyms(): Map<number, string[]> {
       `basement${n}`,
     ]);
   }
-  map.set(0, ["0", "f0", "0f", "0fl", "0floor", "floor0"]);
+  // A literal `0`/`F0` is the European ground-floor spelling — the same
+  // ordinal 0 that `F1`/`GF` already resolve to, so extend that entry rather
+  // than replacing it.
+  map.set(0, [...(map.get(0) ?? []), "0", "f0", "0f", "0fl", "0floor", "floor0"]);
   return map;
 }
 
@@ -433,6 +444,7 @@ export function suggestGdbMapping(inspection: GdbInspection): GdbMappingPlan {
 export function normalizeGdbPlan(plan: GdbMappingPlan): GdbMappingPlan {
   return {
     ...plan,
+    clipToSelection: plan.clipToSelection === true,
     layers: plan.layers.map((row) => ({
       ...row,
       buildingId: row.buildingId === "" ? null : row.buildingId,
@@ -760,12 +772,6 @@ function resolveLevelOrdinal(
   plan: GdbLayerPlan,
   props: Record<string, unknown>,
 ): number | null {
-  if (plan.ordinalField) {
-    const raw = props[plan.ordinalField];
-    if (typeof raw === "number" && Number.isFinite(raw)) return raw;
-    const parsed = extractGdbFloorOrdinal(raw);
-    if (parsed !== null) return parsed;
-  }
   const rule = plan.levelRule;
   if (rule?.kind === "property") {
     const parsed = extractGdbFloorOrdinal(props[rule.field]);
@@ -778,6 +784,18 @@ function resolveLevelOrdinal(
   }
   if (plan.nameField) {
     const parsed = extractGdbFloorOrdinal(props[plan.nameField]);
+    if (parsed !== null) return parsed;
+  }
+  // Last resort. A source `ordinal` attribute is only as trustworthy as the
+  // GDB that wrote it: across the JR East databases it mixes conventions
+  // (`F2` is ordinal 2 in JRTakanawaGatewaySta, ordinal 1 in LinkPillar1),
+  // which silently merged distinct floors onto one ordinal. The floor labels
+  // above are consistent, so they decide; this only fills in rows whose
+  // labels do not parse at all.
+  if (plan.ordinalField) {
+    const raw = props[plan.ordinalField];
+    if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+    const parsed = extractGdbFloorOrdinal(raw);
     if (parsed !== null) return parsed;
   }
   return layerNameFloorOrdinal(plan.key.layerName);

@@ -51,13 +51,25 @@ export function gdbTargetTypesForGeometry(family: GdbGeometryFamily): GdbTargetT
 // Floor ordinal parsing
 // ---------------------------------------------------------------------------
 
-/** floor number -> textual forms, mirroring the proven Cesium parser. */
+/**
+ * floor ordinal -> textual forms, mirroring the proven Cesium parser.
+ *
+ * Ordinals are **0-based**, per `docs/gdb-data-reference.md` and Rust
+ * `kiriko_route::floor_to_ordinal`: `F1` (ground) is ordinal 0, so a floor
+ * designation `n` maps to `n - 1`. Basements keep `B<n> \u2192 -n`.
+ *
+ * This is a deliberate duplicate of `buildFloorSynonyms` in
+ * `server/src/gdb/mapping.ts` (no shared module exists between the client and
+ * the server bundle). The two copies must stay byte-for-byte equivalent \u2014
+ * they are the same parser, and a divergence means the dialog's floor
+ * reasoning disagrees with what the importer actually does.
+ */
 function buildFloorSynonyms(): Map<number, string[]> {
   const map = new Map<number, string[]>();
   for (let n = 1; n <= 60; n += 1) {
     const variants = [`${n}f`, `f${n}`, `${n}\u968e`, `${n}fl`, `${n}floor`, `floor${n}`, `${n}`];
     if (n === 1) variants.push("gf", `g\u968e`, "ground");
-    map.set(n, variants);
+    map.set(n - 1, variants);
   }
   for (let n = 1; n <= 10; n += 1) {
     map.set(-n, [
@@ -67,7 +79,10 @@ function buildFloorSynonyms(): Map<number, string[]> {
       `basement${n}`,
     ]);
   }
-  map.set(0, ["0", "f0", "0f", "0fl", "0floor", "floor0"]);
+  // A literal `0`/`F0` is the European ground-floor spelling \u2014 the same
+  // ordinal 0 that `F1`/`GF` already resolve to, so extend that entry rather
+  // than replacing it.
+  map.set(0, [...(map.get(0) ?? []), "0", "f0", "0f", "0fl", "0floor", "floor0"]);
   return map;
 }
 

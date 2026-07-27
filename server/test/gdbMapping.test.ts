@@ -18,6 +18,7 @@ import type {
   GdbGeometryFamily,
   GdbInspection,
   GdbLayerDescriptor,
+  GdbMappingPlan,
 } from "../src/gdb/types";
 
 function layer(
@@ -72,13 +73,27 @@ describe("extractGdbFloorOrdinal", () => {
   it("accepts numbers and structured layer tokens", () => {
     expect(extractGdbFloorOrdinal(3)).toBe(3);
     expect(extractGdbFloorOrdinal("B2FL(1FL)_extra")).toBe(-2);
-    expect(extractGdbFloorOrdinal("3F_extra")).toBe(3);
+    expect(extractGdbFloorOrdinal("3F_extra")).toBe(2);
   });
   it("resolves synonyms and basement aliases", () => {
     expect(extractGdbFloorOrdinal("KB3")).toBe(-3);
     expect(extractGdbFloorOrdinal("SB4F")).toBe(-4);
     expect(extractGdbFloorOrdinal("M2")).toBe(2);
     expect(extractGdbFloorOrdinal("R")).toBeNull();
+  });
+  // docs/gdb-data-reference.md: `F<n>` → `n - 1`, `B<n>` → `-n`, `M<n>` → `n`.
+  // Must stay identical to Rust `kiriko_route::floor_to_ordinal`, or network
+  // and facility floors land on ordinals the venue does not have.
+  it("is 0-based, matching kiriko_route::floor_to_ordinal", () => {
+    expect(extractGdbFloorOrdinal("F1")).toBe(0);
+    expect(extractGdbFloorOrdinal("F2")).toBe(1);
+    expect(extractGdbFloorOrdinal("F36")).toBe(35);
+    expect(extractGdbFloorOrdinal("1F")).toBe(0);
+    expect(extractGdbFloorOrdinal("2F")).toBe(1);
+    expect(extractGdbFloorOrdinal("1階")).toBe(0);
+    expect(extractGdbFloorOrdinal("GF")).toBe(0);
+    expect(extractGdbFloorOrdinal("B1")).toBe(-1);
+    expect(extractGdbFloorOrdinal("B2")).toBe(-2);
   });
 });
 
@@ -107,7 +122,7 @@ describe("structured/layer-name floor ordinal", () => {
   });
   it("falls back to loose token parse for non-structured names", () => {
     expect(layerNameFloorOrdinal("ShinjukuSt_B1_link")).toBe(-1);
-    expect(layerNameFloorOrdinal("Camera_1_nw")).toBe(1);
+    expect(layerNameFloorOrdinal("Camera_1_nw")).toBe(0);
   });
 });
 
@@ -225,7 +240,7 @@ describe("buildGdbImdf", () => {
     expect(archive.collections.building?.features).toHaveLength(1);
     expect(archive.collections.level?.features).toHaveLength(1);
     const levelFeature = archive.collections.level!.features[0]!;
-    expect((levelFeature.properties as Record<string, unknown>).ordinal).toBe(1);
+    expect((levelFeature.properties as Record<string, unknown>).ordinal).toBe(0);
     expect((levelFeature.properties as Record<string, unknown>)["__gdb_database"]).toBe("gdb-1");
     const unitFeature = archive.collections.unit!.features[0]!;
     // Source floor_id reference must resolve to the imported level id.
@@ -233,6 +248,62 @@ describe("buildGdbImdf", () => {
     // Source UUIDs that are count-one must be preserved on both level and unit.
     expect(levelFeature.id).toBe(floorId);
     expect(unitFeature.id).toBe(spaceId);
+  });
+
+  // Observed in the JR East source: every Floor layer carries a consistent
+  // `floor` label (`F<n>`), but the `ordinal` attribute mixes conventions —
+  // JRTakanawaGatewaySta_2_Floor has ordinal 2 for `F2` while
+  // LinkPillar1_2_Floor has ordinal 1 for `F2`. Trusting the attribute put
+  // Takanawa 1F and LinkPillar 2F on the same ordinal, so the floor selector
+  // and the network overlay (which filter by ordinal alone) drew two
+  // different physical floors together.
+  it("derives the level ordinal from the floor label, not a conflicting ordinal field", () => {
+    const floor = layer("LinkPillar1_2_Floor", "polygon", 1, [
+      "id",
+      "name",
+      "ordinal",
+      "floor",
+    ]);
+    const plan = suggestGdbMapping(inspect([floor]));
+    const levelPlan = plan.layers.find((l) => l.key.layerName === "LinkPillar1_2_Floor")!;
+    expect(levelPlan.ordinalField).toBe("ordinal");
+    expect(levelPlan.levelRule).toEqual({ kind: "property", field: "floor" });
+
+    const floorId = "b1000001-0000-4000-8000-0000000000b1";
+    const floorLayer: GdbConvertedLayer = {
+      key: floor.key,
+      featureCollection: {
+        type: "FeatureCollection",
+        features: [
+          // `ordinal` says 1 (0-based); `floor` says F2. The label wins.
+          feature(polygon(), { id: floorId, name: "2F", ordinal: 1, floor: "F2" }, floorId),
+        ],
+      },
+      skippedGeometryCount: 0,
+    };
+
+    const archive = buildGdbImdf({ layers: [floorLayer], warnings: [] }, plan);
+    const levelFeature = archive.collections.level!.features[0]!;
+    expect((levelFeature.properties as Record<string, unknown>).ordinal).toBe(1);
+  });
+
+  it("falls back to the ordinal field when no label parses", () => {
+    const floor = layer("Tower_1_Floor", "polygon", 1, ["id", "name", "ordinal", "floor"]);
+    const plan = suggestGdbMapping(inspect([floor]));
+    const floorId = "b1000001-0000-4000-8000-0000000000b1";
+    const floorLayer: GdbConvertedLayer = {
+      key: floor.key,
+      featureCollection: {
+        type: "FeatureCollection",
+        features: [
+          feature(polygon(), { id: floorId, name: "Roof", ordinal: 7, floor: "R" }, floorId),
+        ],
+      },
+      skippedGeometryCount: 0,
+    };
+    const archive = buildGdbImdf({ layers: [floorLayer], warnings: [] }, plan);
+    const levelFeature = archive.collections.level!.features[0]!;
+    expect((levelFeature.properties as Record<string, unknown>).ordinal).toBe(7);
   });
 
   it("fails when no layers are included", () => {
@@ -325,6 +396,16 @@ describe("normalizeGdbPlan", () => {
     expect(row.nameField).toBeNull();
     expect(row.categoryField).toBeNull();
     expect(row.idField).toBe("id");
+  });
+
+  it("normalizes clipToSelection to a strict boolean", () => {
+    const base: GdbMappingPlan = {
+      venueName: "Station",
+      buildings: [{ id: "b1", name: "Station" }],
+      layers: [],
+    };
+    expect(normalizeGdbPlan(base).clipToSelection).toBe(false);
+    expect(normalizeGdbPlan({ ...base, clipToSelection: true }).clipToSelection).toBe(true);
   });
 });
 

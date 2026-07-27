@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
-  addEdge,
+  addConnection,
+  addJunction,
   buildNetworkFeatures,
-  deleteEdge,
+  deleteConnection,
+  deleteJunction,
   floorLabelToOrdinal,
+  moveJunction,
   ordinalToFloorLabel,
   parseNetworkOverlay,
   serializeNetwork,
@@ -73,6 +76,28 @@ function jn(id: number, lon: number, lat: number, ordinal: number): ParsedNetwor
   };
 }
 
+/** A directed `net_path` with an explicit reciprocal id pair, for parallel-edge fixtures. */
+function pathFeature(
+  from: number,
+  to: number,
+  pathId: number,
+  reversePathId: number,
+  ordinal = 0,
+): ParsedNetwork["paths"][number] {
+  return {
+    ordinal,
+    geometry: { type: "LineString", coordinates: [[139.7, 35.6], [139.7005, 35.6]] },
+    properties: {
+      FNODEID: from,
+      TNODEID: to,
+      cost: 100,
+      FLOOR: ordinalToFloorLabel(ordinal),
+      PATHID: pathId,
+      RPATHID: reversePathId,
+    },
+  };
+}
+
 describe("ordinalToFloorLabel", () => {
   it("round-trips through floorLabelToOrdinal", () => {
     for (const o of [-3, -1, 0, 1, 5]) {
@@ -81,84 +106,277 @@ describe("ordinalToFloorLabel", () => {
   });
 });
 
-describe("network editing", () => {
+describe("network mutations", () => {
   const base = (): ParsedNetwork => ({
     junctions: [jn(0, 139.7, 35.6, 0), jn(1, 139.7005, 35.6, 0)],
     paths: [],
   });
 
-  it("addEdge appends a forward + reverse path with a positive cost", () => {
-    const net = addEdge(base(), 0, 1);
-    expect(net.paths).toHaveLength(2);
-    const [fwd, rev] = net.paths;
+  it("addJunction appends a NODEID one past the max with canonical defaults", () => {
+    const r = addJunction(base(), { longitude: 139.701, latitude: 35.6, ordinal: 0 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.nodeId).toBe(2);
+    expect(r.network.junctions).toHaveLength(3);
+    const added = r.network.junctions[2]!;
+    expect(added.ordinal).toBe(0);
+    expect(added.geometry).toEqual({ type: "Point", coordinates: [139.701, 35.6] });
+    expect(added.properties).toMatchObject({
+      NODEID: 2,
+      PATH_COUNT: 0,
+      FLOOR: "F1",
+      BARRIER: 0,
+      STARTTIME: -1,
+      ENDTIME: -1,
+      GATE: 0,
+      NAME: null,
+      relative_height: null,
+      altitude: 0,
+    });
+  });
+
+  it("addJunction allocates altitude from the floor ordinal", () => {
+    const r = addJunction(base(), { longitude: 139.7, latitude: 35.6, ordinal: 2 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.network.junctions[2]!.properties).toMatchObject({ FLOOR: "F3", altitude: 8 });
+  });
+
+  it("addJunction rejects non-finite coordinates", () => {
+    const net = base();
+    const r = addJunction(net, { longitude: Number.NaN, latitude: 35.6, ordinal: 0 });
+    expect(r).toEqual({ ok: false, network: net, error: "invalid_coordinate" });
+  });
+
+  it("addConnection emits a reciprocal pair with canonical defaults and positive cost", () => {
+    const r = addConnection(base(), 0, 1);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.network.paths).toHaveLength(2);
+    const [fwd, rev] = r.network.paths;
     expect(fwd!.properties.FNODEID).toBe(0);
     expect(fwd!.properties.TNODEID).toBe(1);
     expect(rev!.properties.FNODEID).toBe(1);
     expect(rev!.properties.TNODEID).toBe(0);
     expect(Number(fwd!.properties.cost)).toBeGreaterThan(0);
+    expect(fwd!.properties.RPATHID).toBe(rev!.properties.PATHID);
+    expect(rev!.properties.RPATHID).toBe(fwd!.properties.PATHID);
+    expect(fwd!.properties.passage_type).toBe(0);
+    expect(fwd!.properties.indoor).toBe(1);
+    expect(fwd!.properties.FFLOOR).toBeNull();
+    expect(fwd!.properties.FLOOR).toBe("F1");
     expect(fwd!.ordinal).toBe(0);
+    expect(r.connectionId).toEqual({ pathId: 1, reversePathId: 2 });
   });
 
-  it("addEdge is idempotent for an existing undirected pair", () => {
-    const net = addEdge(addEdge(base(), 0, 1), 1, 0);
-    expect(net.paths).toHaveLength(2);
+  it("addConnection recomputes PATH_COUNT for both endpoints", () => {
+    const r = addConnection(base(), 0, 1);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.network.junctions.map((j) => j.properties.PATH_COUNT)).toEqual([1, 1]);
   });
 
-  it("deleteEdge removes both directions", () => {
-    const net = deleteEdge(addEdge(base(), 0, 1), 0, 1);
-    expect(net.paths).toHaveLength(0);
+  it("addConnection rejects same, unknown, existing, and cross-floor endpoints", () => {
+    expect(addConnection(base(), 0, 0)).toMatchObject({ ok: false, error: "same_junction" });
+    expect(addConnection(base(), 0, 9)).toMatchObject({ ok: false, error: "unknown_junction" });
+    const once = addConnection(base(), 0, 1);
+    expect(once.ok).toBe(true);
+    if (once.ok) {
+      expect(addConnection(once.network, 1, 0)).toMatchObject({ ok: false, error: "existing_connection" });
+    }
+    const cross: ParsedNetwork = {
+      junctions: [jn(0, 139.7, 35.6, 0), jn(1, 139.7, 35.6, 1)],
+      paths: [],
+    };
+    expect(addConnection(cross, 0, 1)).toMatchObject({ ok: false, error: "cross_floor_connection" });
+  });
+
+  it("addConnection assigns globally-unique reciprocal ids across connections", () => {
+    const seeded: ParsedNetwork = {
+      junctions: [jn(0, 139.7, 35.6, 0), jn(1, 139.7005, 35.6, 0), jn(2, 139.701, 35.6, 0)],
+      paths: [],
+    };
+    const first = addConnection(seeded, 0, 1);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = addConnection(first.network, 1, 2);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.network.paths).toHaveLength(4);
+    const ids = new Set(
+      second.network.paths.flatMap((p) => [p.properties.PATHID, p.properties.RPATHID]),
+    );
+    expect(ids.size).toBe(4);
+  });
+
+  it("deleteConnection removes exactly one of two parallel connections", () => {
+    const net: ParsedNetwork = {
+      junctions: [jn(0, 139.7, 35.6, 0), jn(1, 139.7005, 35.6, 0)],
+      paths: [
+        pathFeature(0, 1, 1, 2),
+        pathFeature(1, 0, 2, 1),
+        pathFeature(0, 1, 3, 4),
+        pathFeature(1, 0, 4, 3),
+      ],
+    };
+    const r = deleteConnection(net, { pathId: 3, reversePathId: 4 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.network.paths).toHaveLength(2);
+    expect(r.network.paths.every((p) => p.properties.PATHID === 1 || p.properties.PATHID === 2)).toBe(true);
+    // Two parallel edges collapse to one remaining logical connection per node.
+    expect(r.network.junctions.map((j) => j.properties.PATH_COUNT)).toEqual([1, 1]);
+  });
+
+  it("deleteConnection normalizes the id pair order", () => {
+    const net: ParsedNetwork = {
+      junctions: [jn(0, 139.7, 35.6, 0), jn(1, 139.7005, 35.6, 0)],
+      paths: [pathFeature(0, 1, 3, 4), pathFeature(1, 0, 4, 3)],
+    };
+    const r = deleteConnection(net, { pathId: 4, reversePathId: 3 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.network.paths).toHaveLength(0);
+  });
+
+  it("deleteConnection reports unknown_connection for a missing pair", () => {
+    const withEdge = addConnection(base(), 0, 1);
+    expect(withEdge.ok).toBe(true);
+    if (!withEdge.ok) return;
+    expect(deleteConnection(withEdge.network, { pathId: 99, reversePathId: 100 })).toMatchObject({
+      ok: false,
+      error: "unknown_connection",
+    });
+  });
+
+  it("moveJunction moves a LineString endpoint and preserves stored cost", () => {
+    const withEdge = addConnection(base(), 0, 1);
+    expect(withEdge.ok).toBe(true);
+    if (!withEdge.ok) return;
+    const originalCost = withEdge.network.paths[0]!.properties.cost;
+    const moved = moveJunction(withEdge.network, 0, { longitude: 139.702, latitude: 35.601 });
+    expect(moved.ok).toBe(true);
+    if (!moved.ok) return;
+    const j0 = moved.network.junctions.find((j) => j.properties.NODEID === 0)!;
+    expect(j0.geometry).toEqual({ type: "Point", coordinates: [139.702, 35.601] });
+    const fwd = moved.network.paths.find((p) => p.properties.FNODEID === 0)!;
+    expect((fwd.geometry as GeoJSON.LineString).coordinates[0]).toEqual([139.702, 35.601]);
+    expect(fwd.properties.cost).toBe(originalCost);
+    const rev = moved.network.paths.find((p) => p.properties.TNODEID === 0)!;
+    const revCoords = (rev.geometry as GeoJSON.LineString).coordinates;
+    expect(revCoords[revCoords.length - 1]).toEqual([139.702, 35.601]);
+  });
+
+  it("moveJunction updates a MultiLineString endpoint keeping interior vertices", () => {
+    const net: ParsedNetwork = {
+      junctions: [jn(0, 139.7, 35.6, 0), jn(1, 139.71, 35.6, 0)],
+      paths: [
+        {
+          ordinal: 0,
+          geometry: {
+            type: "MultiLineString",
+            coordinates: [[[139.7, 35.6], [139.705, 35.6005], [139.71, 35.6]]],
+          },
+          properties: { FNODEID: 0, TNODEID: 1, cost: 500, PATHID: 1, RPATHID: 2, FLOOR: "F1" },
+        },
+      ],
+    };
+    const moved = moveJunction(net, 1, { longitude: 139.72, latitude: 35.61 });
+    expect(moved.ok).toBe(true);
+    if (!moved.ok) return;
+    const geom = moved.network.paths[0]!.geometry as GeoJSON.MultiLineString;
+    const line = geom.coordinates[0]!;
+    expect(line[line.length - 1]).toEqual([139.72, 35.61]);
+    expect(line[1]).toEqual([139.705, 35.6005]);
+  });
+
+  it("moveJunction rejects unknown nodes and non-finite coordinates", () => {
+    expect(moveJunction(base(), 9, { longitude: 139.7, latitude: 35.6 })).toMatchObject({
+      ok: false,
+      error: "unknown_junction",
+    });
+    expect(
+      moveJunction(base(), 0, { longitude: 139.7, latitude: Number.POSITIVE_INFINITY }),
+    ).toMatchObject({ ok: false, error: "invalid_coordinate" });
+  });
+
+  it("deleteJunction removes the node and every incident path", () => {
+    const seeded: ParsedNetwork = {
+      junctions: [jn(0, 139.7, 35.6, 0), jn(1, 139.7005, 35.6, 0), jn(2, 139.701, 35.6, 0)],
+      paths: [],
+    };
+    const c1 = addConnection(seeded, 0, 1);
+    expect(c1.ok).toBe(true);
+    if (!c1.ok) return;
+    const c2 = addConnection(c1.network, 1, 2);
+    expect(c2.ok).toBe(true);
+    if (!c2.ok) return;
+    const del = deleteJunction(c2.network, 1);
+    expect(del.ok).toBe(true);
+    if (!del.ok) return;
+    expect(del.network.junctions.map((j) => j.properties.NODEID)).toEqual([0, 2]);
+    expect(del.network.paths).toHaveLength(0);
+    expect(del.network.junctions.map((j) => j.properties.PATH_COUNT)).toEqual([0, 0]);
+  });
+
+  it("deleteJunction reports unknown_junction for a missing node", () => {
+    expect(deleteJunction(base(), 9)).toMatchObject({ ok: false, error: "unknown_junction" });
   });
 
   it("serializeNetwork emits named FeatureCollections that re-parse", () => {
-    const net = addEdge(base(), 0, 1);
-    const { junctions, paths } = serializeNetwork(net);
+    const withEdge = addConnection(base(), 0, 1);
+    expect(withEdge.ok).toBe(true);
+    if (!withEdge.ok) return;
+    const { junctions, paths } = serializeNetwork(withEdge.network);
     const j = JSON.parse(junctions) as { name: string; features: unknown[] };
     const p = JSON.parse(paths) as { name: string; features: unknown[] };
     expect(j.name).toBe("net_junction");
     expect(j.features).toHaveLength(2);
     expect(p.name).toBe("net_path");
     expect(p.features).toHaveLength(2);
+    const reparsed = parseNetworkOverlay({ junctions, paths });
+    expect(reparsed.junctions).toHaveLength(2);
+    expect(reparsed.paths).toHaveLength(2);
   });
 
-  it("addEdge links the forward and reverse path with a reciprocal PATHID pair", () => {
-    const net = addEdge(base(), 0, 1);
-    const [fwd, rev] = net.paths;
-    // A proper reciprocal pair: each path's PATHID is the other's RPATHID, so
-    // the Rust importer can canonicalize the two directed features into one edge.
-    expect(typeof fwd!.properties.PATHID).toBe("number");
-    expect(typeof rev!.properties.PATHID).toBe("number");
-    expect(fwd!.properties.RPATHID).toBe(rev!.properties.PATHID);
-    expect(rev!.properties.RPATHID).toBe(fwd!.properties.PATHID);
-    expect(fwd!.properties.PATHID).not.toBe(fwd!.properties.RPATHID);
+  it("rejected mutations return the original network object", () => {
+    const net = base();
+    expect(addConnection(net, 0, 0).network).toBe(net);
+    expect(moveJunction(net, 9, { longitude: 1, latitude: 1 }).network).toBe(net);
+    expect(deleteJunction(net, 9).network).toBe(net);
   });
+});
 
-  it("addEdge assigns PATHIDs that stay globally unique across edges", () => {
-    const seeded: ParsedNetwork = {
-      junctions: [jn(0, 139.7, 35.6, 0), jn(1, 139.7005, 35.6, 0), jn(2, 139.701, 35.6, 0)],
-      paths: [],
+describe("buildNetworkFeatures render state", () => {
+  it("marks the selected junction, selected connection, and pending origin", () => {
+    const net: ParsedNetwork = {
+      junctions: [jn(0, 139.7, 35.6, 0), jn(1, 139.7005, 35.6, 0)],
+      paths: [pathFeature(0, 1, 1, 2), pathFeature(1, 0, 2, 1)],
     };
-    const net = addEdge(addEdge(seeded, 0, 1), 1, 2);
-    expect(net.paths).toHaveLength(4); // two undirected edges → four directed paths
-    // Two logical edges use four distinct path ids (1..4); the second edge
-    // never reuses the first edge's ids. Within a reciprocal pair the two ids
-    // are shared (swapped), so the distinct count is 4, not 8.
-    const distinct = new Set(net.paths.flatMap((p) => [p.properties.PATHID, p.properties.RPATHID]));
-    expect(distinct.size).toBe(4);
+    const fc = buildNetworkFeatures(net, 0, {
+      selectedJunctionId: 0,
+      selectedConnection: { pathId: 1, reversePathId: 2 },
+      pendingJunctionId: 1,
+    });
+    const junctions = fc.features.filter((f) => f.properties?.kind === "junction");
+    const paths = fc.features.filter((f) => f.properties?.kind === "path");
+    const j0 = junctions.find((f) => f.properties?.NODEID === 0)!;
+    const j1 = junctions.find((f) => f.properties?.NODEID === 1)!;
+    expect(j0.properties?.selected).toBe(true);
+    expect(j0.properties?.pending).toBe(false);
+    expect(j1.properties?.pending).toBe(true);
+    expect(j1.properties?.selected).toBe(false);
+    // Both directed paths of connection {1,2} are marked selected.
+    expect(paths).toHaveLength(2);
+    expect(paths.every((f) => f.properties?.selected === true)).toBe(true);
+    expect(paths[0]?.properties?.PATHID).toBeDefined();
+    expect(paths[0]?.properties?.RPATHID).toBeDefined();
   });
 
-  it("addEdge is a no-op when a junction has non-finite coordinates", () => {
-    const bad: ParsedNetwork = {
-      junctions: [
-        {
-          ordinal: 0,
-          geometry: { type: "Point", coordinates: [Number.NaN, 35.6] },
-          properties: { NODEID: 0, FLOOR: "F1" },
-        },
-        jn(1, 139.7005, 35.6, 0),
-      ],
-      paths: [],
-    };
-    // No NaN-cost path is ever emitted at the browser adapter boundary.
-    expect(addEdge(bad, 0, 1).paths).toHaveLength(0);
+  it("leaves everything unmarked without render state", () => {
+    const net: ParsedNetwork = { junctions: [jn(0, 139.7, 35.6, 0)], paths: [] };
+    const fc = buildNetworkFeatures(net, 0);
+    expect(fc.features[0]?.properties?.selected).toBe(false);
+    expect(fc.features[0]?.properties?.pending).toBe(false);
   });
 });
