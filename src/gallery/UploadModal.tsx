@@ -12,6 +12,11 @@ const ui = {
   publish: { ja: "公開", en: "Publish" },
   uploading: { ja: "アップロード中", en: "Uploading" },
   processing: { ja: "検証・公開処理中…", en: "Validating and publishing…" },
+  processingContinues: {
+    ja: "公開処理はサーバーで続いています。しばらくしてから一覧を更新してください。",
+    en: "Publishing is still running on the server. Refresh the list again shortly.",
+  },
+  checkStatus: { ja: "状況を確認", en: "Check status" },
   published: { ja: "公開しました", en: "Published" },
   open: { ja: "開く", en: "Open" },
   close: { ja: "閉じる", en: "Close" },
@@ -31,10 +36,17 @@ export interface UploadModalProps {
   target?: UploadModalTarget;
 }
 
+interface AcceptedUploadJob {
+  jobId: string;
+  slug: string;
+  createdVenueId: number | null;
+}
+
 type Phase =
   | { step: "form" }
   | { step: "uploading"; fraction: number }
-  | { step: "processing" }
+  | { step: "processing"; accepted: AcceptedUploadJob }
+  | { step: "accepted"; accepted: AcceptedUploadJob; message: string }
   | { step: "done"; slug: string }
   | { step: "failed"; message: string };
 
@@ -61,7 +73,37 @@ export function UploadModal({ locale, onClose, onPublished, target }: UploadModa
     acceptFile(event.dataTransfer.files[0]);
   };
 
+  const checkAccepted = (accepted: AcceptedUploadJob) => {
+    setPhase({ step: "processing", accepted });
+    void (async () => {
+      try {
+        const job = await api.waitForJob(accepted.jobId);
+        if (job.status === "done") {
+          setPhase({ step: "done", slug: accepted.slug });
+          onPublished();
+        } else if (job.status === "timeout") {
+          setPhase({ step: "accepted", accepted, message: ui.processingContinues[locale] });
+        } else {
+          if (accepted.createdVenueId !== null) {
+            try {
+              await api.deleteVenue(accepted.createdVenueId);
+            } catch {
+              /* best effort */
+            }
+          }
+          setPhase({ step: "failed", message: publishErrorMessage(job.error) });
+        }
+      } catch {
+        setPhase({ step: "accepted", accepted, message: ui.processingContinues[locale] });
+      }
+    })();
+  };
+
   const submit = () => {
+    if (phase.step === "accepted") {
+      checkAccepted(phase.accepted);
+      return;
+    }
     if (!file) return;
     if (!target && name.trim() === "") return;
     setPhase({ step: "uploading", fraction: 0 });
@@ -82,21 +124,7 @@ export function UploadModal({ locale, onClose, onPublished, target }: UploadModa
         const { jobId } = await api.uploadVersion(venueId, file, (fraction) => {
           setPhase({ step: "uploading", fraction });
         });
-        setPhase({ step: "processing" });
-        const job = await api.waitForJob(jobId);
-        if (job.status === "done") {
-          setPhase({ step: "done", slug });
-          onPublished();
-        } else {
-          if (createdVenueId !== null) {
-            try {
-              await api.deleteVenue(createdVenueId);
-            } catch {
-              /* best effort */
-            }
-          }
-          setPhase({ step: "failed", message: publishErrorMessage(job.error) });
-        }
+        checkAccepted({ jobId, slug, createdVenueId });
       } catch (error) {
         if (createdVenueId !== null) {
           try {
@@ -114,6 +142,11 @@ export function UploadModal({ locale, onClose, onPublished, target }: UploadModa
   };
 
   const busy = phase.step === "uploading" || phase.step === "processing";
+  const locked = busy || phase.step === "accepted";
+  const closeDisabled = busy || phase.step === "accepted";
+  const close = () => {
+    if (!closeDisabled) onClose();
+  };
 
   return (
     <div className="modal-overlay">
@@ -122,7 +155,7 @@ export function UploadModal({ locale, onClose, onPublished, target }: UploadModa
           <h2 className="upload-modal__title">
             {(target ? ui.titleVersion : ui.title)[locale]}
           </h2>
-          <button type="button" className="floating-panel__close" aria-label={ui.close[locale]} onClick={onClose} disabled={busy}>
+          <button type="button" className="floating-panel__close" aria-label={ui.close[locale]} onClick={close} disabled={closeDisabled}>
             <IconClose />
           </button>
         </header>
@@ -131,7 +164,7 @@ export function UploadModal({ locale, onClose, onPublished, target }: UploadModa
           <div className="upload-modal__done">
             <p className="upload-modal__published">{ui.published[locale]}</p>
             <div className="upload-modal__footer">
-              <button type="button" className="btn-ghost" onClick={onClose}>
+              <button type="button" className="btn-ghost" onClick={close}>
                 {ui.close[locale]}
               </button>
               <a className="btn-primary" href={`/?dataset=${encodeURIComponent(phase.slug)}`}>
@@ -153,7 +186,7 @@ export function UploadModal({ locale, onClose, onPublished, target }: UploadModa
                 setDragActive(false);
               }}
               onDrop={onDrop}
-              disabled={busy}
+              disabled={locked}
             >
               <span className="drop-target__title">{file ? file.name : ui.dropTitle[locale]}</span>
               <span className="drop-target__hint">{ui.dropHint[locale]}</span>
@@ -164,6 +197,7 @@ export function UploadModal({ locale, onClose, onPublished, target }: UploadModa
               type="file"
               accept=".zip,application/zip"
               aria-label={ui.dropTitle[locale]}
+              disabled={locked}
               onChange={(event) => {
                 acceptFile(event.target.files?.[0]);
                 event.target.value = "";
@@ -175,7 +209,7 @@ export function UploadModal({ locale, onClose, onPublished, target }: UploadModa
                 <input
                   aria-label={ui.nameLabel[locale]}
                   value={target ? target.venueName : name}
-                  disabled={busy}
+                  disabled={locked}
                   readOnly={Boolean(target)}
                   onChange={(event) => {
                     if (target) return;
@@ -194,6 +228,7 @@ export function UploadModal({ locale, onClose, onPublished, target }: UploadModa
               </div>
             ) : null}
             {phase.step === "processing" ? <p className="upload-modal__processing">{ui.processing[locale]}</p> : null}
+            {phase.step === "accepted" ? <p className="upload-modal__processing" role="status">{phase.message}</p> : null}
             {phase.step === "failed" ? (
               <p className="upload-modal__error" role="alert">
                 {phase.message}
@@ -201,16 +236,16 @@ export function UploadModal({ locale, onClose, onPublished, target }: UploadModa
             ) : null}
 
             <div className="upload-modal__footer">
-              <button type="button" className="btn-ghost" onClick={onClose} disabled={busy}>
+              <button type="button" className="btn-ghost" onClick={close} disabled={closeDisabled}>
                 {ui.cancel[locale]}
               </button>
               <button
                 type="button"
                 className="btn-primary"
                 onClick={submit}
-                disabled={busy || !file || (!target && name.trim() === "")}
+                disabled={busy || (phase.step !== "accepted" && (!file || (!target && name.trim() === "")))}
               >
-                {ui.publish[locale]}
+                {phase.step === "accepted" ? ui.checkStatus[locale] : ui.publish[locale]}
               </button>
             </div>
           </>

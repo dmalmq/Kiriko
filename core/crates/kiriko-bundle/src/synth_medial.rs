@@ -308,22 +308,49 @@ fn ring_perimeter(ring: &LineString<f64>) -> f64 {
         .sum()
 }
 
-/// Pick a boundary sampling spacing that keeps the densified vertex count
-/// under [`MAX_CDT_VERTS`] for this floor's navigable area.
-fn choose_spacing(area: &MultiPolygon<f64>) -> f64 {
+/// Distinct original coordinates of one ring, excluding the duplicate closing
+/// vertex. Matches [`densify_ring`], which keeps every original vertex.
+fn ring_vertex_count(ring: &LineString<f64>) -> usize {
+    let coords: Vec<Coord<f64>> = ring.coords().copied().collect();
+    if coords.len() >= 2 && coords.first() == coords.last() {
+        coords.len() - 1
+    } else {
+        coords.len()
+    }
+}
+
+/// Total ORIGINAL ring coordinates (exterior + interiors) across the floor's
+/// navigable area. These vertices are always fed to the CDT verbatim, so they
+/// count against the budget before any interpolation is added.
+fn original_vertex_count(area: &MultiPolygon<f64>) -> usize {
+    area.iter()
+        .map(|p| {
+            ring_vertex_count(p.exterior())
+                + p.interiors().iter().map(ring_vertex_count).sum::<usize>()
+        })
+        .sum()
+}
+
+/// Pick a boundary sampling spacing that keeps the DENSIFIED vertex count under
+/// [`MAX_CDT_VERTS`] for this floor's navigable area, given the `original`
+/// coordinates already present. Returns `None` when the original vertices alone
+/// exceed the ceiling: coarsening the spacing cannot remove existing
+/// coordinates, so the floor must be skipped rather than triangulated.
+fn choose_spacing(area: &MultiPolygon<f64>, original: usize) -> Option<f64> {
+    if original > MAX_CDT_VERTS {
+        return None;
+    }
+    // Remaining budget for interpolated points; original vertices are already
+    // spent. Never coarsen below BASE_SPACING_DEG.
+    let budget = MAX_CDT_VERTS - original;
     let perimeter: f64 = area
         .iter()
         .map(|p| ring_perimeter(p.exterior()) + p.interiors().iter().map(ring_perimeter).sum::<f64>())
         .sum();
-    if perimeter <= 0.0 {
-        return BASE_SPACING_DEG;
+    if perimeter <= 0.0 || budget == 0 {
+        return Some(BASE_SPACING_DEG);
     }
-    let estimate = (perimeter / BASE_SPACING_DEG) as usize;
-    if estimate <= MAX_CDT_VERTS {
-        BASE_SPACING_DEG
-    } else {
-        perimeter / MAX_CDT_VERTS as f64
-    }
+    Some((perimeter / budget as f64).max(BASE_SPACING_DEG))
 }
 
 /// Nearest node in `nodes[range]` to `p` within `max_m` metres.
@@ -407,7 +434,18 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         if area.0.is_empty() {
             continue;
         }
-        let skeleton = medial_axis(&area, choose_spacing(&area));
+        let original = original_vertex_count(&area);
+        let Some(spacing) = choose_spacing(&area, original) else {
+            warnings.push(RouteBuildWarning {
+                code: "synth_floor_too_complex".into(),
+                detail: format!(
+                    "floor ordinal {ord} navigable area has {original} original ring vertices, \
+                     exceeding the {MAX_CDT_VERTS}-vertex synthesis budget; skipping"
+                ),
+            });
+            continue;
+        };
+        let skeleton = medial_axis(&area, spacing);
         if skeleton.nodes.is_empty() || skeleton.edges.is_empty() {
             continue;
         }
@@ -575,6 +613,12 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 interior: Vec::new(),
             });
         }
+    }
+
+    // Convert every accumulated metre weight to canonical `net_path.cost`
+    // units exactly once, matching imported networks (see `synth`).
+    for e in &mut edges {
+        e.weight = kiriko_route::meters_to_cost(f64::from(e.weight));
     }
 
     edges.sort_by(|a, b| (a.from, a.to, a.weight.to_bits()).cmp(&(b.from, b.to, b.weight.to_bits())));
@@ -882,7 +926,7 @@ mod tests {
             build.graph.nodes.iter().map(|n| n.ordinal as i64).collect();
         assert_eq!(ordinals.len(), 2, "both floors present");
         let max_edge = build.graph.edges.iter().fold(0.0_f32, |m, e| m.max(e.weight));
-        assert!(max_edge <= 30.0, "no teleport edges: max {max_edge} m");
+        assert!(max_edge <= 30_000.0, "no teleport edges: max {max_edge} cost units (30 m)");
 
         // Determinism: identical input → identical graph.
         let again = synthesize_network_medial(&doc);
@@ -917,5 +961,102 @@ mod tests {
         let doc = document(&[("l0", 0.0)], features);
         let build = synthesize_network_medial(&doc);
         assert!(build.graph.nodes.is_empty(), "non-walkable rooms → empty graph");
+    }
+
+    /// Canonical `Polygon` approximating a circle at `(cx, cy)` with `sides`
+    /// distinct vertices (plus the duplicated closing coordinate) at `radius`
+    /// degrees. A many-sided polygon packs a large ORIGINAL vertex count into a
+    /// small perimeter.
+    fn regular_polygon(cx: f64, cy: f64, radius: f64, sides: usize) -> Value {
+        use std::f64::consts::TAU;
+        let mut pts: Vec<Value> = (0..sides)
+            .map(|i| {
+                let a = TAU * i as f64 / sides as f64;
+                Value::Array(vec![
+                    Value::Number(cx + radius * a.cos()),
+                    Value::Number(cy + radius * a.sin()),
+                ])
+            })
+            .collect();
+        pts.push(pts[0].clone());
+        Value::Object(BTreeMap::from([
+            ("type".to_string(), Value::String("Polygon".to_string())),
+            ("coordinates".to_string(), Value::Array(vec![Value::Array(pts)])),
+        ]))
+    }
+
+    #[test]
+    fn dense_ring_floor_is_skipped_before_triangulation() {
+        // L0's only walkway is a tiny-perimeter polygon whose exterior ring
+        // already carries more ORIGINAL coordinates than MAX_CDT_VERTS. Coarser
+        // spacing cannot remove existing vertices, so the floor must be skipped
+        // with a controlled warning — never fed to the CDT. L1's plain square
+        // walkway (well within budget) must still synthesize.
+        let dense = regular_polygon(139.70, 35.69, 0.0002, MAX_CDT_VERTS + 10);
+        let plain = square(139.70, 35.69, 0.0004);
+        let doc = document(
+            &[("L0", 0.0), ("L1", 1.0)],
+            vec![
+                feature("w0", FeatureType::Unit, "L0", Some("walkway"), dense),
+                feature("w1", FeatureType::Unit, "L1", Some("walkway"), plain),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+
+        let ords: std::collections::BTreeSet<i64> =
+            build.graph.nodes.iter().map(|n| n.ordinal as i64).collect();
+        assert!(!build.graph.nodes.is_empty(), "in-budget floor still synthesizes");
+        assert_eq!(ords, std::collections::BTreeSet::from([1]), "only L1 is synthesized");
+
+        let skip = build
+            .warnings
+            .iter()
+            .find(|w| w.code == "synth_floor_too_complex")
+            .expect("dense floor emits a synth_floor_too_complex warning");
+        assert!(
+            skip.detail.contains(&(MAX_CDT_VERTS + 10).to_string()),
+            "warning carries the original vertex count: {}",
+            skip.detail
+        );
+        assert!(skip.detail.contains('0'), "warning carries the ordinal: {}", skip.detail);
+    }
+
+    #[test]
+    fn choose_spacing_rejects_over_budget_original_vertices() {
+        let dense = navigable_area(
+            &[&regular_polygon(139.70, 35.69, 0.0002, MAX_CDT_VERTS + 5)],
+            &[],
+        );
+        let orig = original_vertex_count(&dense);
+        assert!(orig > MAX_CDT_VERTS, "original count {orig} exceeds ceiling");
+        assert!(choose_spacing(&dense, orig).is_none(), "over-budget floor is rejected");
+    }
+
+    #[test]
+    fn choose_spacing_keeps_densified_total_under_ceiling() {
+        // A long-perimeter area with few original vertices: spacing must coarsen
+        // from the remaining interpolation budget so the densified total stays
+        // under the ceiling, yet never drop below BASE_SPACING_DEG.
+        let big = MultiPolygon::new(vec![Polygon::new(
+            LineString::from(vec![
+                (0.0, 0.0),
+                (0.4, 0.0),
+                (0.4, 0.001),
+                (0.0, 0.001),
+                (0.0, 0.0),
+            ]),
+            vec![],
+        )]);
+        let orig = original_vertex_count(&big);
+        let spacing = choose_spacing(&big, orig).expect("in-budget original vertices");
+        assert!(spacing >= BASE_SPACING_DEG, "spacing never below base: {spacing}");
+        let densified: usize =
+            big.iter().map(|p| densify_ring(p.exterior(), spacing).len()).sum();
+        assert!(densified <= MAX_CDT_VERTS, "densified {densified} stays under ceiling");
+
+        // A small area keeps the fine base spacing.
+        let small = navigable_area(&[&square(139.70, 35.69, 0.0004)], &[]);
+        let so = original_vertex_count(&small);
+        assert_eq!(choose_spacing(&small, so), Some(BASE_SPACING_DEG));
     }
 }

@@ -613,6 +613,12 @@ fn validate_graph_edge(
             "graph edge weight and ordinal must be finite",
         ));
     }
+    if weight < 0.0 {
+        return Err(BundleError::new(
+            BundleErrorCode::InvalidBundle,
+            "graph edge weight must be non-negative",
+        ));
+    }
     if interior.iter().any(|c| !c[0].is_finite() || !c[1].is_finite()) {
         return Err(BundleError::new(
             BundleErrorCode::InvalidBundle,
@@ -1181,15 +1187,14 @@ mod tests {
 
     #[test]
     fn graph_and_facilities_sections_coexist_in_ascending_directory_order() {
-        use kiriko_route::{RouteGraph, RouteNode};
+        use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
         let mut doc = minimal_document();
         doc.graph = Some(RouteGraph {
-            nodes: vec![RouteNode {
-                lon: 139.0,
-                lat: 35.0,
-                ordinal: 0.0,
-            }],
-            edges: Vec::new(),
+            nodes: vec![
+                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+            ],
+            edges: vec![RouteEdge { from: 0, to: 1, weight: 100.0, ordinal: 0.0, interior: Vec::new() }],
         });
         doc.facilities = Some(kiriko_facilities::Facilities {
             items: vec![facility(139.0, 35.0, 0.0, "Gate A", "gate", None)],
@@ -1235,5 +1240,42 @@ mod tests {
         let err = crate::decode_bundle(&bytes)
             .expect_err("a graph edge past the node count must be rejected");
         assert_eq!(err.code, BundleErrorCode::InvalidBundle);
+    }
+
+    #[test]
+    fn rejects_negative_graph_edge_weight_on_decode() {
+        let manifest_bytes = postcard::to_allocvec(&manifest_section_with_ordinal(1.0))
+            .expect("dto encodes");
+        let graph_bytes = postcard::to_allocvec(&GraphSectionDto {
+            nodes: vec![
+                GraphNodeDto { lon: 139.0, lat: 35.0, ordinal: 0.0 },
+                GraphNodeDto { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+            ],
+            edges: vec![GraphEdgeDto {
+                from: 0,
+                to: 1,
+                weight: -1.0, // a negative routing cost is never valid
+                ordinal: 0.0,
+                interior: vec![],
+            }],
+        })
+        .expect("a negative-weight edge still postcard-encodes");
+        let bytes = wrap_bundle_with_graph(manifest_bytes, graph_bytes);
+        let err = crate::decode_bundle(&bytes)
+            .expect_err("a negative graph edge weight must be rejected on decode");
+        assert_eq!(err.code, BundleErrorCode::InvalidBundle);
+    }
+
+    #[test]
+    fn rejects_negative_graph_edge_weight_on_encode() {
+        use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+        let graph = RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+            ],
+            edges: vec![RouteEdge { from: 0, to: 1, weight: -1.0, ordinal: 0.0, interior: vec![] }],
+        };
+        assert!(encode_graph(&graph).is_err(), "encoding a negative-weight edge must fail");
     }
 }

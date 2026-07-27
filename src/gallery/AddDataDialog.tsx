@@ -32,6 +32,10 @@ export interface AddDataDialogProps {
   onAddNetwork: (file: File) => void;
   onAddFacilities: (file: File) => void;
   onImport: () => void;
+  actionLabel?: string | undefined;
+  canSubmit?: boolean | undefined;
+  cancelDisabled?: boolean | undefined;
+  cancelLocked?: boolean | undefined;
   onCancel: () => void;
 }
 
@@ -46,9 +50,14 @@ export function AddDataDialog({
   onAddFacilities,
   onImport,
   onCancel,
+  actionLabel,
+  canSubmit,
+  cancelDisabled = false,
+  cancelLocked = false,
 }: AddDataDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const headingId = useId();
+  const locked = cancelDisabled || cancelLocked;
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
@@ -58,11 +67,28 @@ export function AddDataDialog({
       dialog.open = true;
     }
   }, []);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const handleCancel = (event: Event) => {
+      event.preventDefault();
+      if (!locked) onCancel();
+    };
+    dialog.addEventListener("cancel", handleCancel);
+    return () => dialog.removeEventListener("cancel", handleCancel);
+  }, [locked, onCancel]);
 
-  const canImport = !busy && (network !== null || facilities !== null);
+  const canImport = !busy && (canSubmit ?? (network !== null || facilities !== null));
 
   return (
-    <dialog ref={dialogRef} className="gdb-dialog" aria-labelledby={headingId}>
+    <dialog
+      ref={dialogRef}
+      className="gdb-dialog"
+      aria-labelledby={headingId}
+      onClick={(event) => {
+        if (event.target === dialogRef.current && !locked) onCancel();
+      }}
+    >
       <form
         method="dialog"
         className="gdb-dialog__form"
@@ -121,7 +147,7 @@ export function AddDataDialog({
             </div>
           ) : null}
           <div className="gdb-dialog__actions">
-            <button type="button" className="gdb-dialog__btn" onClick={onCancel}>
+            <button type="button" className="gdb-dialog__btn" onClick={onCancel} disabled={locked}>
               {ui.cancel[locale]}
             </button>
             <button
@@ -129,7 +155,7 @@ export function AddDataDialog({
               className="gdb-dialog__btn gdb-dialog__btn--primary"
               disabled={!canImport}
             >
-              {ui.import[locale]}
+              {actionLabel ?? ui.import[locale]}
             </button>
           </div>
         </section>

@@ -84,6 +84,22 @@ pub fn build_route_graph(
     let nodes_by_idx: Vec<RouteNode> = by_id.values().cloned().collect();
 
     let mut edges = Vec::new();
+    // A reciprocal PATHID/RPATHID pair is two directed features that are exact
+    // endpoint reverses AND cross-reference each other's ids (fwd.PATHID ==
+    // rev.RPATHID and vice versa); such a pair collapses to one logical
+    // undirected edge, keeping the forward (smaller PATHID). Features sharing
+    // the same unordered id set that are NOT exact reverses are a malformed id
+    // collision, not a pair: both are preserved with a `reciprocal_conflict`
+    // warning.
+    //
+    // `pending` indexes each recorded (not-yet-paired) edge by its exact
+    // directed signature `(pathid, rpathid, from, to)`, so a candidate finds its
+    // reverse partner in O(1) average by looking up `(rpathid, pathid, to,
+    // from)` — never a growing per-key scan. `id_set_seen` counts logical edges
+    // per unordered id set, used only to raise the malformed-collision warning
+    // without scanning.
+    let mut pending: HashMap<(i64, i64, u32, u32), Vec<usize>> = HashMap::new();
+    let mut id_set_seen: HashMap<(i64, i64), u32> = HashMap::new();
     for feature in &paths.features {
         let (Some(from), Some(to), Some(cost)) = (
             prop(&feature.properties, "FNODEID").and_then(|v| v.as_u64()),
@@ -99,6 +115,16 @@ pub fn build_route_graph(
             });
             continue;
         };
+        // Every edge weight is finite and non-negative; a malformed source cost
+        // is rejected here so it never enters the graph.
+        let weight = cost as f32;
+        if !weight.is_finite() || weight < 0.0 {
+            warnings.push(RouteBuildWarning {
+                code: "invalid_cost".into(),
+                detail: format!("edge {from}->{to} has a non-finite or negative cost {cost}"),
+            });
+            continue;
+        }
         // Edge ordinal: its own FLOOR, else the `from` node's ordinal.
         let ordinal = prop(&feature.properties, "FLOOR")
             .and_then(|v| v.as_str())
@@ -106,13 +132,61 @@ pub fn build_route_graph(
             .unwrap_or(nodes_by_idx[from_idx as usize].ordinal);
         // Interior = the polyline vertices with the two endpoints stripped.
         let interior = interior_vertices(feature.geometry.as_ref().map(|g| &g.value));
-        edges.push(RouteEdge {
+        let edge = RouteEdge {
             from: from_idx,
             to: to_idx,
-            weight: cost as f32,
+            weight,
             ordinal,
             interior,
-        });
+        };
+
+        // Reciprocal handling requires both PATHID and RPATHID; id-less paths
+        // are always kept as-is (parallel edges and hand-authored data).
+        let pathid = prop(&feature.properties, "PATHID").and_then(|v| v.as_i64());
+        let rpathid = prop(&feature.properties, "RPATHID").and_then(|v| v.as_i64());
+        match (pathid, rpathid) {
+            (Some(p), Some(r)) => {
+                // The reverse partner, if already recorded, has exactly this
+                // signature (ids swapped, endpoints swapped).
+                let partner = pending
+                    .get_mut(&(r, p, to_idx, from_idx))
+                    .and_then(Vec::pop);
+                match partner {
+                    Some(partner_idx) => {
+                        // True reciprocal pair: keep the forward (smaller PATHID).
+                        // The partner's PATHID is `r` by construction, so compare
+                        // `p` against `r` directly.
+                        if p < r {
+                            edges[partner_idx] = edge;
+                        }
+                        // else: this candidate is the reverse member → drop it.
+                    }
+                    None => {
+                        // No reverse partner. If another logical edge already
+                        // carries this unordered id set, it is a malformed
+                        // collision (not a pair): keep both and warn.
+                        let id_set = (p.min(r), p.max(r));
+                        let seen = id_set_seen.entry(id_set).or_insert(0);
+                        if *seen > 0 {
+                            warnings.push(RouteBuildWarning {
+                                code: "reciprocal_conflict".into(),
+                                detail: format!(
+                                    "edge {from}->{to} shares PATHID/RPATHID set ({}, {}) with a non-reverse edge; keeping both",
+                                    id_set.0, id_set.1
+                                ),
+                            });
+                        }
+                        *seen += 1;
+                        pending
+                            .entry((p, r, from_idx, to_idx))
+                            .or_default()
+                            .push(edges.len());
+                        edges.push(edge);
+                    }
+                }
+            }
+            _ => edges.push(edge),
+        }
     }
     edges.sort_by(|a, b| {
         (a.from, a.to, a.weight.to_bits()).cmp(&(b.from, b.to, b.weight.to_bits()))
@@ -244,5 +318,97 @@ mod tests {
         // NODEID 1 maps to the node at its index
         let idx = b.node_ids.iter().position(|&id| id == 1).unwrap();
         assert!((b.graph.nodes[idx].lon - 139.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn drops_edges_with_negative_cost() {
+        const P: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":-5},"geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}}]}"#;
+        let b = build_route_graph(JUNCTIONS, P, &[0.0, 1.0]).unwrap();
+        assert!(b.graph.edges.is_empty(), "a negative-cost edge must not enter the graph");
+        assert!(b.warnings.iter().any(|w| w.code == "invalid_cost"));
+    }
+
+    #[test]
+    fn canonicalizes_reciprocal_pairs_and_preserves_parallel_edges() {
+        const J: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+          {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}}]}"#;
+        // Two logical undirected edges between nodes 1 and 2, each written as a
+        // reciprocal PATHID/RPATHID pair. Canonicalization keeps exactly one
+        // edge per reciprocal pair (2 total), while the two distinct pairs
+        // (different PATHIDs, different costs) survive as parallel edges.
+        const P: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100,"PATHID":1,"RPATHID":2},"geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}},
+          {"type":"Feature","properties":{"FNODEID":2,"TNODEID":1,"cost":100,"PATHID":2,"RPATHID":1},"geometry":{"type":"MultiLineString","coordinates":[[[139.001,35.0],[139.0,35.0]]]}},
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":200,"PATHID":3,"RPATHID":4},"geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}},
+          {"type":"Feature","properties":{"FNODEID":2,"TNODEID":1,"cost":200,"PATHID":4,"RPATHID":3},"geometry":{"type":"MultiLineString","coordinates":[[[139.001,35.0],[139.0,35.0]]]}}]}"#;
+        let b = build_route_graph(J, P, &[0.0]).unwrap();
+        assert_eq!(b.graph.edges.len(), 2, "two reciprocal pairs → two logical edges");
+        let mut costs: Vec<f32> = b.graph.edges.iter().map(|e| e.weight).collect();
+        costs.sort_by(f32::total_cmp);
+        assert_eq!(costs, vec![100.0, 200.0]);
+        // Every kept edge is the canonical forward (0->1, smaller PATHID) direction.
+        assert!(b.graph.edges.iter().all(|e| (e.from, e.to) == (0, 1)));
+    }
+
+    #[test]
+    fn does_not_collapse_a_non_reverse_edge_sharing_the_id_set() {
+        const J: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+          {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}},
+          {"type":"Feature","properties":{"NODEID":3,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.002,35.0]}}]}"#;
+        // Two edges share the unordered id set {1,2} but are NOT reverses of
+        // each other: 1->2 (PATHID 1/RPATHID 2) and 1->3 (PATHID 2/RPATHID 1).
+        // The second must be preserved, never collapsed into the first.
+        const P: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100,"PATHID":1,"RPATHID":2},"geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}},
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":3,"cost":200,"PATHID":2,"RPATHID":1},"geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.002,35.0]]]}}]}"#;
+        let b = build_route_graph(J, P, &[0.0]).unwrap();
+        assert_eq!(b.graph.edges.len(), 2, "distinct non-reverse edges must both survive");
+        let mut pairs: Vec<(u32, u32)> = b.graph.edges.iter().map(|e| (e.from, e.to)).collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(0, 1), (0, 2)]);
+        assert!(b.warnings.iter().any(|w| w.code == "reciprocal_conflict"));
+    }
+
+    #[test]
+    fn many_non_reverse_id_collisions_are_all_preserved_without_scanning() {
+        // A large batch of distinct edges 1->k that all share the unordered id
+        // set {1,2} yet are never reverses of one another. Every edge must
+        // survive, and the dedupe must resolve each in O(1) average (no growing
+        // per-id bucket scan) — verified structurally by the signature index,
+        // asserted here semantically at scale.
+        const N: usize = 300;
+        let mut jf = String::from(r#"{"type":"FeatureCollection","features":["#);
+        for k in 1..=(N + 1) {
+            if k > 1 {
+                jf.push(',');
+            }
+            jf.push_str(&format!(
+                r#"{{"type":"Feature","properties":{{"NODEID":{k},"FLOOR":"F1"}},"geometry":{{"type":"Point","coordinates":[139.0,35.0]}}}}"#
+            ));
+        }
+        jf.push_str("]}");
+        let mut pf = String::from(r#"{"type":"FeatureCollection","features":["#);
+        for k in 2..=(N + 1) {
+            if k > 2 {
+                pf.push(',');
+            }
+            // Every path reuses PATHID 1 / RPATHID 2 (a malformed id set) but has
+            // a distinct target, so none is the reverse of any other.
+            pf.push_str(&format!(
+                r#"{{"type":"Feature","properties":{{"FNODEID":1,"TNODEID":{k},"cost":100,"PATHID":1,"RPATHID":2}},"geometry":{{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.0,35.0]]]}}}}"#
+            ));
+        }
+        pf.push_str("]}");
+        let b = build_route_graph(&jf, &pf, &[0.0]).unwrap();
+        assert_eq!(b.graph.edges.len(), N, "all distinct non-reverse edges survive");
+        let conflicts = b
+            .warnings
+            .iter()
+            .filter(|w| w.code == "reciprocal_conflict")
+            .count();
+        assert_eq!(conflicts, N - 1, "each collision after the first is reported once");
     }
 }

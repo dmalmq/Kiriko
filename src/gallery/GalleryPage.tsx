@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { KirikoMark } from "../components/icons";
 import type { GdbInspectResponse, GdbMappingPlan, NetworkInspectResponse, FacilitiesInspectResponse } from "../gdb/types";
 import type { LocaleCode } from "../imdf/types";
-import { api, gdbErrorMessage, type ApiUser, type GdbError, type VenueSummary } from "./api";
+import { api, gdbErrorMessage, viewerHref, type ApiUser, type GdbError, type VenueSummary } from "./api";
 import { AddDataDialog } from "./AddDataDialog";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 import { DatasetCard } from "./DatasetCard";
@@ -27,6 +27,11 @@ const ui = {
   routingGenerated: { ja: "経路を生成しました", en: "Routing generated" },
   exportingNetwork: { ja: "ネットワークを書き出し中…", en: "Exporting network…" },
   networkExported: { ja: "ネットワークを書き出しました", en: "Network exported" },
+  processingContinues: {
+    ja: "処理はサーバーで続いています。しばらくしてから一覧を更新してください。",
+    en: "Processing is still running on the server. Refresh the list again shortly.",
+  },
+  checkStatus: { ja: "状況を確認", en: "Check status" },
   noGraphToExport: {
     ja: "書き出せる経路ネットワークがありません。先に生成してください。",
     en: "No routing network to export — generate one first.",
@@ -39,6 +44,13 @@ const ui = {
   },
 } as const;
 
+function navigateTo(href: string): void {
+  const event = new CustomEvent("kiriko:navigate", { cancelable: true, detail: { href } });
+  if (window.dispatchEvent(event)) {
+    window.location.assign(href);
+  }
+}
+
 type GalleryState =
   | { phase: "loading" }
   | { phase: "signed-out" }
@@ -50,6 +62,15 @@ type GdbTarget =
   | { mode: "version"; venueId: number; venueName: string }
   | { mode: "edit-mapping"; venueId: number; venueName: string };
 
+interface AcceptedJob {
+  jobId: string;
+}
+
+interface AcceptedGdbJob extends AcceptedJob {
+  createdVenueId: number | null;
+  excludedLayers: { layer: string; reason: string }[];
+}
+
 type GdbFlow =
   | { phase: "idle" }
   | { phase: "inspecting"; target: GdbTarget }
@@ -60,6 +81,7 @@ type GdbFlow =
       network: NetworkInspectResponse | null;
       facilities: FacilitiesInspectResponse | null;
       busy: boolean;
+      accepted: AcceptedGdbJob | null;
       error: GdbError | null;
     }
   | { phase: "error"; message: string; target: GdbTarget };
@@ -73,8 +95,11 @@ type AddDataFlow =
       network: NetworkInspectResponse | null;
       facilities: FacilitiesInspectResponse | null;
       busy: boolean;
+      accepted: AcceptedJob | null;
       error: GdbError | null;
     };
+
+type TopLevelOwner = "gdb" | "add-data" | "routing";
 
 export function GalleryPage() {
   const [locale, setLocale] = useState<LocaleCode>("ja");
@@ -87,40 +112,133 @@ export function GalleryPage() {
   const [gdbNotice, setGdbNotice] = useState<string | null>(null);
   const [addData, setAddData] = useState<AddDataFlow>({ phase: "idle" });
   const [generatingId, setGeneratingId] = useState<number | null>(null);
+  const [routingJob, setRoutingJob] = useState<{ venueId: number; jobId: string } | null>(null);
   const gdbInputRef = useRef<HTMLInputElement>(null);
   const gdbTargetRef = useRef<GdbTarget>({ mode: "create" });
+  const aliveRef = useRef(true);
+  const reloadGenerationRef = useRef(0);
+  const sessionGenerationRef = useRef(0);
+  const gdbGenerationRef = useRef(0);
+  const gdbNetworkGenerationRef = useRef(0);
+  const gdbFacilitiesGenerationRef = useRef(0);
+  const gdbPublishGenerationRef = useRef(0);
+  const addDataGenerationRef = useRef(0);
+  const addDataNetworkGenerationRef = useRef(0);
+  const addDataFacilitiesGenerationRef = useRef(0);
+  const addDataPublishGenerationRef = useRef(0);
+  const routingGenerationRef = useRef(0);
+  const exportGenerationRef = useRef(0);
+  const noticeGenerationRef = useRef(0);
+  const acceptedOwner: TopLevelOwner | null =
+    gdbFlow.phase === "review" && gdbFlow.accepted !== null
+      ? "gdb"
+      : addData.phase === "open" && addData.accepted !== null
+        ? "add-data"
+        : routingJob !== null || generatingId !== null
+          ? "routing"
+          : null;
+
+  const invalidateGdbRequests = () => {
+    gdbGenerationRef.current += 1;
+    gdbNetworkGenerationRef.current += 1;
+    gdbFacilitiesGenerationRef.current += 1;
+    gdbPublishGenerationRef.current += 1;
+  };
+  const invalidateAddDataRequests = () => {
+    addDataGenerationRef.current += 1;
+    addDataNetworkGenerationRef.current += 1;
+    addDataFacilitiesGenerationRef.current += 1;
+    addDataPublishGenerationRef.current += 1;
+  };
+  const clearAsyncUi = () => {
+    setGdbFlow({ phase: "idle" });
+    setAddData({ phase: "idle" });
+    setGeneratingId(null);
+    setRoutingJob(null);
+    setGdbNotice(null);
+    gdbTargetRef.current = { mode: "create" };
+    if (gdbInputRef.current) gdbInputRef.current.value = "";
+  };
+  const invalidateAsyncWork = () => {
+    invalidateGdbRequests();
+    invalidateAddDataRequests();
+    routingGenerationRef.current += 1;
+    exportGenerationRef.current += 1;
+    noticeGenerationRef.current += 1;
+  };
+  const beginTopLevelActivity = (owner?: TopLevelOwner): boolean => {
+    if (acceptedOwner !== null && owner !== acceptedOwner) {
+      return false;
+    }
+    // Top-level UI activity must not cancel authoritative reload/session results.
+    invalidateAsyncWork();
+    if (owner !== "gdb") {
+      setGdbFlow({ phase: "idle" });
+      gdbTargetRef.current = { mode: "create" };
+      if (gdbInputRef.current) gdbInputRef.current.value = "";
+    }
+    if (owner !== "add-data") {
+      setAddData({ phase: "idle" });
+    }
+    setGeneratingId(null);
+    if (owner !== "routing") {
+      setRoutingJob(null);
+    }
+    setGdbNotice(null);
+    return true;
+  };
 
   const reload = useCallback(async () => {
+    const generation = ++reloadGenerationRef.current;
     try {
       const user = await api.me();
+      if (!aliveRef.current || generation !== reloadGenerationRef.current) return;
       if (user === null) {
+        sessionGenerationRef.current += 1;
+        invalidateAsyncWork();
+        clearAsyncUi();
         setState({ phase: "signed-out" });
         return;
       }
-      setState({ phase: "ready", user, venues: await api.listVenues() });
+      const venues = await api.listVenues();
+      if (!aliveRef.current || generation !== reloadGenerationRef.current) return;
+      setState({ phase: "ready", user, venues });
     } catch {
-      setState({ phase: "error" });
+      if (!aliveRef.current || generation !== reloadGenerationRef.current) return;
+      setState((current) => (current.phase === "ready" ? current : { phase: "error" }));
     }
+  }, []);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      sessionGenerationRef.current += 1;
+      reloadGenerationRef.current += 1;
+      invalidateAsyncWork();
+    };
   }, []);
 
   useEffect(() => {
     void reload();
   }, [reload]);
 
-  const openVenue = (slug: string) => {
-    window.location.assign(`/?dataset=${encodeURIComponent(slug)}`);
-  };
-
-  const openReview = (slug: string) => {
-    window.location.assign(`/?dataset=${encodeURIComponent(slug)}&review=1`);
-  };
-
   const openCreateUpload = () => {
+    if (acceptedOwner !== null) return;
     setUploadTarget(null);
     setUploadOpen(true);
   };
 
+  const openVenue = (venue: VenueSummary) => {
+    navigateTo(viewerHref(venue.slug, venue.latest?.publicVersionId ?? null, locale));
+  };
+
+  const openReview = (venue: VenueSummary) => {
+    navigateTo(viewerHref(venue.slug, venue.latest?.publicVersionId ?? null, locale, true));
+  };
+
   const openVersionUpload = (venue: VenueSummary) => {
+    if (acceptedOwner !== null) return;
     setUploadTarget({
       venueId: venue.id,
       venueName: venue.name,
@@ -135,18 +253,20 @@ export function GalleryPage() {
   };
 
   const startGdbImport = (target: GdbTarget = { mode: "create" }) => {
-    setGdbNotice(null);
+    if (!beginTopLevelActivity()) return;
     gdbTargetRef.current = target;
     gdbInputRef.current?.click();
   };
 
   const startEditMapping = (venue: VenueSummary) => {
-    setGdbNotice(null);
+    if (!beginTopLevelActivity()) return;
+    const generation = gdbGenerationRef.current;
     const target: GdbTarget = { mode: "edit-mapping", venueId: venue.id, venueName: venue.name };
     setGdbFlow({ phase: "inspecting", target });
     void (async () => {
       try {
         const mapping = await api.getGdbMapping(venue.id);
+        if (!aliveRef.current || generation !== gdbGenerationRef.current) return;
         setGdbFlow({
           phase: "review",
           target,
@@ -155,12 +275,14 @@ export function GalleryPage() {
             inspection: mapping.inspection,
             suggestedPlan: mapping.plan,
           },
+          accepted: null,
           network: null,
           facilities: null,
           busy: false,
           error: null,
         });
       } catch (err) {
+        if (!aliveRef.current || generation !== gdbGenerationRef.current) return;
         setGdbFlow({ phase: "error", target, message: gdbErrorMessage(err as GdbError, locale) });
       }
     })();
@@ -169,11 +291,13 @@ export function GalleryPage() {
   const onGdbFile = (file: File | undefined) => {
     if (!file) return;
     const target = gdbTargetRef.current;
-    setGdbNotice(null);
+    if (!beginTopLevelActivity()) return;
+    const generation = gdbGenerationRef.current;
     setGdbFlow({ phase: "inspecting", target });
     void (async () => {
       try {
         const data = await api.inspectGdb(file);
+        if (!aliveRef.current || generation !== gdbGenerationRef.current) return;
         let suggestedPlan = data.suggestedPlan;
         if (target.mode === "version") {
           suggestedPlan = { ...suggestedPlan, venueName: target.venueName };
@@ -181,6 +305,7 @@ export function GalleryPage() {
         setGdbFlow({
           phase: "review",
           target,
+          accepted: null,
           data: { ...data, suggestedPlan },
           network: null,
           facilities: null,
@@ -188,6 +313,7 @@ export function GalleryPage() {
           error: null,
         });
       } catch (err) {
+        if (!aliveRef.current || generation !== gdbGenerationRef.current) return;
         setGdbFlow({
           phase: "error",
           target,
@@ -199,15 +325,27 @@ export function GalleryPage() {
 
   const onGdbNetworkFile = (file: File) => {
     if (gdbFlow.phase !== "review") return;
+    const flowGeneration = gdbGenerationRef.current;
+    const requestGeneration = ++gdbNetworkGenerationRef.current;
     void (async () => {
       try {
         const network = await api.inspectGdbNetwork(file);
         setGdbFlow((current) =>
-          current.phase === "review" ? { ...current, network, error: null } : current,
+          aliveRef.current &&
+          flowGeneration === gdbGenerationRef.current &&
+          requestGeneration === gdbNetworkGenerationRef.current &&
+          current.phase === "review"
+            ? { ...current, network, error: null }
+            : current,
         );
       } catch (err) {
         setGdbFlow((current) =>
-          current.phase === "review" ? { ...current, error: err as GdbError } : current,
+          aliveRef.current &&
+          flowGeneration === gdbGenerationRef.current &&
+          requestGeneration === gdbNetworkGenerationRef.current &&
+          current.phase === "review"
+            ? { ...current, error: err as GdbError }
+            : current,
         );
       }
     })();
@@ -215,15 +353,27 @@ export function GalleryPage() {
 
   const onGdbFacilityFile = (file: File) => {
     if (gdbFlow.phase !== "review") return;
+    const flowGeneration = gdbGenerationRef.current;
+    const requestGeneration = ++gdbFacilitiesGenerationRef.current;
     void (async () => {
       try {
         const facilities = await api.inspectGdbFacilities(file);
         setGdbFlow((current) =>
-          current.phase === "review" ? { ...current, facilities, error: null } : current,
+          aliveRef.current &&
+          flowGeneration === gdbGenerationRef.current &&
+          requestGeneration === gdbFacilitiesGenerationRef.current &&
+          current.phase === "review"
+            ? { ...current, facilities, error: null }
+            : current,
         );
       } catch (err) {
         setGdbFlow((current) =>
-          current.phase === "review" ? { ...current, error: err as GdbError } : current,
+          aliveRef.current &&
+          flowGeneration === gdbGenerationRef.current &&
+          requestGeneration === gdbFacilitiesGenerationRef.current &&
+          current.phase === "review"
+            ? { ...current, error: err as GdbError }
+            : current,
         );
       }
     })();
@@ -235,51 +385,108 @@ export function GalleryPage() {
     const target = gdbFlow.target;
     const network = gdbFlow.network;
     const facilities = gdbFlow.facilities;
-    setGdbFlow({ phase: "review", target, data, network, facilities, busy: true, error: null });
+    let accepted = gdbFlow.accepted;
+    beginTopLevelActivity("gdb");
+    const flowGeneration = gdbGenerationRef.current;
+    const publishGeneration = gdbPublishGenerationRef.current;
+    const sessionGeneration = sessionGenerationRef.current;
+    const isCurrent = () =>
+      aliveRef.current &&
+      flowGeneration === gdbGenerationRef.current &&
+      publishGeneration === gdbPublishGenerationRef.current;
+    setGdbFlow({ phase: "review", target, data, network, facilities, busy: true, accepted, error: null });
     void (async () => {
       let createdVenueId: number | null = null;
       try {
-        let venueId: number;
-        if (target.mode === "version" || target.mode === "edit-mapping") {
-          venueId = target.venueId;
-        } else {
-          const venue = await api.createVenue(plan.venueName.trim());
-          createdVenueId = venue.id;
-          venueId = venue.id;
-        }
-        const published = await api.publishGdb(venueId, data.blobHash, plan, network?.networkBlobHash ?? null, facilities?.facilitiesBlobHash ?? null);
-        const job = await api.waitForJob(published.jobId);
-        if (job.status === "done") {
-          const skipped = published.excludedLayers ?? [];
-          if (skipped.length > 0) {
-            const sample = skipped[0]!.layer;
-            setGdbNotice(ui.publishedWithSkips[locale](skipped.length, sample));
+        if (accepted === null) {
+          let venueId: number;
+          if (target.mode === "version" || target.mode === "edit-mapping") {
+            venueId = target.venueId;
           } else {
-            setGdbNotice(null);
+            const venue = await api.createVenue(plan.venueName.trim());
+            createdVenueId = venue.id;
+            venueId = venue.id;
+            if (!isCurrent()) {
+              await api.deleteVenue(createdVenueId).catch(() => {});
+              return;
+            }
           }
-          setGdbFlow({ phase: "idle" });
-          if (gdbInputRef.current) gdbInputRef.current.value = "";
-          gdbTargetRef.current = { mode: "create" };
+          const published = await api.publishGdb(
+            venueId,
+            data.blobHash,
+            plan,
+            network?.networkBlobHash ?? null,
+            facilities?.facilitiesBlobHash ?? null,
+          );
+          const acceptedCreatedVenueId = createdVenueId;
+          createdVenueId = null;
+          accepted = {
+            jobId: published.jobId,
+            excludedLayers: published.excludedLayers ?? [],
+            createdVenueId: acceptedCreatedVenueId,
+          };
+          if (isCurrent()) {
+            setGdbFlow({ phase: "review", target, data, network, facilities, busy: true, accepted, error: null });
+          }
+        }
+        if (!aliveRef.current) return;
+        const job = await api.waitForJob(accepted.jobId);
+        if (!aliveRef.current) return;
+        if (job.status === "error" && accepted.createdVenueId !== null) {
+          await api.deleteVenue(accepted.createdVenueId).catch(() => {});
+          accepted = { ...accepted, createdVenueId: null };
+        }
+        if (sessionGeneration !== sessionGenerationRef.current) return;
+        if (job.status === "done") {
+          if (isCurrent()) {
+            const skipped = accepted.excludedLayers;
+            if (skipped.length > 0) {
+              const sample = skipped[0]!.layer;
+              setGdbNotice(ui.publishedWithSkips[locale](skipped.length, sample));
+            } else {
+              setGdbNotice(null);
+            }
+            setGdbFlow({ phase: "idle" });
+            if (gdbInputRef.current) gdbInputRef.current.value = "";
+            gdbTargetRef.current = { mode: "create" };
+          }
           await reload();
+        } else if (job.status === "timeout") {
+          if (isCurrent()) {
+            setGdbFlow({ phase: "review", target, data, network, facilities, busy: false, accepted, error: null });
+            setGdbNotice(ui.processingContinues[locale]);
+          }
         } else {
-          setGdbFlow({
-            phase: "review",
-            target,
-            data,
-            network,
-            facilities,
-            busy: false,
-            error: { code: "gdb_conversion_failed", message: job.error },
-          });
+          if (accepted.createdVenueId !== null) {
+            await api.deleteVenue(accepted.createdVenueId).catch(() => {});
+          }
+          if (isCurrent()) {
+            setGdbFlow({
+              phase: "review",
+              target,
+              data,
+              network,
+              facilities,
+              busy: false,
+              accepted: null,
+              error: { code: "gdb_conversion_failed", message: job.error },
+            });
+          }
+          await reload();
         }
       } catch (err) {
-        // Orphan cleanup only for venues we just created in this attempt.
         if (createdVenueId !== null) {
           try {
             await api.deleteVenue(createdVenueId);
           } catch {
             /* best effort */
           }
+        }
+        if (!isCurrent()) return;
+        if (accepted !== null) {
+          setGdbFlow({ phase: "review", target, data, network, facilities, busy: false, accepted, error: null });
+          setGdbNotice(ui.processingContinues[locale]);
+          return;
         }
         setGdbFlow({
           phase: "review",
@@ -288,6 +495,7 @@ export function GalleryPage() {
           network,
           facilities,
           busy: false,
+          accepted: null,
           error: err as GdbError,
         });
       }
@@ -295,16 +503,19 @@ export function GalleryPage() {
   };
 
   const cancelGdbImport = () => {
+    if (gdbFlow.phase === "review" && (gdbFlow.busy || gdbFlow.accepted !== null)) return;
+    invalidateGdbRequests();
     setGdbFlow({ phase: "idle" });
     gdbTargetRef.current = { mode: "create" };
     if (gdbInputRef.current) gdbInputRef.current.value = "";
   };
 
   const openAddData = (venue: VenueSummary) => {
-    setGdbNotice(null);
+    if (!beginTopLevelActivity()) return;
     setAddData({
       phase: "open",
       venueId: venue.id,
+      accepted: null,
       venueName: venue.name,
       network: null,
       facilities: null,
@@ -314,23 +525,55 @@ export function GalleryPage() {
   };
 
   const onAddDataNetwork = (file: File) => {
+    const flowGeneration = addDataGenerationRef.current;
+    const requestGeneration = ++addDataNetworkGenerationRef.current;
     void (async () => {
       try {
         const network = await api.inspectGdbNetwork(file);
-        setAddData((c) => (c.phase === "open" ? { ...c, network, error: null } : c));
+        setAddData((c) =>
+          aliveRef.current &&
+          flowGeneration === addDataGenerationRef.current &&
+          requestGeneration === addDataNetworkGenerationRef.current &&
+          c.phase === "open"
+            ? { ...c, network, error: null }
+            : c,
+        );
       } catch (err) {
-        setAddData((c) => (c.phase === "open" ? { ...c, error: err as GdbError } : c));
+        setAddData((c) =>
+          aliveRef.current &&
+          flowGeneration === addDataGenerationRef.current &&
+          requestGeneration === addDataNetworkGenerationRef.current &&
+          c.phase === "open"
+            ? { ...c, error: err as GdbError }
+            : c,
+        );
       }
     })();
   };
 
   const onAddDataFacilities = (file: File) => {
+    const flowGeneration = addDataGenerationRef.current;
+    const requestGeneration = ++addDataFacilitiesGenerationRef.current;
     void (async () => {
       try {
         const facilities = await api.inspectGdbFacilities(file);
-        setAddData((c) => (c.phase === "open" ? { ...c, facilities, error: null } : c));
+        setAddData((c) =>
+          aliveRef.current &&
+          flowGeneration === addDataGenerationRef.current &&
+          requestGeneration === addDataFacilitiesGenerationRef.current &&
+          c.phase === "open"
+            ? { ...c, facilities, error: null }
+            : c,
+        );
       } catch (err) {
-        setAddData((c) => (c.phase === "open" ? { ...c, error: err as GdbError } : c));
+        setAddData((c) =>
+          aliveRef.current &&
+          flowGeneration === addDataGenerationRef.current &&
+          requestGeneration === addDataFacilitiesGenerationRef.current &&
+          c.phase === "open"
+            ? { ...c, error: err as GdbError }
+            : c,
+        );
       }
     })();
   };
@@ -338,62 +581,149 @@ export function GalleryPage() {
   const submitAddData = () => {
     if (addData.phase !== "open") return;
     const { venueId, network, facilities } = addData;
-    if (network === null && facilities === null) return;
-    setAddData({ ...addData, busy: true, error: null });
+    let accepted = addData.accepted;
+    if (accepted === null && network === null && facilities === null) return;
+    if (!beginTopLevelActivity("add-data")) return;
+    const flowGeneration = addDataGenerationRef.current;
+    const publishGeneration = addDataPublishGenerationRef.current;
+    const sessionGeneration = sessionGenerationRef.current;
+    const isCurrent = () =>
+      aliveRef.current &&
+      flowGeneration === addDataGenerationRef.current &&
+      publishGeneration === addDataPublishGenerationRef.current;
+    setAddData({ ...addData, busy: true, accepted, error: null });
     void (async () => {
       try {
-        const res = await api.augmentGdb(venueId, {
-          ...(network ? { networkBlobHash: network.networkBlobHash } : {}),
-          ...(facilities ? { facilitiesBlobHash: facilities.facilitiesBlobHash } : {}),
-        });
-        const job = await api.waitForJob(res.jobId);
+        if (accepted === null) {
+          const res = await api.augmentGdb(venueId, {
+            ...(network ? { networkBlobHash: network.networkBlobHash } : {}),
+            ...(facilities ? { facilitiesBlobHash: facilities.facilitiesBlobHash } : {}),
+          });
+          accepted = { jobId: res.jobId };
+          if (isCurrent()) {
+            setAddData((c) => (c.phase === "open" ? { ...c, busy: true, accepted, error: null } : c));
+          }
+        }
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
+        const job = await api.waitForJob(accepted.jobId);
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
         if (job.status === "done") {
-          setAddData({ phase: "idle" });
+          if (isCurrent()) {
+            setAddData({ phase: "idle" });
+          }
           await reload();
+        } else if (job.status === "timeout") {
+          if (isCurrent()) {
+            setAddData((c) => (c.phase === "open" ? { ...c, busy: false, accepted, error: null } : c));
+            setGdbNotice(ui.processingContinues[locale]);
+          }
         } else {
-          setAddData((c) =>
-            c.phase === "open"
-              ? { ...c, busy: false, error: { code: "gdb_conversion_failed", message: job.error } }
-              : c,
-          );
+          if (isCurrent()) {
+            setAddData((c) =>
+              c.phase === "open"
+                ? { ...c, busy: false, accepted: null, error: { code: "gdb_conversion_failed", message: job.error } }
+                : c,
+            );
+          }
+          await reload();
         }
       } catch (err) {
-        setAddData((c) => (c.phase === "open" ? { ...c, busy: false, error: err as GdbError } : c));
+        if (!isCurrent()) return;
+        if (accepted !== null) {
+          setAddData((c) => (c.phase === "open" ? { ...c, busy: false, accepted, error: null } : c));
+          setGdbNotice(ui.processingContinues[locale]);
+          return;
+        }
+        setAddData((c) => (c.phase === "open" ? { ...c, busy: false, accepted: null, error: err as GdbError } : c));
       }
     })();
   };
 
   const cancelAddData = () => {
+    if (addData.phase === "open" && (addData.busy || addData.accepted !== null)) return;
+    invalidateAddDataRequests();
     setAddData({ phase: "idle" });
   };
 
   const generateRouting = (venue: VenueSummary) => {
     if (generatingId !== null) return;
+    if (routingJob !== null && routingJob.venueId !== venue.id) return;
+    if (acceptedOwner !== null && acceptedOwner !== "routing") return;
+    let accepted = routingJob?.venueId === venue.id ? routingJob : null;
+    if (!beginTopLevelActivity("routing")) return;
+    const generation = routingGenerationRef.current;
+    const noticeGeneration = noticeGenerationRef.current;
+    const sessionGeneration = sessionGenerationRef.current;
     setGeneratingId(venue.id);
-    setGdbNotice(ui.generatingRouting[locale]);
+    setGdbNotice(accepted === null ? ui.generatingRouting[locale] : ui.processingContinues[locale]);
     void (async () => {
       try {
-        const res = await api.generateNetwork(venue.id);
-        const job = await api.waitForJob(res.jobId);
+        if (accepted === null) {
+          const res = await api.generateNetwork(venue.id);
+          accepted = { venueId: venue.id, jobId: res.jobId };
+          if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
+          if (generation === routingGenerationRef.current) {
+            setRoutingJob(accepted);
+          }
+        }
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
+        const job = await api.waitForJob(accepted.jobId);
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
+        const canTouchNotice = noticeGeneration === noticeGenerationRef.current && generation === routingGenerationRef.current;
         if (job.status === "done") {
-          setGdbNotice(ui.routingGenerated[locale]);
+          if (canTouchNotice) {
+            setRoutingJob(null);
+            setGdbNotice(ui.routingGenerated[locale]);
+          }
           await reload();
+        } else if (job.status === "timeout") {
+          if (canTouchNotice) {
+            setRoutingJob(accepted);
+            setGdbNotice(ui.processingContinues[locale]);
+          }
         } else {
-          setGdbNotice(gdbErrorMessage({ code: "gdb_conversion_failed", message: job.error }, locale));
+          if (canTouchNotice) {
+            setRoutingJob(null);
+            setGdbNotice(gdbErrorMessage({ code: "gdb_conversion_failed", message: job.error }, locale));
+          }
+          await reload();
         }
       } catch (err) {
-        setGdbNotice(gdbErrorMessage(err as GdbError, locale));
+        if (
+          aliveRef.current &&
+          generation === routingGenerationRef.current &&
+          noticeGeneration === noticeGenerationRef.current
+        ) {
+          if (accepted !== null) {
+            setRoutingJob(accepted);
+            setGdbNotice(ui.processingContinues[locale]);
+          } else {
+            setGdbNotice(gdbErrorMessage(err as GdbError, locale));
+          }
+        }
       } finally {
-        setGeneratingId(null);
+        if (aliveRef.current && generation === routingGenerationRef.current) {
+          setGeneratingId(null);
+        }
       }
     })();
   };
 
   const exportNetwork = (venue: VenueSummary) => {
+    if (!beginTopLevelActivity()) return;
+    const generation = exportGenerationRef.current;
+    const noticeGeneration = noticeGenerationRef.current;
     setGdbNotice(ui.exportingNetwork[locale]);
     void (async () => {
       try {
         const { blob, filename } = await api.exportNetwork(venue.id);
+        if (
+          !aliveRef.current ||
+          generation !== exportGenerationRef.current ||
+          noticeGeneration !== noticeGenerationRef.current
+        ) {
+          return;
+        }
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement("a");
         anchor.href = url;
@@ -404,9 +734,20 @@ export function GalleryPage() {
         URL.revokeObjectURL(url);
         setGdbNotice(ui.networkExported[locale]);
       } catch (err) {
+        if (
+          !aliveRef.current ||
+          generation !== exportGenerationRef.current ||
+          noticeGeneration !== noticeGenerationRef.current
+        ) {
+          return;
+        }
+        const errObject = err !== null && typeof err === "object" ? err : null;
         const code =
-          (err as { code?: string; error?: string }).code ??
-          (err as { error?: string }).error;
+          errObject !== null && "code" in errObject && typeof errObject.code === "string"
+            ? errObject.code
+            : errObject !== null && "error" in errObject && typeof errObject.error === "string"
+              ? errObject.error
+              : undefined;
         setGdbNotice(
           code === "no_graph"
             ? ui.noGraphToExport[locale]
@@ -430,6 +771,10 @@ export function GalleryPage() {
               type="button"
               className="chip"
               onClick={() => {
+                sessionGenerationRef.current += 1;
+                reloadGenerationRef.current += 1;
+                invalidateAsyncWork();
+                clearAsyncUi();
                 void api.logout().then(reload);
               }}
             >
@@ -541,10 +886,12 @@ export function GalleryPage() {
                 key={venue.id}
                 venue={venue}
                 locale={locale}
+                actionsDisabled={acceptedOwner !== null}
                 onOpen={() => {
-                  openVenue(venue.slug);
+                  openVenue(venue);
                 }}
                 onDelete={() => {
+                  if (acceptedOwner !== null) return;
                   setDeleting(venue);
                 }}
                 onUploadImdf={() => {
@@ -567,11 +914,12 @@ export function GalleryPage() {
                       },
                     }
                   : {})}
-                {...(venue.hasNetwork === false
+                {...(venue.hasNetwork === false || routingJob?.venueId === venue.id
                   ? {
                       onGenerateRouting: () => {
                         generateRouting(venue);
                       },
+                      ...(routingJob?.venueId === venue.id ? { generateRoutingLabel: ui.checkStatus[locale] } : {}),
                     }
                   : {})}
                 {...(venue.hasGraph === true
@@ -580,7 +928,7 @@ export function GalleryPage() {
                         exportNetwork(venue);
                       },
                       onReviewNetwork: () => {
-                        openReview(venue.slug);
+                        openReview(venue);
                       },
                     }
                   : {})}
@@ -636,6 +984,9 @@ export function GalleryPage() {
           facilities={gdbFlow.facilities}
           onAddFacilities={onGdbFacilityFile}
           venueNameLocked={gdbFlow.target.mode !== "create"}
+          cancelDisabled={gdbFlow.busy || gdbFlow.accepted !== null}
+          actionLabel={gdbFlow.accepted !== null ? ui.checkStatus[locale] : undefined}
+          canSubmit={gdbFlow.accepted !== null ? true : undefined}
           onImport={publishGdbPlan}
           onCancel={cancelGdbImport}
         />
@@ -650,6 +1001,9 @@ export function GalleryPage() {
           error={addData.error}
           onAddNetwork={onAddDataNetwork}
           onAddFacilities={onAddDataFacilities}
+          cancelLocked={addData.busy || addData.accepted !== null}
+          actionLabel={addData.accepted !== null ? ui.checkStatus[locale] : undefined}
+          canSubmit={addData.accepted !== null ? true : undefined}
           onImport={submitAddData}
           onCancel={cancelAddData}
         />

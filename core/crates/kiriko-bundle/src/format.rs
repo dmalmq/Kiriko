@@ -56,9 +56,23 @@ pub(crate) const SECTION_FACILITIES: u16 = 7;
 
 pub(crate) const REQUIRED_SECTIONS: [u16; 3] = [SECTION_MANIFEST, SECTION_GEOMETRY, SECTION_STORES];
 
-/// The only section payload version this decoder understands. A required
-/// section whose directory row declares a different version is rejected as
-/// `unsupported_bundle_version`.
+/// Every section id this decoder recognizes and will interpret (required plus
+/// the optional/reserved ids). A directory row for any of these declaring a
+/// version this decoder does not understand is rejected; unknown ids are left
+/// tolerated for forward compatibility.
+pub(crate) const KNOWN_SECTIONS: [u16; 7] = [
+    SECTION_MANIFEST,
+    SECTION_GEOMETRY,
+    SECTION_STORES,
+    SECTION_STYLE,
+    SECTION_GRAPH,
+    SECTION_BEACONS,
+    SECTION_FACILITIES,
+];
+
+/// The only section payload version this decoder understands. Any known
+/// section (required or optional) whose directory row declares a different
+/// version is rejected as `unsupported_bundle_version`.
 pub(crate) const SECTION_VERSION: u16 = 1;
 
 const DIRECTORY_COUNT_LEN: usize = 2;
@@ -166,11 +180,11 @@ pub(crate) fn parse_directory(payload: &[u8]) -> Result<Directory, BundleError> 
             return Err(invalid("section row is out of bounds"));
         }
 
-        if REQUIRED_SECTIONS.contains(&id) && version != SECTION_VERSION {
+        if KNOWN_SECTIONS.contains(&id) && version != SECTION_VERSION {
             return Err(BundleError::new(
                 BundleErrorCode::UnsupportedBundleVersion,
                 format!(
-                    "required section {id} has version {version}, which this decoder does not understand"
+                    "section {id} has version {version}, which this decoder does not understand"
                 ),
             ));
         }
@@ -529,5 +543,25 @@ mod tests {
         let err = parse_directory(&payload)
             .expect_err("an overlap among many sections must still be detected");
         assert_eq!(err.code, BundleErrorCode::InvalidBundle);
+    }
+
+    #[test]
+    fn rejects_unsupported_optional_section_version() {
+        // Optional graph (5) and facilities (7) sections must be version-checked
+        // exactly like the required ones; a version this decoder cannot read is
+        // rejected rather than silently interpreted.
+        for optional in [SECTION_GRAPH, SECTION_FACILITIES] {
+            let dir_len = (DIRECTORY_COUNT_LEN + 4 * DIRECTORY_ROW_LEN) as u64;
+            let rows = [
+                row_bytes(SECTION_MANIFEST, SECTION_VERSION, dir_len, 0),
+                row_bytes(SECTION_GEOMETRY, SECTION_VERSION, dir_len, 0),
+                row_bytes(SECTION_STORES, SECTION_VERSION, dir_len, 0),
+                row_bytes(optional, SECTION_VERSION + 1, dir_len, 0),
+            ];
+            let payload = payload_with_rows(&rows, &[]);
+            let err = parse_directory(&payload)
+                .expect_err("an unsupported optional section version must be rejected");
+            assert_eq!(err.code, BundleErrorCode::UnsupportedBundleVersion);
+        }
     }
 }

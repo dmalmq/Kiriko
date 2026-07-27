@@ -52,7 +52,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium firefox
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
 
       - name: Run complete acceptance sequence
         run: |
@@ -62,13 +62,20 @@ jobs:
           cargo test --manifest-path core/Cargo.toml --workspace
           cargo check --manifest-path core/Cargo.toml -p kiriko-wasm --target wasm32-unknown-unknown
           pnpm install --frozen-lockfile
+          # Build the native addon and WASM once, before any test or preview
+          # webServer starts, so the in-use addon is never rebuilt mid-suite.
           pnpm core:build
           pnpm typecheck
+          pnpm --filter kiriko-server typecheck
           pnpm test
+          # The server suite includes the mandatory real-gdal3.js GDB smoke
+          # (server/test/gdbSmoke.test.ts) — no environment gate.
           pnpm test:server
           pnpm build
           pnpm exec playwright test --project=chromium
           pnpm exec playwright test --project=firefox
+          pnpm exec playwright test --project=webkit
+          pnpm exec playwright test --project=chromium-visual
           npx -y node@24 -e "const core=require('./core/crates/kiriko-node'); if(typeof core.compileImdf!=='function'||typeof core.inspectBundle!=='function') process.exit(1)"
 
   native-addon:

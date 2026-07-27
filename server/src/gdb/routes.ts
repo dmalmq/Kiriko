@@ -44,24 +44,12 @@ import { exportVenueNetwork, CoreExportError } from "../core/native";
 import { packageNetworkGdbZip } from "./exportGdb";
 
 const TENANT_ID = 1;
-const INSPECT_TIMEOUT_MS = 60_000;
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-    promise.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(t);
-        reject(e);
-      },
-    );
-  });
-}
-
+// The GDAL process queue (gdalProcess.ts) now enforces a real, cancelling
+// per-operation deadline, so route-level GDAL calls no longer need an
+// in-process timeout wrapper. Its returned promise also settles only after the
+// worker has exited, so `removeStagedGdb` in a `finally` after the await runs
+// with no live worker holding the staged file.
 
 const GdbLayerKeySchema = Type.Object({
   databaseId: Type.String(),
@@ -232,11 +220,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       const stagedPath = stageGdbBlobForGdal(request.server.blobs.path(hash), hash);
       let inspection: GdbInspection;
       try {
-        inspection = await withTimeout(
-          inspectGdbArchive(stagedPath, rootName),
-          INSPECT_TIMEOUT_MS,
-          "gdb inspect",
-        );
+        inspection = await inspectGdbArchive(stagedPath, rootName);
       } catch (error) {
         request.log.warn({ err: error }, "gdb inspect failed");
         return reply.code(400).send(
@@ -298,11 +282,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       const stagedPath = stageGdbBlobForGdal(request.server.blobs.path(hash), hash);
       let network: NetworkExtraction;
       try {
-        network = await withTimeout(
-          extractNetworkGeoJson(stagedPath),
-          INSPECT_TIMEOUT_MS,
-          "gdb network inspect",
-        );
+        network = await extractNetworkGeoJson(stagedPath);
       } catch (error) {
         if (isGdbSourceError(error)) {
           return reply
@@ -369,11 +349,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       const stagedPath = stageGdbBlobForGdal(request.server.blobs.path(hash), hash);
       let facilities: FacilitiesExtraction;
       try {
-        facilities = await withTimeout(
-          extractFacilitiesGeoJson(stagedPath),
-          INSPECT_TIMEOUT_MS,
-          "gdb facilities inspect",
-        );
+        facilities = await extractFacilitiesGeoJson(stagedPath);
       } catch (error) {
         if (isGdbSourceError(error)) {
           return reply
@@ -556,32 +532,27 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         ((db.prepare("SELECT MAX(seq) AS m FROM versions WHERE venue_id = ?").get(venueId) as {
           m: number | null;
         }).m ?? 0) + 1;
-      const info = db
-        .prepare(
-          `INSERT INTO versions
-             (venue_id, seq, public_id, source_blob_hash, source_kind,
-              gdb_source_blob_hash, gdb_plan_json,
-              net_junctions_blob_hash, net_paths_blob_hash, facilities_blob_hash)
-           VALUES (?, ?, ?, ?, 'gdb', ?, ?, ?, ?, ?)`,
-        )
-        .run(
+      const accepted = request.server.queue.enqueuePublication(
+        "publish_imdf",
+        {
           venueId,
-          nextSeq,
-          newPublicVersionId(),
-          imdfHash,
-          blobHash,
-          JSON.stringify(normalizeGdbPlan(plan)),
-          networkJunctionsHash ?? null,
-          networkPathsHash ?? null,
-          facilitiesGeoJsonHash ?? null,
-        );
-      const versionId = Number(info.lastInsertRowid);
-      const jobId = request.server.queue.enqueue("publish_imdf", {
-        versionId,
-        networkJunctionsHash,
-        networkPathsHash,
-        facilitiesGeoJsonHash,
-      });
+          seq: nextSeq,
+          publicId: newPublicVersionId(),
+          sourceBlobHash: imdfHash,
+          sourceKind: "gdb",
+          gdbSourceBlobHash: blobHash,
+          gdbPlanJson: JSON.stringify(normalizeGdbPlan(plan)),
+          networkJunctionsBlobHash: networkJunctionsHash ?? null,
+          networkPathsBlobHash: networkPathsHash ?? null,
+          facilitiesBlobHash: facilitiesGeoJsonHash ?? null,
+        },
+        {
+          networkJunctionsHash,
+          networkPathsHash,
+          facilitiesGeoJsonHash,
+        },
+      );
+      const { jobId, versionId } = accepted;
       return reply.code(202).send({ jobId, versionId, seq: nextSeq, excludedLayers });
     },
   );
@@ -678,33 +649,27 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         .prepare("SELECT MAX(seq) AS m FROM versions WHERE venue_id = ?")
         .get(venueId) as { m: number | null };
       const nextSeq = (maxRow.m ?? 0) + 1;
-      const info = db
-        .prepare(
-          `INSERT INTO versions
-             (venue_id, seq, public_id, source_blob_hash, source_kind,
-              gdb_source_blob_hash, gdb_plan_json,
-              net_junctions_blob_hash, net_paths_blob_hash, facilities_blob_hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
+      const accepted = request.server.queue.enqueuePublication(
+        "publish_imdf",
+        {
           venueId,
-          nextSeq,
-          newPublicVersionId(),
-          base.s,
-          base.k,
-          base.g,
-          base.p,
-          networkJunctionsHash ?? null,
-          networkPathsHash ?? null,
-          facilitiesGeoJsonHash ?? null,
-        );
-      const versionId = Number(info.lastInsertRowid);
-      const jobId = request.server.queue.enqueue("publish_imdf", {
-        versionId,
-        networkJunctionsHash,
-        networkPathsHash,
-        facilitiesGeoJsonHash,
-      });
+          seq: nextSeq,
+          publicId: newPublicVersionId(),
+          sourceBlobHash: base.s,
+          sourceKind: base.k === "gdb" ? "gdb" : "imdf",
+          gdbSourceBlobHash: base.g,
+          gdbPlanJson: base.p,
+          networkJunctionsBlobHash: networkJunctionsHash ?? null,
+          networkPathsBlobHash: networkPathsHash ?? null,
+          facilitiesBlobHash: facilitiesGeoJsonHash ?? null,
+        },
+        {
+          networkJunctionsHash,
+          networkPathsHash,
+          facilitiesGeoJsonHash,
+        },
+      );
+      const { jobId, versionId } = accepted;
       return reply.code(202).send({ jobId, versionId, seq: nextSeq });
     },
   );
@@ -752,30 +717,25 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         .prepare("SELECT MAX(seq) AS m FROM versions WHERE venue_id = ?")
         .get(venueId) as { m: number | null };
       const nextSeq = (maxRow.m ?? 0) + 1;
-      const info = db
-        .prepare(
-          `INSERT INTO versions
-             (venue_id, seq, public_id, source_blob_hash, source_kind,
-              gdb_source_blob_hash, gdb_plan_json,
-              net_junctions_blob_hash, net_paths_blob_hash, facilities_blob_hash, synthesized)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 1)`,
-        )
-        .run(
+      const accepted = request.server.queue.enqueuePublication(
+        "publish_imdf",
+        {
           venueId,
-          nextSeq,
-          newPublicVersionId(),
-          base.s,
-          base.k,
-          base.g,
-          base.p,
-          base.f ?? null,
-        );
-      const versionId = Number(info.lastInsertRowid);
-      const jobId = request.server.queue.enqueue("publish_imdf", {
-        versionId,
-        facilitiesGeoJsonHash: base.f ?? undefined,
-        synthesizeNetwork: true,
-      });
+          seq: nextSeq,
+          publicId: newPublicVersionId(),
+          sourceBlobHash: base.s,
+          sourceKind: base.k === "gdb" ? "gdb" : "imdf",
+          gdbSourceBlobHash: base.g,
+          gdbPlanJson: base.p,
+          facilitiesBlobHash: base.f ?? null,
+          synthesized: true,
+        },
+        {
+          facilitiesGeoJsonHash: base.f ?? undefined,
+          synthesizeNetwork: true,
+        },
+      );
+      const { jobId, versionId } = accepted;
       return reply.code(202).send({ jobId, versionId, seq: nextSeq });
     },
   );
@@ -827,11 +787,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       }
       let zip: Uint8Array;
       try {
-        zip = await withTimeout(
-          packageNetworkGdbZip(network.junctions, network.paths),
-          INSPECT_TIMEOUT_MS,
-          "gdb network export",
-        );
+        zip = await packageNetworkGdbZip(network.junctions, network.paths);
       } catch (error) {
         request.log.error({ err: error }, "gdb export packaging failed");
         return reply.code(400).send(
@@ -856,18 +812,20 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       schema: {
         body: Type.Object({
           slug: Type.String({ minLength: 1 }),
+          publicVersionId: Type.String({ pattern: "^[0-9a-f]{64}$" }),
           junctions: Type.String(),
           paths: Type.String(),
         }),
         response: {
-          202: Type.Object({ jobId: Type.String(), versionId: Type.Number(), seq: Type.Number() }),
+          202: Type.Object({ jobId: Type.String(), versionId: Type.Number(), seq: Type.Number(), publicVersionId: Type.String({ pattern: "^[0-9a-f]{64}$" }) }),
           404: Type.Object({ error: Type.String() }),
         },
       },
     },
     async (request, reply) => {
-      const { slug, junctions, paths } = request.body as {
+      const { slug, publicVersionId, junctions, paths } = request.body as {
         slug: string;
+        publicVersionId: string;
         junctions: string;
         paths: string;
       };
@@ -879,15 +837,17 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         return reply.code(404).send({ error: "not_found" });
       }
       const venueId = venue.id;
-      // Reuse the latest published IMDF + carry-forward metadata, exactly like
-      // /augment; the edited graph replaces the network hashes.
+      // Base the edited graph on the EXACT admitted published version identity,
+      // not mutable latest: a concurrent publish must not silently reparent the
+      // save onto a different source/facilities set. Cross-venue or unknown
+      // identities never match (filtered by venue_id + public_id).
       const base = db
         .prepare(
           `SELECT source_blob_hash AS s, source_kind AS k, gdb_source_blob_hash AS g, gdb_plan_json AS p,
                   facilities_blob_hash AS f
-             FROM versions WHERE venue_id = ? AND status = 'published' ORDER BY seq DESC LIMIT 1`,
+             FROM versions WHERE venue_id = ? AND public_id = ? AND status = 'published' LIMIT 1`,
         )
-        .get(venueId) as
+        .get(venueId, publicVersionId) as
         | { s: string; k: string; g: string | null; p: string | null; f: string | null }
         | undefined;
       if (!base) {
@@ -904,34 +864,29 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         .prepare("SELECT MAX(seq) AS m FROM versions WHERE venue_id = ?")
         .get(venueId) as { m: number | null };
       const nextSeq = (maxRow.m ?? 0) + 1;
-      const info = db
-        .prepare(
-          `INSERT INTO versions
-             (venue_id, seq, public_id, source_blob_hash, source_kind,
-              gdb_source_blob_hash, gdb_plan_json,
-              net_junctions_blob_hash, net_paths_blob_hash, facilities_blob_hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
+      const createdPublicVersionId = newPublicVersionId();
+      const accepted = request.server.queue.enqueuePublication(
+        "publish_imdf",
+        {
           venueId,
-          nextSeq,
-          newPublicVersionId(),
-          base.s,
-          base.k,
-          base.g,
-          base.p,
-          junctionsBlob.hash,
-          pathsBlob.hash,
-          base.f ?? null,
-        );
-      const versionId = Number(info.lastInsertRowid);
-      const jobId = request.server.queue.enqueue("publish_imdf", {
-        versionId,
-        networkJunctionsHash: junctionsBlob.hash,
-        networkPathsHash: pathsBlob.hash,
-        facilitiesGeoJsonHash: base.f ?? undefined,
-      });
-      return reply.code(202).send({ jobId, versionId, seq: nextSeq });
+          seq: nextSeq,
+          publicId: createdPublicVersionId,
+          sourceBlobHash: base.s,
+          sourceKind: base.k === "gdb" ? "gdb" : "imdf",
+          gdbSourceBlobHash: base.g,
+          gdbPlanJson: base.p,
+          networkJunctionsBlobHash: junctionsBlob.hash,
+          networkPathsBlobHash: pathsBlob.hash,
+          facilitiesBlobHash: base.f ?? null,
+        },
+        {
+          networkJunctionsHash: junctionsBlob.hash,
+          networkPathsHash: pathsBlob.hash,
+          facilitiesGeoJsonHash: base.f ?? undefined,
+        },
+      );
+      const { jobId, versionId } = accepted;
+      return reply.code(202).send({ jobId, versionId, seq: nextSeq, publicVersionId: createdPublicVersionId });
     },
   );
 
@@ -982,11 +937,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       const stagedPath = stageGdbBlobForGdal(request.server.blobs.path(row.g), row.g);
       let inspection: GdbInspection;
       try {
-        inspection = await withTimeout(
-          inspectGdbArchive(stagedPath, rootName),
-          INSPECT_TIMEOUT_MS,
-          "gdb mapping inspect",
-        );
+        inspection = await inspectGdbArchive(stagedPath, rootName);
       } catch (error) {
         request.log.warn({ err: error }, "gdb mapping inspect failed");
         return reply.code(400).send(

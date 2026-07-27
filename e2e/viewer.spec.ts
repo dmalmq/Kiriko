@@ -43,16 +43,21 @@ test.describe("local IMDF ZIP viewer journey", () => {
     page,
   }) => {
     const issueRequests = collectIssueRequests(page);
-    // No external network: after the static app load event, the only allowed
-    // requests are same-origin font subsets (Noto Sans JP ships unicode-range
-    // subsets that the browser fetches on demand as CJK glyphs render).
+    // No external network and no dataset fetch: after the static app load
+    // event, the only allowed requests are same-origin build-emitted app assets
+    // (Noto Sans JP woff2 unicode-range subsets fetched as CJK glyphs render,
+    // and the staged facility marker-icon PNGs the map registers on load). A
+    // dataset fetch would target `/v/...` and is still caught.
     const networkRequests: string[] = [];
     const onRequest = (request: Request): void => {
       const url = request.url();
       if (!url.startsWith("http://") && !url.startsWith("https://")) {
         return;
       }
-      if (url.startsWith("http://127.0.0.1:4173/assets/") && url.endsWith(".woff2")) {
+      if (
+        url.startsWith("http://127.0.0.1:4173/assets/") &&
+        (url.endsWith(".woff2") || url.endsWith(".png"))
+      ) {
         return;
       }
       networkRequests.push(url);

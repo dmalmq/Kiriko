@@ -235,6 +235,9 @@ export interface GdbImportDialogProps {
   facilities?: FacilitiesInspectResponse | null;
   /** When provided, an "Add point facilities" file picker is shown. */
   onAddFacilities?: (file: File) => void;
+  actionLabel?: string | undefined;
+  canSubmit?: boolean | undefined;
+  cancelDisabled?: boolean | undefined;
   onImport: (plan: GdbMappingPlan) => void;
   onCancel: () => void;
 }
@@ -274,6 +277,9 @@ export function GdbImportDialog({
   onAddFacilities,
   onImport,
   onCancel,
+  actionLabel,
+  canSubmit,
+  cancelDisabled = false,
 }: GdbImportDialogProps) {
   // The dialog owns the edited plan so a retryable conversion error (a changed
   // `error` prop) never resets manual choices.
@@ -281,6 +287,7 @@ export function GdbImportDialog({
   const [filter, setFilter] = useState("");
   const [page, setPage] = useState(0);
 
+  const cancelLocked = cancelDisabled;
   const dialogRef = useRef<HTMLDialogElement>(null);
   const venueInputRef = useRef<HTMLInputElement>(null);
   const headingId = "gdb-import-dialog-title";
@@ -316,11 +323,11 @@ export function GdbImportDialog({
     if (!dialog) return;
     const handleCancel = (event: Event) => {
       event.preventDefault();
-      onCancel();
+      if (!cancelLocked) onCancel();
     };
     dialog.addEventListener("cancel", handleCancel);
     return () => dialog.removeEventListener("cancel", handleCancel);
-  }, [onCancel]);
+  }, [cancelLocked, onCancel]);
 
   const filtered = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -343,7 +350,7 @@ export function GdbImportDialog({
   const includedFeatureCount = includedRows.reduce((sum, row) => {
     return sum + (descriptorByKey.get(gdbLayerKeyString(row.key))?.featureCount ?? 0);
   }, 0);
-  const canImport = issues.length === 0 && !busy;
+  const canImport = !busy && (canSubmit ?? issues.length === 0);
 
   function updateRow(key: GdbLayerPlan["key"], patch: Partial<GdbLayerPlan>): void {
     const keyString = gdbLayerKeyString(key);
@@ -430,6 +437,9 @@ export function GdbImportDialog({
       ref={dialogRef}
       className="gdb-dialog"
       aria-labelledby={headingId}
+      onClick={(event) => {
+        if (event.target === dialogRef.current && !cancelLocked) onCancel();
+      }}
     >
       <form
         method="dialog"
@@ -797,7 +807,7 @@ export function GdbImportDialog({
             </div>
           ) : null}
           <div className="gdb-dialog__actions">
-            <button type="button" className="gdb-dialog__btn" onClick={onCancel}>
+            <button type="button" className="gdb-dialog__btn" onClick={onCancel} disabled={cancelDisabled}>
               {ui.cancel[locale]}
             </button>
             <button
@@ -805,7 +815,7 @@ export function GdbImportDialog({
               className="gdb-dialog__btn gdb-dialog__btn--primary"
               disabled={!canImport}
             >
-              {ui.import[locale]}
+              {actionLabel ?? ui.import[locale]}
             </button>
           </div>
         </section>

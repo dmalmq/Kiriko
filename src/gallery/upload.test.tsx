@@ -55,6 +55,39 @@ describe("UploadModal", () => {
     expect(open.getAttribute("href")).toBe("/?dataset=shinjuku-station");
   });
 
+  it("checks the same accepted create upload job after timeout without creating another venue", async () => {
+    createVenue.mockResolvedValue({ id: 7, slug: "shinjuku-station", name: "shinjuku-station" });
+    uploadVersion.mockResolvedValue({ jobId: "upload-timeout" });
+    waitForJob.mockResolvedValueOnce({ status: "timeout" }).mockResolvedValueOnce({ status: "done" });
+    const onPublished = vi.fn();
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(<UploadModal locale="en" onClose={onClose} onPublished={onPublished} />);
+
+    await user.upload(screen.getByLabelText("IMDF ZIP"), zipFile());
+    await user.click(screen.getByRole("button", { name: "Publish" }));
+
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("upload-timeout"));
+    expect(screen.getByText(/still running/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Close" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.keyboard("{Escape}");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: /open local data/i })).toBeTruthy();
+    expect(createVenue).toHaveBeenCalledTimes(1);
+    expect(uploadVersion).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    await waitFor(() => expect(screen.getByText("Published")).toBeTruthy());
+    expect(waitForJob).toHaveBeenCalledTimes(2);
+    expect(waitForJob).toHaveBeenLastCalledWith("upload-timeout");
+    expect(createVenue).toHaveBeenCalledTimes(1);
+    expect(uploadVersion).toHaveBeenCalledTimes(1);
+    expect(deleteVenue).not.toHaveBeenCalled();
+    expect(onPublished).toHaveBeenCalledTimes(1);
+  });
+
   it("surfaces a failed publish job and re-enables the form", async () => {
     createVenue.mockResolvedValue({ id: 8, slug: "bad", name: "bad" });
     uploadVersion.mockResolvedValue({ jobId: "j2" });
@@ -212,6 +245,44 @@ describe("UploadModal", () => {
     expect(screen.getByRole("link", { name: "Open" }).getAttribute("href")).toBe(
       "/?dataset=existing-station",
     );
+  });
+
+  it("checks the same accepted version upload job after timeout without uploading again", async () => {
+    uploadVersion.mockResolvedValue({ jobId: "version-timeout" });
+    waitForJob.mockResolvedValueOnce({ status: "timeout" }).mockResolvedValueOnce({ status: "done" });
+    const onPublished = vi.fn();
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <UploadModal
+        locale="en"
+        onClose={onClose}
+        onPublished={onPublished}
+        target={{ venueId: 42, venueName: "Existing Station", slug: "existing-station" }}
+      />,
+    );
+
+    await user.upload(screen.getByLabelText("IMDF ZIP"), zipFile("v2-timeout.zip"));
+    await user.click(screen.getByRole("button", { name: "Publish" }));
+
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("version-timeout"));
+    expect(screen.getByText(/still running/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Close" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.keyboard("{Escape}");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: /upload imdf version/i })).toBeTruthy();
+    expect(uploadVersion).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    await waitFor(() => expect(screen.getByText("Published")).toBeTruthy());
+    expect(waitForJob).toHaveBeenCalledTimes(2);
+    expect(waitForJob).toHaveBeenLastCalledWith("version-timeout");
+    expect(createVenue).not.toHaveBeenCalled();
+    expect(uploadVersion).toHaveBeenCalledTimes(1);
+    expect(deleteVenue).not.toHaveBeenCalled();
+    expect(onPublished).toHaveBeenCalledTimes(1);
   });
 
   it("does not delete an existing venue when version upload fails", async () => {

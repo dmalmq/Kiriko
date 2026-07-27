@@ -227,6 +227,18 @@ function haversineM(lon1: number, lat1: number, lon2: number, lat2: number): num
   return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
+/** One past the largest PATHID/RPATHID already present (so new ids stay globally unique); ≥ 1. */
+function nextPathId(paths: NetworkFeature[]): number {
+  let max = 0;
+  for (const p of paths) {
+    for (const key of ["PATHID", "RPATHID"] as const) {
+      const v = p.properties[key];
+      if (typeof v === "number" && Number.isFinite(v) && v > max) max = v;
+    }
+  }
+  return max + 1;
+}
+
 /**
  * Append a straight forward+reverse `net_path` pair between two existing
  * junctions (cost = great-circle mm). No-op if either id is unknown, they are
@@ -247,20 +259,39 @@ export function addEdge(net: ParsedNetwork, fromId: number, toId: number): Parse
   }
   const a = from.geometry.coordinates;
   const b = to.geometry.coordinates;
+  // Browser adapter boundary: never emit a NaN/Infinity-cost edge from a
+  // junction with non-finite coordinates.
+  if (![a[0], a[1], b[0], b[1]].every((v) => typeof v === "number" && Number.isFinite(v))) {
+    return net;
+  }
   const cost = Math.round(haversineM(a[0]!, a[1]!, b[0]!, b[1]!) * 1000);
   const ordinal = from.ordinal;
   const floor =
     typeof from.properties.FLOOR === "string" ? from.properties.FLOOR : ordinalToFloorLabel(ordinal ?? 0);
-  const mk = (f: number, t: number, coords: [number, number][]): NetworkFeature => ({
+  // Fresh, globally-unique reciprocal PATHID/RPATHID so the Rust importer
+  // canonicalizes the forward+reverse pair into one logical undirected edge.
+  const fwdPathId = nextPathId(net.paths);
+  const revPathId = fwdPathId + 1;
+  const mk = (
+    f: number,
+    t: number,
+    pathId: number,
+    reversePathId: number,
+    coords: [number, number][],
+  ): NetworkFeature => ({
     ordinal,
     geometry: { type: "LineString", coordinates: coords },
-    properties: { FNODEID: f, TNODEID: t, cost, FLOOR: floor },
+    properties: { FNODEID: f, TNODEID: t, cost, FLOOR: floor, PATHID: pathId, RPATHID: reversePathId },
   });
   const pa: [number, number] = [a[0]!, a[1]!];
   const pb: [number, number] = [b[0]!, b[1]!];
   return {
     junctions: net.junctions,
-    paths: [...net.paths, mk(fromId, toId, [pa, pb]), mk(toId, fromId, [pb, pa])],
+    paths: [
+      ...net.paths,
+      mk(fromId, toId, fwdPathId, revPathId, [pa, pb]),
+      mk(toId, fromId, revPathId, fwdPathId, [pb, pa]),
+    ],
   };
 }
 
