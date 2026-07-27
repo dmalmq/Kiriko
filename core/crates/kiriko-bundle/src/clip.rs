@@ -161,6 +161,14 @@ impl ClipRegion {
     /// via `level_id`. Building polygons are deliberately not used — they are
     /// synthesized bounding rectangles, and for adjacent structures like Tokyo
     /// Station's they overlap heavily enough to leak a neighbour's nodes.
+    ///
+    /// This is a difference of degree, not kind: GDB import also synthesizes a
+    /// bounding rectangle for any level with no source level feature
+    /// (`resolveOrCreateLevel` in `server/src/gdb/mapping.ts`), and those are
+    /// indexed here like any other level. That can over-include (keep a
+    /// neighbour's nodes) but never corrupts. Left as-is pending real-dataset
+    /// measurement — see the outstanding-verification bullet in
+    /// `docs/gdb-data-reference.md`.
     pub(crate) fn from_venue(venue: &VenueModel) -> Self {
         let mut ordinal_by_level: BTreeMap<&str, f64> = BTreeMap::new();
         for level in &venue.levels {
