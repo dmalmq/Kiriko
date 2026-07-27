@@ -164,10 +164,19 @@ export function makePublishRunner(
         try {
           await exportVenueNetwork(bundle);
         } catch (error) {
-          if (error instanceof CoreExportError && error.code === "no_graph") {
-            throw new NoRoutableNetworkError("synthesized graph is empty");
+          if (error instanceof CoreExportError) {
+            if (error.code === "no_graph") {
+              throw new NoRoutableNetworkError("synthesized graph is empty");
+            }
+            if (error.code === "fractional_ordinal") {
+              // The synthesized graph is present and routable; only GDB export
+              // cannot label fractional IMDF ordinals such as mezzanines.
+            } else {
+              throw error;
+            }
+          } else {
+            throw error;
           }
-          throw error;
         }
       }
       throwIfShutdownAborted(signal);

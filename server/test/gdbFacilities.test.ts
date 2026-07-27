@@ -35,8 +35,8 @@ const fake = vi.hoisted(() => ({
   files: new Map<string, string>(),
   /** `(source, metadata)` seen by the fake `compileVenueBundle`. */
   compileCalls: [] as Array<{ source: unknown; metadata: Record<string, unknown> }>,
-  /** When set, the fake `exportVenueNetwork` throws a no_graph CoreExportError. */
-  exportThrowsNoGraph: false,
+  /** When set, the fake `exportVenueNetwork` throws this CoreExportError code. */
+  exportErrorCode: null as string | null,
 }));
 
 /** Build the fake gdal instance the in-process worker runs `runGdalRequest` against. */
@@ -78,8 +78,8 @@ vi.mock("../src/core/native", async (importOriginal) => {
       };
     },
     exportVenueNetwork: async () => {
-      if (fake.exportThrowsNoGraph) {
-        throw new actual.CoreExportError("no_graph", "bundle carries no routing graph");
+      if (fake.exportErrorCode !== null) {
+        throw new actual.CoreExportError(fake.exportErrorCode, "fake export failure");
       }
       return {
         junctions: '{"type":"FeatureCollection","name":"net_junction","features":[]}',
@@ -221,7 +221,7 @@ beforeEach(() => {
   fake.layerOutputs.clear();
   fake.files.clear();
   fake.compileCalls.length = 0;
-  fake.exportThrowsNoGraph = false;
+  fake.exportErrorCode = null;
   fake.layerOutputs.set("Facility_Merge", FACILITIES_GEOJSON);
   fake.layerOutputs.set("net_junction", JUNCTIONS_GEOJSON);
   fake.layerOutputs.set("net_path", PATHS_GEOJSON);
@@ -782,7 +782,7 @@ describe("POST /api/gdb/generate-network", () => {
     const { app } = await makeTestApp();
     const cookie = await loginCookie(app);
     const venueId = await publishBaseWithFacilities(app, cookie);
-    fake.exportThrowsNoGraph = true; // simulate an empty synthesized graph
+    fake.exportErrorCode = "no_graph"; // simulate an empty synthesized graph
     fake.compileCalls.length = 0;
 
     const res = await app.inject({
@@ -798,6 +798,28 @@ describe("POST /api/gdb/generate-network", () => {
       .get(body.versionId) as { status: string; error: string | null };
     expect(row.status).toBe("failed");
     expect(JSON.parse(row.error!).code).toBe("no_routable_network");
+  });
+
+  it("does not fail synthesized publication when GDB export cannot label fractional ordinals", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await publishBaseWithFacilities(app, cookie);
+    fake.exportErrorCode = "fractional_ordinal";
+    fake.compileCalls.length = 0;
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+      payload: { venueId },
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    const body = res.json() as { versionId: number };
+    await app.queue.idle();
+
+    const row = app.db
+      .prepare("SELECT status, error FROM versions WHERE id = ?")
+      .get(body.versionId) as { status: string; error: string | null };
+    expect(row.status).toBe("published");
+    expect(row.error).toBeNull();
   });
 });
 
@@ -1014,7 +1036,7 @@ describe("POST /api/gdb/export-network", () => {
     const { app } = await makeTestApp();
     const cookie = await loginCookie(app);
     const venueId = await publishBase(app, cookie);
-    fake.exportThrowsNoGraph = true;
+    fake.exportErrorCode = "no_graph";
     const res = await app.inject({
       method: "POST", url: "/api/gdb/export-network", headers: { cookie },
       payload: { venueId },

@@ -1659,7 +1659,7 @@ describe("App directions mode", () => {
   ];
   const ROUTE_RESULT = {
     segments: ROUTE_SEGMENTS,
-    totalWeight: 120,
+    totalWeight: 55_000,
     originProjected: [139.7671, 35.6811, 0],
     destProjected: [139.7674, 35.6813, 0],
   };
@@ -1753,7 +1753,7 @@ describe("App directions mode", () => {
     await waitFor(() => {
       expect(JSON.parse(mapStub().getAttribute("data-directions-route")!)).toEqual(ROUTE_SEGMENTS);
     });
-    expect(screen.getByText(/120\s*m/)).toBeTruthy();
+    expect(screen.getByText(/55\s*m/)).toBeTruthy();
   });
 
   it("hides Review network when the bundle has no graph", async () => {

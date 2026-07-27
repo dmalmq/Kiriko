@@ -238,6 +238,7 @@ interface NetworkSaveState {
 }
 
 const PUBLIC_VERSION_ID = /^[0-9a-f]{64}$/;
+const ROUTE_COST_UNITS_PER_METER = 1000;
 
 function parseGdbJobError(raw: string): GdbError {
   let parsed: unknown;
@@ -1836,7 +1837,7 @@ export function App() {
                           : directions.destination !== null && directions.route === null
                             ? ui.directionsNoPath[locale]
                             : directions.route !== null
-                              ? `${Math.round(directions.route.totalWeight)} m`
+                              ? `${Math.round(directions.route.totalWeight / ROUTE_COST_UNITS_PER_METER)} m`
                               : directions.origin === null
                                 ? ui.directionsPickOrigin[locale]
                                 : ui.directionsPickDestination[locale]}
