@@ -1,0 +1,261 @@
+import { describe, expect, it } from "vitest";
+import { addConnection, type ParsedNetwork } from "./networkFeatures";
+import {
+  createNetworkEditorState,
+  hasNetworkChanges,
+  networkEditorReducer as reduce,
+  networkSaveProblem,
+  summarizeNetworkChanges,
+} from "./networkEditor";
+
+function junction(id: number, lon: number, lat: number, ordinal = 0): ParsedNetwork["junctions"][number] {
+  return {
+    ordinal,
+    geometry: { type: "Point", coordinates: [lon, lat] },
+    properties: { NODEID: id, FLOOR: ordinal < 0 ? `B${-ordinal}` : `F${ordinal + 1}` },
+  };
+}
+
+const empty = (): ParsedNetwork => ({ junctions: [], paths: [] });
+const twoPoints = (): ParsedNetwork => ({
+  junctions: [junction(0, 139.7, 35.6, 0), junction(1, 139.7005, 35.6, 0)],
+  paths: [],
+});
+function connected(): ParsedNetwork {
+  const r = addConnection(twoPoints(), 0, 1);
+  if (!r.ok) throw new Error("fixture setup failed");
+  return r.network;
+}
+
+describe("networkEditorReducer tools", () => {
+  it("starts in select with the baseline as present and no history", () => {
+    const net = twoPoints();
+    const s = createNetworkEditorState(net);
+    expect(s.tool).toBe("select");
+    expect(s.present).toBe(net);
+    expect(s.baseline).toBe(net);
+    expect(s.past).toHaveLength(0);
+    expect(s.future).toHaveLength(0);
+  });
+
+  it("set_tool switches tool and clears any pending origin", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, { type: "set_tool", tool: "connect" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    expect(s.pendingNodeId).toBe(0);
+    s = reduce(s, { type: "set_tool", tool: "select" });
+    expect(s.tool).toBe("select");
+    expect(s.pendingNodeId).toBeNull();
+  });
+
+  it("add-junction adds a point on each bare-map pick and stays active", () => {
+    let s = createNetworkEditorState(empty());
+    s = reduce(s, { type: "set_tool", tool: "add-junction" });
+    s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.7, latitude: 35.6 }, activeOrdinal: 0 });
+    s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.701, latitude: 35.6 }, activeOrdinal: 0 });
+    expect(s.tool).toBe("add-junction");
+    expect(s.present.junctions).toHaveLength(2);
+    expect(s.present.junctions.map((j) => j.properties.NODEID)).toEqual([0, 1]);
+    expect(s.past).toHaveLength(2);
+  });
+
+  it("add-junction selects an existing object instead of stacking a point", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, { type: "set_tool", tool: "add-junction" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 1 }, activeOrdinal: 0 });
+    expect(s.present.junctions).toHaveLength(2);
+    expect(s.selection).toEqual({ kind: "junction", nodeId: 1 });
+    expect(s.tool).toBe("add-junction");
+  });
+
+  it("connect links two junctions, selects the connection, and stays active", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, { type: "set_tool", tool: "connect" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    expect(s.pendingNodeId).toBe(0);
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 1 }, activeOrdinal: 0 });
+    expect(s.pendingNodeId).toBeNull();
+    expect(s.present.paths).toHaveLength(2);
+    expect(s.selection?.kind).toBe("connection");
+    expect(s.tool).toBe("connect");
+  });
+
+  it("connect rejects a cross-floor pair with a notice and clears pending", () => {
+    const net: ParsedNetwork = {
+      junctions: [junction(0, 139.7, 35.6, 0), junction(1, 139.7, 35.6, 1)],
+      paths: [],
+    };
+    let s = createNetworkEditorState(net);
+    s = reduce(s, { type: "set_tool", tool: "connect" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 1 }, activeOrdinal: 1 });
+    expect(s.present.paths).toHaveLength(0);
+    expect(s.notice).toBe("cross_floor_connection");
+    expect(s.pendingNodeId).toBeNull();
+  });
+
+  it("delete removes a picked junction and its incident paths, staying active", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, { type: "set_tool", tool: "delete" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    expect(s.tool).toBe("delete");
+    expect(s.present.junctions.some((j) => j.properties.NODEID === 0)).toBe(false);
+    expect(s.present.paths).toHaveLength(0);
+  });
+
+  it("move-junction applies one map pick then returns to select with the node selected", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, { type: "start_move", nodeId: 0 });
+    expect(s.tool).toBe("move-junction");
+    expect(s.pendingNodeId).toBe(0);
+    s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.72, latitude: 35.61 }, activeOrdinal: 0 });
+    expect(s.tool).toBe("select");
+    expect(s.pendingNodeId).toBeNull();
+    expect(s.selection).toEqual({ kind: "junction", nodeId: 0 });
+    const moved = s.present.junctions.find((j) => j.properties.NODEID === 0)!;
+    expect(moved.geometry).toEqual({ type: "Point", coordinates: [139.72, 35.61] });
+  });
+
+  it("cancel_pending exits move mode and drops the connect origin", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, { type: "set_tool", tool: "connect" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    s = reduce(s, { type: "cancel_pending" });
+    expect(s.pendingNodeId).toBeNull();
+    s = reduce(s, { type: "start_move", nodeId: 1 });
+    s = reduce(s, { type: "cancel_pending" });
+    expect(s.tool).toBe("select");
+    expect(s.pendingNodeId).toBeNull();
+  });
+
+  it("delete_selection removes the current junction selection", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    s = reduce(s, { type: "delete_selection" });
+    expect(s.present.junctions.some((j) => j.properties.NODEID === 0)).toBe(false);
+    expect(s.selection).toBeNull();
+  });
+
+  it("clear_selection drops the current selection without touching the graph", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    expect(s.selection).not.toBeNull();
+    const before = s.present;
+    s = reduce(s, { type: "clear_selection" });
+    expect(s.selection).toBeNull();
+    expect(s.present).toBe(before);
+  });
+});
+
+describe("networkEditorReducer history", () => {
+  it("undo and redo restore prior graphs; a new edit clears redo", () => {
+    let s = createNetworkEditorState(empty());
+    s = reduce(s, { type: "set_tool", tool: "add-junction" });
+    s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.7, latitude: 35.6 }, activeOrdinal: 0 });
+    const afterAdd = s.present;
+    s = reduce(s, { type: "undo" });
+    expect(s.present.junctions).toHaveLength(0);
+    expect(s.future).toHaveLength(1);
+    s = reduce(s, { type: "redo" });
+    expect(s.present).toBe(afterAdd);
+    s = reduce(s, { type: "undo" });
+    s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.71, latitude: 35.6 }, activeOrdinal: 0 });
+    expect(s.future).toHaveLength(0);
+  });
+
+  it("undo drops a selection whose target no longer exists", () => {
+    let s = createNetworkEditorState(empty());
+    s = reduce(s, { type: "set_tool", tool: "add-junction" });
+    s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.7, latitude: 35.6 }, activeOrdinal: 0 });
+    s = reduce(s, { type: "set_tool", tool: "select" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    expect(s.selection).toEqual({ kind: "junction", nodeId: 0 });
+    s = reduce(s, { type: "undo" });
+    expect(s.selection).toBeNull();
+  });
+
+  it("caps undo history at 50 snapshots", () => {
+    let s = createNetworkEditorState(empty());
+    s = reduce(s, { type: "set_tool", tool: "add-junction" });
+    for (let i = 0; i < 60; i += 1) {
+      s = reduce(s, {
+        type: "pick",
+        pick: { kind: "map", longitude: 139.7 + i * 0.001, latitude: 35.6 },
+        activeOrdinal: 0,
+      });
+    }
+    expect(s.present.junctions).toHaveLength(60);
+    expect(s.past.length).toBe(50);
+  });
+
+  it("reset returns to the baseline and clears history", () => {
+    const baseline = twoPoints();
+    let s = createNetworkEditorState(baseline);
+    s = reduce(s, { type: "set_tool", tool: "add-junction" });
+    s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.7, latitude: 35.6 }, activeOrdinal: 0 });
+    s = reduce(s, { type: "reset" });
+    expect(s.present).toBe(baseline);
+    expect(s.past).toHaveLength(0);
+    expect(s.tool).toBe("select");
+  });
+
+  it("clear_notice clears the last rejection", () => {
+    const net: ParsedNetwork = {
+      junctions: [junction(0, 139.7, 35.6, 0), junction(1, 139.7, 35.6, 1)],
+      paths: [],
+    };
+    let s = createNetworkEditorState(net);
+    s = reduce(s, { type: "set_tool", tool: "connect" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 1 }, activeOrdinal: 1 });
+    expect(s.notice).toBe("cross_floor_connection");
+    s = reduce(s, { type: "clear_notice" });
+    expect(s.notice).toBeNull();
+  });
+});
+
+describe("network change summary and save validation", () => {
+  it("summarizes added and moved junctions without double-counting endpoint shifts", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, { type: "set_tool", tool: "add-junction" });
+    s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.71, latitude: 35.6 }, activeOrdinal: 0 });
+    s = reduce(s, { type: "start_move", nodeId: 0 });
+    s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.72, latitude: 35.61 }, activeOrdinal: 0 });
+    const summary = summarizeNetworkChanges(s);
+    expect(summary).toEqual({
+      addedJunctions: 1,
+      movedJunctions: 1,
+      deletedJunctions: 0,
+      addedConnections: 0,
+      deletedConnections: 0,
+    });
+    expect(hasNetworkChanges(summary)).toBe(true);
+  });
+
+  it("nets an added-then-deleted junction to no change", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, { type: "set_tool", tool: "add-junction" });
+    s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.71, latitude: 35.6 }, activeOrdinal: 0 });
+    // The new point takes the next id (2); delete it.
+    s = reduce(s, { type: "set_tool", tool: "delete" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 2 }, activeOrdinal: 0 });
+    const summary = summarizeNetworkChanges(s);
+    expect(summary.addedJunctions).toBe(0);
+    expect(summary.deletedJunctions).toBe(0);
+    expect(hasNetworkChanges(summary)).toBe(false);
+  });
+
+  it("counts added and deleted connections", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, { type: "set_tool", tool: "connect" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 1 }, activeOrdinal: 0 });
+    expect(summarizeNetworkChanges(s).addedConnections).toBe(1);
+  });
+
+  it("networkSaveProblem flags empty and connectionless graphs", () => {
+    expect(networkSaveProblem(empty())).toBe("missing_junction");
+    expect(networkSaveProblem(twoPoints())).toBe("missing_connection");
+    expect(networkSaveProblem(connected())).toBeNull();
+  });
+});

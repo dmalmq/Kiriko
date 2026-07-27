@@ -143,6 +143,14 @@ const gdbErrorCopy: Record<string, { ja: string; en: string } | undefined> = {
     ja: "経路網を生成できませんでした。歩行可能なユニット（walkway / platform など）が割り当てられているか確認してください。",
     en: "No routable network could be generated. Check that walkable units (e.g. walkway, platform) are mapped.",
   },
+  unauthorized: {
+    ja: "サインインしてからもう一度試してください。",
+    en: "Sign in and try again.",
+  },
+  forbidden: {
+    ja: "このネットワークデータを編集する権限がありません。",
+    en: "You do not have permission to edit this network data.",
+  },
 };
 
 export function gdbErrorMessage(err: GdbError, locale: LocaleCode): string {

@@ -11,6 +11,9 @@ import { LayersPanel } from "./LayersPanel";
 import { SearchPanel } from "./SearchPanel";
 import { WarningsPanel } from "./WarningsPanel";
 import { ViewerErrorNotice } from "./ViewerNotice";
+import { NetworkEditorToolbar, type NetworkEditorToolbarProps } from "./NetworkEditorToolbar";
+import { NetworkInspectorPanel } from "./NetworkInspectorPanel";
+import type { ParsedNetwork } from "../map/networkFeatures";
 import { VenueLoadError, venueLoadErrorCopy } from "../errors/VenueLoadError";
 
 const LEVEL_2F: ViewerLevel = {
@@ -487,5 +490,237 @@ describe("ViewerErrorNotice", () => {
       expect(alert.textContent).not.toContain("deadbeef");
       unmount();
     }
+  });
+});
+
+function toolbarProps(
+  overrides: Partial<NetworkEditorToolbarProps> = {},
+): NetworkEditorToolbarProps {
+  return {
+    locale: "en",
+    tool: "select",
+    summary: {
+      addedJunctions: 0,
+      movedJunctions: 0,
+      deletedJunctions: 0,
+      addedConnections: 0,
+      deletedConnections: 0,
+    },
+    activeFloorLabel: "1F",
+    notice: null,
+    saveProblem: null,
+    canUndo: false,
+    canRedo: false,
+    locked: false,
+    canSave: false,
+    checkStatus: false,
+    saveMessage: null,
+    saveError: null,
+    discardArmed: false,
+    onSetTool: vi.fn(),
+    onUndo: vi.fn(),
+    onRedo: vi.fn(),
+    onRequestDiscard: vi.fn(),
+    onCancelDiscard: vi.fn(),
+    onConfirmDiscard: vi.fn(),
+    onSave: vi.fn(),
+    ...overrides,
+  };
+}
+
+describe("NetworkEditorToolbar", () => {
+  it("renders four labelled tools with the active one pressed", () => {
+    render(<NetworkEditorToolbar {...toolbarProps({ tool: "connect" })} />);
+    expect(screen.getByRole("button", { name: "Connect" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Select" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Add point" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
+  });
+
+  it("reports the chosen tool", async () => {
+    const onSetTool = vi.fn();
+    const user = userEvent.setup();
+    render(<NetworkEditorToolbar {...toolbarProps({ onSetTool })} />);
+    await user.click(screen.getByRole("button", { name: "Add point" }));
+    expect(onSetTool).toHaveBeenCalledWith("add-junction");
+  });
+
+  it("locks tools and undo/redo while saving but keeps Check status live", () => {
+    render(<NetworkEditorToolbar {...toolbarProps({ locked: true, checkStatus: true, canSave: true })} />);
+    expect((screen.getByRole("button", { name: "Select" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Check status" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("enables undo/redo only when history allows it", () => {
+    render(<NetworkEditorToolbar {...toolbarProps({ canUndo: true, canRedo: false })} />);
+    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Redo" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("maps mutation notices to localized copy", () => {
+    const { rerender } = render(
+      <NetworkEditorToolbar {...toolbarProps({ notice: "cross_floor_connection" })} />,
+    );
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Connections between floors are not supported",
+    );
+    rerender(<NetworkEditorToolbar {...toolbarProps({ notice: "existing_connection" })} />);
+    expect(screen.getByRole("alert").textContent).toContain("already connected");
+    rerender(<NetworkEditorToolbar {...toolbarProps({ notice: "invalid_coordinate" })} />);
+    expect(screen.getByRole("alert").textContent).toContain("could not be applied");
+  });
+
+  it("toggles the save button label and disabled state", () => {
+    const { rerender } = render(<NetworkEditorToolbar {...toolbarProps({ canSave: true })} />);
+    expect((screen.getByRole("button", { name: "Save as new version" }) as HTMLButtonElement).disabled).toBe(false);
+    rerender(<NetworkEditorToolbar {...toolbarProps({ canSave: false })} />);
+    expect((screen.getByRole("button", { name: "Save as new version" }) as HTMLButtonElement).disabled).toBe(true);
+    rerender(<NetworkEditorToolbar {...toolbarProps({ checkStatus: true, canSave: true })} />);
+    expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
+  });
+
+  it("arms an inline discard confirmation showing the change count", async () => {
+    const onRequestDiscard = vi.fn();
+    const onConfirmDiscard = vi.fn();
+    const onCancelDiscard = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <NetworkEditorToolbar {...toolbarProps({ onRequestDiscard })} />,
+    );
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(onRequestDiscard).toHaveBeenCalled();
+
+    rerender(
+      <NetworkEditorToolbar
+        {...toolbarProps({
+          discardArmed: true,
+          onConfirmDiscard,
+          onCancelDiscard,
+          summary: {
+            addedJunctions: 2,
+            movedJunctions: 0,
+            deletedJunctions: 0,
+            addedConnections: 1,
+            deletedConnections: 0,
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("Discard 3 changes?")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(onCancelDiscard).toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(onConfirmDiscard).toHaveBeenCalled();
+  });
+
+  it("localizes tool labels and the change summary", () => {
+    render(<NetworkEditorToolbar {...toolbarProps({ locale: "ja" })} />);
+    expect(screen.getByRole("button", { name: "接続" })).toBeTruthy();
+
+    render(
+      <NetworkEditorToolbar
+        {...toolbarProps({
+          summary: {
+            addedJunctions: 1,
+            movedJunctions: 0,
+            deletedJunctions: 0,
+            addedConnections: 2,
+            deletedConnections: 0,
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("1 point added · 2 connections added")).toBeTruthy();
+  });
+});
+
+const inspectorNet: ParsedNetwork = {
+  junctions: [
+    {
+      ordinal: 0,
+      geometry: { type: "Point", coordinates: [139.7, 35.6] },
+      properties: { NODEID: 0, FLOOR: "F1", PATH_COUNT: 1 },
+    },
+    {
+      ordinal: 0,
+      geometry: { type: "Point", coordinates: [139.701, 35.6] },
+      properties: { NODEID: 1, FLOOR: "F1", PATH_COUNT: 1 },
+    },
+  ],
+  paths: [
+    {
+      ordinal: 0,
+      geometry: { type: "LineString", coordinates: [[139.7, 35.6], [139.701, 35.6]] },
+      properties: { FNODEID: 0, TNODEID: 1, cost: 90000, FLOOR: "F1", PATHID: 1, RPATHID: 2 },
+    },
+    {
+      ordinal: 0,
+      geometry: { type: "LineString", coordinates: [[139.701, 35.6], [139.7, 35.6]] },
+      properties: { FNODEID: 1, TNODEID: 0, cost: 90000, FLOOR: "F1", PATHID: 2, RPATHID: 1 },
+    },
+  ],
+};
+
+describe("NetworkInspectorPanel", () => {
+  it("shows a junction's read-only fields and Move + Delete actions", async () => {
+    const onMove = vi.fn();
+    const onDelete = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <NetworkInspectorPanel
+        network={inspectorNet}
+        selection={{ kind: "junction", nodeId: 0 }}
+        locale="en"
+        locked={false}
+        onClose={() => {}}
+        onMove={onMove}
+        onDelete={onDelete}
+      />,
+    );
+    expect(screen.getByText("Point 0")).toBeTruthy();
+    expect(screen.getByText("Node ID")).toBeTruthy();
+    expect(screen.getByText("Connections")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Move point" }));
+    expect(onMove).toHaveBeenCalledWith(0);
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    expect(onDelete).toHaveBeenCalled();
+  });
+
+  it("shows a connection's endpoints and only a Delete action", async () => {
+    const onDelete = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <NetworkInspectorPanel
+        network={inspectorNet}
+        selection={{ kind: "connection", connectionId: { pathId: 1, reversePathId: 2 } }}
+        locale="en"
+        locked={false}
+        onClose={() => {}}
+        onMove={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    expect(screen.getByText("Connection")).toBeTruthy();
+    expect(screen.getByText(/0\s*→\s*1/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Move point" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    expect(onDelete).toHaveBeenCalled();
+  });
+
+  it("disables actions while locked", () => {
+    render(
+      <NetworkInspectorPanel
+        network={inspectorNet}
+        selection={{ kind: "junction", nodeId: 0 }}
+        locale="en"
+        locked
+        onClose={() => {}}
+        onMove={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    expect((screen.getByRole("button", { name: "Move point" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Delete" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

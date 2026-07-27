@@ -22,7 +22,7 @@
  */
 import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
-import { requireSession } from "../auth/guard";
+import { requireProducerSession, requireSession } from "../auth/guard";
 import { inspectGdbArchive, convertGdbLayers } from "./convert";
 import { extractFacilitiesGeoJson } from "./facilities";
 import { GdbConversionError, normalizeGdbPlan, resolveGdbImdfWithExclusions, suggestGdbMapping } from "./mapping";
@@ -107,6 +107,12 @@ const ErrorSchema = Type.Object({
   error: Type.String(),
   code: Type.String(),
   details: Type.Optional(Type.Unknown()),
+});
+
+const AuthErrorSchema = Type.Object({
+  error: Type.String(),
+  code: Type.String(),
+  message: Type.String(),
 });
 
 interface ErrorBody {
@@ -808,7 +814,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
   app.post(
     "/api/gdb/import-network",
     {
-      preHandler: requireSession,
+      preHandler: requireProducerSession,
       // Edited graphs can be large; raise the body limit for this route only.
       bodyLimit: 64 * 1024 * 1024,
       schema: {
@@ -819,6 +825,8 @@ export function registerGdbRoutes(app: FastifyInstance): void {
           paths: Type.String(),
         }),
         response: {
+          401: AuthErrorSchema,
+          403: AuthErrorSchema,
           202: Type.Object({ jobId: Type.String(), versionId: Type.Number(), seq: Type.Number(), publicVersionId: Type.String({ pattern: "^[0-9a-f]{64}$" }) }),
           404: Type.Object({ error: Type.String() }),
         },

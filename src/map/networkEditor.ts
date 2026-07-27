@@ -1,0 +1,357 @@
+import {
+  addConnection,
+  addJunction,
+  connectionKeys,
+  deleteConnection,
+  deleteJunction,
+  moveJunction,
+  type NetworkConnectionId,
+  type NetworkMutationError,
+  type ParsedNetwork,
+} from "./networkFeatures";
+
+/**
+ * Pure state machine for the network geometry editor. Owns baseline/current
+ * networks, a bounded undo/redo history, the active tool, selection, and any
+ * pending multi-step operation. All geometry changes route through the
+ * invariant-preserving mutations in {@link ./networkFeatures}; this module adds
+ * only editor semantics (tools, history, selection, change summary).
+ */
+
+/** Active editing tool. `move-junction` is transient and entered from the inspector. */
+export type NetworkEditTool = "select" | "add-junction" | "connect" | "delete" | "move-junction";
+
+/** The currently highlighted junction or logical connection, or nothing. */
+export type NetworkSelection =
+  | { kind: "junction"; nodeId: number }
+  | { kind: "connection"; connectionId: NetworkConnectionId }
+  | null;
+
+/** A semantic pick reported by the map: an existing object or a bare coordinate. */
+export type NetworkMapPick =
+  | { kind: "junction"; nodeId: number }
+  | { kind: "connection"; connectionId: NetworkConnectionId }
+  | { kind: "map"; longitude: number; latitude: number };
+
+/** Counts of pending edits relative to the loaded baseline. */
+export interface NetworkChangeSummary {
+  addedJunctions: number;
+  movedJunctions: number;
+  deletedJunctions: number;
+  addedConnections: number;
+  deletedConnections: number;
+}
+
+export interface NetworkEditorState {
+  baseline: ParsedNetwork;
+  past: ParsedNetwork[];
+  present: ParsedNetwork;
+  future: ParsedNetwork[];
+  tool: NetworkEditTool;
+  selection: NetworkSelection;
+  /** Connect origin (tool `connect`) or the node being repositioned (tool `move-junction`). */
+  pendingNodeId: number | null;
+  notice: NetworkMutationError | null;
+}
+
+export type NetworkEditorAction =
+  | { type: "set_tool"; tool: Exclude<NetworkEditTool, "move-junction"> }
+  | { type: "pick"; pick: NetworkMapPick; activeOrdinal: number }
+  | { type: "start_move"; nodeId: number }
+  | { type: "delete_selection" }
+  | { type: "cancel_pending" }
+  | { type: "undo" }
+  | { type: "redo" }
+  | { type: "reset" }
+  | { type: "clear_selection" }
+  | { type: "clear_notice" };
+
+const HISTORY_LIMIT = 50;
+
+export function createNetworkEditorState(network: ParsedNetwork): NetworkEditorState {
+  return {
+    baseline: network,
+    past: [],
+    present: network,
+    future: [],
+    tool: "select",
+    selection: null,
+    pendingNodeId: null,
+    notice: null,
+  };
+}
+
+function normalizeConnectionId(id: NetworkConnectionId): NetworkConnectionId {
+  return id.pathId < id.reversePathId
+    ? id
+    : { pathId: id.reversePathId, reversePathId: id.pathId };
+}
+
+function connectionKey(id: NetworkConnectionId): string {
+  const n = normalizeConnectionId(id);
+  return `pair:${n.pathId}:${n.reversePathId}`;
+}
+
+/** Whether the current selection still refers to something in `network`. */
+function selectionPresent(network: ParsedNetwork, selection: NetworkSelection): boolean {
+  if (selection === null) return true;
+  if (selection.kind === "junction") {
+    return network.junctions.some((j) => j.properties.NODEID === selection.nodeId);
+  }
+  return connectionKeys(network).has(connectionKey(selection.connectionId));
+}
+
+/** Push `next` onto history (capped) and clear the redo stack. */
+function commit(
+  state: NetworkEditorState,
+  next: ParsedNetwork,
+  patch: Partial<NetworkEditorState>,
+): NetworkEditorState {
+  const past = [...state.past, state.present].slice(-HISTORY_LIMIT);
+  return { ...state, past, present: next, future: [], notice: null, ...patch };
+}
+
+function applyPick(state: NetworkEditorState, pick: NetworkMapPick, activeOrdinal: number): NetworkEditorState {
+  switch (state.tool) {
+    case "select":
+      if (pick.kind === "junction") {
+        return { ...state, selection: { kind: "junction", nodeId: pick.nodeId } };
+      }
+      if (pick.kind === "connection") {
+        return {
+          ...state,
+          selection: { kind: "connection", connectionId: normalizeConnectionId(pick.connectionId) },
+        };
+      }
+      return state;
+
+    case "add-junction": {
+      if (pick.kind === "junction") {
+        return { ...state, selection: { kind: "junction", nodeId: pick.nodeId } };
+      }
+      if (pick.kind === "connection") {
+        return {
+          ...state,
+          selection: { kind: "connection", connectionId: normalizeConnectionId(pick.connectionId) },
+        };
+      }
+      const result = addJunction(state.present, {
+        longitude: pick.longitude,
+        latitude: pick.latitude,
+        ordinal: activeOrdinal,
+      });
+      if (!result.ok) return { ...state, notice: result.error };
+      return commit(state, result.network, { selection: null });
+    }
+
+    case "connect": {
+      if (pick.kind !== "junction") return state;
+      if (state.pendingNodeId === null) {
+        return { ...state, pendingNodeId: pick.nodeId, notice: null };
+      }
+      if (state.pendingNodeId === pick.nodeId) return state;
+      const result = addConnection(state.present, state.pendingNodeId, pick.nodeId);
+      if (!result.ok) return { ...state, pendingNodeId: null, notice: result.error };
+      return commit(state, result.network, {
+        pendingNodeId: null,
+        selection:
+          result.connectionId !== undefined
+            ? { kind: "connection", connectionId: result.connectionId }
+            : null,
+      });
+    }
+
+    case "delete": {
+      if (pick.kind === "junction") {
+        const result = deleteJunction(state.present, pick.nodeId);
+        if (!result.ok) return { ...state, notice: result.error };
+        return commit(state, result.network, { selection: null });
+      }
+      if (pick.kind === "connection") {
+        const result = deleteConnection(state.present, pick.connectionId);
+        if (!result.ok) return { ...state, notice: result.error };
+        return commit(state, result.network, { selection: null });
+      }
+      return state;
+    }
+
+    case "move-junction": {
+      if (pick.kind !== "map" || state.pendingNodeId === null) return state;
+      const nodeId = state.pendingNodeId;
+      const result = moveJunction(state.present, nodeId, {
+        longitude: pick.longitude,
+        latitude: pick.latitude,
+      });
+      if (!result.ok) {
+        return { ...state, tool: "select", pendingNodeId: null, notice: result.error };
+      }
+      return commit(state, result.network, {
+        tool: "select",
+        pendingNodeId: null,
+        selection: { kind: "junction", nodeId },
+      });
+    }
+  }
+}
+
+function restore(
+  state: NetworkEditorState,
+  present: ParsedNetwork,
+  past: ParsedNetwork[],
+  future: ParsedNetwork[],
+): NetworkEditorState {
+  return {
+    ...state,
+    present,
+    past,
+    future,
+    pendingNodeId: null,
+    notice: null,
+    selection: selectionPresent(present, state.selection) ? state.selection : null,
+    tool: state.tool === "move-junction" ? "select" : state.tool,
+  };
+}
+
+export function networkEditorReducer(
+  state: NetworkEditorState,
+  action: NetworkEditorAction,
+): NetworkEditorState {
+  switch (action.type) {
+    case "set_tool":
+      return { ...state, tool: action.tool, pendingNodeId: null, notice: null };
+
+    case "pick":
+      return applyPick(state, action.pick, action.activeOrdinal);
+
+    case "start_move":
+      return {
+        ...state,
+        tool: "move-junction",
+        pendingNodeId: action.nodeId,
+        selection: { kind: "junction", nodeId: action.nodeId },
+        notice: null,
+      };
+
+    case "delete_selection": {
+      if (state.selection === null) return state;
+      const result =
+        state.selection.kind === "junction"
+          ? deleteJunction(state.present, state.selection.nodeId)
+          : deleteConnection(state.present, state.selection.connectionId);
+      if (!result.ok) return { ...state, notice: result.error };
+      return commit(state, result.network, { selection: null });
+    }
+
+    case "cancel_pending":
+      return {
+        ...state,
+        pendingNodeId: null,
+        notice: null,
+        tool: state.tool === "move-junction" ? "select" : state.tool,
+      };
+
+    case "undo": {
+      if (state.past.length === 0) return state;
+      const previous = state.past[state.past.length - 1]!;
+      return restore(
+        state,
+        previous,
+        state.past.slice(0, -1),
+        [state.present, ...state.future],
+      );
+    }
+
+    case "redo": {
+      if (state.future.length === 0) return state;
+      const next = state.future[0]!;
+      return restore(
+        state,
+        next,
+        [...state.past, state.present].slice(-HISTORY_LIMIT),
+        state.future.slice(1),
+      );
+    }
+
+    case "reset":
+      return createNetworkEditorState(state.baseline);
+
+    case "clear_selection":
+      return state.selection === null ? state : { ...state, selection: null };
+
+    case "clear_notice":
+      return state.notice === null ? state : { ...state, notice: null };
+  }
+}
+
+/** Finite [lon, lat] keyed by NODEID for the network's junctions. */
+function junctionCoordinates(net: ParsedNetwork): Map<number, [number, number]> {
+  const map = new Map<number, [number, number]>();
+  for (const junction of net.junctions) {
+    const id = junction.properties.NODEID;
+    if (typeof id !== "number") continue;
+    if (junction.geometry.type !== "Point") {
+      map.set(id, [Number.NaN, Number.NaN]);
+      continue;
+    }
+    const lon = junction.geometry.coordinates[0];
+    const lat = junction.geometry.coordinates[1];
+    map.set(id, [typeof lon === "number" ? lon : Number.NaN, typeof lat === "number" ? lat : Number.NaN]);
+  }
+  return map;
+}
+
+/**
+ * Diff the loaded baseline against the current graph. Junctions diff by NODEID
+ * (moved = present in both with changed Point coordinates); connections diff by
+ * normalized reciprocal-id key, so endpoint shifts from moving a junction never
+ * register as connection changes.
+ */
+export function summarizeNetworkChanges(state: NetworkEditorState): NetworkChangeSummary {
+  const base = junctionCoordinates(state.baseline);
+  const current = junctionCoordinates(state.present);
+  let addedJunctions = 0;
+  let movedJunctions = 0;
+  let deletedJunctions = 0;
+  for (const id of current.keys()) {
+    if (!base.has(id)) addedJunctions += 1;
+  }
+  for (const [id, coord] of base) {
+    const now = current.get(id);
+    if (now === undefined) {
+      deletedJunctions += 1;
+    } else if (now[0] !== coord[0] || now[1] !== coord[1]) {
+      movedJunctions += 1;
+    }
+  }
+  const baseConnections = connectionKeys(state.baseline);
+  const currentConnections = connectionKeys(state.present);
+  let addedConnections = 0;
+  let deletedConnections = 0;
+  for (const key of currentConnections) {
+    if (!baseConnections.has(key)) addedConnections += 1;
+  }
+  for (const key of baseConnections) {
+    if (!currentConnections.has(key)) deletedConnections += 1;
+  }
+  return { addedJunctions, movedJunctions, deletedJunctions, addedConnections, deletedConnections };
+}
+
+export function hasNetworkChanges(summary: NetworkChangeSummary): boolean {
+  return (
+    summary.addedJunctions > 0 ||
+    summary.movedJunctions > 0 ||
+    summary.deletedJunctions > 0 ||
+    summary.addedConnections > 0 ||
+    summary.deletedConnections > 0
+  );
+}
+
+/** Why the graph is not saveable yet, or null when it is. */
+export function networkSaveProblem(
+  network: ParsedNetwork,
+): "missing_junction" | "missing_connection" | null {
+  const hasJunction = network.junctions.some((j) => typeof j.properties.NODEID === "number");
+  if (!hasJunction) return "missing_junction";
+  if (connectionKeys(network).size === 0) return "missing_connection";
+  return null;
+}

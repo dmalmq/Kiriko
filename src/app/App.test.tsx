@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IndoorMapProps } from "../map/IndoorMap";
@@ -363,6 +363,9 @@ vi.mock("../map/IndoorMap", () => ({
         }
         data-network-present={String(props.network != null)}
         data-network-path-count={String(props.network?.paths.length ?? 0)}
+        data-network-editing={String(props.networkEditing != null)}
+        data-network-tool={props.networkEditing?.tool ?? ""}
+        data-network-selection={props.networkEditing?.selection?.kind ?? ""}
       >
         <button
           type="button"
@@ -440,12 +443,23 @@ vi.mock("../map/IndoorMap", () => ({
               key={`net-pick-${id}`}
               type="button"
               data-testid={`net-pick-${id}`}
-              onClick={() => props.onNetworkPick?.({ junctionId: id })}
+              onClick={() => props.networkEditing?.onPick({ kind: "junction", nodeId: id })}
             >
               {`pick ${id}`}
             </button>
           );
         })}
+        {props.networkEditing != null ? (
+          <button
+            type="button"
+            data-testid="net-map-pick"
+            onClick={() =>
+              props.networkEditing?.onPick({ kind: "map", longitude: 139.702, latitude: 35.681 })
+            }
+          >
+            net map pick
+          </button>
+        ) : null}
       </div>
     );
   },
@@ -1672,7 +1686,18 @@ describe("App directions mode", () => {
     routeKirikoBundleMock.mockReset();
     loadNetworkOverlayMock.mockReset();
     resetIssueMocks();
+    // Network editing is a producer action; default these tests to a member so
+    // the Edit control is enabled once the overlay loads.
+    meMock.mockResolvedValue({ id: 1, username: "daniel", role: "member" });
   });
+
+  // Enter edit and select the Connect tool once the overlay is loaded.
+  async function startNetworkEdit(user: UserEvent): Promise<void> {
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    await waitFor(() => expect(mapStub().getAttribute("data-network-present")).toBe("true"));
+    await user.click(screen.getByRole("button", { name: "Edit network" }));
+    await user.click(await screen.findByRole("button", { name: "Connect" }));
+  }
 
   afterEach(() => {
     vi.clearAllMocks();
@@ -1772,11 +1797,10 @@ describe("App directions mode", () => {
     try {
       await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
 
-      await user.click(screen.getByRole("button", { name: "Review network" }));
-      await user.click(await screen.findByRole("button", { name: "Edit network" }));
+      await startNetworkEdit(user);
       await user.click(await screen.findByTestId("net-pick-0"));
       await user.click(await screen.findByTestId("net-pick-1"));
-      await user.click(screen.getByRole("button", { name: "Save network" }));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
 
       await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1));
       const [slug, publicVersionId, junctions, paths] = importSpy.mock.calls[0]!;
@@ -1827,15 +1851,14 @@ describe("App directions mode", () => {
     try {
       await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
 
-      await user.click(screen.getByRole("button", { name: "Review network" }));
-      await user.click(await screen.findByRole("button", { name: "Edit network" }));
+      await startNetworkEdit(user);
       await user.click(await screen.findByTestId("net-pick-0"));
       await user.click(await screen.findByTestId("net-pick-1"));
-      await user.click(screen.getByRole("button", { name: "Save network" }));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
 
       const alert = await screen.findByRole("alert");
       expect(alert.textContent).toContain("No routable network");
-      const saveButton = screen.getByRole("button", { name: "Save network" }) as HTMLButtonElement;
+      const saveButton = screen.getByRole("button", { name: "Save as new version" }) as HTMLButtonElement;
       expect(saveButton.disabled).toBe(false);
       expect(navigation.hrefs).toEqual([]);
 
@@ -1866,11 +1889,10 @@ describe("App directions mode", () => {
     try {
       await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
 
-      await user.click(screen.getByRole("button", { name: "Review network" }));
-      await user.click(await screen.findByRole("button", { name: "Edit network" }));
+      await startNetworkEdit(user);
       await user.click(await screen.findByTestId("net-pick-0"));
       await user.click(await screen.findByTestId("net-pick-1"));
-      await user.click(screen.getByRole("button", { name: "Save network" }));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
 
       await screen.findByRole("button", { name: "Check status" });
       expect(importSpy).toHaveBeenCalledTimes(1);
@@ -1912,11 +1934,10 @@ describe("App directions mode", () => {
     const navigation = collectNavigationEvents();
     try {
       await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
-      await user.click(screen.getByRole("button", { name: "Review network" }));
-      await user.click(await screen.findByRole("button", { name: "Edit network" }));
+      await startNetworkEdit(user);
       await user.click(await screen.findByTestId("net-pick-0"));
       await user.click(await screen.findByTestId("net-pick-1"));
-      await user.click(screen.getByRole("button", { name: "Save network" }));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
 
       await screen.findByRole("button", { name: "Check status" });
       expect(screen.queryByRole("alert")).toBeNull();
@@ -1958,11 +1979,10 @@ describe("App directions mode", () => {
     const navigation = collectNavigationEvents();
     try {
       await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
-      await user.click(screen.getByRole("button", { name: "Review network" }));
-      await user.click(await screen.findByRole("button", { name: "Edit network" }));
+      await startNetworkEdit(user);
       await user.click(await screen.findByTestId("net-pick-0"));
       await user.click(await screen.findByTestId("net-pick-1"));
-      await user.click(screen.getByRole("button", { name: "Save network" }));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
       await waitFor(() => expect(waitSpy).toHaveBeenCalledWith("job-slow-replace", expect.anything()));
 
       loadImdfArchiveMock.mockReturnValueOnce(replacement.promise);
@@ -2004,11 +2024,10 @@ describe("App directions mode", () => {
     const navigation = collectNavigationEvents();
     try {
       await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
-      await user.click(screen.getByRole("button", { name: "Review network" }));
-      await user.click(await screen.findByRole("button", { name: "Edit network" }));
+      await startNetworkEdit(user);
       await user.click(await screen.findByTestId("net-pick-0"));
       await user.click(await screen.findByTestId("net-pick-1"));
-      await user.click(screen.getByRole("button", { name: "Save network" }));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
       await waitFor(() => expect(waitSpy).toHaveBeenCalledWith("job-failed-replace", expect.anything()));
 
       loadImdfArchiveMock.mockReturnValueOnce(replacement.promise);
@@ -2054,11 +2073,10 @@ describe("App directions mode", () => {
     const navigation = collectNavigationEvents();
     try {
       await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
-      await user.click(screen.getByRole("button", { name: "Review network" }));
-      await user.click(await screen.findByRole("button", { name: "Edit network" }));
+      await startNetworkEdit(user);
       await user.click(await screen.findByTestId("net-pick-0"));
       await user.click(await screen.findByTestId("net-pick-1"));
-      await user.click(screen.getByRole("button", { name: "Save network" }));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
       await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1));
 
       loadImdfArchiveMock.mockReturnValueOnce(replacement.promise);
@@ -2099,11 +2117,10 @@ describe("App directions mode", () => {
     const navigation = collectNavigationEvents();
     try {
       await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
-      await user.click(screen.getByRole("button", { name: "Review network" }));
-      await user.click(await screen.findByRole("button", { name: "Edit network" }));
+      await startNetworkEdit(user);
       await user.click(await screen.findByTestId("net-pick-0"));
       await user.click(await screen.findByTestId("net-pick-1"));
-      await user.click(screen.getByRole("button", { name: "Save network" }));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
       await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1));
 
       loadImdfArchiveMock.mockReturnValueOnce(replacement.promise);
@@ -2113,7 +2130,7 @@ describe("App directions mode", () => {
         await replacement.promise.catch(() => {});
       });
       expect(await screen.findByRole("alert")).toBeTruthy();
-      const lockedSave = screen.getByRole("button", { name: "Save network" }) as HTMLButtonElement;
+      const lockedSave = screen.getByRole("button", { name: "Save as new version" }) as HTMLButtonElement;
       expect(lockedSave.disabled).toBe(true);
       await user.click(lockedSave);
       expect(importSpy).toHaveBeenCalledTimes(1);
@@ -2147,11 +2164,10 @@ describe("App directions mode", () => {
     const navigation = collectNavigationEvents();
     try {
       await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
-      await user.click(screen.getByRole("button", { name: "Review network" }));
-      await user.click(await screen.findByRole("button", { name: "Edit network" }));
+      await startNetworkEdit(user);
       await user.click(await screen.findByTestId("net-pick-0"));
       await user.click(await screen.findByTestId("net-pick-1"));
-      await user.click(screen.getByRole("button", { name: "Save network" }));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
       await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1));
 
       const localVenue = buildMinimalVenue({
@@ -2198,11 +2214,10 @@ describe("App directions mode", () => {
     const navigation = collectNavigationEvents();
     try {
       const { unmount } = await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
-      await user.click(screen.getByRole("button", { name: "Review network" }));
-      await user.click(await screen.findByRole("button", { name: "Edit network" }));
+      await startNetworkEdit(user);
       await user.click(await screen.findByTestId("net-pick-0"));
       await user.click(await screen.findByTestId("net-pick-1"));
-      await user.click(screen.getByRole("button", { name: "Save network" }));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
       await waitFor(() => expect(waitSpy).toHaveBeenCalledWith("job-unmount", expect.anything()));
 
       unmount();
@@ -2236,11 +2251,10 @@ describe("App directions mode", () => {
     const navigation = collectNavigationEvents();
     try {
       await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
-      await user.click(screen.getByRole("button", { name: "Review network" }));
-      await user.click(await screen.findByRole("button", { name: "Edit network" }));
+      await startNetworkEdit(user);
       await user.click(await screen.findByTestId("net-pick-0"));
       await user.click(await screen.findByTestId("net-pick-1"));
-      await user.click(screen.getByRole("button", { name: "Save network" }));
+      await user.click(screen.getByRole("button", { name: "Save as new version" }));
       await waitFor(() => expect(waitSpy).toHaveBeenCalledWith("job-replaced", expect.anything()));
 
       const localVenue = buildMinimalVenue({
@@ -2367,5 +2381,88 @@ describe("App directions mode", () => {
         expect.anything(),
       );
     });
+  });
+
+  it("resumes network editing after an anonymous member signs in", async () => {
+    const user = userEvent.setup();
+    meMock.mockResolvedValue(null);
+    loginMock.mockResolvedValue({ id: 2, username: "producer", role: "member" });
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    await waitFor(() => expect(mapStub().getAttribute("data-network-present")).toBe("true"));
+    await user.click(screen.getByRole("button", { name: "Edit network" }));
+
+    expect(screen.getByRole("dialog", { name: "Sign in to Kiriko" })).toBeTruthy();
+    await user.type(screen.getByLabelText("Username"), "producer");
+    await user.type(screen.getByLabelText("Password"), "pw");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => expect(mapStub().getAttribute("data-network-editing")).toBe("true"));
+    expect(screen.getByRole("button", { name: "Add point" })).toBeTruthy();
+    expect(loginMock).toHaveBeenCalledWith("producer", "pw");
+  });
+
+  it("denies viewer network edits without entering editor mode", async () => {
+    const user = userEvent.setup();
+    meMock.mockResolvedValue({ id: 3, username: "viewer", role: "viewer" });
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    await waitFor(() => expect(mapStub().getAttribute("data-network-present")).toBe("true"));
+    await user.click(screen.getByRole("button", { name: "Edit network" }));
+
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Only members and admins can edit network data.",
+    );
+    expect(mapStub().getAttribute("data-network-editing")).toBe("false");
+    expect(screen.queryByRole("button", { name: "Add point" })).toBeNull();
+  });
+
+  it("keeps editing disabled after a network load error until retry succeeds", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock
+      .mockRejectedValueOnce(new Error("overlay failed"))
+      .mockResolvedValueOnce(editableNetwork());
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Network could not be loaded.");
+    expect((screen.getByRole("button", { name: "Edit network" }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(mapStub().getAttribute("data-network-present")).toBe("true"));
+    expect((screen.getByRole("button", { name: "Edit network" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("hides directions while editing and restores them after discarding edits", async () => {
+    const user = userEvent.setup();
+    routeKirikoBundleMock.mockResolvedValue(ROUTE_RESULT);
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    expect(screen.getByRole("button", { name: "Directions" })).toBeTruthy();
+
+    await startNetworkEdit(user);
+    expect(screen.queryByRole("button", { name: "Directions" })).toBeNull();
+    await user.click(await screen.findByTestId("net-pick-0"));
+    await user.click(await screen.findByTestId("net-pick-1"));
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("2");
+
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
+    await user.click(screen.getByRole("button", { name: "Redo" }));
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("2");
+
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
+    await user.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(screen.queryByRole("button", { name: "Connect" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Directions" })).toBeTruthy();
   });
 });

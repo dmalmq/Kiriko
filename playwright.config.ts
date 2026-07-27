@@ -53,8 +53,7 @@ export default defineConfig({
       timeout: 60_000,
     },
     {
-      command:
-        'rm -rf .e2e-data && KIRIKO_DATA_DIR="$PWD/.e2e-data" KIRIKO_PORT=8790 KIRIKO_BOOTSTRAP_USER=e2e KIRIKO_BOOTSTRAP_PASSWORD=e2e-password pnpm --filter kiriko-server start',
+      command: "node scripts/start-e2e-server.mjs",
       url: "http://127.0.0.1:8790/healthz",
       reuseExistingServer: false,
       timeout: 60_000,
