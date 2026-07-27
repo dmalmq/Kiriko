@@ -14,3 +14,7 @@ core/crates/kiriko-node/index.js
 core/crates/kiriko-node/index.d.ts
 core/crates/kiriko-node/*.node
 core/crates/kiriko-wasm/pkg/
+# Local scratch: Vite's dep scan treats every root HTML file as an entry point,
+# so these must stay out of the project root's tracked surface.
+/graphify-out/
+/penpot design/

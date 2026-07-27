@@ -10,6 +10,11 @@ export default defineConfig({
     format: "es",
   },
   optimizeDeps: {
+    // The dep scanner globs the project root for `**/*.html` and does not read
+    // `.gitignore`, so local scratch directories (design exports, tool output)
+    // would otherwise be scanned as entry points — and any unparseable file in
+    // them fails the whole scan. Pin it to the app's own entry.
+    entries: ["index.html"],
     // wasm-pack's "web" target resolves its `.wasm` asset via
     // `new URL('kiriko_wasm_bg.wasm', import.meta.url)`. Vite's dependency
     // pre-bundler rewrites `import.meta.url`, which would break that
