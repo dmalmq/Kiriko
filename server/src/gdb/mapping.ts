@@ -444,6 +444,7 @@ export function suggestGdbMapping(inspection: GdbInspection): GdbMappingPlan {
 export function normalizeGdbPlan(plan: GdbMappingPlan): GdbMappingPlan {
   return {
     ...plan,
+    clipToSelection: plan.clipToSelection === true,
     layers: plan.layers.map((row) => ({
       ...row,
       buildingId: row.buildingId === "" ? null : row.buildingId,

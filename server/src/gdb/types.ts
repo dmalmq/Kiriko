@@ -103,6 +103,13 @@ export interface GdbMappingPlan {
   venueName: string;
   buildings: GdbBuildingPlan[];
   layers: GdbLayerPlan[];
+  /**
+   * Drop routing nodes and facilities outside the selected buildings'
+   * geometry. Lives on the plan rather than the publish request so it is
+   * persisted in `versions.gdb_plan_json` and survives re-edit, augment, and
+   * generate-network with no migration.
+   */
+  clipToSelection?: boolean;
 }
 
 /**

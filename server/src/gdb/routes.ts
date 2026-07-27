@@ -92,6 +92,7 @@ const GdbMappingPlanSchema = Type.Object({
     Type.Object({ id: Type.String(), name: Type.String({ minLength: 1, maxLength: 200 }) }),
   ),
   layers: Type.Array(GdbLayerPlanSchema),
+  clipToSelection: Type.Optional(Type.Boolean()),
 });
 
 const GdbPublishSchema = Type.Object({
@@ -550,6 +551,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
           networkJunctionsHash,
           networkPathsHash,
           facilitiesGeoJsonHash,
+          clipToSelection: plan.clipToSelection === true,
         },
       );
       const { jobId, versionId } = accepted;

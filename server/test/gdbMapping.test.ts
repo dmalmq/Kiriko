@@ -18,6 +18,7 @@ import type {
   GdbGeometryFamily,
   GdbInspection,
   GdbLayerDescriptor,
+  GdbMappingPlan,
 } from "../src/gdb/types";
 
 function layer(
@@ -395,6 +396,16 @@ describe("normalizeGdbPlan", () => {
     expect(row.nameField).toBeNull();
     expect(row.categoryField).toBeNull();
     expect(row.idField).toBe("id");
+  });
+
+  it("normalizes clipToSelection to a strict boolean", () => {
+    const base: GdbMappingPlan = {
+      venueName: "Station",
+      buildings: [{ id: "b1", name: "Station" }],
+      layers: [],
+    };
+    expect(normalizeGdbPlan(base).clipToSelection).toBe(false);
+    expect(normalizeGdbPlan({ ...base, clipToSelection: true }).clipToSelection).toBe(true);
   });
 });
 
