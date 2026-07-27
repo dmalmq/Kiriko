@@ -61,7 +61,9 @@ Network and facility `FLOOR`/`floor` labels map to venue level ordinals via `kir
 - `<letters>B<n>` deep basements (`KB3`, `SB4` — Keiyo/Sobu lines) → `-n`; a single trailing `F` is tolerated (`SB4F` → -4)
 - case-insensitive; roof (`R`/`RF`), empty, or junk → unmapped → node/facility dropped with a warning.
 
-**Both parsers must stay aligned.** When they diverged, facilities on `KB*/SB*` floors were silently dropped and `M2` facilities landed on a phantom ordinal `1.5` the venue never has.
+**Both parsers must stay aligned.** When they diverged, facilities on `KB*/SB*` floors were silently dropped and `M2` facilities landed on a phantom ordinal `1.5` the venue never has. `parseFloorToken` was also 1-based (`F1` → 1) against `floor_to_ordinal`'s 0-based `F1` → 0 until it was corrected; a level parser that is off by one puts whole floors on the wrong ordinal.
+
+**Level ordinals come from the floor label, not the source `ordinal` attribute.** `resolveLevelOrdinal` tries `levelRule` (the `floor` field) → `short_name` → `name` → **then** the layer's `ordinal` field, which is a last resort only for rows whose labels do not parse. The source attribute cannot be trusted: across the JR East databases it mixes conventions — `F2` is `ordinal` 2 in `JRTakanawaGatewaySta_2_Floor` but `ordinal` 1 in `LinkPillar1_2_Floor`, while the `floor` field is a consistent `F<n>` everywhere. Trusting the attribute merged Takanawa 1F and LinkPillar 2F onto ordinal 1, and because the floor selector and the network-review overlay both filter by ordinal alone, they drew two different physical floors at once.
 
 ## Icons
 
