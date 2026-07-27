@@ -287,4 +287,38 @@ describe("GdbImportDialog", () => {
     // The cross-floor layer was excluded by the server heuristic and must stay so.
     expect(submitted.layers.find((l) => l.key.layerName === "North_1_to_2_detail")!.included).toBe(false);
   });
+
+  it("shows included and total layer counts per building", () => {
+    render(<GdbImportDialog inspection={partialInspection} initialPlan={partialPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    // Counts sum feature totals across ALL of a building's rows (included or
+    // not), matching groupCounts: North_1_Floor (3) + North_1_to_2_detail (2).
+    expect(screen.getByText("1 / 2 layers, 5 features")).toBeTruthy();
+  });
+
+  it("filters the layer table to one building", () => {
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/filter by building/i), { target: { value: "b2" } });
+    expect(screen.queryByText("North_1_Floor")).toBeNull();
+    expect(screen.getByText("South_1_Floor")).toBeTruthy();
+  });
+
+  it("groups layers with no building into an unassigned row", () => {
+    const withOrphan: GdbMappingPlan = {
+      ...twoBuildingPlan,
+      layers: [
+        ...twoBuildingPlan.layers,
+        { key: { databaseId: "gdb-1", layerName: "road_edge" }, included: false, targetType: null, buildingId: null, levelRule: null, idField: null, ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      ],
+    };
+    const inspectionWithOrphan: GdbInspection = {
+      ...twoBuildingInspection,
+      layers: [
+        ...twoBuildingInspection.layers,
+        { key: { databaseId: "gdb-1", layerName: "road_edge" }, databaseName: "Station.gdb", featureCount: 9, geometryFamily: "line", fields: [] },
+      ],
+    };
+    render(<GdbImportDialog inspection={inspectionWithOrphan} initialPlan={withOrphan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    expect(screen.getByLabelText(/include unassigned/i)).toBeTruthy();
+    expect(screen.getByText("0 / 1 layers, 9 features")).toBeTruthy();
+  });
 });
