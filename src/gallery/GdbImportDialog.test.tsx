@@ -246,4 +246,45 @@ describe("GdbImportDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: /import/i }));
     expect(onImport.mock.calls[0]![0].clipToSelection).toBe(false);
   });
+
+  const partialPlan: GdbMappingPlan = {
+    venueName: "Station",
+    buildings: [{ id: "b1", name: "North" }],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, included: true, targetType: "level", buildingId: "b1", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      { key: { databaseId: "gdb-1", layerName: "North_1_to_2_detail" }, included: false, targetType: "detail", buildingId: "b1", levelRule: { kind: "layer-name" }, idField: null, ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+    ],
+  };
+
+  const partialInspection: GdbInspection = {
+    sourceName: "Station.gdb",
+    databases: [{ id: "gdb-1", name: "Station.gdb" }],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, databaseName: "Station.gdb", featureCount: 3, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+      { key: { databaseId: "gdb-1", layerName: "North_1_to_2_detail" }, databaseName: "Station.gdb", featureCount: 2, geometryFamily: "line", fields: [{ name: "id", type: "String" }] },
+    ],
+    warnings: [],
+  };
+
+  it("renders a partially included building as indeterminate", () => {
+    render(<GdbImportDialog inspection={partialInspection} initialPlan={partialPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    // Exact match: a loose /include north/i regex would also match the layer
+    // row's "Include North_1_Floor" checkbox.
+    const box = screen.getByRole("checkbox", { name: "Include North" }) as HTMLInputElement;
+    expect(box.indeterminate).toBe(true);
+    expect(box.checked).toBe(false);
+  });
+
+  it("restores the suggested inclusion instead of blanket-including on re-tick", () => {
+    const onImport = vi.fn();
+    render(<GdbImportDialog inspection={partialInspection} initialPlan={partialPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
+    const box = screen.getByRole("checkbox", { name: "Include North" });
+    fireEvent.click(box); // -> all excluded
+    fireEvent.click(box); // -> restore suggestion, NOT all included
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    const submitted = onImport.mock.calls[0]![0] as GdbMappingPlan;
+    expect(submitted.layers.find((l) => l.key.layerName === "North_1_Floor")!.included).toBe(true);
+    // The cross-floor layer was excluded by the server heuristic and must stay so.
+    expect(submitted.layers.find((l) => l.key.layerName === "North_1_to_2_detail")!.included).toBe(false);
+  });
 });

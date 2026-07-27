@@ -308,6 +308,17 @@ export function GdbImportDialog({
     return map;
   }, [inspection]);
 
+  // The server's suggestion, frozen at mount. Re-ticking a building restores
+  // this rather than blanket-including, so heuristic exclusions (zero-feature
+  // layers, `_to_` cross-floor layers) do not come back as junk.
+  const suggestedIncluded = useMemo(() => {
+    const map = new Map<string, boolean>();
+    for (const row of initialPlan.layers) {
+      map.set(gdbLayerKeyString(row.key), row.included);
+    }
+    return map;
+  }, [initialPlan]);
+
   // Open modally and focus the venue name. App owns post-close focus (map /
   // remounted GDB control / Retry) because the pre-inspect invoker is often
   // already unmounted — or still mounted in a menu and would steal focus from
@@ -378,7 +389,14 @@ export function GdbImportDialog({
       // sensible default until the user says otherwise.
       clipToSelection: !include && !clipTouched ? true : current.clipToSelection === true,
       layers: current.layers.map((row) =>
-        row.buildingId === buildingId ? { ...row, included: include } : row,
+        row.buildingId === buildingId
+          ? {
+              ...row,
+              included: include
+                ? (suggestedIncluded.get(gdbLayerKeyString(row.key)) ?? false)
+                : false,
+            }
+          : row,
       ),
     }));
   }
@@ -493,14 +511,20 @@ export function GdbImportDialog({
           </label>
           <ul className="gdb-dialog__buildings">
             {plan.buildings.map((building) => {
-              const assigned = plan.layers.some((l) => l.included && l.buildingId === building.id);
+              const rows = plan.layers.filter((l) => l.buildingId === building.id);
+              const includedCount = rows.filter((l) => l.included).length;
+              const assigned = includedCount > 0;
+              const allIncluded = rows.length > 0 && includedCount === rows.length;
               return (
                 <li key={building.id} className="gdb-dialog__building-row">
                   <input
                     type="checkbox"
                     className="gdb-dialog__checkbox"
                     aria-label={`${ui.includeBuilding[locale]} ${building.name || building.id}`}
-                    checked={assigned}
+                    checked={allIncluded}
+                    ref={(node) => {
+                      if (node) node.indeterminate = assigned && !allIncluded;
+                    }}
                     onChange={(event) => setBuildingIncluded(building.id, event.target.checked)}
                   />
                   <input
