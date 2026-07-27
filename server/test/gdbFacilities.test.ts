@@ -619,6 +619,51 @@ describe("POST /api/gdb/augment", () => {
     expect(fake.compileCalls[0]!.metadata["networkJunctionsGeoJson"]).toBe(JUNCTIONS_GEOJSON);
   });
 
+  it("clips an attached network to the buildings the venue was imported with", async () => {
+    // Add-data has no clip checkbox: the choice lives on the base version's
+    // stored mapping plan, and must be lifted from there into the JOB PAYLOAD
+    // (not just the new version row) or the compiler never sees it.
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await createVenue(app, cookie);
+    const blobHash = putBlob(app, await validGdbZipBytes("venue.gdb"));
+    const published = await app.inject({
+      method: "POST", url: "/api/gdb/publish", headers: { cookie },
+      payload: { venueId, blobHash, plan: { ...PUBLISH_PLAN, clipToSelection: true } },
+    });
+    expect(published.statusCode, published.body).toBe(202);
+    await app.queue.idle();
+    const networkBlobHash = putBlob(app, await validGdbZipBytes("net.gdb"));
+    fake.compileCalls.length = 0;
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/augment", headers: { cookie },
+      payload: { venueId, networkBlobHash },
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    await app.queue.idle();
+
+    expect(fake.compileCalls[0]!.metadata["networkJunctionsGeoJson"]).toBe(JUNCTIONS_GEOJSON);
+    expect(fake.compileCalls[0]!.metadata["clipToVenue"]).toBe(true);
+  });
+
+  it("leaves clipping off when the venue was imported without it", async () => {
+    // Default-off guarantee: an unclipped venue must compile exactly as before.
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const { venueId } = await publishBase(app, cookie);
+    const networkBlobHash = putBlob(app, await validGdbZipBytes("net.gdb"));
+    fake.compileCalls.length = 0;
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/augment", headers: { cookie },
+      payload: { venueId, networkBlobHash },
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    await app.queue.idle();
+
+    expect(fake.compileCalls[0]!.metadata["clipToVenue"]).toBeUndefined();
+  });
 
   it("rolls back the draft version when queue job insertion fails", async () => {
     const { app } = await makeTestApp();
