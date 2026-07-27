@@ -27,10 +27,19 @@ describe("geometry compatibility", () => {
 });
 
 describe("floor ordinal", () => {
-  it("reads the structured floor token", () => {
+  // Ordinals are 0-based: `F1` (ground) is ordinal 0, matching Rust
+  // `kiriko_route::floor_to_ordinal` and the server's copy of this parser in
+  // `server/src/gdb/mapping.ts`. Basements keep `B<n>` -> `-n`.
+  it("reads the structured floor token as a 0-based ordinal", () => {
     expect(layerNameFloorOrdinal("Station_B1_Floor")).toBe(-1);
-    expect(layerNameFloorOrdinal("Station_5_Space")).toBe(5);
+    expect(layerNameFloorOrdinal("Station_1_Floor")).toBe(0);
+    expect(layerNameFloorOrdinal("Station_5_Space")).toBe(4);
     expect(layerNameFloorOrdinal("Station_R_Floor")).toBeNull();
+  });
+
+  it("agrees with the server parser that F1, GF and F0 are all ordinal 0", () => {
+    expect(layerNameFloorOrdinal("Station_0_Floor")).toBe(0);
+    expect(layerNameFloorOrdinal("GF")).toBe(0);
   });
 });
 
