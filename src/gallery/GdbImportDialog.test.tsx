@@ -321,4 +321,24 @@ describe("GdbImportDialog", () => {
     expect(screen.getByLabelText(/include unassigned/i)).toBeTruthy();
     expect(screen.getByText("0 / 1 layers, 9 features")).toBeTruthy();
   });
+
+  it("suggests the building name when exactly one building is selected", () => {
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    // Exact match: a loose /include south/i regex would also match the layer
+    // row's "Include South_1_Floor" checkbox.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
+    expect((screen.getByLabelText(/venue name/i) as HTMLInputElement).value).toBe("North");
+  });
+
+  it("never overwrites a hand-edited venue name", () => {
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    fireEvent.change(screen.getByLabelText(/venue name/i), { target: { value: "My Venue" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
+    expect((screen.getByLabelText(/venue name/i) as HTMLInputElement).value).toBe("My Venue");
+  });
+
+  it("leaves the venue name alone when several buildings remain selected", () => {
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    expect((screen.getByLabelText(/venue name/i) as HTMLInputElement).value).toBe("Station");
+  });
 });

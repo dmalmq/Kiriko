@@ -305,6 +305,9 @@ export function GdbImportDialog({
   // Once the user touches the clip checkbox their choice is final; deselecting
   // another building must not silently flip it back.
   const [clipTouched, setClipTouched] = useState(false);
+  // The venue name auto-fills from a single-building selection until the user
+  // types; after that their text is never overwritten.
+  const [venueNameTouched, setVenueNameTouched] = useState(false);
 
   const cancelLocked = cancelDisabled;
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -397,13 +400,8 @@ export function GdbImportDialog({
   }
 
   function setBuildingIncluded(buildingId: string | null, include: boolean): void {
-    setPlan((current) => ({
-      ...current,
-      // Excluding a building leaves the network GDB — which has no building
-      // field — still describing the whole site, so clipping becomes the
-      // sensible default until the user says otherwise.
-      clipToSelection: !include && !clipTouched ? true : current.clipToSelection === true,
-      layers: current.layers.map((row) =>
+    setPlan((current) => {
+      const layers = current.layers.map((row) =>
         row.buildingId === buildingId
           ? {
               ...row,
@@ -412,8 +410,27 @@ export function GdbImportDialog({
                 : false,
             }
           : row,
-      ),
-    }));
+      );
+      // Suggest the venue name once exactly one building has any included
+      // layer, computed from the layers as they will be AFTER this toggle —
+      // never once the user has typed, and never while the field is locked.
+      const selected = current.buildings.filter((b) =>
+        layers.some((row) => row.included && row.buildingId === b.id),
+      );
+      const venueName =
+        !venueNameTouched && !venueNameLocked && selected.length === 1 && selected[0]!.name
+          ? selected[0]!.name
+          : current.venueName;
+      return {
+        ...current,
+        venueName,
+        // Excluding a building leaves the network GDB — which has no building
+        // field — still describing the whole site, so clipping becomes the
+        // sensible default until the user says otherwise.
+        clipToSelection: !include && !clipTouched ? true : current.clipToSelection === true,
+        layers,
+      };
+    });
   }
 
   function setRuleKind(row: GdbLayerPlan, kind: RuleKind): void {
@@ -537,6 +554,7 @@ export function GdbImportDialog({
               readOnly={venueNameLocked}
               onChange={(event) => {
                 if (venueNameLocked) return;
+                setVenueNameTouched(true);
                 setPlan((c) => ({ ...c, venueName: event.target.value }));
               }}
             />
