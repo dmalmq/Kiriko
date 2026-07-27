@@ -1,7 +1,14 @@
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildMinimalImdfZip } from "../../tests/fixtures/buildMinimalImdfZip";
-import { CoreCompileError, type CompileVenueMetadata, type ImdfStats, type ViewerWarning } from "../src/core/native";
+import {
+  compileVenueBundle,
+  CoreCompileError,
+  type CompileVenueMetadata,
+  type ImdfStats,
+  type NativeCompileResponse,
+  type ViewerWarning,
+} from "../src/core/native";
 import { makePublishRunner } from "../src/jobs/publish";
 import { cleanupTestApps, loginCookie, makeTestApp, newTestPublicVersionId } from "./helpers";
 
@@ -9,6 +16,20 @@ afterEach(cleanupTestApps);
 
 const KVB_MAGIC = Buffer.from([0x4b, 0x56, 0x42, 0x00]); // "KVB\0"
 const LEVEL_1F = "b1000001-0000-4000-8000-0000000000b1";
+
+/**
+ * A minimal well-formed native envelope, matching the fake-response shape
+ * `coreNative.test.ts` uses for `compileVenueBundle`'s injected native
+ * function: just enough for `validateNativeResponse` to accept it.
+ */
+function okNativeResponse(): NativeCompileResponse {
+  return {
+    ok: true,
+    bundle: Buffer.alloc(0),
+    statsJson: JSON.stringify({ levels: 0, features: 0 }),
+    warningsJson: "[]",
+  };
+}
 
 function syntheticUnitId(i: number): string {
   return `f${i.toString(16).padStart(7, "0")}-0000-4000-8000-${i.toString(16).padStart(12, "0")}`;
@@ -251,6 +272,32 @@ describe("upload + publish", () => {
     expect(upload.statusCode).toBe(500);
     expect(app.db.prepare("SELECT COUNT(*) AS n FROM versions WHERE venue_id = ?").get(venue.id)).toEqual({ n: 0 });
     expect(app.db.prepare("SELECT COUNT(*) AS n FROM jobs").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("compileVenueBundle clipToVenue bridge", () => {
+  it("passes clipToVenue to the native compiler when the job payload asks for clipping", async () => {
+    const calls: unknown[][] = [];
+    const fakeCompile = async (...args: unknown[]) => {
+      calls.push(args);
+      return okNativeResponse();
+    };
+    await compileVenueBundle(
+      Buffer.from("x"),
+      { datasetId: "t/v", version: 1, clipToVenue: true },
+      fakeCompile as never,
+    );
+    expect(calls[0]![7]).toBe(true);
+  });
+
+  it("leaves clipToVenue undefined when the job payload omits it", async () => {
+    const calls: unknown[][] = [];
+    const fakeCompile = async (...args: unknown[]) => {
+      calls.push(args);
+      return okNativeResponse();
+    };
+    await compileVenueBundle(Buffer.from("x"), { datasetId: "t/v", version: 1 }, fakeCompile as never);
+    expect(calls[0]![7]).toBeUndefined();
   });
 });
 

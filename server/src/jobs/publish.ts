@@ -82,13 +82,14 @@ export function makePublishRunner(
   compile: PublishCompileFn = compileVenueBundle,
 ): (payloadJson: string, signal?: AbortSignal) => Promise<{ versionId: number }> {
   return async (payloadJson: string, signal = new AbortController().signal): Promise<{ versionId: number }> => {
-    const { versionId, networkJunctionsHash, networkPathsHash, facilitiesGeoJsonHash, synthesizeNetwork } =
+    const { versionId, networkJunctionsHash, networkPathsHash, facilitiesGeoJsonHash, synthesizeNetwork, clipToSelection } =
       JSON.parse(payloadJson) as {
         versionId: number;
         networkJunctionsHash?: string;
         networkPathsHash?: string;
         facilitiesGeoJsonHash?: string;
         synthesizeNetwork?: boolean;
+        clipToSelection?: boolean;
       };
     const version = db
       .prepare(
@@ -150,6 +151,11 @@ export function makePublishRunner(
       // compiler to derive a routing graph from the venue's own geometry.
       if (synthesizeNetwork === true) {
         metadata.synthesizeNetwork = true;
+      }
+      // A building-scoped GDB import asks the compiler to drop network nodes
+      // and facilities outside the buildings that were actually imported.
+      if (clipToSelection === true) {
+        metadata.clipToVenue = true;
       }
       throwIfShutdownAborted(signal);
       const { bundle, stats } = await compile(source, metadata);
