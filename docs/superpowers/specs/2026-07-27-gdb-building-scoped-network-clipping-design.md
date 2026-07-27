@@ -24,17 +24,23 @@ Three smaller gaps in the shipped checkbox also surfaced during design and are f
 
 Per the project boundary rule, GDAL stays in TypeScript and all data interpretation is Rust. Clipping is geometry interpretation, so it belongs in the core — and needs no new geometry input, because the IMDF archive handed to `compileImdf` **already contains only the selected buildings**. The clip region derives from the archive itself.
 
-New `ClipRegion` in `kiriko-model` (the crate that already owns IMDF geometry, and the shared dependency of both `kiriko-route` and `kiriko-facilities`), built from the parsed archive's **level and unit polygons**, bucketed by ordinal, with a bounding-box prefilter ahead of point-in-polygon.
+New `ClipRegion` in **`kiriko-bundle`** (`core/crates/kiriko-bundle/src/clip.rs`), built from the parsed `VenueModel`'s **level and unit polygons**, bucketed by ordinal, with a bounding-box prefilter ahead of point-in-polygon.
 
-Applied in the compile path before graph and facility construction:
+`kiriko-bundle` is the right home, not `kiriko-model`:
 
-- **Junctions** — keep when the point falls inside the region **at the node's own ordinal**, resolved via `kiriko_route::floor_to_ordinal`, within a **2 m** buffer. A node on a floor that was not imported is dropped.
-- **Paths** — keep only when *both* endpoints survived. Edges to dropped nodes are discarded rather than left dangling.
-- **Facilities** — the same point-in-region test.
+- The orchestration point is already there — `compile_imdf_with_network` (`codec.rs:96`) holds both the parsed venue and the network/facility GeoJSON. `kiriko-node` contains no orchestration; it just delegates.
+- `geo` is an **optional** dependency gated behind the `netgen` feature specifically so the browser wasm build never pulls in heavy computational-geometry deps. `kiriko-model` and `kiriko-route` have no `geo` dependency and are in the wasm path; adding one would breach that boundary. `kiriko-bundle/src/synth.rs` already hand-rolls its geometry for the same reason.
+- `synth.rs` exposes `pub(crate) fn point_boundary_dist_m(p: [f64; 2], geom: &Value) -> Option<f64>`, which is reachable from a sibling module and supplies the buffer test directly. Only ray-casting point-in-polygon has to be written.
 
-The buffer is a named constant expressed in metres and converted to degrees at the region's latitude.
+Applied in the compile path, operating on the **built `RouteGraph`** rather than on GeoJSON — `kiriko-bundle` has no `geojson` dependency, and post-build filtering makes the both-endpoints rule a straightforward index remap instead of a re-parse:
 
-Counts of dropped nodes, edges, and facilities surface as new warning codes `network_clipped` and `facilities_clipped`. **Both must be added to the TS bridge allowlist (`server/src/core/native.ts`) and the client type (`src/imdf/types.ts`)** — a Rust warning code missing from either fails publish with `bridge_error`.
+- **Nodes** — keep when the point falls inside the region **at the node's own ordinal** (already resolved to `f64` by `build_route_graph` via `floor_to_ordinal`), within a **2 m** buffer. A node on a floor that was not imported is dropped.
+- **Edges** — keep only when *both* endpoints survived, remapping `from`/`to` to the compacted node indices. Edges to dropped nodes are discarded rather than left dangling.
+- **Facilities** — the same point-in-region test, applied to `Facilities.items`. The graph is clipped *before* `build_facilities` runs, so facility anchors are derived from the clipped graph and stay consistent.
+
+The buffer is a named constant expressed in metres; `point_boundary_dist_m` already works in metres, so no degree conversion is needed.
+
+Clip counts surface as warnings under the **existing** `WarningCode::RouteBuild` and `WarningCode::FacilityBuild`, with the detail in the message. This follows the established convention — route and facility sub-codes are not separate `WarningCode` variants today, they are folded into the message as `format!("{}: {}", w.code, w.detail)` (`codec.rs:130`). Reusing them avoids the four-place edit a new code demands (Rust enum + `as_str`, the `server/src/core/native.ts` union *and* `WARNING_CODES` allowlist, the `src/imdf/types.ts` union) and removes the `bridge_error` failure mode entirely.
 
 If the clip removes every node, the compiler emits a loud warning and **omits section 5** rather than embedding an empty graph. Section 5 is already optional and backward-compatible, so an omitted graph decodes cleanly. This mirrors the existing `no_routable_network` handling for empty synthesis.
 
@@ -75,7 +81,7 @@ All in `src/gallery/GdbImportDialog.tsx`, building on the existing `setBuildingI
 
 TDD throughout, tests written per section before implementation.
 
-**Rust** — `ClipRegion` unit tests: point inside a unit polygon, point outside, point within the buffer band, point inside geometry but at a non-imported ordinal, empty region. Then `kiriko-route` tests asserting junction filtering and both-endpoints edge retention, and `kiriko-facilities` tests for POI filtering. Verify with `cargo test --manifest-path core/Cargo.toml --workspace`.
+**Rust** — `ClipRegion` unit tests in `kiriko-bundle/src/clip.rs`: point inside a unit polygon, point outside, point within the buffer band, point inside geometry but at a non-imported ordinal, empty region. Then graph-clip tests asserting node filtering, both-endpoints edge retention, and correct index remapping after compaction; and facility-clip tests. An end-to-end test in `core/crates/kiriko-bundle/tests/bundle.rs` compiling with `clip_to_venue` on and off. Verify with `cargo test --manifest-path core/Cargo.toml --workspace`.
 
 **Server** — `server/test/gdbMapping.test.ts` for `normalizeGdbPlan` carrying `clipToSelection`, and `suggestGdbMapping` output unchanged. `server/test/gdbNetwork.test.ts` and `gdbFacilities.test.ts` for publish with the flag set, asserting node/edge/facility counts drop against the fixture, and that an all-clipped network omits section 5 with a warning.
 
