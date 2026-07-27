@@ -223,10 +223,72 @@ impl ClipRegion {
     }
 }
 
+/// Drop graph nodes outside `region`, then drop every edge that lost an
+/// endpoint and remap the survivors onto the compacted node indices.
+///
+/// Returns `(clipped graph, dropped node count, dropped edge count)`.
+pub(crate) fn clip_graph(
+    graph: &kiriko_route::RouteGraph,
+    region: &ClipRegion,
+) -> (kiriko_route::RouteGraph, u32, u32) {
+    use kiriko_route::{RouteEdge, RouteGraph};
+
+    let mut remap: Vec<Option<u32>> = Vec::with_capacity(graph.nodes.len());
+    let mut nodes = Vec::new();
+    for node in &graph.nodes {
+        if region.contains(node.lon, node.lat, node.ordinal) {
+            remap.push(Some(
+                u32::try_from(nodes.len()).expect("node count exceeds u32"),
+            ));
+            nodes.push(node.clone());
+        } else {
+            remap.push(None);
+        }
+    }
+    let dropped_nodes = u32::try_from(graph.nodes.len() - nodes.len()).unwrap_or(u32::MAX);
+
+    let mut edges = Vec::new();
+    for edge in &graph.edges {
+        let (Some(from), Some(to)) = (
+            remap.get(edge.from as usize).copied().flatten(),
+            remap.get(edge.to as usize).copied().flatten(),
+        ) else {
+            continue;
+        };
+        edges.push(RouteEdge {
+            from,
+            to,
+            weight: edge.weight,
+            ordinal: edge.ordinal,
+            interior: edge.interior.clone(),
+        });
+    }
+    let dropped_edges = u32::try_from(graph.edges.len() - edges.len()).unwrap_or(u32::MAX);
+
+    (RouteGraph { nodes, edges }, dropped_nodes, dropped_edges)
+}
+
+/// Drop facilities outside `region`. Returns `(clipped, dropped count)`.
+pub(crate) fn clip_facilities(
+    facilities: &kiriko_facilities::Facilities,
+    region: &ClipRegion,
+) -> (kiriko_facilities::Facilities, u32) {
+    let items: Vec<_> = facilities
+        .items
+        .iter()
+        .filter(|item| region.contains(item.lon, item.lat, item.ordinal))
+        .cloned()
+        .collect();
+    let dropped = u32::try_from(facilities.items.len() - items.len()).unwrap_or(u32::MAX);
+    (kiriko_facilities::Facilities { items }, dropped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiriko_facilities::{Facilities, Facility};
     use kiriko_model::canonical::Value;
+    use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
 
     /// A 0.001deg square at (139.000,35.000)-(139.001,35.001) — about 91m x 111m.
     fn square() -> Value {
@@ -324,5 +386,124 @@ mod tests {
         let region = ClipRegion { by_ordinal };
         assert!(region.contains(139.002, 35.002, 0.0)); // in the ring band
         assert!(!region.contains(139.005, 35.005, 0.0)); // in the hole
+    }
+
+    fn node(lon: f64, lat: f64) -> RouteNode {
+        RouteNode {
+            lon,
+            lat,
+            ordinal: 0.0,
+        }
+    }
+
+    fn edge(from: u32, to: u32) -> RouteEdge {
+        RouteEdge {
+            from,
+            to,
+            weight: 100.0,
+            ordinal: 0.0,
+            interior: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn drops_nodes_outside_the_region_and_remaps_edge_indices() {
+        let region = region_with_square_on_ordinal_zero();
+        // Node 0 is outside; nodes 1 and 2 are inside and must become 0 and 1.
+        let graph = RouteGraph {
+            nodes: vec![
+                node(139.020, 35.020),
+                node(139.0004, 35.0004),
+                node(139.0006, 35.0006),
+            ],
+            edges: vec![edge(1, 2)],
+        };
+        let (clipped, dropped_nodes, dropped_edges) = clip_graph(&graph, &region);
+        assert_eq!(dropped_nodes, 1);
+        assert_eq!(dropped_edges, 0);
+        assert_eq!(clipped.nodes.len(), 2);
+        assert_eq!(clipped.edges.len(), 1);
+        assert_eq!((clipped.edges[0].from, clipped.edges[0].to), (0, 1));
+    }
+
+    #[test]
+    fn drops_an_edge_when_either_endpoint_is_clipped() {
+        let region = region_with_square_on_ordinal_zero();
+        let graph = RouteGraph {
+            nodes: vec![node(139.0005, 35.0005), node(139.020, 35.020)],
+            edges: vec![edge(0, 1)],
+        };
+        let (clipped, dropped_nodes, dropped_edges) = clip_graph(&graph, &region);
+        assert_eq!(dropped_nodes, 1);
+        assert_eq!(dropped_edges, 1);
+        assert!(clipped.edges.is_empty());
+        assert_eq!(clipped.nodes.len(), 1);
+    }
+
+    #[test]
+    fn preserves_edge_weight_ordinal_and_interior() {
+        let region = region_with_square_on_ordinal_zero();
+        let mut kept = edge(0, 1);
+        kept.interior = vec![[139.0005, 35.0007]];
+        let graph = RouteGraph {
+            nodes: vec![node(139.0004, 35.0004), node(139.0006, 35.0006)],
+            edges: vec![kept],
+        };
+        let (clipped, _, _) = clip_graph(&graph, &region);
+        assert_eq!(clipped.edges[0].weight, 100.0);
+        assert_eq!(clipped.edges[0].ordinal, 0.0);
+        assert_eq!(clipped.edges[0].interior, vec![[139.0005, 35.0007]]);
+    }
+
+    #[test]
+    fn clipping_an_empty_region_drops_everything() {
+        let region = ClipRegion {
+            by_ordinal: std::collections::BTreeMap::new(),
+        };
+        let graph = RouteGraph {
+            nodes: vec![node(139.0005, 35.0005)],
+            edges: vec![edge(0, 0)],
+        };
+        let (clipped, dropped_nodes, dropped_edges) = clip_graph(&graph, &region);
+        assert_eq!((dropped_nodes, dropped_edges), (1, 1));
+        assert!(clipped.nodes.is_empty());
+        assert!(clipped.edges.is_empty());
+    }
+
+    #[test]
+    fn keeps_only_facilities_inside_the_region() {
+        let region = region_with_square_on_ordinal_zero();
+        let facilities = Facilities {
+            items: vec![
+                Facility {
+                    lon: 139.0005,
+                    lat: 35.0005,
+                    ordinal: 0.0,
+                    name: "Inside".to_string(),
+                    icon: "ticket".to_string(),
+                    anchor: None,
+                },
+                Facility {
+                    lon: 139.020,
+                    lat: 35.020,
+                    ordinal: 0.0,
+                    name: "Outside".to_string(),
+                    icon: "ticket".to_string(),
+                    anchor: None,
+                },
+                Facility {
+                    lon: 139.0005,
+                    lat: 35.0005,
+                    ordinal: 4.0,
+                    name: "Wrong floor".to_string(),
+                    icon: "ticket".to_string(),
+                    anchor: None,
+                },
+            ],
+        };
+        let (clipped, dropped) = clip_facilities(&facilities, &region);
+        assert_eq!(dropped, 2);
+        assert_eq!(clipped.items.len(), 1);
+        assert_eq!(clipped.items[0].name, "Inside");
     }
 }
