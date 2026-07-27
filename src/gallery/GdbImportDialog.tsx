@@ -570,7 +570,7 @@ export function GdbImportDialog({
                     <td>
                       <input
                         type="checkbox"
-                        aria-label={`${ui.colInclude[locale]} ${row.key.databaseId} ${row.key.layerName}`}
+                        aria-label={`${ui.colInclude[locale]} ${row.key.layerName}`}
                         checked={row.included}
                         disabled={empty}
                         onChange={(event) => updateRow(row.key, { included: event.target.checked })}

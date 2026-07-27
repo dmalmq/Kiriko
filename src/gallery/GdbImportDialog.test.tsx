@@ -183,7 +183,9 @@ describe("GdbImportDialog", () => {
   it("auto-enables clipping the first time a building is deselected", () => {
     const onImport = vi.fn();
     render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
-    fireEvent.click(screen.getByLabelText(/include south/i));
+    // Exact match: a loose /include south/i regex would also match the layer
+    // row's "Include South_1_Floor" checkbox.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
     expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: /import/i }));
     expect(onImport.mock.calls[0]![0].clipToSelection).toBe(true);
@@ -195,7 +197,51 @@ describe("GdbImportDialog", () => {
     // Turn clipping on then off by hand; a later deselection must not re-enable it.
     fireEvent.click(screen.getByLabelText(/clip routing/i));
     fireEvent.click(screen.getByLabelText(/clip routing/i));
-    fireEvent.click(screen.getByLabelText(/include south/i));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    expect(onImport.mock.calls[0]![0].clipToSelection).toBe(false);
+  });
+
+  const threeBuildingPlan: GdbMappingPlan = {
+    venueName: "Station",
+    buildings: [
+      { id: "b1", name: "North" },
+      { id: "b2", name: "South" },
+      { id: "b3", name: "East" },
+    ],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, included: true, targetType: "level", buildingId: "b1", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      { key: { databaseId: "gdb-1", layerName: "South_1_Floor" }, included: true, targetType: "level", buildingId: "b2", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      { key: { databaseId: "gdb-1", layerName: "East_1_Floor" }, included: true, targetType: "level", buildingId: "b3", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+    ],
+  };
+
+  const threeBuildingInspection: GdbInspection = {
+    sourceName: "Station.gdb",
+    databases: [{ id: "gdb-1", name: "Station.gdb" }],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, databaseName: "Station.gdb", featureCount: 3, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+      { key: { databaseId: "gdb-1", layerName: "South_1_Floor" }, databaseName: "Station.gdb", featureCount: 5, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+      { key: { databaseId: "gdb-1", layerName: "East_1_Floor" }, databaseName: "Station.gdb", featureCount: 7, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+    ],
+    warnings: [],
+  };
+
+  it("treats a manual uncheck as a touch, so a later deselection does not re-enable clipping", () => {
+    const onImport = vi.fn();
+    render(<GdbImportDialog inspection={threeBuildingInspection} initialPlan={threeBuildingPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
+    // Auto-enable fires on the first deselection (clipTouched is still false here).
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(true);
+    // The user manually unchecks it — this must count as a touch even though
+    // the box goes from checked to unchecked, not unchecked to checked.
+    fireEvent.click(screen.getByLabelText(/clip routing/i));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(false);
+    // A mutant that only records a touch on check-to-true would treat this
+    // deselection as untouched and flip clipping back on; the real
+    // implementation must leave it off.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include East" }));
     expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: /import/i }));
     expect(onImport.mock.calls[0]![0].clipToSelection).toBe(false);
