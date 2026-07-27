@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LoadedVenue, ViewerFeature } from "../imdf/types";
 import type { RouteResultDto } from "../bundle/wasm";
 import { kirikoTheme } from "../theme/presets";
-import { FACILITY_SOURCE_ID, INDOOR_SOURCE_ID, ROUTE_SOURCE_ID } from "./featureLayers";
+import { FACILITY_SOURCE_ID, INDOOR_SOURCE_ID, NETWORK_SOURCE_ID, ROUTE_SOURCE_ID } from "./featureLayers";
 import { defaultLayerVisibility } from "./layerGroups";
 import { IndoorMap, type IndoorMapProps } from "./IndoorMap";
 import type { MapIssuePin } from "./useIssuePins";
@@ -19,6 +19,7 @@ interface FakeMapEvent {
 
 const mapState = vi.hoisted(() => {
   const instances: unknown[] = [];
+  let initialStyleLoaded = true;
   class FakeMap {
     readonly container: HTMLElement;
     readonly handlers = new Map<string, Set<(event?: FakeMapEvent) => void>>();
@@ -32,8 +33,9 @@ const mapState = vi.hoisted(() => {
     readonly sourceData: unknown[] = [];
     readonly routeSourceData: unknown[] = [];
     readonly facilitySourceData: unknown[] = [];
+    readonly networkSourceData: unknown[] = [];
     queryResult: Array<{ properties: Record<string, unknown> }> = [];
-    styleLoaded = true;
+    styleLoaded = initialStyleLoaded;
     sourceLoaded = true;
     center = { lng: 0, lat: 0 };
     removed = false;
@@ -103,7 +105,9 @@ const mapState = vi.hoisted(() => {
               ? this.routeSourceData
               : id === FACILITY_SOURCE_ID
                 ? this.facilitySourceData
-                : this.sourceData;
+                : id === NETWORK_SOURCE_ID
+                  ? this.networkSourceData
+                  : this.sourceData;
           bucket.push(data);
         },
       };
@@ -162,7 +166,13 @@ const mapState = vi.hoisted(() => {
       this.removed = true;
     }
   }
-  return { instances, FakeMap };
+  return {
+    instances,
+    FakeMap,
+    setInitialStyleLoaded(value: boolean) {
+      initialStyleLoaded = value;
+    },
+  };
 });
 
 type FakeMap = InstanceType<typeof mapState.FakeMap>;
@@ -240,6 +250,7 @@ function lastMap(): FakeMap {
 function renderMap(props: IndoorMapProps): { map: FakeMap; rerender: (next: IndoorMapProps) => void } {
   const utils = render(<IndoorMap {...props} />);
   const map = lastMap();
+  map.styleLoaded = true;
   act(() => {
     map.emit("load");
   });
@@ -263,6 +274,7 @@ const originalMatchMedia = window.matchMedia;
 
 beforeEach(() => {
   mapState.instances.length = 0;
+  mapState.setInitialStyleLoaded(true);
 });
 
 afterEach(() => {
@@ -757,6 +769,55 @@ describe("IndoorMap directions", () => {
     rerender(baseProps({ directions: null }));
 
     expect(lastRouteData(map)).toEqual({ type: "FeatureCollection", features: [] });
+  });
+});
+
+describe("IndoorMap network review", () => {
+  const NETWORK: NonNullable<IndoorMapProps["network"]> = {
+    junctions: [
+      { ordinal: 0, geometry: { type: "Point", coordinates: [139.0, 35.0] }, properties: { NODEID: 1, FLOOR: "F1" } },
+      { ordinal: 1, geometry: { type: "Point", coordinates: [139.1, 35.1] }, properties: { NODEID: 2, FLOOR: "F2" } },
+    ],
+    paths: [
+      {
+        ordinal: 0,
+        geometry: { type: "LineString", coordinates: [[139.0, 35.0], [139.01, 35.0]] },
+        properties: { FNODEID: 1, TNODEID: 1, FLOOR: "F1" },
+      },
+      {
+        ordinal: 1,
+        geometry: { type: "LineString", coordinates: [[139.1, 35.1], [139.11, 35.1]] },
+        properties: { FNODEID: 2, TNODEID: 2, FLOOR: "F2" },
+      },
+    ],
+  };
+
+  function lastNetworkData(map: FakeMap): GeoJSON.FeatureCollection {
+    expect(map.networkSourceData.length).toBeGreaterThan(0);
+    return map.networkSourceData.at(-1) as GeoJSON.FeatureCollection;
+  }
+
+  it("applies a network prop that arrives before the map style load event", () => {
+    mapState.setInitialStyleLoaded(false);
+    const utils = render(<IndoorMap {...baseProps({ network: NETWORK })} />);
+    const map = lastMap();
+    map.styleLoaded = true;
+
+    act(() => {
+      map.emit("load");
+    });
+    utils.unmount();
+
+    expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([1, 1]);
+  });
+
+  it("re-filters the network source when the active floor changes", () => {
+    const { map, rerender } = renderMap(baseProps({ network: NETWORK, levelId: "level-1" }));
+    expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([1, 1]);
+
+    rerender(baseProps({ network: NETWORK, levelId: "level-2" }));
+
+    expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([2, 2]);
   });
 });
 

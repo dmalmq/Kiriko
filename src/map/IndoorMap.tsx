@@ -469,6 +469,8 @@ export function IndoorMap({
   const onControlsRef = useRef(onControls);
   const issueReviewRef = useRef(issueReview);
   const directionsRef = useRef(directions);
+  const networkRef = useRef(network);
+  const selectedJunctionsRef = useRef(selectedJunctions);
   const onNetworkPickRef = useRef(onNetworkPick);
   const [mapInstance, setMapInstance] = useState<MapLibreMap | null>(null);
 
@@ -481,6 +483,8 @@ export function IndoorMap({
   onControlsRef.current = onControls;
   issueReviewRef.current = issueReview;
   directionsRef.current = directions;
+  networkRef.current = network;
+  selectedJunctionsRef.current = selectedJunctions;
   const facilitiesRef = useRef(facilities);
   const onSelectFacilityRef = useRef(onSelectFacility);
   facilitiesRef.current = facilities;
@@ -678,6 +682,7 @@ export function IndoorMap({
     const onLoad = (): void => {
       setSourceData(map, venueRef.current, levelIdRef.current);
       setRouteSourceData(map, venueRef.current, levelIdRef.current, directionsRef.current);
+      setNetworkSourceData(map, venueRef.current, levelIdRef.current, networkRef.current, selectedJunctionsRef.current);
       registerFacilityImages(map);
       setFacilitySourceData(map, venueRef.current, levelIdRef.current, facilitiesRef.current);
       applyLayerVisibility(map, visibilityRef.current);
@@ -759,6 +764,7 @@ export function IndoorMap({
     }
 
     setSourceData(map, venue, levelId);
+    setNetworkSourceData(map, venue, levelId, network, selectedJunctions);
     fitLevelBounds(map, venue, levelId);
 
     const selected = selectedIdRef.current;
