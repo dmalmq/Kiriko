@@ -150,4 +150,54 @@ describe("GdbImportDialog", () => {
     render(<GdbImportDialog inspection={inspection} initialPlan={plan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
     expect((screen.getByRole("checkbox", { name: "Include Station" }) as HTMLInputElement).checked).toBe(true);
   });
+
+  const twoBuildingPlan: GdbMappingPlan = {
+    venueName: "Station",
+    buildings: [
+      { id: "b1", name: "North" },
+      { id: "b2", name: "South" },
+    ],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, included: true, targetType: "level", buildingId: "b1", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      { key: { databaseId: "gdb-1", layerName: "South_1_Floor" }, included: true, targetType: "level", buildingId: "b2", levelRule: { kind: "layer-name" }, idField: "id", ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+    ],
+  };
+
+  const twoBuildingInspection: GdbInspection = {
+    sourceName: "Station.gdb",
+    databases: [{ id: "gdb-1", name: "Station.gdb" }],
+    layers: [
+      { key: { databaseId: "gdb-1", layerName: "North_1_Floor" }, databaseName: "Station.gdb", featureCount: 3, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+      { key: { databaseId: "gdb-1", layerName: "South_1_Floor" }, databaseName: "Station.gdb", featureCount: 5, geometryFamily: "polygon", fields: [{ name: "id", type: "String" }] },
+    ],
+    warnings: [],
+  };
+
+  it("leaves clipping off when every building stays selected", () => {
+    const onImport = vi.fn();
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    expect(onImport.mock.calls[0]![0].clipToSelection).toBe(false);
+  });
+
+  it("auto-enables clipping the first time a building is deselected", () => {
+    const onImport = vi.fn();
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
+    fireEvent.click(screen.getByLabelText(/include south/i));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    expect(onImport.mock.calls[0]![0].clipToSelection).toBe(true);
+  });
+
+  it("respects a manual clip choice over the auto-enable", () => {
+    const onImport = vi.fn();
+    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
+    // Turn clipping on then off by hand; a later deselection must not re-enable it.
+    fireEvent.click(screen.getByLabelText(/clip routing/i));
+    fireEvent.click(screen.getByLabelText(/clip routing/i));
+    fireEvent.click(screen.getByLabelText(/include south/i));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    expect(onImport.mock.calls[0]![0].clipToSelection).toBe(false);
+  });
 });

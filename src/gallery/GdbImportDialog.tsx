@@ -59,6 +59,10 @@ const ui = {
   import: { ja: "取り込む", en: "Import" },
   addNetwork: { ja: "ルーティングネットワークを追加", en: "Add routing network" },
   addFacilities: { ja: "地点施設を追加", en: "Add point facilities" },
+  clipToSelection: {
+    ja: "ルーティングと地点施設を選択した建物で切り取る",
+    en: "Clip routing and POIs to selected buildings",
+  },
 } as const;
 
 const summaryText = {
@@ -262,7 +266,7 @@ function pruneUnusedBuildings(plan: GdbMappingPlan): GdbMappingPlan {
   const buildings = plan.buildings.every((building) => used.has(building.id))
     ? plan.buildings
     : plan.buildings.filter((building) => used.has(building.id));
-  return { ...plan, layers, buildings };
+  return { ...plan, layers, buildings, clipToSelection: plan.clipToSelection === true };
 }
 
 export function GdbImportDialog({
@@ -287,6 +291,9 @@ export function GdbImportDialog({
   const [plan, setPlan] = useState<GdbMappingPlan>(initialPlan);
   const [filter, setFilter] = useState("");
   const [page, setPage] = useState(0);
+  // Once the user touches the clip checkbox their choice is final; deselecting
+  // another building must not silently flip it back.
+  const [clipTouched, setClipTouched] = useState(false);
 
   const cancelLocked = cancelDisabled;
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -366,6 +373,10 @@ export function GdbImportDialog({
   function setBuildingIncluded(buildingId: string, include: boolean): void {
     setPlan((current) => ({
       ...current,
+      // Excluding a building leaves the network GDB — which has no building
+      // field — still describing the whole site, so clipping becomes the
+      // sensible default until the user says otherwise.
+      clipToSelection: !include && !clipTouched ? true : current.clipToSelection === true,
       layers: current.layers.map((row) =>
         row.buildingId === buildingId ? { ...row, included: include } : row,
       ),
@@ -559,7 +570,7 @@ export function GdbImportDialog({
                     <td>
                       <input
                         type="checkbox"
-                        aria-label={`${ui.colInclude[locale]} ${row.key.layerName}`}
+                        aria-label={`${ui.colInclude[locale]} ${row.key.databaseId} ${row.key.layerName}`}
                         checked={row.included}
                         disabled={empty}
                         onChange={(event) => updateRow(row.key, { included: event.target.checked })}
@@ -735,6 +746,19 @@ export function GdbImportDialog({
           <p className="gdb-dialog__summary">
             {summaryText[locale](includedRows.length, includedFeatureCount)}
           </p>
+          <label className="gdb-dialog__field">
+            <input
+              type="checkbox"
+              className="gdb-dialog__checkbox"
+              aria-label={ui.clipToSelection[locale]}
+              checked={plan.clipToSelection === true}
+              onChange={(event) => {
+                setClipTouched(true);
+                setPlan((current) => ({ ...current, clipToSelection: event.target.checked }));
+              }}
+            />
+            <span>{ui.clipToSelection[locale]}</span>
+          </label>
           {onAddNetwork ? (
             <label className="gdb-dialog__btn gdb-dialog__network-add">
               {ui.addNetwork[locale]}
