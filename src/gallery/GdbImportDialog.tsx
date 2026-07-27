@@ -73,11 +73,16 @@ const summaryText = {
   en: (layers: number, features: number) => `Including ${layers} layers, ${features} features`,
 };
 
+/**
+ * Per-building count line. Both quantities are shown as included/total so
+ * excluding a layer moves the feature figure too — a group reading
+ * `0 / 1 layers` must not still claim its features are coming in.
+ */
 const buildingCountsText = {
-  ja: (included: number, total: number, features: number) =>
-    `${included} / ${total} レイヤー、${features} 地物`,
-  en: (included: number, total: number, features: number) =>
-    `${included} / ${total} layers, ${features} features`,
+  ja: (included: number, total: number, includedFeatures: number, features: number) =>
+    `${included} / ${total} レイヤー・${includedFeatures} / ${features} 地物`,
+  en: (included: number, total: number, includedFeatures: number, features: number) =>
+    `${included} / ${total} layers · ${includedFeatures} of ${features} features`,
 };
 
 const pageText = {
@@ -424,10 +429,16 @@ export function GdbImportDialog({
       return {
         ...current,
         venueName,
-        // Excluding a building leaves the network GDB — which has no building
+        // Excluding a *building* leaves the network GDB — which has no building
         // field — still describing the whole site, so clipping becomes the
-        // sensible default until the user says otherwise.
-        clipToSelection: !include && !clipTouched ? true : current.clipToSelection === true,
+        // sensible default until the user says otherwise. Unticking the
+        // unassigned/outdoor bucket (`buildingId === null`) is not deselecting a
+        // building: the network still covers exactly the same buildings, so it
+        // must not auto-enable clipping.
+        clipToSelection:
+          buildingId !== null && !include && !clipTouched
+            ? true
+            : current.clipToSelection === true,
         layers,
       };
     });
@@ -508,17 +519,36 @@ export function GdbImportDialog({
     return plan.layers.filter((row) => row.buildingId === id);
   }
 
-  function groupCounts(id: string | null): { included: number; total: number; features: number } {
-    const rows = rowsForBuilding(id);
-    return {
-      included: rows.filter((row) => row.included).length,
-      total: rows.length,
-      features: rows.reduce(
-        (sum, row) => sum + (descriptorByKey.get(gdbLayerKeyString(row.key))?.featureCount ?? 0),
-        0,
-      ),
-    };
+  interface GroupCounts {
+    /** Rows of this group with `included` set. */
+    included: number;
+    /** Rows of this group, included or not. */
+    total: number;
+    /** Features across every row of this group. */
+    features: number;
+    /** Features across the included rows only. */
+    includedFeatures: number;
   }
+
+  function groupCounts(id: string | null): GroupCounts {
+    const rows = rowsForBuilding(id);
+    let included = 0;
+    let features = 0;
+    let includedFeatures = 0;
+    for (const row of rows) {
+      const count = descriptorByKey.get(gdbLayerKeyString(row.key))?.featureCount ?? 0;
+      features += count;
+      if (row.included) {
+        included += 1;
+        includedFeatures += count;
+      }
+    }
+    return { included, total: rows.length, features, includedFeatures };
+  }
+
+  // The unassigned/outdoor bucket is rendered from one counts read, exactly
+  // like a named building's row.
+  const unassignedCounts = groupCounts(null);
 
   return (
     <dialog
@@ -574,7 +604,12 @@ export function GdbImportDialog({
                     ref={(node) => {
                       if (node) node.indeterminate = assigned && !allIncluded;
                     }}
-                    onChange={(event) => setBuildingIncluded(building.id, event.target.checked)}
+                    // Intent comes from the group's state, never from
+                    // `event.target.checked`: a partially-included group renders
+                    // unchecked+indeterminate, and clicking an unchecked box
+                    // always reports `checked === true`, which would make
+                    // deselecting a partial building impossible.
+                    onChange={() => setBuildingIncluded(building.id, counts.included === 0)}
                   />
                   <input
                     type="text"
@@ -585,7 +620,12 @@ export function GdbImportDialog({
                     onChange={(event) => renameBuilding(building.id, event.target.value)}
                   />
                   <span className="gdb-dialog__counts">
-                    {buildingCountsText[locale](counts.included, counts.total, counts.features)}
+                    {buildingCountsText[locale](
+                      counts.included,
+                      counts.total,
+                      counts.includedFeatures,
+                      counts.features,
+                    )}
                   </span>
                   <button
                     type="button"
@@ -599,30 +639,31 @@ export function GdbImportDialog({
                 </li>
               );
             })}
-            {plan.layers.some((row) => row.buildingId === null) && (
+            {unassignedCounts.total > 0 && (
               <li className="gdb-dialog__building-row">
                 <input
                   type="checkbox"
                   className="gdb-dialog__checkbox"
                   aria-label={`${ui.includeBuilding[locale]} ${ui.unassigned[locale]}`}
-                  checked={
-                    rowsForBuilding(null).length > 0 &&
-                    rowsForBuilding(null).every((row) => row.included)
-                  }
+                  checked={unassignedCounts.included === unassignedCounts.total}
                   ref={(node) => {
                     if (node) {
-                      const counts = groupCounts(null);
-                      node.indeterminate = counts.included > 0 && counts.included < counts.total;
+                      node.indeterminate =
+                        unassignedCounts.included > 0 &&
+                        unassignedCounts.included < unassignedCounts.total;
                     }
                   }}
-                  onChange={(event) => setBuildingIncluded(null, event.target.checked)}
+                  // Same state-derived intent as a named building's checkbox.
+                  onChange={() => setBuildingIncluded(null, unassignedCounts.included === 0)}
                 />
                 <span>{ui.unassigned[locale]}</span>
                 <span className="gdb-dialog__counts">
-                  {(() => {
-                    const counts = groupCounts(null);
-                    return buildingCountsText[locale](counts.included, counts.total, counts.features);
-                  })()}
+                  {buildingCountsText[locale](
+                    unassignedCounts.included,
+                    unassignedCounts.total,
+                    unassignedCounts.includedFeatures,
+                    unassignedCounts.features,
+                  )}
                 </span>
               </li>
             )}

@@ -275,24 +275,58 @@ describe("GdbImportDialog", () => {
     expect(box.checked).toBe(false);
   });
 
-  it("restores the suggested inclusion instead of blanket-including on re-tick", () => {
+  it("deselects a partially included building on one click, then restores the suggestion", () => {
     const onImport = vi.fn();
     render(<GdbImportDialog inspection={partialInspection} initialPlan={partialPlan} locale="en" busy={false} error={null} onImport={onImport} onCancel={() => {}} />);
     const box = screen.getByRole("checkbox", { name: "Include North" });
-    fireEvent.click(box); // -> all excluded
-    fireEvent.click(box); // -> restore suggestion, NOT all included
+    const floorRow = () =>
+      screen.getByRole("checkbox", { name: "Include North_1_Floor" }) as HTMLInputElement;
+    const detailRow = () =>
+      screen.getByRole("checkbox", { name: "Include North_1_to_2_detail" }) as HTMLInputElement;
+    expect(floorRow().checked).toBe(true);
+
+    // partialPlan starts 1-of-2 included, so the group checkbox renders
+    // unchecked+indeterminate. A click on an unchecked box always reports
+    // `event.target.checked === true` — an implementation that trusts the
+    // event can never reach `include=false` and leaves this group untouched.
+    fireEvent.click(box);
+    expect(floorRow().checked).toBe(false);
+    expect(detailRow().checked).toBe(false);
+    expect(screen.getByText("0 / 2 layers · 0 of 5 features")).toBeTruthy();
+    expect((box as HTMLInputElement).checked).toBe(false);
+    expect((box as HTMLInputElement).indeterminate).toBe(false);
+
+    // A second click restores exactly the server's suggestion — not a blanket
+    // include: the cross-floor `_to_` layer the heuristic excluded stays out.
+    fireEvent.click(box);
+    expect(floorRow().checked).toBe(true);
+    expect(detailRow().checked).toBe(false);
+    expect(screen.getByText("1 / 2 layers · 3 of 5 features")).toBeTruthy();
+
     fireEvent.click(screen.getByRole("button", { name: /import/i }));
     const submitted = onImport.mock.calls[0]![0] as GdbMappingPlan;
     expect(submitted.layers.find((l) => l.key.layerName === "North_1_Floor")!.included).toBe(true);
-    // The cross-floor layer was excluded by the server heuristic and must stay so.
     expect(submitted.layers.find((l) => l.key.layerName === "North_1_to_2_detail")!.included).toBe(false);
   });
 
-  it("shows included and total layer counts per building", () => {
+  it("auto-enables clipping when a partially included building is deselected", () => {
+    // The real dataset renders most buildings partial (the server excludes
+    // zero-feature and `_to_` layers), so the clip auto-enable is only
+    // reachable at all if a partial group can actually be deselected.
     render(<GdbImportDialog inspection={partialInspection} initialPlan={partialPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
-    // Counts sum feature totals across ALL of a building's rows (included or
-    // not), matching groupCounts: North_1_Floor (3) + North_1_to_2_detail (2).
-    expect(screen.getByText("1 / 2 layers, 5 features")).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include North" }));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("shows included and total counts for both layers and features per building", () => {
+    render(<GdbImportDialog inspection={partialInspection} initialPlan={partialPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    // North_1_Floor (3 features, included) + North_1_to_2_detail (2, excluded).
+    expect(screen.getByText("1 / 2 layers · 3 of 5 features")).toBeTruthy();
+  });
+
+  it("localizes the per-building count line", () => {
+    render(<GdbImportDialog inspection={partialInspection} initialPlan={partialPlan} locale="ja" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    expect(screen.getByText("1 / 2 レイヤー・3 / 5 地物")).toBeTruthy();
   });
 
   it("filters the layer table to one building", () => {
@@ -319,7 +353,37 @@ describe("GdbImportDialog", () => {
     };
     render(<GdbImportDialog inspection={inspectionWithOrphan} initialPlan={withOrphan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
     expect(screen.getByLabelText(/include unassigned/i)).toBeTruthy();
-    expect(screen.getByText("0 / 1 layers, 9 features")).toBeTruthy();
+    expect(screen.getByText("0 / 1 layers · 0 of 9 features")).toBeTruthy();
+  });
+
+  it("does not auto-enable clipping when only the unassigned group is unticked", () => {
+    // Outdoor/site-wide layers belong to no building. Dropping them does not
+    // narrow which buildings the venue covers, so the network GDB still
+    // matches the selection and clipping must stay off.
+    const withIncludedOrphan: GdbMappingPlan = {
+      ...twoBuildingPlan,
+      layers: [
+        ...twoBuildingPlan.layers,
+        { key: { databaseId: "gdb-1", layerName: "road_edge" }, included: true, targetType: "detail", buildingId: null, levelRule: { kind: "layer-name" }, idField: null, ordinalField: null, shortNameField: null, nameField: null, categoryField: null },
+      ],
+    };
+    const inspectionWithOrphan: GdbInspection = {
+      ...twoBuildingInspection,
+      layers: [
+        ...twoBuildingInspection.layers,
+        { key: { databaseId: "gdb-1", layerName: "road_edge" }, databaseName: "Station.gdb", featureCount: 9, geometryFamily: "line", fields: [] },
+      ],
+    };
+    render(<GdbImportDialog inspection={inspectionWithOrphan} initialPlan={withIncludedOrphan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Unassigned / outdoor" }));
+    expect(screen.getByText("0 / 1 layers · 0 of 9 features")).toBeTruthy();
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(false);
+
+    // Deselecting a real building still auto-enables it — the guard is on the
+    // unassigned bucket only, not on the auto-enable as a whole.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
+    expect((screen.getByLabelText(/clip routing/i) as HTMLInputElement).checked).toBe(true);
   });
 
   it("suggests the building name when exactly one building is selected", () => {
@@ -337,8 +401,14 @@ describe("GdbImportDialog", () => {
     expect((screen.getByLabelText(/venue name/i) as HTMLInputElement).value).toBe("My Venue");
   });
 
-  it("leaves the venue name alone when several buildings remain selected", () => {
-    render(<GdbImportDialog inspection={twoBuildingInspection} initialPlan={twoBuildingPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+  it("leaves the venue name alone while several buildings remain selected", () => {
+    render(<GdbImportDialog inspection={threeBuildingInspection} initialPlan={threeBuildingPlan} locale="en" busy={false} error={null} onImport={vi.fn()} onCancel={() => {}} />);
+    // Three buildings; deselecting one leaves two selected, which is still
+    // ambiguous — the venue name must not be prefilled from either.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include East" }));
     expect((screen.getByLabelText(/venue name/i) as HTMLInputElement).value).toBe("Station");
+    // Down to exactly one, the suggestion does fire.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include South" }));
+    expect((screen.getByLabelText(/venue name/i) as HTMLInputElement).value).toBe("North");
   });
 });
