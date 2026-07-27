@@ -276,28 +276,82 @@ describe("upload + publish", () => {
 });
 
 describe("compileVenueBundle clipToVenue bridge", () => {
-  it("passes clipToVenue to the native compiler when the job payload asks for clipping", async () => {
+  it("passes metadata.clipToVenue through to the native compiler as the eighth positional argument", async () => {
     const calls: unknown[][] = [];
     const fakeCompile = async (...args: unknown[]) => {
       calls.push(args);
       return okNativeResponse();
     };
-    await compileVenueBundle(
-      Buffer.from("x"),
-      { datasetId: "t/v", version: 1, clipToVenue: true },
-      fakeCompile as never,
-    );
+    await compileVenueBundle(Buffer.from("x"), { datasetId: "t/v", version: 1, clipToVenue: true }, fakeCompile);
     expect(calls[0]![7]).toBe(true);
   });
 
-  it("leaves clipToVenue undefined when the job payload omits it", async () => {
+  it("leaves the eighth positional argument undefined when metadata.clipToVenue is absent", async () => {
     const calls: unknown[][] = [];
     const fakeCompile = async (...args: unknown[]) => {
       calls.push(args);
       return okNativeResponse();
     };
-    await compileVenueBundle(Buffer.from("x"), { datasetId: "t/v", version: 1 }, fakeCompile as never);
+    await compileVenueBundle(Buffer.from("x"), { datasetId: "t/v", version: 1 }, fakeCompile);
     expect(calls[0]![7]).toBeUndefined();
+  });
+});
+
+describe("clipToSelection job payload threading", () => {
+  async function insertDraftVersion(
+    app: FastifyInstance,
+    cookie: string,
+  ): Promise<{ venue: { id: number; slug: string }; versionId: number }> {
+    const venue = await createVenue(app, cookie);
+    const source = await buildMinimalImdfZip();
+    const { hash: sourceHash } = app.blobs.put(source);
+    app.db.prepare("INSERT OR IGNORE INTO blobs (hash, size) VALUES (?, ?)").run(sourceHash, source.byteLength);
+    const insert = app.db
+      .prepare(
+        "INSERT INTO versions (venue_id, seq, public_id, source_blob_hash, source_kind) VALUES (?, 1, ?, ?, 'imdf')",
+      )
+      .run(venue.id, newTestPublicVersionId(), sourceHash);
+    return { venue, versionId: Number(insert.lastInsertRowid) };
+  }
+
+  it("sets metadata.clipToVenue to true when the job payload's clipToSelection is true", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const { versionId } = await insertDraftVersion(app, cookie);
+
+    let capturedMetadata: CompileVenueMetadata | undefined;
+    const compile = async (_source: Buffer, metadata: CompileVenueMetadata) => {
+      capturedMetadata = metadata;
+      return {
+        bundle: Buffer.from([0x4b, 0x56, 0x42, 0x00]),
+        stats: { levels: 0, features: 0 },
+        warnings: [],
+      };
+    };
+    const runner = makePublishRunner(app.db, app.blobs, compile);
+    await runner(JSON.stringify({ versionId, clipToSelection: true }));
+
+    expect(capturedMetadata?.clipToVenue).toBe(true);
+  });
+
+  it("leaves metadata.clipToVenue undefined when the job payload omits clipToSelection", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const { versionId } = await insertDraftVersion(app, cookie);
+
+    let capturedMetadata: CompileVenueMetadata | undefined;
+    const compile = async (_source: Buffer, metadata: CompileVenueMetadata) => {
+      capturedMetadata = metadata;
+      return {
+        bundle: Buffer.from([0x4b, 0x56, 0x42, 0x00]),
+        stats: { levels: 0, features: 0 },
+        warnings: [],
+      };
+    };
+    const runner = makePublishRunner(app.db, app.blobs, compile);
+    await runner(JSON.stringify({ versionId }));
+
+    expect(capturedMetadata?.clipToVenue).toBeUndefined();
   });
 });
 
