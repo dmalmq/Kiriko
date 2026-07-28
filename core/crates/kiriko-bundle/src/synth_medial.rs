@@ -275,6 +275,16 @@ const SPIKE_WEDGE_MAX_M: f64 = 8.0;
 /// A wedge tip with less than this fraction of its junction clearance narrows
 /// into a boundary corner rather than continuing through a corridor.
 const SPIKE_TIP_CLEARANCE_RATIO: f64 = 0.5;
+/// A flat corridor end has a nearest boundary segment approximately
+/// perpendicular to the branch tangent. Corner wedges do not. Allow about
+/// 20 degrees of CDT/sampling noise around perpendicular.
+const ENDCAP_TANGENT_DOT_MAX: f64 = 0.35;
+/// Distance tolerance (m) when collecting boundary segments tied for nearest
+/// to a leaf tip; corridor tips can be equidistant from side walls and endcap.
+const ENDCAP_NEAREST_TOL_M: f64 = 0.1;
+/// A real dead-end corridor retains roughly the same half-width immediately
+/// behind its endcap. Open-room spurs widen much faster and remain prunable.
+const ENDCAP_CHANNEL_CLEARANCE_RATIO: f64 = 1.5;
 /// Degree-2 centerline chains with at least this much path detour are aligned
 /// to their chord when that chord remains fully passable.
 const WEAVE_DETOUR_RATIO: f64 = 1.15;
@@ -303,6 +313,63 @@ fn boundary_clearance_m(p: [f64; 2], area: &MultiPolygon<f64>) -> f64 {
         }
     }
     best
+}
+
+/// True when the leaf faces a flat endcap and remains inside a narrow channel
+/// immediately behind it. The endcap is perpendicular to the branch tangent;
+/// stable clearance supplies the side-wall evidence that distinguishes a
+/// genuine dead-end corridor from an open-room spur aimed at a flat wall.
+fn leaf_has_corridor_endcap(
+    tip: [f64; 2],
+    inward: [f64; 2],
+    tip_clearance_m: f64,
+    area: &MultiPolygon<f64>,
+) -> bool {
+    let mx = 111_320.0 * tip[1].to_radians().cos();
+    let my = 111_320.0;
+    let branch = [(inward[0] - tip[0]) * mx, (inward[1] - tip[1]) * my];
+    let branch_len = branch[0].hypot(branch[1]);
+    if branch_len <= f64::EPSILON {
+        return false;
+    }
+    let nearest = tip_clearance_m;
+    let ring_has_endcap = |ring: &LineString<f64>| {
+        ring.0.windows(2).any(|segment| {
+            let a = [(segment[0].x - tip[0]) * mx, (segment[0].y - tip[1]) * my];
+            let edge = [
+                (segment[1].x - segment[0].x) * mx,
+                (segment[1].y - segment[0].y) * my,
+            ];
+            let edge_len_sq = edge[0] * edge[0] + edge[1] * edge[1];
+            if edge_len_sq <= f64::EPSILON {
+                return false;
+            }
+            let projection =
+                (-(a[0] * edge[0] + a[1] * edge[1]) / edge_len_sq).clamp(0.0, 1.0);
+            let offset = [
+                a[0] + projection * edge[0],
+                a[1] + projection * edge[1],
+            ];
+            let distance = offset[0].hypot(offset[1]);
+            let tangent_dot =
+                (branch[0] * edge[0] + branch[1] * edge[1]).abs()
+                    / (branch_len * edge_len_sq.sqrt());
+            distance <= nearest + ENDCAP_NEAREST_TOL_M
+                && tangent_dot <= ENDCAP_TANGENT_DOT_MAX
+        })
+    };
+    let has_flat_endcap = area.iter().any(|poly| {
+        ring_has_endcap(poly.exterior()) || poly.interiors().iter().any(ring_has_endcap)
+    });
+    if !has_flat_endcap {
+        return false;
+    }
+    let probe = [
+        tip[0] + branch[0] / branch_len * nearest / mx,
+        tip[1] + branch[1] / branch_len * nearest / my,
+    ];
+    boundary_clearance_m(probe, area)
+        <= nearest * ENDCAP_CHANNEL_CLEARANCE_RATIO + ENDCAP_NEAREST_TOL_M
 }
 
 /// True when `p` lies inside `area` or within `tol_m` of it.
@@ -403,10 +470,19 @@ fn prune_spur_leaves(
         };
         let Some(end) = endpoint else { continue };
         let is_short = total < short_chain_max_m;
-        let is_narrowing_wedge = deg(end) >= 3
-            && total < wedge_chain_max_m
-            && boundary_clearance_m(skeleton.nodes[start], area)
-                < boundary_clearance_m(skeleton.nodes[end], area) * tip_clearance_ratio;
+        let is_narrowing_wedge = if deg(end) >= 3 && total < wedge_chain_max_m {
+            let tip_clearance = boundary_clearance_m(skeleton.nodes[start], area);
+            tip_clearance
+                < boundary_clearance_m(skeleton.nodes[end], area) * tip_clearance_ratio
+                && !leaf_has_corridor_endcap(
+                    skeleton.nodes[start],
+                    skeleton.nodes[adj[start][0].0],
+                    tip_clearance,
+                    area,
+                )
+        } else {
+            false
+        };
         if is_short || is_narrowing_wedge {
             for ei in chain {
                 remove[ei] = true;
@@ -1542,11 +1618,11 @@ mod tests {
         };
         let area = MultiPolygon::new(vec![Polygon::new(
             LineString::from(vec![
-                xy(-10.0, -5.0),
-                xy(10.0, -5.0),
-                xy(10.0, 5.0),
-                xy(-10.0, 5.0),
-                xy(-10.0, -5.0),
+                xy(-7.0, -5.0),
+                xy(7.0, -5.0),
+                xy(7.0, 5.0),
+                xy(-7.0, 5.0),
+                xy(-7.0, -5.0),
             ]),
             vec![],
         )]);
@@ -1555,20 +1631,24 @@ mod tests {
                 node(0.0, 0.0),
                 node(-4.0, 0.0),
                 node(4.0, 0.0),
-                node(0.0, 4.5),
+                node(6.5, 4.5), // convex-corner wedge
+                node(0.0, 4.5), // flat-wall spur without corridor side walls
             ],
-            edges: vec![(0, 1), (0, 2), (0, 3)],
+            edges: vec![(0, 1), (0, 2), (0, 3), (0, 4)],
         };
 
         let pruned = prune_spur_leaves(skeleton, &area, 3.0, 8.0, 0.5);
 
-        assert_eq!(pruned.edges.len(), 2, "narrowing boundary wedge removed");
+        assert_eq!(pruned.edges.len(), 2, "narrowing room spurs removed");
         assert!(
             pruned
                 .nodes
                 .iter()
-                .all(|p| haversine_m(*p, node(0.0, 4.5)) > 0.1),
-            "wedge tip is removed"
+                .all(|p| {
+                    haversine_m(*p, node(6.5, 4.5)) > 0.1
+                        && haversine_m(*p, node(0.0, 4.5)) > 0.1
+                }),
+            "corner and flat-wall spur tips are removed"
         );
         assert!(
             pruned
@@ -1579,7 +1659,56 @@ mod tests {
                     .nodes
                     .iter()
                     .any(|p| haversine_m(*p, node(4.0, 0.0)) < 0.1),
-            "equal-clearance corridor ends survive"
+            "non-narrowing room coverage survives"
+        );
+    }
+
+    #[test]
+    fn prune_spur_leaves_keeps_short_dead_end_corridor() {
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let mx = 111_320.0 * cy.to_radians().cos();
+        let xy = |x_m: f64, y_m: f64| (cx + x_m / mx, cy + y_m / 111_320.0);
+        let node = |x_m: f64, y_m: f64| {
+            let (x, y) = xy(x_m, y_m);
+            [x, y]
+        };
+        // A 1 m-wide, 6 m-long side corridor branches from a 4 m-wide main
+        // corridor and ends at a flat wall. Its leaf clearance is 0.5 m while
+        // the junction clearance is 2 m, so clearance ratio alone is unsafe.
+        let area = MultiPolygon::new(vec![Polygon::new(
+            LineString::from(vec![
+                xy(-10.0, -2.0),
+                xy(10.0, -2.0),
+                xy(10.0, 2.0),
+                xy(0.5, 2.0),
+                xy(0.5, 8.0),
+                xy(-0.5, 8.0),
+                xy(-0.5, 2.0),
+                xy(-10.0, 2.0),
+                xy(-10.0, -2.0),
+            ]),
+            vec![],
+        )]);
+        let skeleton = Skeleton {
+            nodes: vec![
+                node(0.0, 0.0),
+                node(-4.0, 0.0),
+                node(4.0, 0.0),
+                node(0.0, 4.0),
+                node(0.0, 7.5),
+            ],
+            edges: vec![(0, 1), (0, 2), (0, 3), (3, 4)],
+        };
+
+        let pruned = prune_spur_leaves(skeleton, &area, 3.0, 8.0, 0.5);
+
+        assert_eq!(pruned.edges.len(), 4, "flat-end corridor remains routable");
+        assert!(
+            pruned
+                .nodes
+                .iter()
+                .any(|p| haversine_m(*p, node(0.0, 7.5)) < 0.1),
+            "dead-end tip is preserved"
         );
     }
 
