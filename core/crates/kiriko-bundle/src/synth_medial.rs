@@ -5,9 +5,11 @@
 //!      subtraction is available via `navigable_area` but currently unused);
 //!   2. constrained-Delaunay-triangulate the navigable polygon and extract its
 //!      medial axis (Chin–Snoeyink–Wang) as centerlines;
-//!   3. build a graph from the centerlines, snap doorway `opening`s and transit
-//!      units as junctions, bridge near-touching blobs, and stitch floors
-//!      vertically (footprint overlap or centroid proximity), attaching costs.
+//!   3. build a graph from the centerlines, snap doorway `opening`s on as
+//!      junctions (unioning the blobs they connect so nothing duplicates a
+//!      doorway path), attach transit units THROUGH their boundary openings,
+//!      bridge near-touching blobs, and stitch floors vertically (footprint
+//!      overlap or centroid proximity), attaching costs.
 //!
 //! Gated behind `netgen` so the browser wasm build never pulls in `geo`/`spade`.
 
@@ -23,7 +25,7 @@ use std::collections::HashMap;
 
 use kiriko_model::canonical::Value;
 use crate::codec::BundleDocument;
-use crate::synth::{haversine_m, linestring_midpoint, polygon_centroid};
+use crate::synth::{haversine_m, linestring_midpoint, point_boundary_dist_m, polygon_centroid};
 use kiriko_model::model::FeatureType;
 use kiriko_route::{RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode};
 
@@ -257,6 +259,76 @@ const VERTICAL_MATCH_M: f64 = 5.0;
 /// polygon edge (~half the corridor width), so this measures spine-to-spine,
 /// not polygon-to-polygon; kept short so only near-touching areas merge.
 const ADJACENCY_BRIDGE_M: f64 = 2.0;
+/// Max distance (m) from a transit unit's boundary for an `opening` node to
+/// count as the unit's doorway; the unit then attaches through that opening
+/// instead of snapping its centroid straight onto the centerline.
+const TRANSIT_OPENING_SNAP_M: f64 = 1.5;
+/// Minimum passable corridor width (m). Centerline edges and blob bridges
+/// through narrower passages (wall–column pinches, slivers) are pruned.
+const MIN_PASSAGE_M: f64 = 0.8;
+/// Tolerance (m) for samples to lie just OUTSIDE the walkable area when
+/// validating that an attach segment stays within walkable space — covers
+/// openings digitized slightly off a unit boundary. Gaps this rule rejects
+/// (track strips, walls) are an order of magnitude wider.
+const SEGMENT_OUTSIDE_TOL_M: f64 = 0.3;
+
+/// Distance (m) from `p` to the nearest boundary ring of `area`
+/// (equirectangular metres at `p`'s latitude). Inside the area this is the
+/// local passage half-width; outside, the distance to the area.
+fn boundary_clearance_m(p: [f64; 2], area: &MultiPolygon<f64>) -> f64 {
+    use geo::algorithm::line_measures::{Distance, Euclidean};
+    let mx = 111_320.0 * p[1].to_radians().cos();
+    let my = 111_320.0;
+    let sp = Point::new(p[0] * mx, p[1] * my);
+    let scale = |ls: &LineString<f64>| -> LineString<f64> {
+        LineString::new(ls.coords().map(|c| Coord { x: c.x * mx, y: c.y * my }).collect())
+    };
+    let mut best = f64::INFINITY;
+    for poly in area {
+        best = best.min(Euclidean::distance(&sp, &scale(poly.exterior())));
+        for hole in poly.interiors() {
+            best = best.min(Euclidean::distance(&sp, &scale(hole)));
+        }
+    }
+    best
+}
+
+/// True when `p` lies inside `area` or within `tol_m` of it.
+fn point_within_area(p: [f64; 2], area: &MultiPolygon<f64>, tol_m: f64) -> bool {
+    area.contains(&Point::new(p[0], p[1]))
+        || (tol_m > 0.0 && boundary_clearance_m(p, area) <= tol_m)
+}
+
+/// True when every interior sample of segment `a`–`b` lies within `area`
+/// (or within `tol_m` of it). Used to prove an attach edge never leaves
+/// walkable space (track strips, walls, other units).
+fn segment_within_area(a: [f64; 2], b: [f64; 2], area: &MultiPolygon<f64>, tol_m: f64) -> bool {
+    (1..10).all(|k| {
+        let t = k as f64 / 10.0;
+        point_within_area([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], area, tol_m)
+    })
+}
+
+/// True when every interior sample of segment `a`–`b` lies within at least
+/// ONE of `areas` (e.g. the walkable union or the transit unit itself).
+fn segment_within_any(a: [f64; 2], b: [f64; 2], areas: &[&MultiPolygon<f64>], tol_m: f64) -> bool {
+    (1..10).all(|k| {
+        let t = k as f64 / 10.0;
+        let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+        areas.iter().any(|area| point_within_area(p, area, tol_m))
+    })
+}
+
+/// True when the passage along segment `a`–`b` is at least [`MIN_PASSAGE_M`]
+/// wide everywhere and never leaves the walkable area — the bridge rule.
+fn bridge_passable(a: [f64; 2], b: [f64; 2], area: &MultiPolygon<f64>) -> bool {
+    let min_clear = MIN_PASSAGE_M / 2.0;
+    (1..10).all(|k| {
+        let t = k as f64 / 10.0;
+        let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+        area.contains(&Point::new(p[0], p[1])) && boundary_clearance_m(p, area) >= min_clear
+    })
+}
 
 fn is_walkway(category: &str) -> bool {
     matches!(
@@ -353,22 +425,9 @@ fn choose_spacing(area: &MultiPolygon<f64>, original: usize) -> Option<f64> {
     Some((perimeter / budget as f64).max(BASE_SPACING_DEG))
 }
 
-/// Nearest node in `nodes[range]` to `p` within `max_m` metres.
-fn nearest_node(
-    nodes: &[RouteNode],
-    range: std::ops::Range<usize>,
-    p: [f64; 2],
-    max_m: f64,
-) -> Option<usize> {
-    let mut best: Option<(usize, f64)> = None;
-    for i in range {
-        let d = haversine_m([nodes[i].lon, nodes[i].lat], p);
-        if d <= max_m && best.is_none_or(|(_, bd)| d < bd) {
-            best = Some((i, d));
-        }
-    }
-    best.map(|(i, _)| i)
-}
+/// One floor's transit unit: centroid, category, largest footprint polygon
+/// (for vertical matching), and the source geometry (for doorway matching).
+type TransitUnit<'a> = ([f64; 2], String, Option<Polygon<f64>>, &'a Value);
 
 /// Union-find root with path compression (over a `parent` slice).
 fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
@@ -401,7 +460,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
     for &ord in &ordinals {
         let mut walk: Vec<&Value> = Vec::new();
         let mut openings: Vec<[f64; 2]> = Vec::new();
-        let mut transit: Vec<([f64; 2], String, Option<Polygon<f64>>)> = Vec::new();
+        let mut transit: Vec<TransitUnit<'_>> = Vec::new();
         for f in &document.features {
             let Some(level_id) = f.level_id.as_deref() else { continue };
             if level_ordinal.get(level_id).copied() != Some(ord) {
@@ -415,7 +474,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         walk.push(geom);
                     } else if is_transit(category) {
                         if let Some(c) = polygon_centroid(geom) {
-                            transit.push((c, category.to_string(), largest_polygon(geom)));
+                            transit.push((c, category.to_string(), largest_polygon(geom), geom));
                         }
                     }
                 }
@@ -450,6 +509,37 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             continue;
         }
 
+        // Prune centerline edges through sub-width passages (wall–column
+        // pinches, slivers): an edge survives only when the passage along it
+        // is at least MIN_PASSAGE_M wide. Nodes left without edges are
+        // dropped (remapped), so they can never become snap targets.
+        let min_clear = MIN_PASSAGE_M / 2.0;
+        let mut remap: Vec<Option<usize>> = vec![None; skeleton.nodes.len()];
+        let (mut snodes, mut sedges) = (Vec::new(), Vec::new());
+        for &(a, b) in &skeleton.edges {
+            let (pa, pb) = (skeleton.nodes[a], skeleton.nodes[b]);
+            let mid = [(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0];
+            if boundary_clearance_m(pa, &area) < min_clear
+                || boundary_clearance_m(pb, &area) < min_clear
+                || boundary_clearance_m(mid, &area) < min_clear
+            {
+                continue;
+            }
+            let ia = *remap[a].get_or_insert_with(|| {
+                snodes.push(pa);
+                snodes.len() - 1
+            });
+            let ib = *remap[b].get_or_insert_with(|| {
+                snodes.push(pb);
+                snodes.len() - 1
+            });
+            sedges.push((ia, ib));
+        }
+        let skeleton = Skeleton { nodes: snodes, edges: sedges };
+        if skeleton.nodes.is_empty() || skeleton.edges.is_empty() {
+            continue;
+        }
+
         // Centerline nodes + edges for this floor; union-find over the skeleton
         // marks disjoint walkable blobs so doorways can bridge them below.
         let mut blob: Vec<usize> = (0..skeleton.nodes.len()).collect();
@@ -477,23 +567,41 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
 
         // Doorways: bridge each opening to the nearest centerline node of every
         // distinct blob within range, merging areas that share the doorway.
+        // Blobs connected here are UNIONED as they are processed, so a second
+        // doorway into the same area attaches as a leaf instead of fanning out
+        // a parallel bridge, and the near-blob pass below never duplicates a
+        // doorway path with a direct skeleton-skeleton edge.
+        let mut opening_nodes: Vec<(usize, [f64; 2])> = Vec::new();
         for op in &openings {
-            let mut per_blob: HashMap<usize, (usize, f64)> = HashMap::new();
+            // Nearest VALID node per blob: candidates in distance order, the
+            // first whose segment from the opening stays within walkable
+            // space. Rejecting blocked snaps is what stops doorways from
+            // teleporting across track strips and walls.
+            let mut cands: Vec<(usize, usize, f64)> = Vec::new();
             for (local, n) in skeleton.nodes.iter().enumerate() {
                 let d = haversine_m(*n, *op);
                 if d <= SNAP_MAX_M {
                     let root = uf_find(&mut blob, local);
-                    let entry = per_blob.entry(root).or_insert((local, d));
-                    if d < entry.1 {
-                        *entry = (local, d);
-                    }
+                    cands.push((root, local, d));
                 }
+            }
+            cands.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.1.cmp(&b.1)));
+            let mut per_blob: HashMap<usize, (usize, f64)> = HashMap::new();
+            for (root, local, d) in cands {
+                if per_blob.contains_key(&root) {
+                    continue;
+                }
+                if !segment_within_area(*op, skeleton.nodes[local], &area, SEGMENT_OUTSIDE_TOL_M) {
+                    continue;
+                }
+                per_blob.insert(root, (local, d));
             }
             if per_blob.is_empty() {
                 warnings.push(RouteBuildWarning {
                     code: "synth_opening_no_walkway".into(),
                     detail: format!(
-                        "opening ({:.6}, {:.6}) on ordinal {ord} is >{SNAP_MAX_M} m from any centerline",
+                        "opening ({:.6}, {:.6}) on ordinal {ord} has no centerline node reachable \
+                         within walkable space (>{SNAP_MAX_M} m away or blocked)",
                         op[0], op[1]
                     ),
                 });
@@ -501,6 +609,14 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             }
             let idx = nodes.len();
             nodes.push(RouteNode { lon: op[0], lat: op[1], ordinal: ord });
+            opening_nodes.push((idx, *op));
+            let roots: Vec<usize> = per_blob.keys().copied().collect();
+            for &r in &roots[1..] {
+                let (ra, rb) = (uf_find(&mut blob, roots[0]), uf_find(&mut blob, r));
+                if ra != rb {
+                    blob[ra] = rb;
+                }
+            }
             for (_root, (local, d)) in per_blob {
                 edges.push(RouteEdge {
                     from: idx as u32,
@@ -556,6 +672,12 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             if uf_find(&mut blob, li) == uf_find(&mut blob, lj) {
                 continue;
             }
+            // A bridge is a real connection: its segment must stay inside
+            // walkable space at full passage width. This rejects bridges
+            // across track beds, walls, and sub-width necks alike.
+            if !bridge_passable(skeleton.nodes[li], skeleton.nodes[lj], &area) {
+                continue;
+            }
             let (ra, rb) = (uf_find(&mut blob, li), uf_find(&mut blob, lj));
             blob[ra] = rb;
             edges.push(RouteEdge {
@@ -567,18 +689,60 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             });
         }
 
-        // Transit units: snap onto the centerline and record for vertical links.
-        for (tp, category, footprint) in &transit {
+        // Transit units: attach through their doorway `opening`s and record
+        // for vertical links. The opening must be reachable THROUGH the unit
+        // itself (its real door — an opening that is merely near the boundary
+        // but across a wall or track bed is not). A unit with no usable
+        // doorway falls back to the nearest centerline node reachable without
+        // leaving walkable space or the unit.
+        for (tp, category, footprint, geom) in &transit {
             let idx = nodes.len();
             nodes.push(RouteNode { lon: tp[0], lat: tp[1], ordinal: ord });
-            if let Some(near) = nearest_node(&nodes, skeleton_range.clone(), *tp, SNAP_MAX_M) {
+            let unit_area: Option<MultiPolygon<f64>> =
+                footprint.clone().map(|p| MultiPolygon::new(vec![p]));
+            let mut attached = false;
+            for &(oidx, op) in &opening_nodes {
+                let Some(boundary_d) = point_boundary_dist_m(op, geom) else { continue };
+                if boundary_d > TRANSIT_OPENING_SNAP_M {
+                    continue;
+                }
+                if !unit_area.as_ref().is_some_and(|u| segment_within_area(*tp, op, u, SEGMENT_OUTSIDE_TOL_M)) {
+                    continue;
+                }
                 edges.push(RouteEdge {
                     from: idx as u32,
-                    to: near as u32,
-                    weight: haversine_m(*tp, [nodes[near].lon, nodes[near].lat]) as f32,
+                    to: oidx as u32,
+                    weight: haversine_m(*tp, op) as f32,
                     ordinal: ord,
                     interior: Vec::new(),
                 });
+                attached = true;
+            }
+            if !attached {
+                let mut cands: Vec<(usize, f64)> = skeleton_range
+                    .clone()
+                    .map(|i| (i, haversine_m(*tp, [nodes[i].lon, nodes[i].lat])))
+                    .filter(|(_, d)| *d <= SNAP_MAX_M)
+                    .collect();
+                cands.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+                let mut areas: Vec<&MultiPolygon<f64>> = vec![&area];
+                if let Some(u) = unit_area.as_ref() {
+                    areas.push(u);
+                }
+                for (near, _) in cands {
+                    let p = [nodes[near].lon, nodes[near].lat];
+                    if !segment_within_any(*tp, p, &areas, SEGMENT_OUTSIDE_TOL_M) {
+                        continue;
+                    }
+                    edges.push(RouteEdge {
+                        from: idx as u32,
+                        to: near as u32,
+                        weight: haversine_m(*tp, p) as f32,
+                        ordinal: ord,
+                        interior: Vec::new(),
+                    });
+                    break;
+                }
             }
             transit_all.push((idx as u32, *tp, category.clone(), ord, footprint.clone()));
         }
@@ -864,9 +1028,11 @@ mod tests {
     }
 
     #[test]
-    fn near_blobs_bridge_into_one_component() {
-        // Two thin walkway rectangles with parallel spines ~1.5 m apart and NO
-        // opening between them: they must fuse into a single component.
+    fn narrow_gap_between_walkways_is_not_bridged() {
+        // Two thin walkway rectangles whose spines are ~1.5 m apart but whose
+        // POLYGONS are separated by a ~0.45 m non-walkable gap (wall, column
+        // row) with NO opening: below the minimum passage width, so the graph
+        // must NOT connect them.
         let features = vec![
             feature(
                 "wa",
@@ -885,7 +1051,110 @@ mod tests {
         ];
         let doc = document(&[("l0", 0.0)], features);
         let build = synthesize_network_medial(&doc);
-        assert_eq!(component_count(&build.graph), 1, "near blobs fuse into one component");
+        assert_eq!(component_count(&build.graph), 2, "sub-width gap stays disconnected");
+    }
+
+    #[test]
+    fn narrow_neck_walkway_is_pruned() {
+        // One connected walkable area shaped like an hourglass: two 2.2 m wide
+        // rooms joined by a 0.5 m neck (wall–column pinch). The neck is below
+        // the minimum passage width, so the two rooms must not be routable to
+        // each other through it.
+        let neck = rect(139.70012, 35.60000, 0.00006, 0.0000045); // ~6.6 m long, 0.5 m wide
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("ra", FeatureType::Unit, "l0", Some("walkway"),
+                    rect(139.70000, 35.60000, 0.00020, 0.00002)),
+                feature("neck", FeatureType::Unit, "l0", Some("walkway"), neck),
+                feature("rb", FeatureType::Unit, "l0", Some("walkway"),
+                    rect(139.70024, 35.60000, 0.00020, 0.00002)),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        assert_eq!(component_count(&build.graph), 2, "sub-width neck is pruned");
+        let crosses_neck = build.graph.edges.iter().any(|e| {
+            let (a, b) = (&build.graph.nodes[e.from as usize], &build.graph.nodes[e.to as usize]);
+            (a.lon - 139.70012) * (b.lon - 139.70012) < 0.0
+        });
+        assert!(!crosses_neck, "no edge crosses the pinched neck");
+    }
+
+    #[test]
+    fn wide_neck_walkway_stays_connected() {
+        // Same hourglass shape but with a 1.5 m neck — above the minimum
+        // passage width, so the rooms stay connected.
+        let neck = rect(139.70012, 35.60000, 0.00006, 0.0000135); // ~6.6 m long, 1.5 m wide
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("ra", FeatureType::Unit, "l0", Some("walkway"),
+                    rect(139.70000, 35.60000, 0.00020, 0.00002)),
+                feature("neck", FeatureType::Unit, "l0", Some("walkway"), neck),
+                feature("rb", FeatureType::Unit, "l0", Some("walkway"),
+                    rect(139.70024, 35.60000, 0.00020, 0.00002)),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        assert_eq!(component_count(&build.graph), 1, "wide-enough neck stays routable");
+    }
+
+    #[test]
+    fn opening_does_not_snap_across_a_track_gap() {
+        // Two platforms (2.2 m wide) separated by a ~9 m track strip. An
+        // opening on platform B's edge facing platform A must NOT snap to
+        // platform A's centerline: the segment would cross non-walkable track
+        // bed, even though platform A's spine is within snap range.
+        let features = vec![
+            feature("pa", FeatureType::Unit, "l0", Some("platform"),
+                rect(139.70000, 35.60000, 0.00040, 0.00002)),
+            feature("pb", FeatureType::Unit, "l0", Some("platform"),
+                rect(139.70000, 35.60010, 0.00040, 0.00002)),
+            feature("door", FeatureType::Opening, "l0", None,
+                line(139.69998, 35.60009, 139.70002, 35.60009)),
+        ];
+        let doc = document(&[("l0", 0.0)], features);
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        let cross_gap = g.edges.iter().any(|e| {
+            let (a, b) = (&g.nodes[e.from as usize], &g.nodes[e.to as usize]);
+            (a.lat - 35.60005) * (b.lat - 35.60005) < 0.0
+        });
+        assert!(!cross_gap, "no edge crosses the track strip");
+        assert_eq!(component_count(g), 2, "platforms stay disconnected");
+    }
+
+    #[test]
+    fn transit_does_not_attach_to_a_foreign_door() {
+        // A stairs unit separated from the walkway by a 1 m non-walkable
+        // strip. An opening sits in the strip — close to the walkway (so it
+        // gets a node) AND within doorway tolerance of the stairs boundary —
+        // but it is not the stairs' door: the centroid-to-opening segment
+        // leaves the stairs unit. The stairs must not attach horizontally.
+        let walk = rect(139.70000, 35.60000, 0.00040, 0.00002); // y in [35.59999, 35.60001]
+        let stairs = rect(139.70000, 35.599965, 0.00006, 0.00003); // y in [35.59995, 35.59998], 1 m gap
+        let door = line(139.70000, 35.599980, 139.70000, 35.599990); // midpoint in the gap
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("s", FeatureType::Unit, "l0", Some("stairs"), stairs.clone()),
+                feature("door", FeatureType::Opening, "l0", None, door),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        let sc = polygon_centroid(&stairs).unwrap();
+        let snode = g
+            .nodes
+            .iter()
+            .position(|n| [n.lon, n.lat] == sc)
+            .expect("stairs centroid node exists");
+        assert_eq!(
+            same_floor_degree(g, snode),
+            0,
+            "stairs does not attach through a foreign door or across the gap"
+        );
     }
 
     /// Canonical two-vertex `LineString` geometry (for openings).
@@ -902,16 +1171,17 @@ mod tests {
 
     #[test]
     fn synthesized_graph_is_connected_and_bounded() {
-        // Floor 0: two thin walkways joined by a doorway; a stairs unit on the
-        // first walkway stacks onto floor 1's walkway. The whole graph is ONE
-        // component, spans both floors, and every edge is a short indoor hop.
+        // Floor 0: two adjacent walkways joined by a doorway in their shared
+        // wall; a stairs unit on the first walkway stacks onto floor 1's
+        // walkway. The whole graph is ONE component, spans both floors, and
+        // every edge is a short indoor hop.
         let features = vec![
             feature("wa", FeatureType::Unit, "l0", Some("walkway"),
                 rect(139.70000, 35.60000, 0.00040, 0.00002)),
             feature("wb", FeatureType::Unit, "l0", Some("walkway"),
-                rect(139.70050, 35.60000, 0.00040, 0.00002)),
+                rect(139.70040, 35.60000, 0.00040, 0.00002)),
             feature("door", FeatureType::Opening, "l0", None,
-                line(139.70025, 35.60000, 139.70025, 35.60002)),
+                line(139.70020, 35.59999, 139.70020, 35.60001)),
             feature("s0", FeatureType::Unit, "l0", Some("stairs"),
                 rect(139.70000, 35.60000, 0.00006, 0.00001)),
             feature("w1", FeatureType::Unit, "l1", Some("walkway"),
@@ -931,6 +1201,170 @@ mod tests {
         // Determinism: identical input → identical graph.
         let again = synthesize_network_medial(&doc);
         assert_eq!(build.graph, again.graph, "synthesis is deterministic");
+    }
+
+    /// Same-floor neighbor count of one graph node.
+    fn same_floor_degree(graph: &kiriko_route::RouteGraph, node: usize) -> usize {
+        let ord = graph.nodes[node].ordinal;
+        graph
+            .edges
+            .iter()
+            .filter(|e| {
+                let (a, b) = (e.from as usize, e.to as usize);
+                (a == node || b == node)
+                    && graph.nodes[if a == node { b } else { a }].ordinal == ord
+            })
+            .count()
+    }
+
+    #[test]
+    fn transit_attaches_through_its_opening() {
+        // A walkway corridor with a stairs unit behind a doorway in its wall:
+        // the stairs must be reached THROUGH the opening node, never via a
+        // direct centroid-to-centerline edge.
+        let walk = rect(139.70000, 35.60000, 0.00040, 0.00002);
+        let stairs = rect(139.70000, 35.599975, 0.00006, 0.00003);
+        let door = line(139.70000, 35.599985, 139.70000, 35.599995);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("s", FeatureType::Unit, "l0", Some("stairs"), stairs.clone()),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+
+        let sc = polygon_centroid(&stairs).unwrap();
+        let snode = g
+            .nodes
+            .iter()
+            .position(|n| [n.lon, n.lat] == sc)
+            .expect("stairs centroid node exists");
+        let dm = linestring_midpoint(&door).unwrap();
+        let onode = g
+            .nodes
+            .iter()
+            .position(|n| [n.lon, n.lat] == dm)
+            .expect("opening node exists");
+
+        let has_edge = |a: usize, b: usize| {
+            g.edges.iter().any(|e| {
+                (e.from as usize == a && e.to as usize == b)
+                    || (e.from as usize == b && e.to as usize == a)
+            })
+        };
+        assert!(has_edge(snode, onode), "stairs attaches via its opening");
+        let direct = g.edges.iter().any(|e| {
+            let (a, b) = (e.from as usize, e.to as usize);
+            (a == snode || b == snode) && a != onode && b != onode
+        });
+        assert!(!direct, "no direct centroid-to-centerline edge");
+        assert_eq!(component_count(g), 1, "graph stays connected through the doorway");
+    }
+
+    #[test]
+    fn transit_without_opening_snaps_to_centerline() {
+        // A stairs unit touching the walkway with NO opening feature keeps the
+        // direct centroid-to-centerline snap as a fallback.
+        let walk = rect(139.70000, 35.60000, 0.00040, 0.00002);
+        let stairs = rect(139.70000, 35.599975, 0.00006, 0.00003);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("s", FeatureType::Unit, "l0", Some("stairs"), stairs.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        let sc = polygon_centroid(&stairs).unwrap();
+        let snode = g
+            .nodes
+            .iter()
+            .position(|n| [n.lon, n.lat] == sc)
+            .expect("stairs centroid node exists");
+        assert!(same_floor_degree(g, snode) >= 1, "stairs snaps onto the centerline");
+        assert_eq!(component_count(g), 1);
+    }
+
+    #[test]
+    fn opening_connected_blobs_skip_the_near_blob_bridge() {
+        // Two parallel thin walkways (spines ~1.5 m apart) joined by a doorway:
+        // the opening already connects the two spines, so the near-blob
+        // bridging pass must not add a second, direct skeleton-skeleton edge
+        // across the same gap.
+        let door = line(139.70000, 35.600004, 139.70000, 35.600010);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("wa", FeatureType::Unit, "l0", Some("walkway"),
+                    rect(139.70000, 35.600000, 0.00040, 0.00001)),
+                feature("wb", FeatureType::Unit, "l0", Some("walkway"),
+                    rect(139.70000, 35.600014, 0.00040, 0.00001)),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        assert_eq!(component_count(g), 1, "doorway connects the two walkways");
+
+        let dm = linestring_midpoint(&door).unwrap();
+        let onode = g
+            .nodes
+            .iter()
+            .position(|n| [n.lon, n.lat] == dm)
+            .expect("opening node exists");
+        // A cross-spine skeleton edge jumps the ~1.4 m lat gap between the two
+        // spines without touching the opening node.
+        let cross_spine = g.edges.iter().any(|e| {
+            let (a, b) = (e.from as usize, e.to as usize);
+            if a == onode || b == onode {
+                return false;
+            }
+            (g.nodes[a].lat - g.nodes[b].lat).abs() > 0.000008
+        });
+        assert!(!cross_spine, "no direct bridge edge duplicating the doorway path");
+        assert_eq!(same_floor_degree(g, onode), 2, "opening bridges exactly the two spines");
+    }
+
+    #[test]
+    fn nearby_openings_share_one_doorway_bridge() {
+        // Two doorways ~1.5 m apart in the same wall between the same two
+        // walkway blobs: the first bridges the blobs; the second must attach
+        // as a leaf to the already-connected component, not fan out a second
+        // parallel bridge.
+        let door1 = line(139.700000, 35.600004, 139.700000, 35.600010);
+        let door2 = line(139.700016, 35.600004, 139.700016, 35.600010);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("wa", FeatureType::Unit, "l0", Some("walkway"),
+                    rect(139.70000, 35.600000, 0.00040, 0.00001)),
+                feature("wb", FeatureType::Unit, "l0", Some("walkway"),
+                    rect(139.70000, 35.600014, 0.00040, 0.00001)),
+                feature("door1", FeatureType::Opening, "l0", None, door1.clone()),
+                feature("door2", FeatureType::Opening, "l0", None, door2.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        assert_eq!(component_count(g), 1);
+
+        let degrees: Vec<usize> = [door1, door2]
+            .iter()
+            .map(|d| {
+                let dm = linestring_midpoint(d).unwrap();
+                let node = g
+                    .nodes
+                    .iter()
+                    .position(|n| [n.lon, n.lat] == dm)
+                    .expect("opening node exists");
+                same_floor_degree(g, node)
+            })
+            .collect();
+        assert_eq!(degrees, vec![2, 1], "second doorway attaches as a leaf, not a parallel bridge");
     }
 
     #[test]
