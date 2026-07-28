@@ -54,6 +54,9 @@ fn floor_cost(category: &str) -> f64 {
 }
 
 fn is_walkway(category: &str) -> bool {
+    // NOTE: keep in sync with synth_medial.rs. `unenclosedarea` is excluded
+    // on purpose: it models open shop interiors, and routing must follow the
+    // real walkways around them, not cut through.
     matches!(
         category,
         "walkway"
@@ -64,7 +67,6 @@ fn is_walkway(category: &str) -> bool {
             | "steps"
             | "lobby"
             | "platform"
-            | "unenclosedarea"
             | "corridor"
             | "sidewalk"
     )

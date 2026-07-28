@@ -266,6 +266,9 @@ const TRANSIT_OPENING_SNAP_M: f64 = 1.5;
 /// Minimum passable corridor width (m). Centerline edges and blob bridges
 /// through narrower passages (wall–column pinches, slivers) are pruned.
 const MIN_PASSAGE_M: f64 = 0.8;
+/// Leaf centerline branches shorter than this (m) tip-to-junction are
+/// medial-axis serration twigs, not real corridor ends — pruned whole.
+const SPIKE_CHAIN_MAX_M: f64 = 3.0;
 /// Tolerance (m) for samples to lie just OUTSIDE the walkable area when
 /// validating that an attach segment stays within walkable space — covers
 /// openings digitized slightly off a unit boundary. Gaps this rule rejects
@@ -330,7 +333,75 @@ fn bridge_passable(a: [f64; 2], b: [f64; 2], area: &MultiPolygon<f64>) -> bool {
     })
 }
 
+/// Short-branch prune of medial-axis spur artifacts. A chain starting at a
+/// leaf (degree-1) node and continuing through degree-2 nodes is removed
+/// WHOLE when its total length tip-to-junction is under `chain_max_m` —
+/// those are boundary-serration twigs. Longer chains (real dead-end
+/// corridors, alcoves) survive untouched, so no useful tip is ever eaten.
+fn prune_spur_leaves(skeleton: Skeleton, chain_max_m: f64) -> Skeleton {
+    let n = skeleton.nodes.len();
+    let mut adj: Vec<Vec<(usize, usize, f64)>> = vec![Vec::new(); n]; // (neighbor, edge_idx, len)
+    for (ei, &(a, b)) in skeleton.edges.iter().enumerate() {
+        let d = haversine_m(skeleton.nodes[a], skeleton.nodes[b]);
+        adj[a].push((b, ei, d));
+        adj[b].push((a, ei, d));
+    }
+    let deg = |i: usize| adj[i].len();
+    let mut remove = vec![false; skeleton.edges.len()];
+    for start in 0..n {
+        if deg(start) != 1 {
+            continue;
+        }
+        // Walk tip → junction, collecting the chain.
+        let mut chain: Vec<usize> = Vec::new();
+        let mut total = 0.0;
+        let (mut cur, mut prev) = (start, usize::MAX);
+        let junction_reached = loop {
+            let Some(&(nb, ei, d)) = adj[cur].iter().find(|(nb, _, _)| *nb != prev) else {
+                break true; // isolated node (shouldn't happen for a leaf)
+            };
+            chain.push(ei);
+            total += d;
+            if deg(nb) != 2 {
+                break true; // junction (deg >= 3) or the other end of a free segment
+            }
+            if total >= chain_max_m || chain.len() > n {
+                break false; // long real stub — keep it
+            }
+            prev = cur;
+            cur = nb;
+        };
+        if junction_reached && total < chain_max_m {
+            for ei in chain {
+                remove[ei] = true;
+            }
+        }
+    }
+    // Compact: drop marked edges and the nodes they orphan.
+    let mut remap: Vec<Option<usize>> = vec![None; n];
+    let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+    for (ei, &(a, b)) in skeleton.edges.iter().enumerate() {
+        if remove[ei] {
+            continue;
+        }
+        let (pa, pb) = (skeleton.nodes[a], skeleton.nodes[b]);
+        let ia = *remap[a].get_or_insert_with(|| {
+            nodes.push(pa);
+            nodes.len() - 1
+        });
+        let ib = *remap[b].get_or_insert_with(|| {
+            nodes.push(pb);
+            nodes.len() - 1
+        });
+        edges.push((ia, ib));
+    }
+    Skeleton { nodes, edges }
+}
+
 fn is_walkway(category: &str) -> bool {
+    // NOTE: keep in sync with synth.rs. `unenclosedarea` is excluded on
+    // purpose: it models open shop interiors, and routing must follow the
+    // real walkways around them, not cut through.
     matches!(
         category,
         "walkway"
@@ -341,7 +412,6 @@ fn is_walkway(category: &str) -> bool {
             | "steps"
             | "lobby"
             | "platform"
-            | "unenclosedarea"
             | "corridor"
             | "sidewalk"
     )
@@ -511,11 +581,10 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
 
         // Prune centerline edges through sub-width passages (wall–column
         // pinches, slivers): an edge survives only when the passage along it
-        // is at least MIN_PASSAGE_M wide. Nodes left without edges are
-        // dropped (remapped), so they can never become snap targets.
+        // is at least MIN_PASSAGE_M wide. Then drop short spur twigs
+        // (boundary-serration artifacts) and the nodes they orphan.
         let min_clear = MIN_PASSAGE_M / 2.0;
-        let mut remap: Vec<Option<usize>> = vec![None; skeleton.nodes.len()];
-        let (mut snodes, mut sedges) = (Vec::new(), Vec::new());
+        let mut wide_edges: Vec<(usize, usize)> = Vec::new();
         for &(a, b) in &skeleton.edges {
             let (pa, pb) = (skeleton.nodes[a], skeleton.nodes[b]);
             let mid = [(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0];
@@ -525,17 +594,12 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             {
                 continue;
             }
-            let ia = *remap[a].get_or_insert_with(|| {
-                snodes.push(pa);
-                snodes.len() - 1
-            });
-            let ib = *remap[b].get_or_insert_with(|| {
-                snodes.push(pb);
-                snodes.len() - 1
-            });
-            sedges.push((ia, ib));
+            wide_edges.push((a, b));
         }
-        let skeleton = Skeleton { nodes: snodes, edges: sedges };
+        let skeleton = prune_spur_leaves(
+            Skeleton { nodes: skeleton.nodes, edges: wide_edges },
+            SPIKE_CHAIN_MAX_M,
+        );
         if skeleton.nodes.is_empty() || skeleton.edges.is_empty() {
             continue;
         }
@@ -1201,6 +1265,77 @@ mod tests {
         // Determinism: identical input → identical graph.
         let again = synthesize_network_medial(&doc);
         assert_eq!(build.graph, again.graph, "synthesis is deterministic");
+    }
+
+    #[test]
+    fn unenclosedarea_is_not_routable() {
+        // A floor whose ONLY unit is an unenclosedarea (open shop interior):
+        // no walkable coverage, so no network at all.
+        let shop_only = rect(139.70000, 35.60000, 0.00020, 0.00002);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![feature("shop", FeatureType::Unit, "l0", Some("unenclosedarea"), shop_only)],
+        );
+        let build = synthesize_network_medial(&doc);
+        assert!(build.graph.nodes.is_empty(), "unenclosedarea alone yields no network");
+
+        // Walkways loop AROUND an unenclosed shop block: the network follows
+        // the walkways and no centerline node lies inside the shop.
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("wn", FeatureType::Unit, "l0", Some("walkway"),
+                    rect(139.70000, 35.60003, 0.00030, 0.00002)),
+                feature("ws", FeatureType::Unit, "l0", Some("walkway"),
+                    rect(139.70000, 35.59997, 0.00030, 0.00002)),
+                feature("ww", FeatureType::Unit, "l0", Some("walkway"),
+                    rect(139.69986, 35.60000, 0.00002, 0.00006)),
+                feature("shop", FeatureType::Unit, "l0", Some("unenclosedarea"),
+                    rect(139.70000, 35.60000, 0.00020, 0.00002)),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        assert!(!build.graph.nodes.is_empty(), "walkways still synthesize");
+        assert_eq!(component_count(&build.graph), 1, "walkway loop stays connected");
+        let inside_shop = build.graph.nodes.iter().any(|n| {
+            (n.lon - 139.70000).abs() < 0.00010 && (n.lat - 35.60000).abs() < 0.00001
+        });
+        assert!(!inside_shop, "no centerline inside the shop interior");
+    }
+
+    #[test]
+    fn prune_spur_leaves_removes_short_twigs_but_keeps_real_ends() {
+        // A spine with three branches: a 0.6 m twig, a kinked 3-link twig
+        // (total 2.1 m), and a 3.5 m terminal branch. Short branches are
+        // removed WHOLE (no remnant links); the long real end survives.
+        let m = 9e-6; // ~1 m in degrees latitude
+        let skeleton = Skeleton {
+            nodes: vec![
+                [139.70000, 35.60000],
+                [139.70010, 35.60000],
+                [139.70020, 35.60000],
+                [139.70010, 35.60000 + 0.6 * m], // twig tip
+                [139.70020, 35.60000 + 3.5 * m], // branch tip
+                [139.70010, 35.60000 - 0.7 * m], // kinked twig link 1
+                [139.70010, 35.60000 - 1.4 * m], // kinked twig link 2
+                [139.70010, 35.60000 - 2.1 * m], // kinked twig tip
+            ],
+            edges: vec![(0, 1), (1, 2), (1, 3), (2, 4), (1, 5), (5, 6), (6, 7)],
+        };
+        let pruned = prune_spur_leaves(skeleton, 3.0);
+        assert_eq!(pruned.edges.len(), 3, "both twigs removed whole: {:?}", pruned.edges);
+        // the surviving branch is the 3.5 m real end
+        let has_long_branch = pruned.edges.iter().any(|&(a, b)| {
+            haversine_m(pruned.nodes[a], pruned.nodes[b]) > 3.0
+        });
+        assert!(has_long_branch, "real corridor end preserved");
+        // no sub-1 m remnant link survives from the kinked twig
+        let short_links = pruned
+            .edges
+            .iter()
+            .filter(|&&(a, b)| haversine_m(pruned.nodes[a], pruned.nodes[b]) < 1.0)
+            .count();
+        assert_eq!(short_links, 0, "no twig remnant links");
     }
 
     /// Same-floor neighbor count of one graph node.

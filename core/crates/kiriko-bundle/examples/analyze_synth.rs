@@ -340,6 +340,41 @@ fn main() {
     println!("opening->skeleton degree histogram: {skel_deg_hist:?}");
     println!("opening->transit  degree histogram: {trans_deg_hist:?}");
 
+    // spike analysis: skeleton leaf nodes (degree 1) and their edge lengths
+    let mut leaf_hist: BTreeMap<String, usize> = BTreeMap::new();
+    let mut leaf_total = 0usize;
+    for (i, &k) in kinds.iter().enumerate() {
+        if k != Kind::Skeleton {
+            continue;
+        }
+        let same_floor: Vec<usize> = adj[i]
+            .iter()
+            .filter(|&&nb| graph.nodes[nb].ordinal == graph.nodes[i].ordinal)
+            .copied()
+            .collect();
+        if same_floor.len() == 1 {
+            leaf_total += 1;
+            let nb = same_floor[0];
+            let d = haversine_m(
+                [graph.nodes[i].lon, graph.nodes[i].lat],
+                [graph.nodes[nb].lon, graph.nodes[nb].lat],
+            );
+            let bucket = if d < 0.5 {
+                "<0.5m"
+            } else if d < 1.0 {
+                "0.5-1m"
+            } else if d < 2.0 {
+                "1-2m"
+            } else if d < 4.0 {
+                "2-4m"
+            } else {
+                ">=4m"
+            };
+            *leaf_hist.entry(bucket.to_string()).or_default() += 1;
+        }
+    }
+    println!("skeleton leaf edges: {leaf_total} by length: {leaf_hist:?}");
+
     // duplicate doorway nodes: pairs of opening nodes <2 m apart on same floor
     let opening_nodes: Vec<usize> =
         kinds.iter().enumerate().filter(|&(_, &k)| k == Kind::Opening).map(|(i, _)| i).collect();
