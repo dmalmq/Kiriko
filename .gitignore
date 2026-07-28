@@ -6,6 +6,8 @@ playwright-report
 .pnpm-store
 .superpowers/
 .e2e-data/
+e2e/.platform-data/
+tmp-test-list.txt
 .worktrees/
 server/data/
 # Kiriko Rust core build outputs
