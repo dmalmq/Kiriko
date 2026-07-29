@@ -8,17 +8,19 @@ covers the operational surface added with attachments.
 
 - **SQLite (`$KIRIKO_DATA_DIR/data/kiriko.db`)** — `issue_attachment_blobs`
   (content-addressed normalized image metadata) and `issue_attachments`
-  (per-upload rows: staged → attached → detached). Both cascade with their
-  version/venue.
+  (per-upload rows: staged → attached → detached). Attachment rows cascade
+  with their version/venue; unreferenced blob rows are removed by garbage
+  collection or the janitor.
 - **Files (`$KIRIKO_DATA_DIR/issue-attachments/sha256/<prefix>/<hash>`)** —
   server-normalized rasters only (auto-oriented, EXIF/GPS stripped,
-  re-encoded; PNG/JPEG/WebP originals plus WebP thumbnails ≤ 1600 px). Raw
+  re-encoded; full-size PNG/JPEG/WebP plus WebP thumbnails ≤ 1600 px). Raw
   uploaded bytes are never stored or served.
 
 Attachments are **server-side and version-pinned**: excluded from KVB
 bundles, local ZIP viewers, issue export/import, and cross-version
 carry-forward. A newly published version starts with an empty issue and
-attachment set.
+attachment set. Removing a token during edit detaches its media; while retained,
+that same attachment may be rebound only to the same comment to support undo.
 
 ## Backup and restore
 
@@ -45,13 +47,17 @@ metadata are swept by the janitor after a 24 h safety age.
 
 | Budget | Default | Env override |
 | --- | --- | --- |
-| File size / count per comment / aggregate | 10 MiB / 10 / 25 MiB | — |
+| File size / count per comment / aggregate input bytes | 10 MiB / 10 / 25 MiB | — |
 | Decoded pixels / dimension | 40 MP / 12,000 px | — |
 | Per-version storage quota | 512 MiB | `KIRIKO_ISSUE_ATTACHMENT_VERSION_QUOTA_BYTES` |
-| Upload rate per user | 30 per 10 min | `KIRIKO_ISSUE_ATTACHMENT_UPLOAD_RATE_MAX` |
+| Upload rate per user, per server process | 30 per 10 min | `KIRIKO_ISSUE_ATTACHMENT_UPLOAD_RATE_MAX` |
 | Staged retention | 24 h | — |
 | Detached / tombstoned retention | 30 days | — |
 | Janitor interval | 1 h (also at startup) | `KIRIKO_ISSUE_ATTACHMENT_JANITOR_INTERVAL_MS` |
+
+The per-version quota counts governed full-size and thumbnail bytes for every
+retained staged, attached, and detached row. The per-comment aggregate instead
+uses the original upload input sizes.
 
 The janitor deletes expired staged/detached/tombstoned rows, frees blob
 files only once no row references their hash, and sweeps filesystem orphans

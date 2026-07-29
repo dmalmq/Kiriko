@@ -25,7 +25,7 @@ Editing Rust while servers run needs a restart (or `pnpm core:build`). Verify: `
 The JR East Tokyo dataset is three EPSG:3857 File Geodatabases (venue, routing network, point facilities). **Full schema, layer inventory, floor-label mapping, icon situation, and the GDB→GeoJSON→KVB→routing pipeline are documented in `docs/gdb-data-reference.md` — read it before touching GDB import, `kiriko-route`, `kiriko-facilities`, or KVB sections.**
 
 ## Issue comment attachments
-Rich comments keep Markdown canonical (`comments.body_markdown`); images are first-party staged→attached→detached rows with sharp-normalized rasters under `dataDir/issue-attachments/`. Storage layout, limits, retention/janitor, backup/restore, security, and rollback: `docs/issue-attachments-operations.md`. Editor: shared native-textarea `src/issues/IssueMarkdownEditor.tsx`; `MarkdownBody` remains the only render boundary (attachment:`<id>` tokens only — never remote/data:/SVG).
+Before changing rich comments or first-party media, read the canonical storage, lifecycle, security, and operations contract in `docs/issue-attachments-operations.md`.
 
 Key facts: GDAL stays in TypeScript (gdal3.js); all data interpretation is Rust. KVB sections: `1 manifest / 2 geometry / 3 stores / 5 graph / 7 facilities` (5 and 7 optional, backward-compatible). Reproject 3857→4326 on every GDB read. New Rust `WarningCode`s must be added to the TS bridge allowlist (`server/src/core/native.ts`) AND the client type (`src/imdf/types.ts`) or publish fails with `bridge_error`.
 

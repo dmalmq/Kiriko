@@ -149,7 +149,7 @@ function AttachmentLightbox({ image, locale, onClose }: LightboxProps): ReactEle
     while (active.parentElement !== null) {
       for (const sibling of active.parentElement.children) {
         if (sibling !== active && sibling instanceof HTMLElement) {
-          background.push({ element: sibling, inert: sibling.inert });
+          background.push({ element: sibling, inert: sibling.inert === true });
           sibling.inert = true;
         }
       }
