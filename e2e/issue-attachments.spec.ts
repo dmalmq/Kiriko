@@ -70,9 +70,19 @@ test.describe("issue image attachments", () => {
       await page.getByLabel("Issue body").fill("Gate photo below ");
 
       // File picker path: progress card, then the token replaces the
-      // placeholder and the alt editor appears.
+      // placeholder and the alt editor appears. Hold the upload response so
+      // the transient placeholder cannot disappear before the assertion.
+      let releasePickerUpload!: () => void;
+      const pickerUploadReleased = new Promise<void>((resolve) => {
+        releasePickerUpload = resolve;
+      });
+      await page.route("**/api/review/versions/*/issue-attachments", async (route) => {
+        await pickerUploadReleased;
+        await route.continue();
+      }, { times: 1 });
       await pickerPng(page);
       await expect(page.getByLabel("Issue body")).toHaveValue(/pending:/);
+      releasePickerUpload();
       await expect(page.getByLabel("Issue body")).toHaveValue(/attachment:[0-9a-f-]{36}/, {
         timeout: 15_000,
       });
