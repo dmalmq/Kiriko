@@ -39,6 +39,7 @@ const mapState = vi.hoisted(() => {
     readonly jumpToCalls: Array<{ center: [number, number] }> = [];
     readonly sourceData: unknown[] = [];
     readonly sourceDataDiffs: unknown[] = [];
+    readonly indoorFloorOperations: Array<"fit" | "update"> = [];
     indoorSourceData: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
     readonly routeSourceData: unknown[] = [];
     readonly facilitySourceData: unknown[] = [];
@@ -139,6 +140,7 @@ const mapState = vi.hoisted(() => {
             return;
           }
           this.sourceDataDiffs.push(diff);
+          this.indoorFloorOperations.push("update");
           const removed = new Set(diff.remove ?? []);
           const retained = this.indoorSourceData.features.filter((feature) => {
             const featureId = feature.id ?? feature.properties?.["__feature_id"];
@@ -189,7 +191,9 @@ const mapState = vi.hoisted(() => {
       return { x: lng, y: lat };
     }
 
-    fitBounds(): void {}
+    fitBounds(): void {
+      this.indoorFloorOperations.push("fit");
+    }
     easeTo(options: { center: [number, number]; duration?: number }): void {
       this.easeToCalls.push(options);
     }
@@ -697,12 +701,16 @@ describe("IndoorMap floor source", () => {
       type: "FeatureCollection",
       features: [floorRenderFeature("floor-2", "level-2", 139.2)],
     });
+    venue.boundsByLevel.set("level-1", [139.0, 35.5, 139.2, 35.7]);
+    venue.boundsByLevel.set("level-2", [139.1, 35.5, 139.3, 35.7]);
     const { map, rerender } = renderMap(baseProps({ venue, levelId: "level-1" }));
     const fullUpdatesBeforeFloorChange = map.sourceData.length;
     const deltaUpdatesBeforeFloorChange = map.sourceDataDiffs.length;
+    map.indoorFloorOperations.length = 0;
 
     rerender(baseProps({ venue, levelId: "level-2" }));
 
+    expect(map.indoorFloorOperations).toEqual(["fit", "update"]);
     expect(map.sourceData).toHaveLength(fullUpdatesBeforeFloorChange);
     expect(map.sourceDataDiffs).toHaveLength(deltaUpdatesBeforeFloorChange + 1);
     expect(map.sourceDataDiffs.at(-1)).toEqual({

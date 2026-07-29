@@ -181,7 +181,13 @@ describe("bundle route: publication-state semantics", () => {
 
     app.db.prepare("DELETE FROM venues WHERE id = ?").run(venue.id);
     const replacementVenue = await createVenue(app, cookie, "Recreated Identity");
-    expect(replacementVenue).toEqual(venue); // same slug and reclaimed numeric row id
+    // Creation can cross a wall-clock second on a busy runner. Identity reuse
+    // is about the slug and reclaimed row id, not the new row's timestamp.
+    expect(replacementVenue).toMatchObject({
+      id: venue.id,
+      name: "Recreated Identity",
+      slug: venue.slug,
+    });
     await uploadAndWait(app, cookie, replacementVenue.id, zip);
     const replacementRow = app.db
       .prepare("SELECT id FROM versions WHERE venue_id = ?")

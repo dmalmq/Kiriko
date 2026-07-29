@@ -338,7 +338,8 @@ jobs:
           pnpm exec playwright test e2e/viewer.performance.spec.ts \
             --project=chromium-performance --workers=1 \
             --grep "diagnostic: level-change" \
-            --output=test-results/performance-250ms-dwell
+            --output=test-results/performance-250ms-dwell \
+            2>&1 | tee performance-250ms-dwell.log
 
       - name: Preserve dwell diagnostics
         # High dwell P95 is intentionally evidence, not an assertion failure,
@@ -347,8 +348,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (v4)
         with:
           name: performance-diagnostics-250ms-dwell
-          path: test-results/performance-250ms-dwell
-          if-no-files-found: warn
+          path: |
+            test-results/performance-250ms-dwell
+            performance-250ms-dwell.log
+          if-no-files-found: error
           retention-days: 7
 
   native-addon:

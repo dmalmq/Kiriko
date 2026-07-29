@@ -961,13 +961,16 @@ export function IndoorMap({
       hoverIdRef.current = null;
     }
 
+    // Move the camera first so MapLibre computes the floor delta only for the
+    // final viewport. Updating the source before fitBounds makes the worker
+    // parse tiles for both the departing and arriving viewports.
+    fitLevelBounds(map, venue, levelId);
     indoorSourceStateRef.current = updateSourceData(
       map,
       venue,
       levelId,
       indoorSourceStateRef.current,
     );
-    fitLevelBounds(map, venue, levelId);
 
     const selected = selectedIdRef.current;
     if (selected != null) {
