@@ -85,7 +85,6 @@ export const issueAttachmentRoutes: FastifyPluginAsync<IssueAttachmentRoutesOpti
       if (data === undefined) {
         throw invalidRequest("an image file is required");
       }
-      const requestId = multipartRequestId(data.fields);
       let bytes: Buffer;
       try {
         bytes = await data.toBuffer();
@@ -99,6 +98,7 @@ export const issueAttachmentRoutes: FastifyPluginAsync<IssueAttachmentRoutesOpti
           details: [{ field: "file", reason: "file is too large" }],
         });
       }
+      const requestId = multipartRequestId(data.fields);
       return options.service.upload(
         request.user,
         publicVersionId,

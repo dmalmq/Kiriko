@@ -46,7 +46,11 @@ export function uploadIssueAttachment(
     });
     xhr.addEventListener("load", () => {
       if (xhr.status === 200) {
-        resolve(JSON.parse(xhr.responseText) as IssueAttachmentMetadata);
+        try {
+          resolve(JSON.parse(xhr.responseText) as IssueAttachmentMetadata);
+        } catch {
+          reject(new AttachmentUploadError(xhr.status, "The upload returned an invalid response."));
+        }
       } else {
         let message = "The upload failed.";
         try {

@@ -73,17 +73,24 @@ async function webpBuffer(): Promise<Buffer> {
 function multipartUpload(
   requestId: string,
   bytes: Buffer,
-  options: { filename?: string; contentType?: string } = {},
+  options: { filename?: string; contentType?: string; fileFirst?: boolean } = {},
 ): { payload: Buffer; headers: Record<string, string> } {
   const boundary = "----kirikoAttachmentBoundary";
-  const head = Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="requestId"\r\n\r\n${requestId}\r\n`
-      + `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${options.filename ?? "shot.png"}"\r\n`
+  const requestIdPart = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="requestId"\r\n\r\n${requestId}\r\n`,
+  );
+  const fileHead = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${options.filename ?? "shot.png"}"\r\n`
       + `Content-Type: ${options.contentType ?? "image/png"}\r\n\r\n`,
   );
-  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const filePart = Buffer.concat([fileHead, bytes, Buffer.from("\r\n")]);
+  const tail = Buffer.from(`--${boundary}--\r\n`);
   return {
-    payload: Buffer.concat([head, bytes, tail]),
+    payload: Buffer.concat(
+      options.fileFirst
+        ? [filePart, requestIdPart, tail]
+        : [requestIdPart, filePart, tail],
+    ),
     headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
   };
 }
@@ -272,6 +279,22 @@ describe("attachment upload API", () => {
       const response = await app.inject({ method: "GET", url: `/api/issue-attachments/${metadata.id}/${kind}` });
       expect(response.statusCode).toBe(404);
     }
+  });
+
+  it("accepts requestId after the file part", async () => {
+    const { app, memberCookie } = await seededApp();
+    const requestId = randomUUID();
+    const multipart = multipartUpload(requestId, await pngBuffer(), { fileFirst: true });
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/review/versions/${PUBLIC_ID}/issue-attachments`,
+      headers: { cookie: memberCookie, ...multipart.headers },
+      payload: multipart.payload,
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    const metadata = response.json<UploadMetadata>();
+    expect(attachmentState(app, metadata.id)).toBe("staged");
   });
 
   it("requires authentication and a published version for uploads", async () => {
