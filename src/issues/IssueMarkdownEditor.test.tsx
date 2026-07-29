@@ -242,6 +242,16 @@ describe("IssueMarkdownEditor Write/Preview tabs", () => {
 });
 
 describe("IssueMarkdownEditor image uploads", () => {
+  it("accepts file dragover only while enabled", () => {
+    const { rerender } = render(<Harness />);
+
+    expect(fireEvent.dragOver(textarea(), { dataTransfer: { types: ["text/plain"] } })).toBe(true);
+    expect(fireEvent.dragOver(textarea(), { dataTransfer: { types: ["Files"] } })).toBe(false);
+
+    rerender(<Harness disabled />);
+    expect(fireEvent.dragOver(textarea(), { dataTransfer: { types: ["Files"] } })).toBe(true);
+  });
+
   it("disables every attachment mutation control when locked", async () => {
     const { uploadFile, calls } = mockUploadTransport();
     const { container, rerender } = render(<Harness uploadFile={uploadFile} />);

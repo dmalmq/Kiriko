@@ -500,8 +500,17 @@ export function IssueMarkdownEditor({
     }
   };
 
+  const onDragOver = (event: ReactDragEvent<HTMLTextAreaElement>) => {
+    if (!disabled && Array.from(event.dataTransfer.types).includes("Files")) {
+      event.preventDefault();
+    }
+  };
+
   const onDrop = (event: ReactDragEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(event.dataTransfer?.files ?? []).filter((file) =>
+    if (disabled) {
+      return;
+    }
+    const files = Array.from(event.dataTransfer.files).filter((file) =>
       file.type.startsWith("image/"),
     );
     if (files.length > 0) {
@@ -688,6 +697,7 @@ export function IssueMarkdownEditor({
             onChange(event.target.value);
           }}
           onPaste={onPaste}
+          onDragOver={onDragOver}
           onDrop={onDrop}
         />
       ) : (
