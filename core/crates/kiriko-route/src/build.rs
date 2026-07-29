@@ -280,8 +280,12 @@ mod tests {
 
     #[test]
     fn deterministic_output() {
-        let a = build_route_graph(JUNCTIONS, PATHS, &[0.0, 1.0]).unwrap().graph;
-        let b = build_route_graph(JUNCTIONS, PATHS, &[0.0, 1.0]).unwrap().graph;
+        let a = build_route_graph(JUNCTIONS, PATHS, &[0.0, 1.0])
+            .unwrap()
+            .graph;
+        let b = build_route_graph(JUNCTIONS, PATHS, &[0.0, 1.0])
+            .unwrap()
+            .graph;
         assert_eq!(a, b);
     }
 
@@ -325,7 +329,10 @@ mod tests {
         const P: &str = r#"{"type":"FeatureCollection","features":[
           {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":-5},"geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}}]}"#;
         let b = build_route_graph(JUNCTIONS, P, &[0.0, 1.0]).unwrap();
-        assert!(b.graph.edges.is_empty(), "a negative-cost edge must not enter the graph");
+        assert!(
+            b.graph.edges.is_empty(),
+            "a negative-cost edge must not enter the graph"
+        );
         assert!(b.warnings.iter().any(|w| w.code == "invalid_cost"));
     }
 
@@ -344,7 +351,11 @@ mod tests {
           {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":200,"PATHID":3,"RPATHID":4},"geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}},
           {"type":"Feature","properties":{"FNODEID":2,"TNODEID":1,"cost":200,"PATHID":4,"RPATHID":3},"geometry":{"type":"MultiLineString","coordinates":[[[139.001,35.0],[139.0,35.0]]]}}]}"#;
         let b = build_route_graph(J, P, &[0.0]).unwrap();
-        assert_eq!(b.graph.edges.len(), 2, "two reciprocal pairs → two logical edges");
+        assert_eq!(
+            b.graph.edges.len(),
+            2,
+            "two reciprocal pairs → two logical edges"
+        );
         let mut costs: Vec<f32> = b.graph.edges.iter().map(|e| e.weight).collect();
         costs.sort_by(f32::total_cmp);
         assert_eq!(costs, vec![100.0, 200.0]);
@@ -365,7 +376,11 @@ mod tests {
           {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100,"PATHID":1,"RPATHID":2},"geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}},
           {"type":"Feature","properties":{"FNODEID":1,"TNODEID":3,"cost":200,"PATHID":2,"RPATHID":1},"geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.002,35.0]]]}}]}"#;
         let b = build_route_graph(J, P, &[0.0]).unwrap();
-        assert_eq!(b.graph.edges.len(), 2, "distinct non-reverse edges must both survive");
+        assert_eq!(
+            b.graph.edges.len(),
+            2,
+            "distinct non-reverse edges must both survive"
+        );
         let mut pairs: Vec<(u32, u32)> = b.graph.edges.iter().map(|e| (e.from, e.to)).collect();
         pairs.sort_unstable();
         assert_eq!(pairs, vec![(0, 1), (0, 2)]);
@@ -403,12 +418,20 @@ mod tests {
         }
         pf.push_str("]}");
         let b = build_route_graph(&jf, &pf, &[0.0]).unwrap();
-        assert_eq!(b.graph.edges.len(), N, "all distinct non-reverse edges survive");
+        assert_eq!(
+            b.graph.edges.len(),
+            N,
+            "all distinct non-reverse edges survive"
+        );
         let conflicts = b
             .warnings
             .iter()
             .filter(|w| w.code == "reciprocal_conflict")
             .count();
-        assert_eq!(conflicts, N - 1, "each collision after the first is reported once");
+        assert_eq!(
+            conflicts,
+            N - 1,
+            "each collision after the first is reported once"
+        );
     }
 }

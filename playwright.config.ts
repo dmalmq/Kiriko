@@ -5,6 +5,12 @@ const VISUAL_SPEC = "**/viewer.visual.spec.ts";
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
+  // CI's default worker count runs multiple spec files concurrently, and the
+  // performance spec's wall-clock budgets assume the browser it measures has
+  // the machine to itself. Sharing CPU with another file's Chromium instance
+  // inflates its samples (longtasks, frame timing) well past any real
+  // regression signal, so pin CI to a single worker for determinism.
+  ...(process.env.CI ? { workers: 1 } : {}),
   retries: 0,
   reporter: [["list"]],
   // Plan-literal baseline names (desktop-tokyo-ja.png, …) on the fixed

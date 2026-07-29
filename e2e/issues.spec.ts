@@ -271,17 +271,18 @@ test.describe("version-pinned review issues", () => {
       await expect(latestPage.getByText("No active issues")).toBeVisible();
       await expect(page.getByRole("option", { name: /#1 Pinned to version one/ })).toBeVisible();
 
-      const reconnect404 = page.waitForResponse(
-        (response) =>
-          new URL(response.url()).pathname === streamPath(old.publicVersionId) &&
-          response.status() === 404,
-      );
+      const reconnect404 = page
+        .waitForResponse(
+          (response) =>
+            new URL(response.url()).pathname === streamPath(old.publicVersionId) &&
+            response.status() === 404,
+        )
+        .then(async (response) => (await response.json()) as { error?: string });
       const deletion = await page.request.delete(`/api/venues/${original.venueId}`);
       expect(deletion.status(), await deletion.text()).toBe(204);
       originalDeleted = true;
       await waitForIssueStreamClose(page, old.publicVersionId);
-      const reconnectResponse = await reconnect404;
-      const reconnectBody = (await reconnectResponse.json()) as { error?: string };
+      const reconnectBody = await reconnect404;
       expect(reconnectBody.error).toBe("not_found");
 
       const oldCollection = await page.request.get(collectionPath(old.publicVersionId));

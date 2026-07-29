@@ -238,7 +238,10 @@ fn to_js(response: &DecodeResponseDto) -> JsValue {
 /// A decoded bundle advertises a routable graph only when it carries at least
 /// one edge; a nodes-only graph never enables Directions or Network Review.
 fn has_routable_graph(document: &BundleDocument) -> bool {
-    document.graph.as_ref().is_some_and(|graph| !graph.is_empty())
+    document
+        .graph
+        .as_ref()
+        .is_some_and(|graph| !graph.is_empty())
 }
 
 /// Decode `bytes` (a `kvb1` bundle) into a structured JS value shaped as
@@ -432,9 +435,12 @@ pub fn export_network_js(bundle: &[u8]) -> Result<JsValue, JsError> {
         junctions: String,
         paths: String,
     }
-    NetworkDto { junctions: network.junctions, paths: network.paths }
-        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
-        .map_err(|e| JsError::new(&e.to_string()))
+    NetworkDto {
+        junctions: network.junctions,
+        paths: network.paths,
+    }
+    .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+    .map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[cfg(test)]
@@ -648,7 +654,11 @@ mod tests {
         // would trap the module instance.
         let bundle = compile_with_graph();
         let document = decode_bundle(&bundle).expect("bundle decodes");
-        let ok = Point3 { lon: 139.0, lat: 35.0, ordinal: 0.0 };
+        let ok = Point3 {
+            lon: 139.0,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(route_in_document(&document, Point3 { lon: bad, ..ok }, ok).is_none());
             assert!(route_in_document(&document, ok, Point3 { lat: bad, ..ok }).is_none());
@@ -665,10 +675,17 @@ mod tests {
         // A decoded graph reduced to junction nodes only must NOT advertise
         // routing (has_graph gates Directions / Network Review).
         document.graph = Some(RouteGraph {
-            nodes: vec![RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 }],
+            nodes: vec![RouteNode {
+                lon: 139.0,
+                lat: 35.0,
+                ordinal: 0.0,
+            }],
             edges: Vec::new(),
         });
-        assert!(!has_routable_graph(&document), "nodes alone are not routable");
+        assert!(
+            !has_routable_graph(&document),
+            "nodes alone are not routable"
+        );
         document.graph = None;
         assert!(!has_routable_graph(&document));
     }
