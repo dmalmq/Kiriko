@@ -225,9 +225,16 @@ fn compile_without_facilities_has_no_facilities_section() {
 #[test]
 fn compile_with_facilities_but_no_network_warns_once_and_leaves_anchors_unset() {
     let source = support::build_minimal_imdf_zip();
-    let compiled =
-        compile_imdf_with_network(&source, metadata(), None, None, Some(FACILITIES), false, false)
-            .expect("fixture + facilities compiles without a network");
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        Some(FACILITIES),
+        false,
+        false,
+    )
+    .expect("fixture + facilities compiles without a network");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
 
     let facilities = document
@@ -345,7 +352,11 @@ fn clipping_drops_network_nodes_outside_the_venue() {
     let unclipped_graph = unclipped_document
         .graph
         .expect("unclipped compile embeds a graph section");
-    assert_eq!(unclipped_graph.nodes.len(), 8, "all eight junctions survive unclipped");
+    assert_eq!(
+        unclipped_graph.nodes.len(),
+        8,
+        "all eight junctions survive unclipped"
+    );
 
     let clipped_document = decode_bundle(&clipped.bytes).expect("clipped bundle decodes");
     let clipped_graph = clipped_document
@@ -787,10 +798,20 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
     // (LF vs CRLF varies by platform and git checkout) without weakening the
     // exact hash or path assertions.
     let mut fields = checksum_file.split_whitespace();
-    let file_hash = fields.next().expect("checksum file must carry a hash field");
-    let file_path = fields.next().expect("checksum file must carry a path field");
-    assert!(fields.next().is_none(), "checksum file must carry exactly two fields");
-    assert_eq!(file_hash, hex, "the committed sha256 must match the golden bytes");
+    let file_hash = fields
+        .next()
+        .expect("checksum file must carry a hash field");
+    let file_path = fields
+        .next()
+        .expect("checksum file must carry a path field");
+    assert!(
+        fields.next().is_none(),
+        "checksum file must carry exactly two fields"
+    );
+    assert_eq!(
+        file_hash, hex,
+        "the committed sha256 must match the golden bytes"
+    );
     assert_eq!(
         file_path, "tests/fixtures/minimal.kvb",
         "the committed sha256 line must name the golden bundle"
@@ -1035,13 +1056,37 @@ fn network_round_trip_is_stable_across_two_export_build_cycles() {
     // and a vertical edge up to F2.
     let g0 = RouteGraph {
         nodes: vec![
-            RouteNode { lon: 139.70, lat: 35.69, ordinal: 0.0 },
-            RouteNode { lon: 139.701, lat: 35.69, ordinal: 0.0 },
-            RouteNode { lon: 139.70, lat: 35.69, ordinal: 1.0 },
+            RouteNode {
+                lon: 139.70,
+                lat: 35.69,
+                ordinal: 0.0,
+            },
+            RouteNode {
+                lon: 139.701,
+                lat: 35.69,
+                ordinal: 0.0,
+            },
+            RouteNode {
+                lon: 139.70,
+                lat: 35.69,
+                ordinal: 1.0,
+            },
         ],
         edges: vec![
-            RouteEdge { from: 0, to: 1, weight: 90_000.0, ordinal: 0.0, interior: Vec::new() },
-            RouteEdge { from: 0, to: 2, weight: 5_000.0, ordinal: 0.0, interior: Vec::new() },
+            RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 90_000.0,
+                ordinal: 0.0,
+                interior: Vec::new(),
+            },
+            RouteEdge {
+                from: 0,
+                to: 2,
+                weight: 5_000.0,
+                ordinal: 0.0,
+                interior: Vec::new(),
+            },
         ],
     };
 
@@ -1053,7 +1098,10 @@ fn network_round_trip_is_stable_across_two_export_build_cycles() {
     // Reciprocal PATHID/RPATHID pairs collapse back to one logical edge each —
     // no doubling across the round-trip.
     assert_eq!(g1.edges.len(), g0.edges.len(), "edge count is stable");
-    assert_eq!(g1, g0, "costs, geometry, and integer ordinals survive one cycle");
+    assert_eq!(
+        g1, g0,
+        "costs, geometry, and integer ordinals survive one cycle"
+    );
 
     let net2 = export_network(&bundle_with_graph(g1.clone())).expect("second export");
     let g2 = kiriko_route::build_route_graph(&net2.junctions, &net2.paths, &ordinals)
