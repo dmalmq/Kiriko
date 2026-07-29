@@ -488,7 +488,6 @@ async function runLevelChangeSamples(page: Page, interSampleDwellMs = 0): Promis
   await waitForReadyVenue(page, VENUE_NAME_JA);
   await waitForMapIdle(page);
   await zeroMapLibreTransitions(page);
-  const environment = await levelChangeEnvironment(page);
   const labels = [LEVEL_B1_SHORT, LEVEL_1F_SHORT, LEVEL_2F_SHORT, LEVEL_1F_SHORT];
 
   // 3 unmeasured warm-ups.
@@ -508,6 +507,11 @@ async function runLevelChangeSamples(page: Page, interSampleDwellMs = 0): Promis
       await page.waitForTimeout(interSampleDwellMs);
     }
   }
+
+  // WebGL debug-extension access can synchronize the renderer. Keep the
+  // environment probe after every gate sample so diagnostics cannot perturb
+  // the unchanged acceptance clock on software-rendered CI browsers.
+  const environment = await levelChangeEnvironment(page);
 
   // Collect phase/source/long-task evidence in a distinct probe sequence.
   // Separating observation from the controls preserves both useful failure
