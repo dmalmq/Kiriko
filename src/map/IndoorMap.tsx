@@ -7,6 +7,7 @@ import {
 } from "react";
 import maplibregl, {
   type GeoJSONSource,
+  type GeoJSONSourceDiff,
   type Map as MapLibreMap,
   type MapMouseEvent,
   type PointLike,
@@ -415,16 +416,113 @@ function fitLevelBounds(
   );
 }
 
+interface IndoorSourceState {
+  venue: LoadedVenue;
+  data: GeoJSON.FeatureCollection;
+}
+
+function renderFeatureId(feature: GeoJSON.Feature): string | number | null {
+  if (typeof feature.id === "string" || typeof feature.id === "number") {
+    return feature.id;
+  }
+  const promoted = feature.properties?.["__feature_id"];
+  return typeof promoted === "string" || typeof promoted === "number" ? promoted : null;
+}
+
+function sameRenderFeature(left: GeoJSON.Feature, right: GeoJSON.Feature): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.geometry !== right.geometry) {
+    return false;
+  }
+  const leftProperties = left.properties ?? {};
+  const rightProperties = right.properties ?? {};
+  const leftKeys = Object.keys(leftProperties);
+  const rightKeys = Object.keys(rightProperties);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => Object.is(leftProperties[key], rightProperties[key]))
+  );
+}
+
+/**
+ * Build an ID-based floor delta for one immutable venue. Shared context and
+ * same-ordinal features stay in the worker index; only departed/arriving or
+ * changed features are removed/added. null falls back to a full setData when
+ * IDs are missing or duplicated.
+ */
+export function buildIndoorSourceDiff(
+  previous: GeoJSON.FeatureCollection,
+  next: GeoJSON.FeatureCollection,
+): GeoJSONSourceDiff | null {
+  const previousById = new Map<string | number, GeoJSON.Feature>();
+  const nextById = new Map<string | number, GeoJSON.Feature>();
+  for (const [features, byId] of [
+    [previous.features, previousById],
+    [next.features, nextById],
+  ] as const) {
+    for (const feature of features) {
+      const id = renderFeatureId(feature);
+      if (id === null || byId.has(id)) {
+        return null;
+      }
+      byId.set(id, feature);
+    }
+  }
+
+  const remove: Array<string | number> = [];
+  const add: GeoJSON.Feature[] = [];
+  for (const [id, previousFeature] of previousById) {
+    const nextFeature = nextById.get(id);
+    if (nextFeature === undefined || !sameRenderFeature(previousFeature, nextFeature)) {
+      remove.push(id);
+    }
+  }
+  for (const [id, nextFeature] of nextById) {
+    const previousFeature = previousById.get(id);
+    if (previousFeature === undefined || !sameRenderFeature(previousFeature, nextFeature)) {
+      add.push(nextFeature);
+    }
+  }
+  return {
+    ...(remove.length > 0 ? { remove } : {}),
+    ...(add.length > 0 ? { add } : {}),
+  };
+}
+
 function setSourceData(
   map: MapLibreMap,
   venue: LoadedVenue,
   levelId: string,
-): void {
+): GeoJSON.FeatureCollection | null {
   const source = getIndoorSource(map);
   if (source == null) {
-    return;
+    return null;
   }
-  source.setData(buildRenderFeatures(venue, levelId));
+  const data = buildRenderFeatures(venue, levelId);
+  source.setData(data);
+  return data;
+}
+
+function updateSourceData(
+  map: MapLibreMap,
+  venue: LoadedVenue,
+  levelId: string,
+  previous: IndoorSourceState | null,
+): IndoorSourceState | null {
+  const source = getIndoorSource(map);
+  if (source == null) {
+    return null;
+  }
+  const data = buildRenderFeatures(venue, levelId);
+  const diff = previous?.venue === venue ? buildIndoorSourceDiff(previous.data, data) : null;
+  if (diff === null) {
+    source.setData(data);
+  } else if (diff.remove !== undefined || diff.add !== undefined || diff.update !== undefined) {
+    source.updateData(diff);
+  }
+  return { venue, data };
 }
 
 type FeatureStateKey = "hover" | "selected" | "issueHighlight";
@@ -552,7 +650,10 @@ export function IndoorMap({
   const directionsRef = useRef(directions);
   const networkRef = useRef(network);
   const networkEditingRef = useRef(networkEditing);
+  const routeSourceActiveRef = useRef(directions != null);
   const networkSourceActiveRef = useRef(network != null || networkEditing != null);
+  const facilitySourceActiveRef = useRef(facilities.length > 0);
+  const indoorSourceStateRef = useRef<IndoorSourceState | null>(null);
   const [mapInstance, setMapInstance] = useState<MapLibreMap | null>(null);
 
   onSelectRef.current = onSelectFeature;
@@ -764,8 +865,11 @@ export function IndoorMap({
     };
 
     const onLoad = (): void => {
-      setSourceData(map, venueRef.current, levelIdRef.current);
+      const indoorData = setSourceData(map, venueRef.current, levelIdRef.current);
+      indoorSourceStateRef.current =
+        indoorData === null ? null : { venue: venueRef.current, data: indoorData };
       setRouteSourceData(map, venueRef.current, levelIdRef.current, directionsRef.current);
+      routeSourceActiveRef.current = directionsRef.current != null;
       setNetworkSourceData(
         map,
         venueRef.current,
@@ -777,6 +881,7 @@ export function IndoorMap({
         networkRef.current != null || networkEditingRef.current != null;
       registerFacilityImages(map);
       setFacilitySourceData(map, venueRef.current, levelIdRef.current, facilitiesRef.current);
+      facilitySourceActiveRef.current = facilitiesRef.current.length > 0;
       applyLayerVisibility(map, visibilityRef.current);
       fitLevelBounds(map, venueRef.current, levelIdRef.current);
       setMapInstance(map);
@@ -830,6 +935,7 @@ export function IndoorMap({
       appliedSelectedRef.current = null;
       appliedIssueHighlightRef.current = null;
       appliedCameraKeyRef.current = null;
+      indoorSourceStateRef.current = null;
     };
     // Map is created once; theme/venue/level are applied via later effects.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -855,7 +961,12 @@ export function IndoorMap({
       hoverIdRef.current = null;
     }
 
-    setSourceData(map, venue, levelId);
+    indoorSourceStateRef.current = updateSourceData(
+      map,
+      venue,
+      levelId,
+      indoorSourceStateRef.current,
+    );
     fitLevelBounds(map, venue, levelId);
 
     const selected = selectedIdRef.current;
@@ -1018,13 +1129,20 @@ export function IndoorMap({
   }, [issueReview?.cameraRequest, levelId]);
 
   // Directions overlay: re-segment the route per active floor whenever the
-  // route, endpoints, floor, or venue change; empty when Directions is off.
+  // route, endpoints, floor, or venue change. onLoad initializes it to empty;
+  // while Directions stays off, floor changes cannot alter that data. A
+  // transition from active to off still clears the source exactly once.
   useEffect(() => {
     const map = mapRef.current;
     if (map == null || !map.isStyleLoaded()) {
       return;
     }
+    const active = directions != null;
+    if (!active && !routeSourceActiveRef.current) {
+      return;
+    }
     setRouteSourceData(map, venue, levelId, directions);
+    routeSourceActiveRef.current = active;
   }, [directions, venue, levelId]);
 
   // Network-review overlay: re-filter the generated network to the active
@@ -1049,13 +1167,20 @@ export function IndoorMap({
   }, [network, networkEditing, venue, levelId]);
 
   // Facility symbols: refresh per active floor (and when the facility set or
-  // venue changes). Icons are registered once on load.
+  // venue changes). onLoad initializes the source to empty, so an empty set
+  // needs no floor invalidations; removing active facilities clears it once.
+  // Icons are registered once on load.
   useEffect(() => {
     const map = mapRef.current;
     if (map == null || !map.isStyleLoaded()) {
       return;
     }
+    const active = facilities.length > 0;
+    if (!active && !facilitySourceActiveRef.current) {
+      return;
+    }
     setFacilitySourceData(map, venue, levelId, facilities);
+    facilitySourceActiveRef.current = active;
   }, [facilities, venue, levelId]);
 
   // Layer-group visibility toggles (Layers panel).
