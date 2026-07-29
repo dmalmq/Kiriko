@@ -705,7 +705,7 @@ test.describe("viewer performance", () => {
     );
   });
 
-  test("1s drag keeps ≥30 frames and no longtask > 100ms", async ({ page }) => {
+  test("diagnostic: 1s drag keeps ≥30 frames and no longtask > 100ms", async ({ page }) => {
     test.setTimeout(60_000);
     const zipBuffer = await minimalImdfZipBuffer();
     await page.goto(VIEWER_URL);

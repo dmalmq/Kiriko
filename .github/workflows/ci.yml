@@ -78,11 +78,23 @@ jobs:
           test ! -e dist
           pnpm exec playwright test --project=chromium
           # Single worker: real-time thresholds need an uncontended CPU.
-          pnpm exec playwright test --project=chromium-performance --workers=1
+          pnpm exec playwright test --project=chromium-performance --workers=1 \
+            --grep-invert "diagnostic:" \
+            --output=test-results/acceptance-performance-controls
           pnpm exec playwright test --project=firefox
           pnpm exec playwright test --project=webkit
           pnpm exec playwright test --project=chromium-visual
           npx -y node@24 -e "const core=require('./core/crates/kiriko-node'); if(typeof core.compileImdf!=='function'||typeof core.inspectBundle!=='function') process.exit(1)"
+
+      - name: Run performance probes separately
+        id: acceptance_performance_probes
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          pnpm exec playwright test e2e/viewer.performance.spec.ts \
+            --project=chromium-performance --workers=1 \
+            --grep "diagnostic:" \
+            --output=test-results/acceptance-performance-probes
 
       - name: Preserve Playwright failure diagnostics
         if: failure()
@@ -90,6 +102,16 @@ jobs:
         with:
           name: acceptance-playwright-diagnostics
           path: test-results
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Preserve failed acceptance probes
+        if: steps.acceptance_performance_probes.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (v4)
+        with:
+          name: acceptance-performance-probes
+          path: test-results/acceptance-performance-probes
           if-no-files-found: warn
           retention-days: 7
 
@@ -197,7 +219,8 @@ jobs:
           node scripts/print-runner-diagnostics.mjs
           pnpm exec playwright test e2e/viewer.performance.spec.ts \
             --project=chromium-performance --workers=1 \
-            --grep "level-change P95"
+            --grep "level-change P95" \
+            --output=test-results/performance-control-${{ matrix.replica }}
 
       - name: Run level-change phase and source probes
         id: phase_source_probes
@@ -207,7 +230,8 @@ jobs:
         run: |
           pnpm exec playwright test e2e/viewer.performance.spec.ts \
             --project=chromium-performance --workers=1 \
-            --grep "diagnostic: level-change phase/source probes"
+            --grep "diagnostic: level-change phase/source probes" \
+            --output=test-results/performance-probes-${{ matrix.replica }}
 
       - name: Publish explicit P95 assertion failure
         if: ${{ always() && hashFiles(format('performance-p95-failure-{0}.json', matrix.replica)) != '' }}
@@ -218,13 +242,23 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-      - name: Preserve performance failure diagnostics
-        if: ${{ failure() || steps.phase_source_probes.outcome == 'failure' }}
+      - name: Preserve failed control diagnostics
+        if: failure()
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (v4)
         with:
-          name: performance-diagnostics-${{ matrix.replica }}
-          path: test-results
+          name: performance-control-diagnostics-${{ matrix.replica }}
+          path: test-results/performance-control-${{ matrix.replica }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Preserve failed probe diagnostics
+        if: steps.phase_source_probes.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (v4)
+        with:
+          name: performance-probe-diagnostics-${{ matrix.replica }}
+          path: test-results/performance-probes-${{ matrix.replica }}
           if-no-files-found: warn
           retention-days: 7
 
@@ -303,7 +337,8 @@ jobs:
           node scripts/print-runner-diagnostics.mjs
           pnpm exec playwright test e2e/viewer.performance.spec.ts \
             --project=chromium-performance --workers=1 \
-            --grep "diagnostic: level-change"
+            --grep "diagnostic: level-change" \
+            --output=test-results/performance-250ms-dwell
 
       - name: Preserve dwell diagnostics
         # High dwell P95 is intentionally evidence, not an assertion failure,
@@ -312,7 +347,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (v4)
         with:
           name: performance-diagnostics-250ms-dwell
-          path: test-results
+          path: test-results/performance-250ms-dwell
           if-no-files-found: warn
           retention-days: 7
 
