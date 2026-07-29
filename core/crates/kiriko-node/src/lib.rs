@@ -174,6 +174,9 @@ fn error_json(err: &CompileError) -> Value {
 /// entirely off the Node.js event loop via `AsyncTask`; the returned promise
 /// always resolves to a [`NativeCompileResponse`], never rejecting for
 /// domain (IMDF, route-build, facility-build, or bundle-codec) failures.
+// Positional napi FFI signature mirrored by the TS bridge; grouping args
+// into a struct would change the JS-facing API.
+#[allow(clippy::too_many_arguments)]
 #[napi]
 pub fn compile_imdf(
     source: Buffer,

@@ -633,6 +633,9 @@ fn choose_spacing(area: &MultiPolygon<f64>, original: usize) -> Option<f64> {
 /// (for vertical matching), and the source geometry (for doorway matching).
 type TransitUnit<'a> = ([f64; 2], String, Option<Polygon<f64>>, &'a Value);
 
+/// Cross-floor transit record accumulated while scanning ordinals.
+type TransitAllEntry = (u32, [f64; 2], String, f64, Option<Polygon<f64>>);
+
 /// Union-find root with path compression (over a `parent` slice).
 fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
     while parent[x] != x {
@@ -659,7 +662,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
     let mut nodes: Vec<RouteNode> = Vec::new();
     let mut edges: Vec<RouteEdge> = Vec::new();
     let mut warnings: Vec<RouteBuildWarning> = Vec::new();
-    let mut transit_all: Vec<(u32, [f64; 2], String, f64, Option<Polygon<f64>>)> = Vec::new();
+    let mut transit_all: Vec<TransitAllEntry> = Vec::new();
 
     for &ord in &ordinals {
         let mut walk: Vec<&Value> = Vec::new();
@@ -682,10 +685,10 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     };
                     if is_walkway(category) {
                         walk.push(geom);
-                    } else if is_transit(category) {
-                        if let Some(c) = polygon_centroid(geom) {
-                            transit.push((c, category.to_string(), largest_polygon(geom), geom));
-                        }
+                    } else if is_transit(category)
+                        && let Some(c) = polygon_centroid(geom)
+                    {
+                        transit.push((c, category.to_string(), largest_polygon(geom), geom));
                     }
                 }
                 FeatureType::Opening => {
@@ -1041,7 +1044,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
 
     // Vertical transitions: match each transit unit to the nearest same-kind
     // unit on the next consecutive floor.
-    transit_all.sort_by(|a, b| a.0.cmp(&b.0));
+    transit_all.sort_by_key(|a| a.0);
     let next_ordinal = |o: f64| -> Option<f64> {
         let pos = ordinals.iter().position(|&x| x == o)?;
         ordinals.get(pos + 1).copied()

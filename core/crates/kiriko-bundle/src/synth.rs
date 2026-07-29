@@ -570,7 +570,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
 
     // Vertical: match each transit node to the nearest same-category node on
     // the next consecutive ordinal. Iterate in node-index order for stability.
-    transit_all.sort_by(|a, b| a.0.cmp(&b.0));
+    transit_all.sort_by_key(|a| a.0);
     let next_ordinal = |ord: f64| -> Option<f64> {
         let pos = ordinals.iter().position(|&o| o == ord)?;
         ordinals.get(pos + 1).copied()

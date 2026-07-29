@@ -280,7 +280,12 @@ test.describe("version-pinned review issues", () => {
       expect(deletion.status(), await deletion.text()).toBe(204);
       originalDeleted = true;
       await waitForIssueStreamClose(page, old.publicVersionId);
-      const reconnectResponse = await reconnect404;
+      // The 404 body is read via a fresh request rather than the live EventSource
+      // response captured above: Chrome/CDP does not reliably retain response bodies
+      // for streaming (EventSource) resources, which makes reading them flaky.
+      await reconnect404;
+      const reconnectResponse = await page.request.get(streamPath(old.publicVersionId));
+      expect(reconnectResponse.status()).toBe(404);
       const reconnectBody = (await reconnectResponse.json()) as { error?: string };
       expect(reconnectBody.error).toBe("not_found");
 

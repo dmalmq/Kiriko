@@ -419,10 +419,10 @@ fn group_segments(verts: Vec<TaggedVertex>) -> Vec<RouteSegment> {
             }
             _ => {
                 let mut coordinates = Vec::new();
-                if let Some(seg) = segments.last() {
-                    if let Some(&junction) = seg.coordinates.last() {
-                        coordinates.push(junction);
-                    }
+                if let Some(seg) = segments.last()
+                    && let Some(&junction) = seg.coordinates.last()
+                {
+                    coordinates.push(junction);
                 }
                 coordinates.push(v.coord);
                 segments.push(RouteSegment {
