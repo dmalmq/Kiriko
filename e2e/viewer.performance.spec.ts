@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import {
   floorButton,
@@ -138,6 +139,7 @@ const LEVEL_SOURCE_IDS = [
 
 interface SourceUpdateTiming {
   sourceId: string;
+  operation: "setData" | "updateData";
   startMs: number;
   durationMs: number;
 }
@@ -177,14 +179,21 @@ interface LevelChangeDiagnostic {
   longTasks: LongTaskTiming[];
 }
 
-interface LevelChangeRun {
+interface LevelChangeEnvironment {
+  browserVersion: string;
+  webglVendor: string;
+  webglRenderer: string;
+}
+
+interface LevelChangeControlRun {
   samples: number[];
+  environment: LevelChangeEnvironment;
+}
+
+interface LevelChangeDiagnosticRun {
   diagnostics: LevelChangeDiagnostic[];
-  environment: {
-    browserVersion: string;
-    webglVendor: string;
-    webglRenderer: string;
-  };
+  environment: LevelChangeEnvironment;
+  error: string | null;
 }
 
 /**
@@ -252,6 +261,7 @@ async function measureLevelChangeDiagnostic(
       };
       type PerfSource = {
         setData: (data: unknown) => unknown;
+        updateData?: (diff: unknown) => unknown;
       };
 
       const container = document.querySelector(".indoor-map");
@@ -299,6 +309,7 @@ async function measureLevelChangeDiagnostic(
             if (start !== null) {
               sourceUpdates.push({
                 sourceId,
+                operation: "setData",
                 startMs: updateStart - start,
                 durationMs: performance.now() - updateStart,
               });
@@ -308,6 +319,28 @@ async function measureLevelChangeDiagnostic(
         restoreSources.push(() => {
           source.setData = originalSetData;
         });
+
+        if (typeof source.updateData === "function") {
+          const originalUpdateData = source.updateData;
+          source.updateData = function timedUpdateData(this: PerfSource, diff: unknown): unknown {
+            const updateStart = performance.now();
+            try {
+              return originalUpdateData.call(this, diff);
+            } finally {
+              if (start !== null) {
+                sourceUpdates.push({
+                  sourceId,
+                  operation: "updateData",
+                  startMs: updateStart - start,
+                  durationMs: performance.now() - updateStart,
+                });
+              }
+            }
+          };
+          restoreSources.push(() => {
+            source.updateData = originalUpdateData;
+          });
+        }
       }
 
       const recordSourceEvent = (
@@ -447,7 +480,7 @@ async function measureLevelChangeDiagnostic(
   );
 }
 
-async function levelChangeEnvironment(page: Page): Promise<LevelChangeRun["environment"]> {
+async function levelChangeEnvironment(page: Page): Promise<LevelChangeEnvironment> {
   const renderer = await page.evaluate(() => {
     const canvas = document.querySelector(".indoor-map canvas");
     if (!(canvas instanceof HTMLCanvasElement)) {
@@ -478,7 +511,9 @@ async function levelChangeEnvironment(page: Page): Promise<LevelChangeRun["envir
   };
 }
 
-async function runLevelChangeSamples(page: Page, interSampleDwellMs = 0): Promise<LevelChangeRun> {
+const LEVEL_LABELS = [LEVEL_B1_SHORT, LEVEL_1F_SHORT, LEVEL_2F_SHORT, LEVEL_1F_SHORT];
+
+async function prepareLevelChanges(page: Page): Promise<void> {
   // Measure setData + idle, not camera ease (FIT_DURATION_MS = 500).
   await page.emulateMedia({ reducedMotion: "reduce" });
   const zipBuffer = await minimalImdfZipBuffer();
@@ -488,57 +523,114 @@ async function runLevelChangeSamples(page: Page, interSampleDwellMs = 0): Promis
   await waitForReadyVenue(page, VENUE_NAME_JA);
   await waitForMapIdle(page);
   await zeroMapLibreTransitions(page);
-  const labels = [LEVEL_B1_SHORT, LEVEL_1F_SHORT, LEVEL_2F_SHORT, LEVEL_1F_SHORT];
 
   // 3 unmeasured warm-ups.
   for (let i = 0; i < 3; i += 1) {
-    const label = labels[i % labels.length]!;
+    const label = LEVEL_LABELS[i % LEVEL_LABELS.length]!;
     await floorButton(page, label).click();
     await waitForMapIdle(page);
   }
+}
 
-  // These are the gate samples. Keep them immediate and free of diagnostic
-  // hooks so this remains the pre-existing nearest-rank acceptance method.
+async function safeLevelChangeEnvironment(page: Page): Promise<LevelChangeEnvironment> {
+  try {
+    return await levelChangeEnvironment(page);
+  } catch {
+    return {
+      browserVersion: page.context().browser()?.version() ?? "unknown",
+      webglVendor: "unavailable",
+      webglRenderer: "unavailable",
+    };
+  }
+}
+
+async function runLevelChangeControls(
+  page: Page,
+  interSampleDwellMs = 0,
+): Promise<LevelChangeControlRun> {
+  await prepareLevelChanges(page);
   const samples: number[] = [];
   for (let i = 0; i < 30; i += 1) {
-    const label = labels[i % labels.length]!;
+    const label = LEVEL_LABELS[i % LEVEL_LABELS.length]!;
     samples.push(await measureLevelChangeElapsed(page, label));
     if (interSampleDwellMs > 0 && i < 29) {
       await page.waitForTimeout(interSampleDwellMs);
     }
   }
 
-  // WebGL debug-extension access can synchronize the renderer. Keep the
-  // environment probe after every gate sample so diagnostics cannot perturb
-  // the unchanged acceptance clock on software-rendered CI browsers.
-  const environment = await levelChangeEnvironment(page);
-
-  // Collect phase/source/long-task evidence in a distinct probe sequence.
-  // Separating observation from the controls preserves both useful failure
-  // evidence and the exact timing semantics of the unchanged 150ms gate.
-  const diagnostics: LevelChangeDiagnostic[] = [];
-  for (let i = 0; i < 30; i += 1) {
-    const label = labels[i % labels.length]!;
-    diagnostics.push(await measureLevelChangeDiagnostic(page, label, i + 1));
-    if (interSampleDwellMs > 0 && i < 29) {
-      await page.waitForTimeout(interSampleDwellMs);
-    }
-  }
-  return { samples, diagnostics, environment };
+  // Renderer inspection runs after every control sample and is best-effort, so
+  // it cannot perturb or determine the unchanged acceptance result.
+  return { samples, environment: await safeLevelChangeEnvironment(page) };
 }
 
-function logLevelChangeRun(run: LevelChangeRun, prefix = "level-change"): number {
+async function runLevelChangeDiagnosticProbes(
+  page: Page,
+  interSampleDwellMs = 0,
+): Promise<LevelChangeDiagnosticRun> {
+  const diagnostics: LevelChangeDiagnostic[] = [];
+  let error: string | null = null;
+  try {
+    await prepareLevelChanges(page);
+    for (let i = 0; i < 30; i += 1) {
+      const label = LEVEL_LABELS[i % LEVEL_LABELS.length]!;
+      diagnostics.push(await measureLevelChangeDiagnostic(page, label, i + 1));
+      if (interSampleDwellMs > 0 && i < 29) {
+        await page.waitForTimeout(interSampleDwellMs);
+      }
+    }
+  } catch (cause) {
+    error = cause instanceof Error ? cause.message : String(cause);
+  }
+  return {
+    diagnostics,
+    environment: await safeLevelChangeEnvironment(page),
+    error,
+  };
+}
+
+function logLevelChangeControls(
+  run: LevelChangeControlRun,
+  prefix = "level-change",
+): number {
   const p95 = percentileNearestRank(run.samples, 0.95);
   console.log(
     `${prefix} samples(ms)=${run.samples.map((n) => n.toFixed(1)).join(", ")} P95=${p95.toFixed(1)}`,
   );
+  console.log(`${prefix} environment=${JSON.stringify(run.environment)}`);
+  return p95;
+}
+
+function logLevelChangeDiagnostics(
+  run: LevelChangeDiagnosticRun,
+  prefix = "level-change",
+): void {
   console.log(
     `${prefix} diagnostics=${JSON.stringify({
       environment: run.environment,
+      error: run.error,
       slowSamples: run.diagnostics.filter((sample) => sample.elapsedMs > 150),
     })}`,
   );
-  return p95;
+}
+
+async function writeP95FailureOutcome(p95: number): Promise<void> {
+  const outputPath = process.env.KIRIKO_PERF_P95_FAILURE_FILE;
+  if (outputPath === undefined || outputPath === "" || p95 <= 150) {
+    return;
+  }
+  await writeFile(
+    outputPath,
+    `${JSON.stringify({
+      kind: "level-change-p95-failure",
+      p95,
+      budgetMs: 150,
+      warmUps: 3,
+      samples: 30,
+      percentile: "nearest-rank-p95",
+      interSampleDwellMs: 0,
+    })}\n`,
+    "utf8",
+  );
 }
 
 test.describe("viewer performance", () => {
@@ -566,13 +658,26 @@ test.describe("viewer performance", () => {
     page,
   }, testInfo) => {
     test.setTimeout(120_000);
-    const run = await runLevelChangeSamples(page);
-    const p95 = logLevelChangeRun(run);
+    const run = await runLevelChangeControls(page);
+    const p95 = logLevelChangeControls(run);
+    await testInfo.attach("level-change-controls", {
+      body: Buffer.from(JSON.stringify(run, null, 2)),
+      contentType: "application/json",
+    });
+    await writeP95FailureOutcome(p95);
+    expect(p95, `level-change P95 ${p95.toFixed(1)}ms exceeds 150ms`).toBeLessThanOrEqual(150);
+  });
+
+  test("diagnostic: level-change phase/source probes", async ({ page }, testInfo) => {
+    test.setTimeout(120_000);
+    const run = await runLevelChangeDiagnosticProbes(page);
+    logLevelChangeDiagnostics(run);
     await testInfo.attach("level-change-diagnostics", {
       body: Buffer.from(JSON.stringify(run, null, 2)),
       contentType: "application/json",
     });
-    expect(p95, `level-change P95 ${p95.toFixed(1)}ms exceeds 150ms`).toBeLessThanOrEqual(150);
+    // Evidence only: private instrumentation failure must never decide the
+    // unchanged control result in the separate test above.
   });
 
   test("diagnostic: level-change with 250ms unmeasured inter-sample dwell", async ({
@@ -583,10 +688,12 @@ test.describe("viewer performance", () => {
       "run only as the conditional burst-carryover counterfactual",
     );
     test.setTimeout(120_000);
-    const run = await runLevelChangeSamples(page, 250);
-    const p95 = logLevelChangeRun(run, "level-change 250ms-dwell diagnostic");
+    const controls = await runLevelChangeControls(page, 250);
+    const p95 = logLevelChangeControls(controls, "level-change 250ms-dwell diagnostic");
+    const diagnostics = await runLevelChangeDiagnosticProbes(page, 250);
+    logLevelChangeDiagnostics(diagnostics, "level-change 250ms-dwell diagnostic");
     await testInfo.attach("level-change-250ms-dwell-diagnostics", {
-      body: Buffer.from(JSON.stringify(run, null, 2)),
+      body: Buffer.from(JSON.stringify({ controls, diagnostics }, null, 2)),
       contentType: "application/json",
     });
     // This counterfactual is evidence only. The no-dwell control jobs retain

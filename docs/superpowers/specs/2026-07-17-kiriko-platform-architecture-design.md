@@ -353,7 +353,7 @@ Current performance acceptance in the executable browser suite includes:
 - warm floor change nearest-rank P95 at or below 150 ms after three unmeasured warm-ups and 30 immediate alternating clicks in a dedicated one-worker Chromium project;
 - a one-second drag sustaining at least 30 frames with no long task above 100 ms.
 
-Floor-change runs record per-sample phase/source timings, long tasks, WebGL identity, and a privacy-safe runner CPU/image summary. Pull requests supplement the acceptance gate with five independent Ubuntu 24.04 replicas at the same SHA; a 250 ms unmeasured inter-sample dwell runs only as a diagnostic when a no-dwell replica fails and does not replace or relax the gate.
+Floor-change runs preserve the unchanged control samples and runner/WebGL identity separately from best-effort instrumented phase/source and long-task probes, so diagnostic failure cannot determine acceptance. Pull requests supplement the gate with five independent Ubuntu 24.04 replicas at the same SHA; only an explicit no-dwell P95 assertion failure triggers the 250 ms unmeasured inter-sample dwell diagnostic, which does not replace or relax the gate.
 
 These thresholds are regression budgets for the tested fixtures and hosted-runner class, not universal customer SLAs.
 

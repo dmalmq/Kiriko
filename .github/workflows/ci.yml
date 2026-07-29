@@ -191,11 +191,22 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Run unchanged isolated level-change acceptance
+        env:
+          KIRIKO_PERF_P95_FAILURE_FILE: performance-p95-failure-${{ matrix.replica }}.json
         run: |
           node scripts/print-runner-diagnostics.mjs
           pnpm exec playwright test e2e/viewer.performance.spec.ts \
             --project=chromium-performance --workers=1 \
-            --grep "level-change P95"
+            --grep "level-change (P95|phase/source probes)"
+
+      - name: Publish explicit P95 assertion failure
+        if: ${{ always() && hashFiles(format('performance-p95-failure-{0}.json', matrix.replica)) != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (v4)
+        with:
+          name: performance-p95-failure-${{ matrix.replica }}
+          path: performance-p95-failure-${{ matrix.replica }}.json
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Preserve performance failure diagnostics
         if: failure()
@@ -206,12 +217,45 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # Reduce the five matrix results to an explicit P95-assertion outcome. A
+  # setup, install, server, browser-launch, or timeout failure emits no marker
+  # and therefore cannot trigger the changed-methodology counterfactual.
+  performance_dwell_decision:
+    name: Performance diagnostic dwell decision
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: performance_replicate
+    runs-on: ubuntu-24.04
+    outputs:
+      run_dwell: ${{ steps.classify.outputs.run_dwell }}
+    steps:
+      - name: Prepare P95 outcome directory
+        run: mkdir -p performance-p95-failures
+
+      - name: Download explicit P95 failures
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0 (v4)
+        with:
+          pattern: performance-p95-failure-*
+          path: performance-p95-failures
+          merge-multiple: true
+
+      - name: Classify explicit P95 outcomes
+        id: classify
+        run: |
+          if grep -Rql '"kind":"level-change-p95-failure"' performance-p95-failures; then
+            echo "run_dwell=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_dwell=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Run the one-condition dwell counterfactual only when at least one no-dwell
-  # replica fails. It is diagnostic and does not replace the required method.
+  # control explicitly records a genuine P95 assertion failure. It is
+  # diagnostic and does not replace the required method.
   performance_dwell_diagnostic:
     name: Performance diagnostic (250ms dwell counterfactual)
-    if: ${{ always() && needs.performance_assets.result == 'success' && needs.performance_replicate.result == 'failure' }}
-    needs: [performance_assets, performance_replicate]
+    if: ${{ always() && needs.performance_assets.result == 'success' && needs.performance_dwell_decision.outputs.run_dwell == 'true' }}
+    needs: [performance_assets, performance_replicate, performance_dwell_decision]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -251,7 +295,9 @@ jobs:
             --grep "diagnostic: level-change"
 
       - name: Preserve dwell diagnostics
-        if: failure()
+        # High dwell P95 is intentionally evidence, not an assertion failure,
+        # so preserve this conditional job's complete result on every outcome.
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (v4)
         with:
           name: performance-diagnostics-250ms-dwell
