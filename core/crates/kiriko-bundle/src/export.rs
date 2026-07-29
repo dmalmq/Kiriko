@@ -11,7 +11,7 @@
 //! and connectivity match the reference; the GDB driver owns `OBJECTID` and
 //! `SHAPE_Length`, so those are never emitted here.
 
-use serde_json::{json, Value as Json};
+use serde_json::{Value as Json, json};
 
 use crate::codec::decode_bundle;
 use crate::error::BundleError;
@@ -171,10 +171,30 @@ pub fn export_network(bundle: &[u8]) -> Result<NetworkGeoJson, ExportError> {
 
         let reversed: Vec<[f64; 2]> = poly.iter().rev().copied().collect();
         path_features.push(path_feature(
-            e.from, e.to, cost, travel_time, from_ord, to_ord, e.ordinal, vertical, fwd, rev, &poly,
+            e.from,
+            e.to,
+            cost,
+            travel_time,
+            from_ord,
+            to_ord,
+            e.ordinal,
+            vertical,
+            fwd,
+            rev,
+            &poly,
         ));
         path_features.push(path_feature(
-            e.to, e.from, cost, travel_time, to_ord, from_ord, e.ordinal, vertical, rev, fwd, &reversed,
+            e.to,
+            e.from,
+            cost,
+            travel_time,
+            to_ord,
+            from_ord,
+            e.ordinal,
+            vertical,
+            rev,
+            fwd,
+            &reversed,
         ));
     }
     let paths = serde_json::to_string(&json!({
@@ -238,14 +258,17 @@ fn path_feature(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::{encode_bundle, BundleDocument, BundleMetadata, BundleStats};
+    use crate::codec::{BundleDocument, BundleMetadata, BundleStats, encode_bundle};
     use kiriko_model::model::{ImdfManifest, ViewerLevel};
     use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
     use std::collections::BTreeMap;
 
     fn bundle_with_graph(graph: RouteGraph) -> Vec<u8> {
         let doc = BundleDocument {
-            metadata: BundleMetadata { dataset_id: "t/v".into(), version: 1 },
+            metadata: BundleMetadata {
+                dataset_id: "t/v".into(),
+                version: 1,
+            },
             manifest: ImdfManifest {
                 version: "1.0.0".into(),
                 language: "en".into(),
@@ -253,13 +276,26 @@ mod tests {
             },
             venue_id: "v".into(),
             levels: vec![
-                ViewerLevel { id: "l0".into(), ordinal: 0.0, label: BTreeMap::new(), short_name: BTreeMap::new() },
-                ViewerLevel { id: "l1".into(), ordinal: 1.0, label: BTreeMap::new(), short_name: BTreeMap::new() },
+                ViewerLevel {
+                    id: "l0".into(),
+                    ordinal: 0.0,
+                    label: BTreeMap::new(),
+                    short_name: BTreeMap::new(),
+                },
+                ViewerLevel {
+                    id: "l1".into(),
+                    ordinal: 1.0,
+                    label: BTreeMap::new(),
+                    short_name: BTreeMap::new(),
+                },
             ],
             features: Vec::new(),
             bounds_by_level: BTreeMap::new(),
             warnings: Vec::new(),
-            stats: BundleStats { levels: 2, features: 0 },
+            stats: BundleStats {
+                levels: 2,
+                features: 0,
+            },
             graph: Some(graph),
             facilities: None,
         };
@@ -270,7 +306,11 @@ mod tests {
     fn ordinal_labels_round_trip_through_floor_to_ordinal() {
         for ord in [-5.0, -1.0, 0.0, 1.0, 8.0, 35.0] {
             let label = ordinal_to_floor_label(ord);
-            assert_eq!(kiriko_route::floor_to_ordinal(&label), Some(ord), "label {label}");
+            assert_eq!(
+                kiriko_route::floor_to_ordinal(&label),
+                Some(ord),
+                "label {label}"
+            );
         }
     }
 
@@ -279,13 +319,37 @@ mod tests {
         // Two nodes on F1 joined horizontally, plus a vertical link to F2.
         let graph = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.70, lat: 35.69, ordinal: 0.0 },
-                RouteNode { lon: 139.701, lat: 35.69, ordinal: 0.0 },
-                RouteNode { lon: 139.70, lat: 35.69, ordinal: 1.0 },
+                RouteNode {
+                    lon: 139.70,
+                    lat: 35.69,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.701,
+                    lat: 35.69,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.70,
+                    lat: 35.69,
+                    ordinal: 1.0,
+                },
             ],
             edges: vec![
-                RouteEdge { from: 0, to: 1, weight: 90_000.0, ordinal: 0.0, interior: Vec::new() },
-                RouteEdge { from: 0, to: 2, weight: 5_000.0, ordinal: 0.0, interior: Vec::new() },
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 90_000.0,
+                    ordinal: 0.0,
+                    interior: Vec::new(),
+                },
+                RouteEdge {
+                    from: 0,
+                    to: 2,
+                    weight: 5_000.0,
+                    ordinal: 0.0,
+                    interior: Vec::new(),
+                },
             ],
         };
         let bundle = bundle_with_graph(graph);
@@ -316,20 +380,38 @@ mod tests {
         assert_eq!(pf[2]["properties"]["FFLOOR"], "F1");
         assert_eq!(pf[2]["properties"]["TFOOLR"], "F2");
         // Reverse partner cross-references PATHID.
-        assert_eq!(pf[0]["properties"]["RPATHID"], pf[1]["properties"]["PATHID"]);
+        assert_eq!(
+            pf[0]["properties"]["RPATHID"],
+            pf[1]["properties"]["PATHID"]
+        );
     }
 
     #[test]
     fn export_without_graph_is_no_graph_error() {
         let doc = BundleDocument {
-            metadata: BundleMetadata { dataset_id: "t/v".into(), version: 1 },
-            manifest: ImdfManifest { version: "1.0.0".into(), language: "en".into(), rest: BTreeMap::new() },
+            metadata: BundleMetadata {
+                dataset_id: "t/v".into(),
+                version: 1,
+            },
+            manifest: ImdfManifest {
+                version: "1.0.0".into(),
+                language: "en".into(),
+                rest: BTreeMap::new(),
+            },
             venue_id: "v".into(),
-            levels: vec![ViewerLevel { id: "l0".into(), ordinal: 0.0, label: BTreeMap::new(), short_name: BTreeMap::new() }],
+            levels: vec![ViewerLevel {
+                id: "l0".into(),
+                ordinal: 0.0,
+                label: BTreeMap::new(),
+                short_name: BTreeMap::new(),
+            }],
             features: Vec::new(),
             bounds_by_level: BTreeMap::new(),
             warnings: Vec::new(),
-            stats: BundleStats { levels: 1, features: 0 },
+            stats: BundleStats {
+                levels: 1,
+                features: 0,
+            },
             graph: None,
             facilities: None,
         };
@@ -344,13 +426,30 @@ mod tests {
         // than silently rounding it to an integer floor.
         let graph = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.70, lat: 35.69, ordinal: 0.5 },
-                RouteNode { lon: 139.701, lat: 35.69, ordinal: 0.5 },
+                RouteNode {
+                    lon: 139.70,
+                    lat: 35.69,
+                    ordinal: 0.5,
+                },
+                RouteNode {
+                    lon: 139.701,
+                    lat: 35.69,
+                    ordinal: 0.5,
+                },
             ],
-            edges: vec![RouteEdge { from: 0, to: 1, weight: 100.0, ordinal: 0.5, interior: Vec::new() }],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 100.0,
+                ordinal: 0.5,
+                interior: Vec::new(),
+            }],
         };
         let bundle = bundle_with_graph(graph);
-        assert_eq!(export_network(&bundle).unwrap_err().code(), "fractional_ordinal");
+        assert_eq!(
+            export_network(&bundle).unwrap_err().code(),
+            "fractional_ordinal"
+        );
     }
 
     #[test]
@@ -359,10 +458,24 @@ mod tests {
         // ordinals (F1 → 0) must round-trip on its own FLOOR, not the from-node's.
         let g0 = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.70, lat: 35.69, ordinal: 0.0 },
-                RouteNode { lon: 139.701, lat: 35.69, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.70,
+                    lat: 35.69,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.701,
+                    lat: 35.69,
+                    ordinal: 0.0,
+                },
             ],
-            edges: vec![RouteEdge { from: 0, to: 1, weight: 90_000.0, ordinal: 1.0, interior: Vec::new() }],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 90_000.0,
+                ordinal: 1.0,
+                interior: Vec::new(),
+            }],
         };
         let net1 = export_network(&bundle_with_graph(g0.clone())).expect("first export");
         let g1 = kiriko_route::build_route_graph(&net1.junctions, &net1.paths, &[0.0, 1.0])
@@ -383,17 +496,34 @@ mod tests {
         // exactly (the importer reads it as f64), never rounded to an integer.
         let g0 = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.70, lat: 35.69, ordinal: 0.0 },
-                RouteNode { lon: 139.701, lat: 35.69, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.70,
+                    lat: 35.69,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.701,
+                    lat: 35.69,
+                    ordinal: 0.0,
+                },
             ],
-            edges: vec![RouteEdge { from: 0, to: 1, weight: 100.5, ordinal: 0.0, interior: Vec::new() }],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 100.5,
+                ordinal: 0.0,
+                interior: Vec::new(),
+            }],
         };
         let net = export_network(&bundle_with_graph(g0.clone())).expect("export");
         let g1 = kiriko_route::build_route_graph(&net.junctions, &net.paths, &[0.0, 1.0])
             .expect("re-import")
             .graph;
         assert_eq!(g1.edges.len(), 1);
-        assert_eq!(g1.edges[0].weight, 100.5, "fractional cost preserved exactly");
+        assert_eq!(
+            g1.edges[0].weight, 100.5,
+            "fractional cost preserved exactly"
+        );
         assert_eq!(g1, g0);
     }
 }

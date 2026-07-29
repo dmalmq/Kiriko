@@ -198,8 +198,12 @@ fn quantize(x: f64) -> i64 {
 /// Exterior-ring vertices of a `Polygon` (or every part of a `MultiPolygon`),
 /// used to detect units that share a boundary. Empty for other geometry.
 fn exterior_ring_vertices(geom: &Value) -> Vec<[f64; 2]> {
-    let Some(obj) = geom.as_object() else { return Vec::new() };
-    let Some(coords) = obj.get("coordinates") else { return Vec::new() };
+    let Some(obj) = geom.as_object() else {
+        return Vec::new();
+    };
+    let Some(coords) = obj.get("coordinates") else {
+        return Vec::new();
+    };
     match obj.get("type").and_then(Value::as_str) {
         Some("Polygon") => coords
             .as_array()
@@ -265,7 +269,9 @@ pub(crate) fn point_boundary_dist_m(p: [f64; 2], geom: &Value) -> Option<f64> {
         }
         "MultiPolygon" => {
             for poly in coords.as_array()? {
-                let Some(rings) = poly.as_array() else { continue };
+                let Some(rings) = poly.as_array() else {
+                    continue;
+                };
                 for r in rings {
                     accumulate_ring_dist(p, &ring_coords(r), &mut best);
                 }
@@ -374,14 +380,20 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         let mut openings: Vec<[f64; 2]> = Vec::new();
 
         for f in &document.features {
-            let Some(level_id) = f.level_id.as_deref() else { continue };
+            let Some(level_id) = f.level_id.as_deref() else {
+                continue;
+            };
             if level_ordinal.get(level_id).copied() != Some(ord) {
                 continue;
             }
-            let Some(geom) = f.geometry.as_ref() else { continue };
+            let Some(geom) = f.geometry.as_ref() else {
+                continue;
+            };
             match f.feature_type {
                 FeatureType::Unit => {
-                    let Some(category) = f.category.as_deref() else { continue };
+                    let Some(category) = f.category.as_deref() else {
+                        continue;
+                    };
                     let transit = is_transit(category);
                     if (transit || is_walkway(category))
                         && let Some(pt) = polygon_centroid(geom)
@@ -565,7 +577,9 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
     };
     for &(idx, pt, ref category, ord) in &transit_all {
         // Top floor (no ordinal above) has nothing to match: not a warning.
-        let Some(next) = next_ordinal(ord) else { continue };
+        let Some(next) = next_ordinal(ord) else {
+            continue;
+        };
         let mut best: Option<(u32, f64)> = None;
         for &(cidx, cpt, ref ccat, cord) in &transit_all {
             if cord != next || ccat != category {
@@ -753,9 +767,27 @@ mod tests {
     fn opening_connects_two_walkways_and_rooms_are_not_nodes() {
         // Walkway square east of x=0; rooms (ignored) west; opening on x=0 edge.
         let features = vec![
-            feature("room-a", FeatureType::Unit, "L0", Some("room"), polygon(&square(-0.0005, 0.0005, 0.0009))),
-            feature("room-b", FeatureType::Unit, "L0", Some("room"), polygon(&square(0.0005, 0.0015, 0.0009))),
-            feature("walk", FeatureType::Unit, "L0", Some("walkway"), polygon(&square(0.0005, 0.0005, 0.001))),
+            feature(
+                "room-a",
+                FeatureType::Unit,
+                "L0",
+                Some("room"),
+                polygon(&square(-0.0005, 0.0005, 0.0009)),
+            ),
+            feature(
+                "room-b",
+                FeatureType::Unit,
+                "L0",
+                Some("room"),
+                polygon(&square(0.0005, 0.0015, 0.0009)),
+            ),
+            feature(
+                "walk",
+                FeatureType::Unit,
+                "L0",
+                Some("walkway"),
+                polygon(&square(0.0005, 0.0005, 0.001)),
+            ),
             feature(
                 "op",
                 FeatureType::Opening,
@@ -766,8 +798,18 @@ mod tests {
         ];
         let build = synthesize_network(&document(&[("L0", 0.0)], features));
         // Only the walkway hub and the opening are nodes (rooms excluded).
-        assert_eq!(build.graph.nodes.len(), 2, "nodes = {:?}", build.graph.nodes);
-        assert_eq!(build.graph.edges.len(), 1, "edges = {:?}", build.graph.edges);
+        assert_eq!(
+            build.graph.nodes.len(),
+            2,
+            "nodes = {:?}",
+            build.graph.nodes
+        );
+        assert_eq!(
+            build.graph.edges.len(),
+            1,
+            "edges = {:?}",
+            build.graph.edges
+        );
         let e = &build.graph.edges[0];
         assert!((e.from, e.to) == (0, 1) || (e.from, e.to) == (1, 0));
         assert_eq!(e.ordinal, 0.0);
@@ -779,12 +821,29 @@ mod tests {
     #[test]
     fn stairs_stacked_across_floors_get_a_vertical_edge() {
         let features = vec![
-            feature("s0", FeatureType::Unit, "L0", Some("stairs"), polygon(&square(0.001, 0.001, 0.0004))),
-            feature("s1", FeatureType::Unit, "L1", Some("stairs"), polygon(&square(0.001, 0.001, 0.0004))),
+            feature(
+                "s0",
+                FeatureType::Unit,
+                "L0",
+                Some("stairs"),
+                polygon(&square(0.001, 0.001, 0.0004)),
+            ),
+            feature(
+                "s1",
+                FeatureType::Unit,
+                "L1",
+                Some("stairs"),
+                polygon(&square(0.001, 0.001, 0.0004)),
+            ),
         ];
         let build = synthesize_network(&document(&[("L0", 0.0), ("L1", 1.0)], features));
         assert_eq!(build.graph.nodes.len(), 2);
-        assert_eq!(build.graph.edges.len(), 1, "edges = {:?}", build.graph.edges);
+        assert_eq!(
+            build.graph.edges.len(),
+            1,
+            "edges = {:?}",
+            build.graph.edges
+        );
         let e = &build.graph.edges[0];
         // Coincident footprints → vertical weight ≈ stairs floor cost in canonical
         // cost units (5.0 m × 1000 = 5000), NOT the raw 5.0 metres.
@@ -795,8 +854,20 @@ mod tests {
     #[test]
     fn opening_with_no_walkway_is_dropped_with_a_warning() {
         let features = vec![
-            feature("walk", FeatureType::Unit, "L0", Some("walkway"), polygon(&square(0.0, 0.0, 0.001))),
-            feature("op", FeatureType::Opening, "L0", None, linestring(&[[1.0, 1.0], [1.0, 1.001]])),
+            feature(
+                "walk",
+                FeatureType::Unit,
+                "L0",
+                Some("walkway"),
+                polygon(&square(0.0, 0.0, 0.001)),
+            ),
+            feature(
+                "op",
+                FeatureType::Opening,
+                "L0",
+                None,
+                linestring(&[[1.0, 1.0], [1.0, 1.001]]),
+            ),
         ];
         let build = synthesize_network(&document(&[("L0", 0.0)], features));
         assert_eq!(build.graph.nodes.len(), 1, "only the walkway hub is a node");
@@ -811,10 +882,34 @@ mod tests {
             document(
                 &[("L0", 0.0), ("L1", 1.0)],
                 vec![
-                    feature("walk0", FeatureType::Unit, "L0", Some("walkway"), polygon(&square(0.0005, 0.0005, 0.001))),
-                    feature("op0", FeatureType::Opening, "L0", None, linestring(&[[0.0, 0.0004], [0.0, 0.0006]])),
-                    feature("st0", FeatureType::Unit, "L0", Some("stairs"), polygon(&square(0.001, 0.001, 0.0004))),
-                    feature("st1", FeatureType::Unit, "L1", Some("stairs"), polygon(&square(0.001, 0.001, 0.0004))),
+                    feature(
+                        "walk0",
+                        FeatureType::Unit,
+                        "L0",
+                        Some("walkway"),
+                        polygon(&square(0.0005, 0.0005, 0.001)),
+                    ),
+                    feature(
+                        "op0",
+                        FeatureType::Opening,
+                        "L0",
+                        None,
+                        linestring(&[[0.0, 0.0004], [0.0, 0.0006]]),
+                    ),
+                    feature(
+                        "st0",
+                        FeatureType::Unit,
+                        "L0",
+                        Some("stairs"),
+                        polygon(&square(0.001, 0.001, 0.0004)),
+                    ),
+                    feature(
+                        "st1",
+                        FeatureType::Unit,
+                        "L1",
+                        Some("stairs"),
+                        polygon(&square(0.001, 0.001, 0.0004)),
+                    ),
                 ],
             )
         };
@@ -830,16 +925,37 @@ mod tests {
         // great-circle metres between them converted to canonical cost units
         // (× 1000) exactly once — not the raw metre value.
         let features = vec![
-            feature("walk", FeatureType::Unit, "L0", Some("walkway"), polygon(&square(0.0005, 0.0005, 0.001))),
-            feature("op", FeatureType::Opening, "L0", None, linestring(&[[0.0, 0.0003], [0.0, 0.0005], [0.0, 0.0007]])),
+            feature(
+                "walk",
+                FeatureType::Unit,
+                "L0",
+                Some("walkway"),
+                polygon(&square(0.0005, 0.0005, 0.001)),
+            ),
+            feature(
+                "op",
+                FeatureType::Opening,
+                "L0",
+                None,
+                linestring(&[[0.0, 0.0003], [0.0, 0.0005], [0.0, 0.0007]]),
+            ),
         ];
         let build = synthesize_network(&document(&[("L0", 0.0)], features));
         assert_eq!(build.graph.edges.len(), 1);
         let e = &build.graph.edges[0];
         // Walkway centroid (0.0005, 0.0005) ↔ opening midpoint (0.0, 0.0005).
         let expected = (haversine_m([0.0, 0.0005], [0.0005, 0.0005]) * 1000.0) as f32;
-        assert!((e.weight - expected).abs() <= 1.0, "weight {} expected {}", e.weight, expected);
+        assert!(
+            (e.weight - expected).abs() <= 1.0,
+            "weight {} expected {}",
+            e.weight,
+            expected
+        );
         // Cost units dwarf the raw metre distance (~55 m here).
-        assert!(e.weight > 1000.0, "cost units must be millimetre-scale, got {}", e.weight);
+        assert!(
+            e.weight > 1000.0,
+            "cost units must be millimetre-scale, got {}",
+            e.weight
+        );
     }
 }

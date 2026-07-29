@@ -67,15 +67,32 @@ mod tests {
         // edges is empty for embedding/routing purposes.
         let nodes_only = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
             edges: Vec::new(),
         };
-        assert!(nodes_only.is_empty(), "a graph with no edges is not routable");
+        assert!(
+            nodes_only.is_empty(),
+            "a graph with no edges is not routable"
+        );
 
         let with_edge = RouteGraph {
-            edges: vec![RouteEdge { from: 0, to: 1, weight: 100.0, ordinal: 0.0, interior: Vec::new() }],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 100.0,
+                ordinal: 0.0,
+                interior: Vec::new(),
+            }],
             ..nodes_only.clone()
         };
         assert!(!with_edge.is_empty(), "an edge-bearing graph is routable");
