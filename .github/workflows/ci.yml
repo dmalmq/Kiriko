@@ -71,6 +71,8 @@ jobs:
           pnpm test:server
           pnpm build
           pnpm exec playwright test --project=chromium
+          # Single worker: real-time thresholds need an uncontended CPU.
+          pnpm exec playwright test --project=chromium-performance --workers=1
           pnpm exec playwright test --project=firefox
           pnpm exec playwright test --project=webkit
           pnpm exec playwright test --project=chromium-visual
