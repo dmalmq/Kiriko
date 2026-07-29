@@ -61,9 +61,16 @@ function validationField(error: FastifySchemaValidationError): string {
   return path && path.length > 0 ? path : "request";
 }
 
-function multipartParserFailure(error: unknown): boolean {
+function multipartErrorCode(error: unknown): string | null {
   if (typeof error !== "object" || error === null || !("code" in error)) {
-    return false;
+    return null;
+  }
+  return String(error.code);
+}
+
+function multipartParserFailure(error: unknown): boolean {
+  if (error instanceof Error && error.message === "Multipart: Boundary not found") {
+    return true;
   }
   return [
     "FST_PARTS_LIMIT",
@@ -73,7 +80,7 @@ function multipartParserFailure(error: unknown): boolean {
     "FST_INVALID_MULTIPART_CONTENT_TYPE",
     "FST_INVALID_JSON_FIELD_ERROR",
     "FST_PROTO_VIOLATION",
-  ].includes(String(error.code));
+  ].includes(multipartErrorCode(error) ?? "");
 }
 
 /** Extracts the single `requestId` text field from multipart fields. */
@@ -107,6 +114,10 @@ export const issueAttachmentRoutes: FastifyPluginAsync<IssueAttachmentRoutesOpti
           reason: entry.message ?? "is invalid",
         })),
       });
+    } else if (multipartErrorCode(error) === "FST_REQ_FILE_TOO_LARGE") {
+      mappedError = new IssueServiceError("invalid_attachment", "The image could not be accepted.", {
+        details: [{ field: "file", reason: "file is too large" }],
+      });
     } else if (multipartParserFailure(error)) {
       mappedError = invalidRequest("body is invalid");
     }
@@ -136,25 +147,13 @@ export const issueAttachmentRoutes: FastifyPluginAsync<IssueAttachmentRoutesOpti
       const { publicVersionId } = request.params as { publicVersionId: string };
       // Route-level limits: the global multipart registration allows 200 MiB
       // GDB sources; attachments are capped far lower.
-      let data: Awaited<ReturnType<typeof request.file>>;
-      try {
-        data = await request.file({
-          limits: { fileSize: ATTACHMENT_MAX_FILE_BYTES, files: 1, fields: 5 },
-        });
-      } catch {
-        throw invalidRequest("body is invalid");
-      }
+      const data = await request.file({
+        limits: { fileSize: ATTACHMENT_MAX_FILE_BYTES, files: 1, fields: 5 },
+      });
       if (data === undefined) {
         throw invalidRequest("an image file is required");
       }
-      let bytes: Buffer;
-      try {
-        bytes = await data.toBuffer();
-      } catch {
-        throw new IssueServiceError("invalid_attachment", "The image could not be accepted.", {
-          details: [{ field: "file", reason: "file is too large" }],
-        });
-      }
+      const bytes = await data.toBuffer();
       if (data.file.truncated) {
         throw new IssueServiceError("invalid_attachment", "The image could not be accepted.", {
           details: [{ field: "file", reason: "file is too large" }],

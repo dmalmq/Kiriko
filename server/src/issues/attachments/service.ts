@@ -100,9 +100,6 @@ export class IssueAttachmentService {
     if (version === null) {
       throw new IssueServiceError("not_found", NOT_FOUND_MESSAGE);
     }
-    if (!this.rateLimiter.check(user.id, this.clock().getTime())) {
-      throw new IssueServiceError("rate_limited", "Too many uploads. Try again later.");
-    }
     if (bytes.byteLength === 0) {
       throw new IssueServiceError("invalid_attachment", "The image could not be accepted.", {
         details: [{ field: "file", reason: "file is empty" }],
@@ -128,6 +125,9 @@ export class IssueAttachmentService {
         );
       }
       return existing.metadata;
+    }
+    if (!this.rateLimiter.check(user.id, this.clock().getTime())) {
+      throw new IssueServiceError("rate_limited", "Too many uploads. Try again later.");
     }
 
     const processed = await this.pool.run(() =>

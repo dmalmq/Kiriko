@@ -343,6 +343,34 @@ describe("attachment upload API", () => {
     expect(response.json()).toMatchObject({ error: "idempotency_conflict" });
   });
 
+  it("does not convert unexpected multipart failures into client errors", async () => {
+    const { app, memberCookie } = await seededApp();
+    app.addHook("preHandler", async (request) => {
+      if (request.headers["x-test-multipart-failure"] === "1") {
+        Object.defineProperty(request, "file", {
+          value: async () => {
+            throw new Error("unexpected multipart failure");
+          },
+        });
+      }
+    });
+    const multipart = multipartUpload(randomUUID(), await pngBuffer());
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/review/versions/${PUBLIC_ID}/issue-attachments`,
+      headers: {
+        cookie: memberCookie,
+        "x-test-multipart-failure": "1",
+        ...multipart.headers,
+      },
+      payload: multipart.payload,
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toMatchObject({ error: "internal_error" });
+    expect(response.body).not.toContain("unexpected multipart failure");
+  });
+
   it("maps parameter validation and malformed multipart to sanitized client errors", async () => {
     const { app, memberCookie } = await seededApp();
     const png = await pngBuffer();
@@ -392,6 +420,36 @@ describe("attachment upload API", () => {
     expect(oversizeResponse.statusCode).toBe(400);
     expect(oversizeResponse.json()).toMatchObject({ error: "invalid_attachment" });
     expect(oversizeResponse.body).not.toMatch(/data\/|issue-attachments\/sha256/);
+  });
+
+  it("replays and conflicts before rate-limiting genuinely new uploads", async () => {
+    const { app } = await seededApp();
+    const dataDir = mkdtempSync(join(tmpdir(), "kiriko-attach-replay-rate-"));
+    try {
+      const service = new IssueAttachmentService({
+        db: app.db,
+        store: new IssueAttachmentStore(dataDir),
+        versions: new IssueRepository(app.db),
+        versionQuotaBytes: 512 * 1024 * 1024,
+        uploadRateMax: 1,
+        uploadRateWindowMs: 60_000,
+        processingConcurrency: 1,
+      });
+      const user = { id: 2, username: "member", role: "member" } as const;
+      const requestId = randomUUID();
+      const png = await pngBuffer();
+      const first = await service.upload(user, PUBLIC_ID, requestId, null, png);
+
+      await expect(service.upload(user, PUBLIC_ID, requestId, null, png)).resolves.toEqual(first);
+      await expect(
+        service.upload(user, PUBLIC_ID, requestId, null, await jpegBuffer()),
+      ).rejects.toMatchObject({ code: "idempotency_conflict" });
+      await expect(
+        service.upload(user, PUBLIC_ID, randomUUID(), null, png),
+      ).rejects.toMatchObject({ code: "rate_limited" });
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   it("enforces the version storage quota and per-user upload rate limit", async () => {
