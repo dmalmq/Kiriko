@@ -130,7 +130,10 @@ pub fn compile_imdf_with_network(
     // Clipping was requested but the imported venue carries no level/unit
     // polygons to clip against: every node/facility would be dropped below,
     // silently. Warn once up front so that isn't mistaken for a bug.
-    if clip_region.as_ref().is_some_and(crate::clip::ClipRegion::is_empty) {
+    if clip_region
+        .as_ref()
+        .is_some_and(crate::clip::ClipRegion::is_empty)
+    {
         document.warnings.push(ViewerWarning {
             code: WarningCode::RouteBuild,
             message: "clip_region_empty: the imported venue has no level or unit polygons to clip \
