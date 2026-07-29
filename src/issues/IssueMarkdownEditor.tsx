@@ -610,6 +610,7 @@ export function IssueMarkdownEditor({
             <input
               type="text"
               value={linkDialog.text}
+              disabled={disabled}
               onChange={(event) => {
                 setLinkDialog({ ...linkDialog, text: event.target.value });
               }}
@@ -622,6 +623,7 @@ export function IssueMarkdownEditor({
               inputMode="url"
               value={linkDialog.url}
               aria-invalid={linkInvalid}
+              disabled={disabled}
               onChange={(event) => {
                 setLinkDialog({ ...linkDialog, url: event.target.value });
                 setLinkInvalid(false);
@@ -643,6 +645,7 @@ export function IssueMarkdownEditor({
             <button
               type="button"
               className="btn-ghost"
+              disabled={disabled}
               onClick={() => {
                 setLinkDialog(null);
                 internalRef.current?.focus();
@@ -650,7 +653,7 @@ export function IssueMarkdownEditor({
             >
               {ui.cancel[locale]}
             </button>
-            <button type="button" className="btn-primary" onClick={insertLink}>
+            <button type="button" className="btn-primary" disabled={disabled} onClick={insertLink}>
               {ui.linkInsert[locale]}
             </button>
           </div>
@@ -665,6 +668,7 @@ export function IssueMarkdownEditor({
         hidden
         aria-hidden="true"
         tabIndex={-1}
+        disabled={disabled}
         onChange={(event) => {
           addFiles(Array.from(event.target.files ?? []));
           event.target.value = "";
@@ -709,6 +713,7 @@ export function IssueMarkdownEditor({
                     <button
                       type="button"
                       className="btn-ghost"
+                      disabled={disabled}
                       onClick={() => {
                         removeUpload(upload.localId);
                       }}
@@ -735,6 +740,7 @@ export function IssueMarkdownEditor({
                     <button
                       type="button"
                       className="btn-ghost"
+                      disabled={disabled}
                       onClick={() => {
                         cancelUpload(upload);
                       }}
@@ -750,6 +756,7 @@ export function IssueMarkdownEditor({
                     <button
                       type="button"
                       className="btn-ghost"
+                      disabled={disabled}
                       onClick={() => {
                         retryUpload(upload);
                       }}
@@ -759,6 +766,7 @@ export function IssueMarkdownEditor({
                     <button
                       type="button"
                       className="btn-ghost"
+                      disabled={disabled}
                       onClick={() => {
                         cancelUpload(upload);
                       }}
@@ -781,6 +789,7 @@ export function IssueMarkdownEditor({
                         type="text"
                         defaultValue={ui.defaultAlt[locale]}
                         aria-label={ui.altLabel[locale]}
+                        disabled={disabled}
                         onChange={(event) => {
                           applyAlt(upload, event.target.value);
                         }}
@@ -789,6 +798,7 @@ export function IssueMarkdownEditor({
                     <button
                       type="button"
                       className="btn-ghost"
+                      disabled={disabled}
                       onClick={() => {
                         cancelUpload(upload);
                       }}

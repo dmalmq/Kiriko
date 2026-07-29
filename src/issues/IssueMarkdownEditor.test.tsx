@@ -58,6 +58,7 @@ interface HarnessProps {
   cancelStaged?: (id: string) => Promise<void>;
   onSubmitBlockedChange?: (blocked: boolean) => void;
   existingAttachments?: IssueAttachmentMetadata[];
+  disabled?: boolean;
 }
 
 function Harness(props: HarnessProps): ReactElement {
@@ -74,6 +75,7 @@ function Harness(props: HarnessProps): ReactElement {
         cancelStaged={props.cancelStaged}
         onSubmitBlockedChange={props.onSubmitBlockedChange}
         existingAttachments={props.existingAttachments}
+        disabled={props.disabled}
       />
       <output data-testid="value">{value}</output>
     </div>
@@ -240,6 +242,38 @@ describe("IssueMarkdownEditor Write/Preview tabs", () => {
 });
 
 describe("IssueMarkdownEditor image uploads", () => {
+  it("disables every attachment mutation control when locked", async () => {
+    const { uploadFile, calls } = mockUploadTransport();
+    const { container, rerender } = render(<Harness uploadFile={uploadFile} />);
+    fireEvent.paste(textarea(), {
+      clipboardData: {
+        files: [
+          pngFile("uploading.png"),
+          pngFile("failed.png"),
+          pngFile("complete.png"),
+          pngFile("invalid.gif", "image/gif"),
+        ],
+      },
+    });
+    calls[1]?.reject(new Error("network"));
+    calls[2]?.resolve(makeMetadata());
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+      expect(screen.getByLabelText("Alt text")).toBeTruthy();
+    });
+
+    rerender(<Harness uploadFile={uploadFile} disabled />);
+
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Dismiss" }) as HTMLButtonElement).disabled).toBe(true);
+    for (const remove of screen.getAllByRole("button", { name: "Remove" })) {
+      expect((remove as HTMLButtonElement).disabled).toBe(true);
+    }
+    expect((screen.getByLabelText("Alt text") as HTMLInputElement).disabled).toBe(true);
+    expect((container.querySelector('input[type="file"]') as HTMLInputElement).disabled).toBe(true);
+  });
+
   it("uploads a pasted image, replaces the placeholder with a token, and edits alt text", async () => {
     const { uploadFile, calls } = mockUploadTransport();
     const blocked: boolean[] = [];
