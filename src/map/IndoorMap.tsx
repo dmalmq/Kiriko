@@ -402,18 +402,46 @@ function fitLevelBounds(
   ) {
     return;
   }
+  const bounds: [[number, number], [number, number]] = [
+    [west, south],
+    [east, north],
+  ];
   const reduced = prefersReducedMotion();
-  map.fitBounds(
-    [
-      [west, south],
-      [east, north],
-    ],
-    {
-      padding: FIT_PADDING,
-      maxZoom: FIT_MAX_ZOOM,
-      duration: reduced ? 0 : FIT_DURATION_MS,
-    },
-  );
+  const options = {
+    padding: FIT_PADDING,
+    maxZoom: FIT_MAX_ZOOM,
+    duration: reduced ? 0 : FIT_DURATION_MS,
+  };
+
+  // Re-fitting an already exact camera still makes MapLibre expire and rebuild
+  // the visible GeoJSON tiles. Floors in one building commonly share bounds,
+  // so avoid that no-op invalidation while retaining the normal refit after a
+  // user pan or for a floor whose bounds differ.
+  const camera = map.cameraForBounds(bounds, options);
+  if (
+    camera?.center != null &&
+    typeof camera.zoom === "number" &&
+    typeof camera.bearing === "number"
+  ) {
+    const center = map.getCenter();
+    const targetLng = Array.isArray(camera.center)
+      ? camera.center[0]
+      : "lng" in camera.center
+        ? camera.center.lng
+        : camera.center.lon;
+    const targetLat = Array.isArray(camera.center) ? camera.center[1] : camera.center.lat;
+    const epsilon = 1e-7;
+    if (
+      Math.abs(center.lng - targetLng) <= epsilon &&
+      Math.abs(center.lat - targetLat) <= epsilon &&
+      Math.abs(map.getZoom() - camera.zoom) <= epsilon &&
+      Math.abs(map.getBearing() - camera.bearing) <= epsilon
+    ) {
+      return;
+    }
+  }
+
+  map.fitBounds(bounds, options);
 }
 
 interface IndoorSourceState {

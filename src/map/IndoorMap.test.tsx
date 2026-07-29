@@ -49,6 +49,7 @@ const mapState = vi.hoisted(() => {
     styleLoaded = initialStyleLoaded;
     sourceLoaded = true;
     center = { lng: 0, lat: 0 };
+    zoom = 0;
     removed = false;
 
     constructor(options: { container: HTMLElement }) {
@@ -191,8 +192,26 @@ const mapState = vi.hoisted(() => {
       return { x: lng, y: lat };
     }
 
-    fitBounds(): void {
+    cameraForBounds(bounds: [[number, number], [number, number]]): {
+      center: { lng: number; lat: number };
+      zoom: number;
+      bearing: number;
+    } {
+      return {
+        center: {
+          lng: (bounds[0][0] + bounds[1][0]) / 2,
+          lat: (bounds[0][1] + bounds[1][1]) / 2,
+        },
+        zoom: 16,
+        bearing: 0,
+      };
+    }
+
+    fitBounds(bounds: [[number, number], [number, number]]): void {
       this.indoorFloorOperations.push("fit");
+      const camera = this.cameraForBounds(bounds);
+      this.center = camera.center;
+      this.zoom = camera.zoom;
     }
     easeTo(options: { center: [number, number]; duration?: number }): void {
       this.easeToCalls.push(options);
@@ -204,6 +223,12 @@ const mapState = vi.hoisted(() => {
     zoomOut(): void {}
     getCenter(): { lng: number; lat: number } {
       return this.center;
+    }
+    getZoom(): number {
+      return this.zoom;
+    }
+    getBearing(): number {
+      return 0;
     }
     remove(): void {
       this.removed = true;
@@ -717,6 +742,28 @@ describe("IndoorMap floor source", () => {
       remove: ["floor-1"],
       add: [venue.renderFeaturesByLevel.get("level-2")!.features[0]],
     });
+    expect(map.indoorSourceData.features.map((feature) => feature.id)).toEqual(["floor-2"]);
+  });
+
+  it("does not refit shared bounds before applying the floor delta", () => {
+    const venue = baseVenue();
+    venue.renderFeaturesByLevel.set("level-1", {
+      type: "FeatureCollection",
+      features: [floorRenderFeature("floor-1", "level-1", 139.1)],
+    });
+    venue.renderFeaturesByLevel.set("level-2", {
+      type: "FeatureCollection",
+      features: [floorRenderFeature("floor-2", "level-2", 139.2)],
+    });
+    const sharedBounds: [number, number, number, number] = [139.0, 35.5, 139.2, 35.7];
+    venue.boundsByLevel.set("level-1", sharedBounds);
+    venue.boundsByLevel.set("level-2", sharedBounds);
+    const { map, rerender } = renderMap(baseProps({ venue, levelId: "level-1" }));
+    map.indoorFloorOperations.length = 0;
+
+    rerender(baseProps({ venue, levelId: "level-2" }));
+
+    expect(map.indoorFloorOperations).toEqual(["update"]);
     expect(map.indoorSourceData.features.map((feature) => feature.id)).toEqual(["floor-2"]);
   });
 

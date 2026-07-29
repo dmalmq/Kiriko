@@ -88,6 +88,7 @@ jobs:
 
       - name: Run performance probes separately
         id: acceptance_performance_probes
+        if: always()
         continue-on-error: true
         timeout-minutes: 5
         run: |
