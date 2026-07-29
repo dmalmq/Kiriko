@@ -836,6 +836,27 @@ describe("IndoorMap network review", () => {
     expect(map.networkSourceData).toHaveLength(updatesBeforeFloorChange + 1);
     expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([2, 2]);
   });
+
+  it("keeps the initial empty network data without invalidating it on floor changes", () => {
+    const { map, rerender } = renderMap(baseProps({ network: null, levelId: "level-1" }));
+    expect(lastNetworkData(map).features).toEqual([]);
+    const updatesBeforeFloorChange = map.networkSourceData.length;
+
+    rerender(baseProps({ network: null, levelId: "level-2" }));
+
+    expect(map.networkSourceData).toHaveLength(updatesBeforeFloorChange);
+    expect(lastNetworkData(map).features).toEqual([]);
+  });
+
+  it("clears active network data exactly once when review is turned off", () => {
+    const { map, rerender } = renderMap(baseProps({ network: NETWORK }));
+    const updatesBeforeReviewOff = map.networkSourceData.length;
+
+    rerender(baseProps({ network: null }));
+
+    expect(map.networkSourceData).toHaveLength(updatesBeforeReviewOff + 1);
+    expect(lastNetworkData(map).features).toEqual([]);
+  });
 });
 
 describe("IndoorMap issue pins", () => {

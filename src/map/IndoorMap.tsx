@@ -552,6 +552,7 @@ export function IndoorMap({
   const directionsRef = useRef(directions);
   const networkRef = useRef(network);
   const networkEditingRef = useRef(networkEditing);
+  const networkSourceActiveRef = useRef(network != null || networkEditing != null);
   const [mapInstance, setMapInstance] = useState<MapLibreMap | null>(null);
 
   onSelectRef.current = onSelectFeature;
@@ -772,6 +773,8 @@ export function IndoorMap({
         networkRef.current,
         networkEditingRef.current == null ? undefined : networkRenderState(networkEditingRef.current),
       );
+      networkSourceActiveRef.current =
+        networkRef.current != null || networkEditingRef.current != null;
       registerFacilityImages(map);
       setFacilitySourceData(map, venueRef.current, levelIdRef.current, facilitiesRef.current);
       applyLayerVisibility(map, visibilityRef.current);
@@ -1032,8 +1035,17 @@ export function IndoorMap({
     if (map == null || !map.isStyleLoaded()) {
       return;
     }
+    // onLoad has already initialized the source to empty. While review remains
+    // off, floor changes cannot alter that data, so do not enqueue another
+    // empty GeoJSON worker/render cycle. A transition from active to off must
+    // still clear the source once; active floor changes still update once.
+    const active = network != null || networkEditing != null;
+    if (!active && !networkSourceActiveRef.current) {
+      return;
+    }
     const render = networkEditing != null ? networkRenderState(networkEditing) : undefined;
     setNetworkSourceData(map, venue, levelId, network, render);
+    networkSourceActiveRef.current = active;
   }, [network, networkEditing, venue, levelId]);
 
   // Facility symbols: refresh per active floor (and when the facility set or
