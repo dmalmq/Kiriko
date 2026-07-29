@@ -80,6 +80,7 @@ function rootCommand(overrides: RootOverrides = {}): CreateRootCommand {
   const version = overrides.version ?? published(PUBLIC_A);
   const input: NormalizedRootCreate = {
     bodyMarkdown: "Broken escalator",
+    attachmentIds: [],
     levelId: "level-1",
     longitude: 139.7,
     latitude: 35.68,
@@ -108,7 +109,7 @@ interface ReplyOverrides {
 
 function replyCommand(parentIssueId: string, overrides: ReplyOverrides = {}): CreateReplyCommand {
   const version = overrides.version ?? published(PUBLIC_A);
-  const input = { bodyMarkdown: overrides.bodyMarkdown ?? "Acknowledged" };
+  const input = { bodyMarkdown: overrides.bodyMarkdown ?? "Acknowledged", attachmentIds: [] };
   return {
     version,
     parentIssueId,
@@ -453,7 +454,7 @@ describe("IssueRepository revision accounting (contract 6)", () => {
     expect(reply.revision).toBe(2);
     expect(ok(repo.patchIssue({
       issueId: root.resourceId,
-      patch: { type: "body", bodyMarkdown: "Edited", expectedVersion: 1 },
+      patch: { type: "body", bodyMarkdown: "Edited", expectedVersion: 1, attachmentIds: [] },
       now: T2,
     })).revision).toBe(3);
     expect(ok(repo.patchIssue({
@@ -473,7 +474,7 @@ describe("IssueRepository revision accounting (contract 6)", () => {
     })).revision).toBe(6);
     expect(ok(repo.patchReply({
       replyId: reply.resourceId,
-      patch: { type: "body", bodyMarkdown: "Edited reply", expectedVersion: 1 },
+      patch: { type: "body", bodyMarkdown: "Edited reply", expectedVersion: 1, attachmentIds: [] },
       now: T2,
     })).revision).toBe(7);
     expect(ok(repo.deleteReply({ replyId: reply.resourceId, expectedVersion: 2, now: T3 })).revision).toBe(8);
@@ -487,12 +488,12 @@ describe("IssueRepository stale mutations (contract 7)", () => {
     const root = ok(repo.createRoot(rootCommand()));
     ok(repo.patchIssue({
       issueId: root.resourceId,
-      patch: { type: "body", bodyMarkdown: "Edited", expectedVersion: 1 },
+      patch: { type: "body", bodyMarkdown: "Edited", expectedVersion: 1, attachmentIds: [] },
       now: T2,
     }));
     const result = stale(repo.patchIssue({
       issueId: root.resourceId,
-      patch: { type: "body", bodyMarkdown: "Lost update", expectedVersion: 1 },
+      patch: { type: "body", bodyMarkdown: "Lost update", expectedVersion: 1, attachmentIds: [] },
       now: T3,
     }));
     expect(result.revision).toBe(2);
@@ -514,13 +515,13 @@ describe("IssueRepository stale mutations (contract 7)", () => {
     const reply = ok(repo.createReply(replyCommand(root.resourceId)));
     ok(repo.patchReply({
       replyId: reply.resourceId,
-      patch: { type: "body", bodyMarkdown: "Edited reply", expectedVersion: 1 },
+      patch: { type: "body", bodyMarkdown: "Edited reply", expectedVersion: 1, attachmentIds: [] },
       now: T2,
     }));
 
     const stalePatch = stale(repo.patchReply({
       replyId: reply.resourceId,
-      patch: { type: "body", bodyMarkdown: "Old edit", expectedVersion: 1 },
+      patch: { type: "body", bodyMarkdown: "Old edit", expectedVersion: 1, attachmentIds: [] },
       now: T3,
     }));
     expect(stalePatch.current.kind).toBe("reply");
@@ -539,7 +540,7 @@ describe("IssueRepository stale mutations (contract 7)", () => {
     const root = ok(repo.createRoot(rootCommand()));
     ok(repo.patchIssue({
       issueId: root.resourceId,
-      patch: { type: "body", bodyMarkdown: "Edited", expectedVersion: 1 },
+      patch: { type: "body", bodyMarkdown: "Edited", expectedVersion: 1, attachmentIds: [] },
       now: T2,
     }));
     db.prepare("DELETE FROM users WHERE id = 2").run();
@@ -702,7 +703,7 @@ describe("IssueRepository tombstones (contract 10)", () => {
     // Existing reply authors may still edit and delete after root deletion.
     ok(repo.patchReply({
       replyId: reply.resourceId,
-      patch: { type: "body", bodyMarkdown: "Edited after root delete", expectedVersion: 1 },
+      patch: { type: "body", bodyMarkdown: "Edited after root delete", expectedVersion: 1, attachmentIds: [] },
       now: T3,
     }));
     ok(repo.deleteReply({ replyId: other.resourceId, expectedVersion: 1, now: T3 }));
@@ -724,19 +725,19 @@ describe("IssueRepository tombstones (contract 10)", () => {
 
     expectIssueError(() => repo.patchIssue({
       issueId: root.resourceId,
-      patch: { type: "body", bodyMarkdown: "Necromancy", expectedVersion: 2 },
+      patch: { type: "body", bodyMarkdown: "Necromancy", expectedVersion: 2, attachmentIds: [] },
       now: T3,
     }), "issue_deleted");
     expectIssueError(() => repo.deleteIssue({ issueId: root.resourceId, expectedVersion: 2, now: T3 }), "issue_deleted");
     expectIssueError(() => repo.patchReply({
       replyId: reply.resourceId,
-      patch: { type: "body", bodyMarkdown: "Necromancy", expectedVersion: 2 },
+      patch: { type: "body", bodyMarkdown: "Necromancy", expectedVersion: 2, attachmentIds: [] },
       now: T3,
     }), "issue_deleted");
     expectIssueError(() => repo.deleteReply({ replyId: reply.resourceId, expectedVersion: 2, now: T3 }), "issue_deleted");
     expectIssueError(() => repo.patchIssue({
       issueId: "missing",
-      patch: { type: "body", bodyMarkdown: "x", expectedVersion: 1 },
+      patch: { type: "body", bodyMarkdown: "x", expectedVersion: 1, attachmentIds: [] },
       now: T3,
     }), "not_found");
   });
@@ -778,7 +779,7 @@ describe("IssueRepository timestamps (contract 12)", () => {
 
       ok(repo.patchIssue({
         issueId: root.resourceId,
-        patch: { type: "body", bodyMarkdown: "Edited", expectedVersion: 1 },
+        patch: { type: "body", bodyMarkdown: "Edited", expectedVersion: 1, attachmentIds: [] },
         now: updatedAt,
       }));
       ok(repo.deleteIssue({ issueId: root.resourceId, expectedVersion: 2, now: deletedAt }));

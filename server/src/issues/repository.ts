@@ -1,15 +1,20 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
+import {
+  ATTACHMENT_MAX_COMMENT_AGGREGATE_BYTES,
+  ATTACHMENT_MAX_PER_COMMENT,
+} from "./attachments/limits";
 import { IssueServiceError } from "./errors";
 import type { IssueCurrentResource } from "./errors";
 import type {
+  IssueAttachmentMetadata,
   IssueCollection,
-  IssuePatch,
   IssueReply,
   IssueStatus,
+  NormalizedIssuePatch,
   NormalizedReplyCreate,
+  NormalizedReplyPatch,
   NormalizedRootCreate,
-  ReplyPatch,
   ReviewerSummary,
   ReviewIssue,
 } from "./types";
@@ -86,13 +91,13 @@ export interface CreateReplyCommand {
 
 export interface PatchIssueCommand {
   issueId: string;
-  patch: IssuePatch;
+  patch: NormalizedIssuePatch;
   now: string;
 }
 
 export interface PatchReplyCommand {
   replyId: string;
-  patch: ReplyPatch;
+  patch: NormalizedReplyPatch;
   now: string;
 }
 
@@ -195,7 +200,19 @@ function deleted(): never {
   throw new IssueServiceError("issue_deleted", DELETED_MESSAGE);
 }
 
-function publicIssue(row: RootProjectionRow, replies: IssueReply[]): ReviewIssue {
+function invalidAttachment(): never {
+  // Opaque on purpose: cross-user, cross-comment, cross-version, expired, and
+  // unknown attachment IDs are indistinguishable.
+  throw new IssueServiceError("invalid_attachment", "invalid_attachment", {
+    details: [{ field: "attachmentIds", reason: "unknown or unavailable attachment" }],
+  });
+}
+
+function publicIssue(
+  row: RootProjectionRow,
+  replies: IssueReply[],
+  attachments: IssueAttachmentMetadata[],
+): ReviewIssue {
   const anchor = row.featureId === null
     ? { levelId: row.levelId, longitude: row.longitude, latitude: row.latitude }
     : {
@@ -224,12 +241,12 @@ function publicIssue(row: RootProjectionRow, replies: IssueReply[]): ReviewIssue
     if (row.bodyMarkdown === null) {
       throw new IssueServiceError("internal_error", "A live issue has no body.");
     }
-    return { ...common, bodyMarkdown: row.bodyMarkdown, deletedAt: null };
+    return { ...common, bodyMarkdown: row.bodyMarkdown, attachments, deletedAt: null };
   }
-  return { ...common, bodyMarkdown: null, deletedAt: row.deletedAt };
+  return { ...common, bodyMarkdown: null, attachments: [], deletedAt: row.deletedAt };
 }
 
-function publicReply(row: ReplyProjectionRow): IssueReply {
+function publicReply(row: ReplyProjectionRow, attachments: IssueAttachmentMetadata[]): IssueReply {
   const common = {
     id: row.id,
     rowVersion: row.rowVersion,
@@ -241,9 +258,9 @@ function publicReply(row: ReplyProjectionRow): IssueReply {
     if (row.bodyMarkdown === null) {
       throw new IssueServiceError("internal_error", "A live reply has no body.");
     }
-    return { ...common, bodyMarkdown: row.bodyMarkdown, deletedAt: null };
+    return { ...common, bodyMarkdown: row.bodyMarkdown, attachments, deletedAt: null };
   }
-  return { ...common, bodyMarkdown: null, deletedAt: row.deletedAt };
+  return { ...common, bodyMarkdown: null, attachments: [], deletedAt: row.deletedAt };
 }
 
 export class IssueRepository {
@@ -312,9 +329,10 @@ export class IssueRepository {
         )
         .all(versionId) as ReplyProjectionRow[];
       const repliesByRoot = new Map<string, IssueReply[]>();
+      const attachmentsByComment = this.attachmentsForVersion(versionId);
       for (const row of replyRows) {
         const replies = repliesByRoot.get(row.parentId);
-        const reply = publicReply(row);
+        const reply = publicReply(row, attachmentsByComment.get(row.id) ?? []);
         if (replies === undefined) {
           repliesByRoot.set(row.parentId, [reply]);
         } else {
@@ -323,7 +341,12 @@ export class IssueRepository {
       }
       return {
         revision,
-        issues: roots.map((root) => publicIssue(root, repliesByRoot.get(root.id) ?? [])),
+        issues: roots.map((root) =>
+          publicIssue(
+            root,
+            repliesByRoot.get(root.id) ?? [],
+            attachmentsByComment.get(root.id) ?? [],
+          )),
       };
     })();
   }
@@ -428,6 +451,13 @@ export class IssueRepository {
           command.now,
           command.now,
         );
+      this.bindAttachments(
+        resourceId,
+        command.version.versionId,
+        command.authorId,
+        command.input.attachmentIds,
+        command.now,
+      );
       return this.success(command.version, resourceId, this.bumpRevision(command.version.versionId));
     });
     return create.immediate();
@@ -473,6 +503,13 @@ export class IssueRepository {
           command.now,
           command.now,
         );
+      this.bindAttachments(
+        resourceId,
+        command.version.versionId,
+        command.authorId,
+        command.input.attachmentIds,
+        command.now,
+      );
       return this.success(command.version, resourceId, this.bumpRevision(command.version.versionId));
     });
     return create.immediate();
@@ -490,6 +527,15 @@ export class IssueRepository {
           command.issueId,
           command.patch.expectedVersion,
           invalidAssigneeId,
+        );
+      }
+      if (command.patch.type === "body") {
+        this.bindAttachments(
+          command.issueId,
+          returned.versionId,
+          returned.authorId,
+          command.patch.attachmentIds,
+          command.now,
         );
       }
       this.ensureState(returned.versionId);
@@ -511,17 +557,24 @@ export class IssueRepository {
                  AND versions.status = 'published'
                  AND versions.bundle_hash IS NOT NULL
              )
-           RETURNING version_id AS versionId`,
+           RETURNING version_id AS versionId, author_id AS authorId`,
         )
         .get(
           command.patch.bodyMarkdown,
           command.now,
           command.replyId,
           command.patch.expectedVersion,
-        ) as { versionId: number } | undefined;
+        ) as { versionId: number; authorId: number } | undefined;
       if (returned === undefined) {
         return this.replyMutationFailure(command.replyId);
       }
+      this.bindAttachments(
+        command.replyId,
+        returned.versionId,
+        returned.authorId,
+        command.patch.attachmentIds,
+        command.now,
+      );
       this.ensureState(returned.versionId);
       const version = this.readVersionIdentity(returned.versionId);
       return this.success(version, command.replyId, this.bumpRevision(returned.versionId));
@@ -591,6 +644,115 @@ export class IssueRepository {
 
   private ensureState(versionId: number): void {
     this.db.prepare("INSERT OR IGNORE INTO comment_state (version_id) VALUES (?)").run(versionId);
+  }
+
+  /**
+   * Attached-attachment metadata for every comment of a version, keyed by
+   * comment ID. Tombstoned comments simply have no attached rows projected
+   * (their media is unservable), and janitor cleanup never rewrites bodies.
+   */
+  private attachmentsForVersion(versionId: number): Map<string, IssueAttachmentMetadata[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT
+           a.comment_id AS commentId,
+           a.id,
+           o.content_type AS contentType,
+           o.width,
+           o.height,
+           t.width AS thumbnailWidth,
+           t.height AS thumbnailHeight
+         FROM issue_attachments a
+         JOIN issue_attachment_blobs o ON o.hash = a.original_hash
+         JOIN issue_attachment_blobs t ON t.hash = a.thumbnail_hash
+         WHERE a.version_id = ? AND a.state = 'attached'
+         ORDER BY a.attached_at, a.id`,
+      )
+      .all(versionId) as ({ commentId: string } & IssueAttachmentMetadata)[];
+    const map = new Map<string, IssueAttachmentMetadata[]>();
+    for (const { commentId, ...metadata } of rows) {
+      const list = map.get(commentId);
+      if (list === undefined) {
+        map.set(commentId, [metadata]);
+      } else {
+        list.push(metadata);
+      }
+    }
+    return map;
+  }
+
+  /**
+   * Transactional attachment binding for create/body-edit. Attaches staged
+   * IDs owned by the author on the exact version, detaches IDs the body no
+   * longer references, and enforces count/aggregate caps — all inside the
+   * caller's mutation transaction so a failure rolls the body change back.
+   * Re-attaching an ID this same comment previously detached (undo-removal)
+   * is allowed; every other unavailable ID is an opaque validation error.
+   */
+  private bindAttachments(
+    commentId: string,
+    versionId: number,
+    authorId: number,
+    ids: string[],
+    now: string,
+  ): void {
+    if (ids.length > ATTACHMENT_MAX_PER_COMMENT) {
+      throw new IssueServiceError("invalid_attachment", "invalid_attachment", {
+        details: [
+          { field: "attachmentIds", reason: `at most ${ATTACHMENT_MAX_PER_COMMENT} attachments per comment` },
+        ],
+      });
+    }
+    const currentRows = this.db
+      .prepare(
+        `SELECT id FROM issue_attachments
+         WHERE comment_id = ? AND version_id = ? AND state = 'attached'`,
+      )
+      .all(commentId, versionId) as { id: string }[];
+    const wanted = new Set(ids);
+    const kept = new Set<string>();
+    for (const row of currentRows) {
+      if (wanted.has(row.id)) {
+        kept.add(row.id);
+      } else {
+        this.db
+          .prepare(
+            `UPDATE issue_attachments
+             SET state = 'detached', detached_at = ?
+             WHERE id = ? AND version_id = ? AND state = 'attached'`,
+          )
+          .run(now, row.id, versionId);
+      }
+    }
+    for (const id of ids) {
+      if (kept.has(id)) {
+        continue;
+      }
+      const attached = this.db
+        .prepare(
+          `UPDATE issue_attachments
+           SET state = 'attached', comment_id = ?, attached_at = ?, detached_at = NULL
+           WHERE id = ? AND version_id = ? AND uploader_id = ?
+             AND (state = 'staged' OR (state = 'detached' AND comment_id = ?))`,
+        )
+        .run(commentId, now, id, versionId, authorId, commentId);
+      if (attached.changes === 0) {
+        invalidAttachment();
+      }
+    }
+    const aggregate = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(o.byte_size), 0) AS total
+         FROM issue_attachments a
+         JOIN issue_attachment_blobs o ON o.hash = a.original_hash
+         WHERE a.comment_id = ? AND a.version_id = ? AND a.state = 'attached'`,
+      )
+      .get(commentId, versionId) as { total: number };
+    if (aggregate.total > ATTACHMENT_MAX_COMMENT_AGGREGATE_BYTES) {
+      throw new IssueServiceError("invalid_attachment", "invalid_attachment", {
+        details: [{ field: "attachmentIds", reason: "attachments exceed the per-comment size limit" }],
+      });
+    }
   }
 
   private readRevision(versionId: number): number {
@@ -730,7 +892,7 @@ export class IssueRepository {
     return { versionId: row.id, publicVersionId: row.publicVersionId, bundleHash: row.bundleHash };
   }
 
-  private updateIssue(command: PatchIssueCommand): { versionId: number } | undefined {
+  private updateIssue(command: PatchIssueCommand): { versionId: number; authorId: number } | undefined {
     const common = `
       WHERE id = ? AND parent_id IS NULL AND row_version = ? AND deleted_at IS NULL
         AND EXISTS (
@@ -739,7 +901,7 @@ export class IssueRepository {
             AND versions.status = 'published'
             AND versions.bundle_hash IS NOT NULL
         )
-      RETURNING version_id AS versionId`;
+      RETURNING version_id AS versionId, author_id AS authorId`;
     switch (command.patch.type) {
       case "body":
         return this.db
@@ -753,7 +915,7 @@ export class IssueRepository {
             command.now,
             command.issueId,
             command.patch.expectedVersion,
-          ) as { versionId: number } | undefined;
+          ) as { versionId: number; authorId: number } | undefined;
       case "assignment":
         return this.db
           .prepare(
@@ -767,7 +929,7 @@ export class IssueRepository {
                    AND versions.status = 'published'
                    AND versions.bundle_hash IS NOT NULL
                )
-             RETURNING version_id AS versionId`,
+             RETURNING version_id AS versionId, author_id AS authorId`,
           )
           .get(
             command.patch.assigneeId,
@@ -776,7 +938,7 @@ export class IssueRepository {
             command.patch.expectedVersion,
             command.patch.assigneeId,
             command.patch.assigneeId,
-          ) as { versionId: number } | undefined;
+          ) as { versionId: number; authorId: number } | undefined;
       case "due_date":
         return this.db
           .prepare(
@@ -789,7 +951,7 @@ export class IssueRepository {
             command.now,
             command.issueId,
             command.patch.expectedVersion,
-          ) as { versionId: number } | undefined;
+          ) as { versionId: number; authorId: number } | undefined;
       case "status":
         return this.db
           .prepare(
@@ -802,7 +964,7 @@ export class IssueRepository {
             command.now,
             command.issueId,
             command.patch.expectedVersion,
-          ) as { versionId: number } | undefined;
+          ) as { versionId: number; authorId: number } | undefined;
     }
   }
 
@@ -931,7 +1093,12 @@ export class IssueRepository {
          ORDER BY c.created_at, c.id`,
       )
       .all(issueId, versionId) as ReplyProjectionRow[];
-    return publicIssue(row, replies.map(publicReply));
+    const attachmentsByComment = this.attachmentsForVersion(versionId);
+    return publicIssue(
+      row,
+      replies.map((reply) => publicReply(reply, attachmentsByComment.get(reply.id) ?? [])),
+      attachmentsByComment.get(row.id) ?? [],
+    );
   }
 
   private readReplyProjection(replyId: string, versionId: number): IssueReply {
@@ -955,6 +1122,6 @@ export class IssueRepository {
     if (row === undefined) {
       notFound();
     }
-    return publicReply(row);
+    return publicReply(row, this.attachmentsForVersion(versionId).get(row.id) ?? []);
   }
 }

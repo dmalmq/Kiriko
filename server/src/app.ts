@@ -20,6 +20,10 @@ import { registerGdbRoutes } from "./gdb/routes";
 import { registerServeRoutes } from "./serve/routes";
 import { recompileLegacyPublished } from "./core/recompileLegacy";
 import { AnchorIndexCache } from "./issues/anchorIndex";
+import { runIssueAttachmentJanitor } from "./issues/attachments/janitor";
+import { issueAttachmentRoutes } from "./issues/attachments/routes";
+import { IssueAttachmentService } from "./issues/attachments/service";
+import { IssueAttachmentStore } from "./issues/attachments/store";
 import { IssueEventHub } from "./issues/events";
 import { IssueRepository } from "./issues/repository";
 import { issueRoutes } from "./issues/routes";
@@ -77,6 +81,33 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
   });
   const issueService = new IssueService(issueRepository, anchorIndexCache, issueHub);
 
+  const issueAttachmentStore = new IssueAttachmentStore(config.dataDir);
+  const issueAttachmentService = new IssueAttachmentService({
+    db,
+    store: issueAttachmentStore,
+    versions: issueRepository,
+    versionQuotaBytes: config.issueAttachmentVersionQuotaBytes ?? 512 * 1024 * 1024,
+    uploadRateMax: config.issueAttachmentUploadRateMax ?? 30,
+    uploadRateWindowMs: 10 * 60 * 1000,
+    processingConcurrency: 2,
+  });
+
+  // Startup janitor pass (plus a periodic timer below): expired staged
+  // uploads, detached/tombstoned media, and filesystem/SQLite crash gaps.
+  try {
+    runIssueAttachmentJanitor(db, issueAttachmentStore);
+  } catch (error) {
+    app.log.error(error, "issue attachment janitor failed at startup");
+  }
+  const issueAttachmentJanitorTimer = setInterval(() => {
+    try {
+      runIssueAttachmentJanitor(db, issueAttachmentStore);
+    } catch (error) {
+      app.log.error(error, "issue attachment janitor failed");
+    }
+  }, config.issueAttachmentJanitorIntervalMs ?? 3_600_000);
+  issueAttachmentJanitorTimer.unref();
+
   ensureBootstrapUser(db, config);
   seedDevUsers(db, config, (message) => app.log.warn(message));
   registerAuthRoutes(app);
@@ -90,6 +121,7 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
     repository: issueRepository,
     hub: issueHub,
   });
+  await app.register(issueAttachmentRoutes, { service: issueAttachmentService });
 
   app.get("/healthz", async () => ({ ok: true }));
   app.get("/api/openapi.json", async () => app.swagger());
@@ -100,6 +132,7 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
   });
 
   app.addHook("onClose", async () => {
+    clearInterval(issueAttachmentJanitorTimer);
     anchorIndexCache.clear();
     db.close();
   });

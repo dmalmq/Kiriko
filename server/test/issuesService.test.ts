@@ -374,7 +374,7 @@ describe("IssueService create orchestration", () => {
     const input = { requestId: nextRequestId(), bodyMarkdown: "Already saved" };
 
     const result = await service.createReply(VIEWER, "issue-1", input);
-    const expected = hashReplyCreate({ bodyMarkdown: input.bodyMarkdown }, VERSION.versionId, "issue-1");
+    const expected = hashReplyCreate({ bodyMarkdown: input.bodyMarkdown, attachmentIds: [] }, VERSION.versionId, "issue-1");
     expect(repository.calls.slice(0, 2)).toEqual(["issue-context", "probe"]);
     expect(repository.onProbe).toBeUndefined();
     expect(result.resourceId).toBe("reply-existing");
@@ -604,6 +604,7 @@ describe("IssueService permissions and mutations", () => {
           rowVersion: 2,
           anchor: { levelId: "level-1", longitude: 0, latitude: 0 },
           bodyMarkdown: "current",
+          attachments: [],
           status: "open",
           author: { id: VIEWER.id, username: VIEWER.username },
           assignee: null,
