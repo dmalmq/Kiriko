@@ -15,7 +15,7 @@ interface UploadCall {
   onProgress: (fraction: number) => void;
   resolve: (metadata: IssueAttachmentMetadata) => void;
   reject: (error: unknown) => void;
-  abort: ReturnType<typeof vi.fn>;
+  abort: () => void;
 }
 
 function makeMetadata(id: string = crypto.randomUUID()): IssueAttachmentMetadata {
@@ -241,7 +241,6 @@ describe("IssueMarkdownEditor Write/Preview tabs", () => {
 
 describe("IssueMarkdownEditor image uploads", () => {
   it("uploads a pasted image, replaces the placeholder with a token, and edits alt text", async () => {
-    const user = userEvent.setup();
     const { uploadFile, calls } = mockUploadTransport();
     const blocked: boolean[] = [];
     render(

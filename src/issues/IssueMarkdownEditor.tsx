@@ -90,22 +90,22 @@ export interface IssueMarkdownEditorProps {
   value: string;
   onChange: (value: string) => void;
   /** Disables the textarea and toolbar while a mutation is in flight. */
-  disabled?: boolean;
+  disabled?: boolean | undefined;
   ariaLabel: string;
-  placeholder?: string;
-  rows?: number;
+  placeholder?: string | undefined;
+  rows?: number | undefined;
   /** Textarea class, preserving each host surface's existing styling. */
-  textareaClassName?: string;
+  textareaClassName?: string | undefined;
   /** Null when issues are unavailable (embed/local viewers): image controls hide. */
   publicVersionId: string | null;
   /** Canonical attachment metadata (edit surfaces) for preview rendering. */
-  existingAttachments?: IssueAttachmentMetadata[];
+  existingAttachments?: IssueAttachmentMetadata[] | undefined;
   /** Reports whether incomplete uploads must block Post/Save. */
-  onSubmitBlockedChange?: (blocked: boolean) => void;
-  textareaRef?: Ref<HTMLTextAreaElement>;
+  onSubmitBlockedChange?: ((blocked: boolean) => void) | undefined;
+  textareaRef?: Ref<HTMLTextAreaElement> | undefined;
   /** Test seams for the upload transport. */
-  uploadFile?: typeof uploadIssueAttachment;
-  cancelStaged?: typeof deleteStagedAttachment;
+  uploadFile?: typeof uploadIssueAttachment | undefined;
+  cancelStaged?: typeof deleteStagedAttachment | undefined;
 }
 
 interface SelectionRange {
