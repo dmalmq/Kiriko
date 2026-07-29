@@ -15,6 +15,7 @@
     "test:server": "pnpm --filter kiriko-server test -- --run",
     "test:e2e": "playwright test",
     "build": "tsc --noEmit && vite build",
+    "build:web": "vite build",
     "preview": "vite preview",
     "core:build:node": "pnpm --filter @kiriko/node build",
     "core:build:wasm": "node scripts/build-wasm.mjs",
@@ -23,7 +24,8 @@
     "predev": "pnpm core:build:wasm",
     "predev:server": "pnpm core:build:node",
     "prebuild": "pnpm core:build",
-    "pretest": "pnpm core:build"
+    "pretest": "pnpm core:build",
+    "pretest:e2e": "pnpm core:build"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",

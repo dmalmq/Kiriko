@@ -62,9 +62,13 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: "pnpm exec vite preview --host 127.0.0.1 --port 4173",
+      // Always replace dist before preview. build:web intentionally skips the
+      // Rust prebuild: standalone `pnpm test:e2e` builds core once, while CI
+      // has already built it before invoking each browser project.
+      command: "pnpm build:web && pnpm exec vite preview --host 127.0.0.1 --port 4173",
       url: "http://127.0.0.1:4173",
-      reuseExistingServer: !process.env.CI,
+      // Never reuse an unknown preview: doing so would bypass the fresh build.
+      reuseExistingServer: false,
       timeout: 60_000,
     },
     {
