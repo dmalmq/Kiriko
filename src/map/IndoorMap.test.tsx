@@ -826,12 +826,14 @@ describe("IndoorMap network review", () => {
     expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([1, 1]);
   });
 
-  it("re-filters the network source when the active floor changes", () => {
+  it("updates the network source exactly once with the active floor's data", () => {
     const { map, rerender } = renderMap(baseProps({ network: NETWORK, levelId: "level-1" }));
     expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([1, 1]);
+    const updatesBeforeFloorChange = map.networkSourceData.length;
 
     rerender(baseProps({ network: NETWORK, levelId: "level-2" }));
 
+    expect(map.networkSourceData).toHaveLength(updatesBeforeFloorChange + 1);
     expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([2, 2]);
   });
 });

@@ -853,13 +853,6 @@ export function IndoorMap({
     }
 
     setSourceData(map, venue, levelId);
-    setNetworkSourceData(
-      map,
-      venue,
-      levelId,
-      network,
-      networkEditing == null ? undefined : networkRenderState(networkEditing),
-    );
     fitLevelBounds(map, venue, levelId);
 
     const selected = selectedIdRef.current;
