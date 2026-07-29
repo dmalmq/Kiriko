@@ -902,12 +902,19 @@ describe("IndoorMap directions", () => {
     });
   });
 
-  it("keeps the initial empty route data without invalidating it on floor changes", () => {
-    const { map, rerender } = renderMap(baseProps({ directions: null, levelId: "level-1" }));
+  it("keeps the initial inactive route data without invalidating it on floor changes", () => {
+    const inactiveDirections = directions({
+      active: false,
+      origin: { longitude: 139.0, latitude: 35.0, ordinal: 0 },
+      route: CROSS_FLOOR_ROUTE,
+    });
+    const { map, rerender } = renderMap(
+      baseProps({ directions: inactiveDirections, levelId: "level-1" }),
+    );
     expect(lastRouteData(map).features).toEqual([]);
     const updatesBeforeFloorChange = map.routeSourceData.length;
 
-    rerender(baseProps({ directions: null, levelId: "level-2" }));
+    rerender(baseProps({ directions: inactiveDirections, levelId: "level-2" }));
 
     expect(map.routeSourceData).toHaveLength(updatesBeforeFloorChange);
     expect(lastRouteData(map).features).toEqual([]);
@@ -925,7 +932,7 @@ describe("IndoorMap directions", () => {
     expect(lastRouteData(map).features.length).toBeGreaterThan(0);
     const updatesBeforeDirectionsOff = map.routeSourceData.length;
 
-    rerender(baseProps({ directions: null }));
+    rerender(baseProps({ directions: directions({ active: false }) }));
 
     expect(map.routeSourceData).toHaveLength(updatesBeforeDirectionsOff + 1);
     expect(lastRouteData(map)).toEqual({ type: "FeatureCollection", features: [] });

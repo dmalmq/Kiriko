@@ -198,7 +198,7 @@ function setRouteSourceData(
     return;
   }
   const ordinal = activeOrdinalFor(venue, levelId);
-  const active = directions != null && ordinal !== null;
+  const active = directions?.active === true && ordinal !== null;
   source.setData(
     buildRouteFeatures(
       active ? { origin: directions.origin, destination: directions.destination, route: directions.route } : null,
@@ -650,7 +650,7 @@ export function IndoorMap({
   const directionsRef = useRef(directions);
   const networkRef = useRef(network);
   const networkEditingRef = useRef(networkEditing);
-  const routeSourceActiveRef = useRef(directions != null);
+  const routeSourceActiveRef = useRef(directions?.active === true);
   const networkSourceActiveRef = useRef(network != null || networkEditing != null);
   const facilitySourceActiveRef = useRef(facilities.length > 0);
   const indoorSourceStateRef = useRef<IndoorSourceState | null>(null);
@@ -869,7 +869,7 @@ export function IndoorMap({
       indoorSourceStateRef.current =
         indoorData === null ? null : { venue: venueRef.current, data: indoorData };
       setRouteSourceData(map, venueRef.current, levelIdRef.current, directionsRef.current);
-      routeSourceActiveRef.current = directionsRef.current != null;
+      routeSourceActiveRef.current = directionsRef.current?.active === true;
       setNetworkSourceData(
         map,
         venueRef.current,
@@ -1137,7 +1137,7 @@ export function IndoorMap({
     if (map == null || !map.isStyleLoaded()) {
       return;
     }
-    const active = directions != null;
+    const active = directions?.active === true;
     if (!active && !routeSourceActiveRef.current) {
       return;
     }

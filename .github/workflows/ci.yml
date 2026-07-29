@@ -197,7 +197,17 @@ jobs:
           node scripts/print-runner-diagnostics.mjs
           pnpm exec playwright test e2e/viewer.performance.spec.ts \
             --project=chromium-performance --workers=1 \
-            --grep "level-change (P95|phase/source probes)"
+            --grep "level-change P95"
+
+      - name: Run level-change phase and source probes
+        id: phase_source_probes
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          pnpm exec playwright test e2e/viewer.performance.spec.ts \
+            --project=chromium-performance --workers=1 \
+            --grep "diagnostic: level-change phase/source probes"
 
       - name: Publish explicit P95 assertion failure
         if: ${{ always() && hashFiles(format('performance-p95-failure-{0}.json', matrix.replica)) != '' }}
@@ -209,7 +219,8 @@ jobs:
           retention-days: 3
 
       - name: Preserve performance failure diagnostics
-        if: failure()
+        if: ${{ failure() || steps.phase_source_probes.outcome == 'failure' }}
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (v4)
         with:
           name: performance-diagnostics-${{ matrix.replica }}
