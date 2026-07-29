@@ -63,17 +63,30 @@ function sniffFormat(bytes: Uint8Array): "png" | "jpeg" | "webp" | null {
 }
 
 async function withTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+  const timeout = Symbol("timeout");
   let timer: NodeJS.Timeout | undefined;
+  const settled = work.then(
+    (value) => ({ value }),
+    (error: unknown) => ({ error }),
+  );
   try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_resolve, reject) => {
+    const result = await Promise.race([
+      settled,
+      new Promise<typeof timeout>((resolve) => {
         timer = setTimeout(() => {
-          reject(invalidImage("processing timed out"));
+          resolve(timeout);
         }, timeoutMs);
         timer.unref();
       }),
     ]);
+    if (result === timeout) {
+      await settled;
+      throw invalidImage("processing timed out");
+    }
+    if ("error" in result) {
+      throw result.error;
+    }
+    return result.value;
   } finally {
     if (timer !== undefined) {
       clearTimeout(timer);
@@ -117,7 +130,9 @@ async function process(
     limitInputPixels: limits.maxPixels,
     animated: false,
     failOn: "error",
-  }).rotate();
+  })
+    .timeout({ seconds: Math.max(1, Math.ceil(limits.timeoutMs / 1000)) })
+    .rotate();
   const metadata = await base.metadata();
   if (metadata.format !== sniffed) {
     throw invalidImage("image content does not match its type");

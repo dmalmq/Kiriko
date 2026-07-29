@@ -36,6 +36,14 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const ACCEPTED_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 export const PENDING_SCHEME = "pending:";
 
+function escapeAttachmentAlt(alt: string): string {
+  return alt.replace(/[\\[\]]/g, "\\$&");
+}
+
+function attachmentTokenPattern(id: string): RegExp {
+  return new RegExp(`!\\[(?:\\\\.|[^\\\\\\]])*\\]\\(attachment:${id}\\)`);
+}
+
 const ui = {
   write: { ja: "書く", en: "Write" },
   preview: { ja: "プレビュー", en: "Preview" },
@@ -402,7 +410,7 @@ export function IssueMarkdownEditor({
     upload.transport?.abort();
     if (upload.metadata !== null) {
       void cancelStaged(upload.metadata.id).catch(() => undefined);
-      const tokenPattern = new RegExp(`!\\[[^\\]]*\\]\\(attachment:${upload.metadata.id}\\)`);
+      const tokenPattern = attachmentTokenPattern(upload.metadata.id);
       const current = valueRef.current;
       const match = tokenPattern.exec(current);
       if (match !== null) {
@@ -418,12 +426,13 @@ export function IssueMarkdownEditor({
     if (upload.metadata === null) {
       return;
     }
-    const tokenPattern = new RegExp(`!\\[[^\\]]*\\](\\(attachment:${upload.metadata.id}\\))`);
+    const tokenPattern = attachmentTokenPattern(upload.metadata.id);
     const current = valueRef.current;
     const match = tokenPattern.exec(current);
     if (match !== null) {
+      const token = `![${escapeAttachmentAlt(alt)}](attachment:${upload.metadata.id})`;
       onChangeRef.current(
-        `${current.slice(0, match.index)}![${alt}]${match[1]}${current.slice(match.index + match[0].length)}`,
+        current.slice(0, match.index) + token + current.slice(match.index + match[0].length),
       );
     }
   };

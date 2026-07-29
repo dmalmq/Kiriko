@@ -2,7 +2,7 @@ import { useState, type ReactElement } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { IssueMarkdownEditor } from "./IssueMarkdownEditor";
+import { attachmentIdsForSubmit, IssueMarkdownEditor } from "./IssueMarkdownEditor";
 import type { LocaleCode } from "../imdf/types";
 import type { IssueAttachmentMetadata } from "./types";
 
@@ -273,8 +273,13 @@ describe("IssueMarkdownEditor image uploads", () => {
     });
 
     const alt = screen.getByLabelText("Alt text");
-    fireEvent.change(alt, { target: { value: "Gate photo" } });
-    expect(currentValue()).toContain(`![Gate photo](attachment:${metadata.id})`);
+    fireEvent.change(alt, { target: { value: "West ] \\ entrance" } });
+    expect(currentValue()).toContain(`![West \\] \\\\ entrance](attachment:${metadata.id})`);
+    expect(attachmentIdsForSubmit(currentValue())).toEqual([metadata.id]);
+
+    fireEvent.change(alt, { target: { value: "Gate [2]" } });
+    expect(currentValue()).toContain(`![Gate \\[2\\]](attachment:${metadata.id})`);
+    expect(attachmentIdsForSubmit(currentValue())).toEqual([metadata.id]);
   });
 
   it("keeps every placeholder when multiple files are selected", () => {
