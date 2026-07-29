@@ -344,18 +344,12 @@ fn leaf_has_corridor_endcap(
             if edge_len_sq <= f64::EPSILON {
                 return false;
             }
-            let projection =
-                (-(a[0] * edge[0] + a[1] * edge[1]) / edge_len_sq).clamp(0.0, 1.0);
-            let offset = [
-                a[0] + projection * edge[0],
-                a[1] + projection * edge[1],
-            ];
+            let projection = (-(a[0] * edge[0] + a[1] * edge[1]) / edge_len_sq).clamp(0.0, 1.0);
+            let offset = [a[0] + projection * edge[0], a[1] + projection * edge[1]];
             let distance = offset[0].hypot(offset[1]);
-            let tangent_dot =
-                (branch[0] * edge[0] + branch[1] * edge[1]).abs()
-                    / (branch_len * edge_len_sq.sqrt());
-            distance <= nearest + ENDCAP_NEAREST_TOL_M
-                && tangent_dot <= ENDCAP_TANGENT_DOT_MAX
+            let tangent_dot = (branch[0] * edge[0] + branch[1] * edge[1]).abs()
+                / (branch_len * edge_len_sq.sqrt());
+            distance <= nearest + ENDCAP_NEAREST_TOL_M && tangent_dot <= ENDCAP_TANGENT_DOT_MAX
         })
     };
     let has_flat_endcap = area.iter().any(|poly| {
