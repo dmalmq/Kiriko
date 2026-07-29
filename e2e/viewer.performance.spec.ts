@@ -558,7 +558,7 @@ async function runLevelChangeControls(
     }
   }
 
-  // Renderer inspection runs after every control sample and is best-effort, so
+  // Renderer inspection runs after all control samples and is best-effort, so
   // it cannot perturb or determine the unchanged acceptance result.
   return { samples, environment: await safeLevelChangeEnvironment(page) };
 }
