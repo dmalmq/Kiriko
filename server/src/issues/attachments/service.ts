@@ -153,8 +153,6 @@ export class IssueAttachmentService {
 
     const used = this.repository.versionAttachmentBytes(version.versionId);
     if (used + original.byteSize > this.versionQuotaBytes) {
-      this.store.remove(originalPut.hash);
-      this.store.remove(thumbnailPut.hash);
       throw new IssueServiceError("quota_exceeded", "The attachment storage quota is exhausted.");
     }
 
@@ -185,8 +183,6 @@ export class IssueAttachmentService {
           return replay.metadata;
         }
       }
-      this.store.remove(originalPut.hash);
-      this.store.remove(thumbnailPut.hash);
       throw error;
     }
 

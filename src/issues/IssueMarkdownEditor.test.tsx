@@ -277,6 +277,17 @@ describe("IssueMarkdownEditor image uploads", () => {
     expect(currentValue()).toContain(`![Gate photo](attachment:${metadata.id})`);
   });
 
+  it("keeps every placeholder when multiple files are selected", () => {
+    const { uploadFile } = mockUploadTransport();
+    render(<Harness uploadFile={uploadFile} />);
+    fireEvent.drop(textarea(), {
+      dataTransfer: { files: [pngFile("first.png"), pngFile("second.png")] },
+    });
+
+    expect(uploadFile).toHaveBeenCalledTimes(2);
+    expect(currentValue().match(/pending:/g)).toHaveLength(2);
+  });
+
   it("uploads from drag/drop and from the file picker", async () => {
     const user = userEvent.setup();
     const { uploadFile, calls } = mockUploadTransport();
@@ -317,6 +328,24 @@ describe("IssueMarkdownEditor image uploads", () => {
     calls[1]?.resolve(metadata);
     await waitFor(() => {
       expect(currentValue()).toContain(`attachment:${metadata.id}`);
+    });
+  });
+
+  it("aborts an upload when its placeholder is deleted", async () => {
+    const { uploadFile, calls } = mockUploadTransport();
+    const blocked: boolean[] = [];
+    render(
+      <Harness uploadFile={uploadFile} onSubmitBlockedChange={(value) => blocked.push(value)} />,
+    );
+    fireEvent.paste(textarea(), { clipboardData: { files: [pngFile()] } });
+    expect(blocked[blocked.length - 1]).toBe(true);
+
+    fireEvent.change(textarea(), { target: { value: "" } });
+
+    await waitFor(() => {
+      expect(calls[0]?.abort).toHaveBeenCalled();
+      expect(screen.queryByText("Uploading…")).toBeNull();
+      expect(blocked[blocked.length - 1]).toBe(false);
     });
   });
 

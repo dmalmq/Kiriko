@@ -366,9 +366,10 @@ describe("attachment upload API", () => {
       ).run(PUBLIC_ID, bundle.hash);
       const cookie = cookieFor(app, 1);
 
+      const store = new IssueAttachmentStore(dataDir);
       const service = new IssueAttachmentService({
         db,
-        store: new IssueAttachmentStore(dataDir),
+        store,
         versions: new IssueRepository(db),
         versionQuotaBytes: 1,
         uploadRateMax: 2,
@@ -383,7 +384,7 @@ describe("attachment upload API", () => {
 
       const generous = new IssueAttachmentService({
         db,
-        store: new IssueAttachmentStore(dataDir),
+        store,
         versions: new IssueRepository(db),
         versionQuotaBytes: 512 * 1024 * 1024,
         uploadRateMax: 2,
@@ -391,6 +392,22 @@ describe("attachment upload API", () => {
         processingConcurrency: 1,
       });
       await generous.upload(user, PUBLIC_ID, randomUUID(), null, png);
+      const referencedHashes = store.list();
+      expect(referencedHashes.length).toBeGreaterThan(0);
+      const restrictive = new IssueAttachmentService({
+        db,
+        store,
+        versions: new IssueRepository(db),
+        versionQuotaBytes: 1,
+        uploadRateMax: 2,
+        uploadRateWindowMs: 60_000,
+        processingConcurrency: 1,
+      });
+      await expect(
+        restrictive.upload(user, PUBLIC_ID, randomUUID(), null, png),
+      ).rejects.toMatchObject({ code: "quota_exceeded" });
+      expect(referencedHashes.every((hash) => store.has(hash))).toBe(true);
+
       await generous.upload(user, PUBLIC_ID, randomUUID(), null, png);
       await expect(
         generous.upload(user, PUBLIC_ID, randomUUID(), null, png),

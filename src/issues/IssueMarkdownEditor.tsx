@@ -245,6 +245,28 @@ export function IssueMarkdownEditor({
       upload.status === "uploading"
       || (upload.status === "error" && value.includes(upload.placeholder)),
   );
+  useEffect(() => {
+    const removedIds = new Set(
+      uploads
+        .filter(
+          (upload) =>
+            upload.status === "uploading"
+            && upload.placeholder !== ""
+            && !value.includes(upload.placeholder),
+        )
+        .map((upload) => upload.localId),
+    );
+    if (removedIds.size === 0) {
+      return;
+    }
+    for (const upload of uploads) {
+      if (removedIds.has(upload.localId)) {
+        upload.transport?.abort();
+        URL.revokeObjectURL(upload.previewUrl);
+      }
+    }
+    setUploads((current) => current.filter((upload) => !removedIds.has(upload.localId)));
+  }, [uploads, value]);
   const lastBlockedRef = useRef<boolean | null>(null);
   useEffect(() => {
     if (onSubmitBlockedChange !== undefined && lastBlockedRef.current !== blocked) {
@@ -285,12 +307,13 @@ export function IssueMarkdownEditor({
     const token = `![${ui.defaultAlt[locale]}](attachment:${metadata.id})`;
     // If the author deleted the placeholder mid-flight, discard the staged
     // upload instead of inserting an unreferenced token.
-    if (!replaceText(upload.placeholder, token)) {
+    if (!valueRef.current.includes(upload.placeholder)) {
       void cancelStaged(metadata.id).catch(() => undefined);
       removeUpload(upload.localId);
       return;
     }
     updateUpload(upload.localId, { status: "success", metadata, progress: 1, transport: null });
+    replaceText(upload.placeholder, token);
   };
 
   const startUpload = (upload: EditorUpload) => {
@@ -317,6 +340,7 @@ export function IssueMarkdownEditor({
     }
     const textarea = internalRef.current;
     const fresh: EditorUpload[] = [];
+    let nextValue = valueRef.current;
     let cursor: SelectionRange | null = null;
     for (const file of files) {
       const localId = crypto.randomUUID();
@@ -335,13 +359,11 @@ export function IssueMarkdownEditor({
       }
       const placeholderText = `![${ui.uploading[locale]}](${PENDING_SCHEME}${localId})`;
       if (cursor === null && textarea !== null) {
-        cursor = selectionOf(textarea, valueRef.current);
+        cursor = selectionOf(textarea, nextValue);
       }
-      const insertAt: SelectionRange = cursor ?? { start: valueRef.current.length, end: valueRef.current.length };
-      const current = valueRef.current;
-      const nextValue =
-        current.slice(0, insertAt.start) + placeholderText + current.slice(insertAt.end);
-      onChangeRef.current(nextValue);
+      const insertAt: SelectionRange = cursor ?? { start: nextValue.length, end: nextValue.length };
+      nextValue =
+        nextValue.slice(0, insertAt.start) + placeholderText + nextValue.slice(insertAt.end);
       cursor = { start: insertAt.start + placeholderText.length, end: insertAt.start + placeholderText.length };
       fresh.push({
         localId,
@@ -356,6 +378,10 @@ export function IssueMarkdownEditor({
     }
     if (fresh.length === 0) {
       return;
+    }
+    if (nextValue !== valueRef.current) {
+      valueRef.current = nextValue;
+      onChangeRef.current(nextValue);
     }
     setUploads((current) => [...current, ...fresh]);
     for (const upload of fresh) {
