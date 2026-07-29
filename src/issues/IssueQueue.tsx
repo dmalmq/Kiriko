@@ -34,6 +34,7 @@ const ui = {
     closed: { ja: "クローズ", en: "Closed" },
   },
   commentDeleted: { ja: "コメントは削除されました", en: "Comment deleted" },
+  imageAttachment: { ja: "画像添付", en: "Image attachment" },
   duePrefix: { ja: "期限 ", en: "Due " },
   overdue: { ja: "期限切れ", en: "Overdue" },
   dueSoon: { ja: "期限が近い", en: "Due soon" },
@@ -94,14 +95,22 @@ export function issueSummary(bodyMarkdown: string | null, locale: LocaleCode): s
   if (bodyMarkdown === null) {
     return ui.commentDeleted[locale];
   }
+  const normalized = normalizeIssueMarkdown(bodyMarkdown);
+  // Image syntax never contributes summary text; an image-only body falls
+  // back to the localized placeholder instead of exposing token syntax.
+  const hadAttachment = /!\[[^\]]*\]\(attachment:[0-9a-f-]{36}\)/.test(normalized);
+  const stripped = normalized.replace(/!\[[^\]]*\]\([^)\n]*\)/g, "");
   let firstLine = "";
-  for (const line of normalizeIssueMarkdown(bodyMarkdown).split("\n")) {
+  for (const line of stripped.split("\n")) {
     if (line.trim() !== "") {
       firstLine = line;
       break;
     }
   }
   const collapsed = firstLine.trim().replace(/\s+/g, " ");
+  if (collapsed === "") {
+    return hadAttachment ? ui.imageAttachment[locale] : "";
+  }
   const scalars = [...collapsed];
   if (scalars.length <= SUMMARY_MAX_SCALARS) {
     return collapsed;

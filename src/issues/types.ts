@@ -5,14 +5,32 @@ export type IssueErrorCode =
   | "invalid_anchor"
   | "invalid_due_date"
   | "invalid_markdown"
+  | "invalid_attachment"
   | "unauthorized"
   | "forbidden"
   | "not_found"
   | "stale_issue"
   | "idempotency_conflict"
   | "issue_deleted"
+  | "rate_limited"
+  | "quota_exceeded"
   | "sse_capacity"
   | "internal_error";
+
+/**
+ * Server-projected attachment metadata for a live body. `previewUrl` is
+ * client-only: a temporary `blob:` object URL for a staged upload that the
+ * server does not serve yet (staged media is uploader-private).
+ */
+export interface IssueAttachmentMetadata {
+  id: string;
+  contentType: "image/png" | "image/jpeg" | "image/webp";
+  width: number;
+  height: number;
+  thumbnailWidth: number;
+  thumbnailHeight: number;
+  previewUrl?: string;
+}
 
 export interface ReviewerSummary {
   id: number;
@@ -31,6 +49,7 @@ export type IssueReply =
       id: string;
       rowVersion: number;
       bodyMarkdown: string;
+      attachments: IssueAttachmentMetadata[];
       author: ReviewerSummary;
       createdAt: string;
       updatedAt: string;
@@ -40,6 +59,7 @@ export type IssueReply =
       id: string;
       rowVersion: number;
       bodyMarkdown: null;
+      attachments: [];
       author: ReviewerSummary;
       createdAt: string;
       updatedAt: string;
@@ -61,8 +81,8 @@ interface ReviewIssueFields {
 }
 
 export type ReviewIssue =
-  | (ReviewIssueFields & { bodyMarkdown: string; deletedAt: null })
-  | (ReviewIssueFields & { bodyMarkdown: null; deletedAt: string });
+  | (ReviewIssueFields & { bodyMarkdown: string; attachments: IssueAttachmentMetadata[]; deletedAt: null })
+  | (ReviewIssueFields & { bodyMarkdown: null; attachments: []; deletedAt: string });
 
 export interface IssueCollection {
   revision: number;
@@ -72,6 +92,7 @@ export interface IssueCollection {
 export interface CreateIssueInput {
   requestId: string;
   bodyMarkdown: string;
+  attachmentIds?: string[];
   anchor: {
     levelId: string;
     longitude: number;
@@ -85,10 +106,11 @@ export interface CreateIssueInput {
 export interface CreateReplyInput {
   requestId: string;
   bodyMarkdown: string;
+  attachmentIds?: string[];
 }
 
 export type IssuePatch =
-  | { type: "body"; bodyMarkdown: string; expectedVersion: number }
+  | { type: "body"; bodyMarkdown: string; expectedVersion: number; attachmentIds?: string[] }
   | { type: "assignment"; assigneeId: number | null; expectedVersion: number }
   | { type: "due_date"; dueDate: string | null; expectedVersion: number }
   | { type: "status"; status: IssueStatus; expectedVersion: number };
