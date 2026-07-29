@@ -6,7 +6,7 @@ covers the operational surface added with attachments.
 
 ## What is stored where
 
-- **SQLite (`$KIRIKO_DATA_DIR/kiriko.db`)** — `issue_attachment_blobs`
+- **SQLite (`$KIRIKO_DATA_DIR/data/kiriko.db`)** — `issue_attachment_blobs`
   (content-addressed normalized image metadata) and `issue_attachments`
   (per-upload rows: staged → attached → detached). Both cascade with their
   version/venue.
@@ -32,9 +32,9 @@ consistent capture. Use either of these supported procedures:
    the copy has completed successfully.
 2. Keep the servers running only when the storage platform can create one
    atomic filesystem snapshot spanning the entire `$KIRIKO_DATA_DIR`. Retain
-   the whole snapshot, including `kiriko.db-wal` and `kiriko.db-shm` when
-   present; do not combine a SQLite backup from one instant with attachment
-   files copied at another.
+   the whole snapshot, including `data/kiriko.db-wal` and
+   `data/kiriko.db-shm` when present; do not combine a SQLite backup from one
+   instant with attachment files copied at another.
 
 For restore, stop every server and janitor, replace the entire data directory
 from one capture, verify its ownership and permissions, then restart. A

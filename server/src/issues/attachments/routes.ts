@@ -1,5 +1,10 @@
 import { Type } from "@sinclair/typebox";
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
+import type {
+  FastifyPluginAsync,
+  FastifyReply,
+  FastifyRequest,
+  FastifySchemaValidationError,
+} from "fastify";
 import { requireSession } from "../../auth/guard";
 import { IssueServiceError, toIssueErrorResponse } from "../errors";
 import {
@@ -30,6 +35,47 @@ function invalidRequest(reason: string): IssueServiceError {
   });
 }
 
+interface FastifyValidationFailure {
+  validation: FastifySchemaValidationError[];
+}
+
+function isFastifyValidationError(error: unknown): error is FastifyValidationFailure {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "validation" in error &&
+    Array.isArray(error.validation)
+  );
+}
+
+function validationField(error: FastifySchemaValidationError): string {
+  const additionalProperty = error.params?.additionalProperty;
+  if (typeof additionalProperty === "string") {
+    return additionalProperty;
+  }
+  const missingProperty = error.params?.missingProperty;
+  if (typeof missingProperty === "string") {
+    return missingProperty;
+  }
+  const path = error.instancePath?.replace(/^\//, "").replaceAll("/", ".");
+  return path && path.length > 0 ? path : "request";
+}
+
+function multipartParserFailure(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  return [
+    "FST_PARTS_LIMIT",
+    "FST_FILES_LIMIT",
+    "FST_FIELDS_LIMIT",
+    "FST_REQ_FILE_TOO_LARGE",
+    "FST_INVALID_MULTIPART_CONTENT_TYPE",
+    "FST_INVALID_JSON_FIELD_ERROR",
+    "FST_PROTO_VIOLATION",
+  ].includes(String(error.code));
+}
+
 /** Extracts the single `requestId` text field from multipart fields. */
 function multipartRequestId(fields: unknown): string {
   const record = fields as Record<string, unknown> | undefined;
@@ -53,7 +99,18 @@ export const issueAttachmentRoutes: FastifyPluginAsync<IssueAttachmentRoutesOpti
   // Same sanitized envelope as the issue routes; multipart/parser failures
   // never surface storage paths or decoder internals.
   app.setErrorHandler((error, request, reply) => {
-    const mapped = toIssueErrorResponse(error, (cause) => request.log.error(cause));
+    let mappedError: unknown = error;
+    if (isFastifyValidationError(error)) {
+      mappedError = new IssueServiceError("invalid_request", "The request is invalid.", {
+        details: error.validation.map((entry) => ({
+          field: validationField(entry),
+          reason: entry.message ?? "is invalid",
+        })),
+      });
+    } else if (multipartParserFailure(error)) {
+      mappedError = invalidRequest("body is invalid");
+    }
+    const mapped = toIssueErrorResponse(mappedError, (cause) => request.log.error(cause));
     return reply.code(mapped.status).send(mapped.body);
   });
 
@@ -79,9 +136,14 @@ export const issueAttachmentRoutes: FastifyPluginAsync<IssueAttachmentRoutesOpti
       const { publicVersionId } = request.params as { publicVersionId: string };
       // Route-level limits: the global multipart registration allows 200 MiB
       // GDB sources; attachments are capped far lower.
-      const data = await request.file({
-        limits: { fileSize: ATTACHMENT_MAX_FILE_BYTES, files: 1, fields: 5 },
-      });
+      let data: Awaited<ReturnType<typeof request.file>>;
+      try {
+        data = await request.file({
+          limits: { fileSize: ATTACHMENT_MAX_FILE_BYTES, files: 1, fields: 5 },
+        });
+      } catch {
+        throw invalidRequest("body is invalid");
+      }
       if (data === undefined) {
         throw invalidRequest("an image file is required");
       }

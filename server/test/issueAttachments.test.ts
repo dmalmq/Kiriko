@@ -343,6 +343,30 @@ describe("attachment upload API", () => {
     expect(response.json()).toMatchObject({ error: "idempotency_conflict" });
   });
 
+  it("maps parameter validation and malformed multipart to sanitized client errors", async () => {
+    const { app, memberCookie } = await seededApp();
+    const png = await pngBuffer();
+    const multipart = multipartUpload(randomUUID(), png);
+    const invalidParams = await app.inject({
+      method: "POST",
+      url: "/api/review/versions/not-a-version/issue-attachments",
+      headers: { cookie: memberCookie, ...multipart.headers },
+      payload: multipart.payload,
+    });
+    expect(invalidParams.statusCode).toBe(400);
+    expect(invalidParams.json()).toMatchObject({ error: "invalid_request" });
+
+    const malformed = await app.inject({
+      method: "POST",
+      url: `/api/review/versions/${PUBLIC_ID}/issue-attachments`,
+      headers: { cookie: memberCookie, "content-type": "multipart/form-data" },
+      payload: Buffer.from("not multipart"),
+    });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json()).toMatchObject({ error: "invalid_request" });
+    expect(malformed.body).not.toMatch(/boundary|data\/|issue-attachments\/sha256/);
+  });
+
   it("rejects SVG, oversize files, and malformed multipart opaquely", async () => {
     const { app, memberCookie } = await seededApp();
     const svg = multipartUpload(randomUUID(), Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'/>"), {
