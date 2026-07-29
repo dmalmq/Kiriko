@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import {
   floorButton,
@@ -121,6 +122,7 @@ async function zeroMapLibreTransitions(page: Page): Promise<void> {
     }
     map.style.stylesheet.transition = { duration: 0, delay: 0 };
     map._fadeDuration = 0;
+    Reflect.set(window, "__kirikoPerfMap", map);
     return true;
   });
   if (!ok) {
@@ -128,6 +130,508 @@ async function zeroMapLibreTransitions(page: Page): Promise<void> {
   }
 }
 
+const LEVEL_SOURCE_IDS = [
+  "indoor-features",
+  "indoor-route",
+  "indoor-network",
+  "indoor-facilities",
+] as const;
+
+interface SourceUpdateTiming {
+  sourceId: string;
+  operation: "setData" | "updateData";
+  startMs: number;
+  durationMs: number;
+}
+
+interface SourceEventTiming {
+  type: "dataloading" | "sourcedata";
+  sourceId: string;
+  atMs: number;
+  isSourceLoaded: boolean | null;
+}
+
+interface LongTaskTiming {
+  startMs: number;
+  durationMs: number;
+}
+
+interface LevelChangeDiagnostic {
+  sample: number;
+  label: string;
+  elapsedMs: number;
+  phases: {
+    clickToFirstSourceMs: number | null;
+    sourceWorkEndMs: number | null;
+    sourceEndToIdleMs: number | null;
+    idleToFinalFrameMs: number | null;
+  };
+  sourceUpdates: SourceUpdateTiming[];
+  sourceEvents: SourceEventTiming[];
+  render: {
+    count: number;
+    firstMs: number | null;
+    lastMs: number | null;
+    idleMs: number | null;
+    finalFrameMs: number;
+  };
+  longTaskObserverSupported: boolean;
+  longTasks: LongTaskTiming[];
+}
+
+interface LevelChangeEnvironment {
+  browserVersion: string;
+  webglVendor: string;
+  webglRenderer: string;
+}
+
+interface LevelChangeControlRun {
+  samples: number[];
+  environment: LevelChangeEnvironment;
+}
+
+interface LevelChangeDiagnosticRun {
+  diagnostics: LevelChangeDiagnostic[];
+  environment: LevelChangeEnvironment;
+  error: string | null;
+}
+
+/**
+ * Keep the acceptance clock identical to the original gate. In particular,
+ * source monkey-patching and PerformanceObserver callbacks must not execute in
+ * the 30 control samples: on slower hosted CPUs that instrumentation changes
+ * MapLibre's worker/render scheduling enough to become what the test measures.
+ */
+async function measureLevelChangeElapsed(page: Page, label: string): Promise<number> {
+  return await page.evaluate(async (levelLabel) => {
+    const container = document.querySelector(".indoor-map");
+    if (!(container instanceof HTMLElement)) {
+      throw new Error("map container missing");
+    }
+    delete container.dataset.mapIdle;
+
+    const button = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(".floor-stack__btn"),
+    ).find((candidate) => candidate.textContent?.trim() === levelLabel);
+    if (!button) {
+      throw new Error(`floor button not found: ${levelLabel}`);
+    }
+
+    return await new Promise<number>((resolve, reject) => {
+      const start = performance.now();
+      const timeout = window.setTimeout(() => {
+        observer.disconnect();
+        reject(new Error("level change idle timeout"));
+      }, 10_000);
+      const observer = new MutationObserver(() => {
+        if (container.dataset.mapIdle !== "true") {
+          return;
+        }
+        observer.disconnect();
+        requestAnimationFrame(() => {
+          window.clearTimeout(timeout);
+          resolve(performance.now() - start);
+        });
+      });
+      observer.observe(container, {
+        attributes: true,
+        attributeFilter: ["data-map-idle"],
+      });
+      button.click();
+    });
+  }, label);
+}
+
+/** A separate instrumented probe; never contributes to the gate percentile. */
+async function measureLevelChangeDiagnostic(
+  page: Page,
+  label: string,
+  sample: number,
+): Promise<LevelChangeDiagnostic> {
+  return await page.evaluate(
+    async ({ levelLabel, sampleIndex, sourceIds }) => {
+      type PerfMapEvent = {
+        sourceId?: string;
+        isSourceLoaded?: boolean;
+      };
+      type PerfMap = {
+        getSource: (id: string) => unknown;
+        on: (type: string, handler: (event?: PerfMapEvent) => void) => void;
+        off: (type: string, handler: (event?: PerfMapEvent) => void) => void;
+      };
+      type PerfSource = {
+        setData: (data: unknown) => unknown;
+        updateData?: (diff: unknown) => unknown;
+      };
+
+      const container = document.querySelector(".indoor-map");
+      if (!(container instanceof HTMLElement)) {
+        throw new Error("map container missing");
+      }
+      delete container.dataset.mapIdle;
+
+      const buttons = Array.from(
+        document.querySelectorAll<HTMLButtonElement>(".floor-stack__btn"),
+      );
+      const button = buttons.find((candidate) => candidate.textContent?.trim() === levelLabel);
+      if (!button) {
+        throw new Error(`floor button not found: ${levelLabel}`);
+      }
+
+      const mapValue = Reflect.get(window, "__kirikoPerfMap");
+      if (mapValue == null || typeof mapValue !== "object") {
+        throw new Error("performance map handle missing");
+      }
+      const map = mapValue as PerfMap;
+      const knownSources = new Set<string>(sourceIds);
+      const sourceUpdates: SourceUpdateTiming[] = [];
+      const sourceEvents: SourceEventTiming[] = [];
+      const longTasks: LongTaskTiming[] = [];
+      const restoreSources: Array<() => void> = [];
+      let start: number | null = null;
+      let idleMs: number | null = null;
+      let firstRenderMs: number | null = null;
+      let lastRenderMs: number | null = null;
+      let renderCount = 0;
+
+      for (const sourceId of sourceIds) {
+        const sourceValue = map.getSource(sourceId);
+        if (sourceValue == null || typeof sourceValue !== "object" || !("setData" in sourceValue)) {
+          continue;
+        }
+        const source = sourceValue as PerfSource;
+        const originalSetData = source.setData;
+        source.setData = function timedSetData(this: PerfSource, data: unknown): unknown {
+          const updateStart = performance.now();
+          try {
+            return originalSetData.call(this, data);
+          } finally {
+            if (start !== null) {
+              sourceUpdates.push({
+                sourceId,
+                operation: "setData",
+                startMs: updateStart - start,
+                durationMs: performance.now() - updateStart,
+              });
+            }
+          }
+        };
+        restoreSources.push(() => {
+          source.setData = originalSetData;
+        });
+
+        if (typeof source.updateData === "function") {
+          const originalUpdateData = source.updateData;
+          source.updateData = function timedUpdateData(this: PerfSource, diff: unknown): unknown {
+            const updateStart = performance.now();
+            try {
+              return originalUpdateData.call(this, diff);
+            } finally {
+              if (start !== null) {
+                sourceUpdates.push({
+                  sourceId,
+                  operation: "updateData",
+                  startMs: updateStart - start,
+                  durationMs: performance.now() - updateStart,
+                });
+              }
+            }
+          };
+          restoreSources.push(() => {
+            source.updateData = originalUpdateData;
+          });
+        }
+      }
+
+      const recordSourceEvent = (
+        type: SourceEventTiming["type"],
+        event?: PerfMapEvent,
+      ): void => {
+        if (start === null || event?.sourceId == null || !knownSources.has(event.sourceId)) {
+          return;
+        }
+        sourceEvents.push({
+          type,
+          sourceId: event.sourceId,
+          atMs: performance.now() - start,
+          isSourceLoaded:
+            typeof event.isSourceLoaded === "boolean" ? event.isSourceLoaded : null,
+        });
+      };
+      const onDataLoading = (event?: PerfMapEvent): void => {
+        recordSourceEvent("dataloading", event);
+      };
+      const onSourceData = (event?: PerfMapEvent): void => {
+        recordSourceEvent("sourcedata", event);
+      };
+      const onRender = (): void => {
+        if (start === null) {
+          return;
+        }
+        const atMs = performance.now() - start;
+        firstRenderMs ??= atMs;
+        lastRenderMs = atMs;
+        renderCount += 1;
+      };
+      const onIdle = (): void => {
+        if (start !== null) {
+          idleMs = performance.now() - start;
+        }
+      };
+      map.on("dataloading", onDataLoading);
+      map.on("sourcedata", onSourceData);
+      map.on("render", onRender);
+      map.on("idle", onIdle);
+
+      let longTaskObserver: PerformanceObserver | null = null;
+      let longTaskObserverSupported = false;
+      const recordLongTasks = (entries: readonly PerformanceEntry[]): void => {
+        if (start === null) {
+          return;
+        }
+        for (const entry of entries) {
+          if (entry.entryType === "longtask") {
+            longTasks.push({
+              startMs: entry.startTime - start,
+              durationMs: entry.duration,
+            });
+          }
+        }
+      };
+      try {
+        longTaskObserver = new PerformanceObserver((list) => {
+          recordLongTasks(list.getEntries());
+        });
+        longTaskObserver.observe({ type: "longtask", buffered: false });
+        longTaskObserverSupported = true;
+      } catch {
+        // Chromium normally supports longtask; timings remain useful if not.
+      }
+
+      return await new Promise<LevelChangeDiagnostic>((resolve, reject) => {
+        start = performance.now();
+        const timeout = window.setTimeout(() => {
+          mutationObserver.disconnect();
+          cleanup();
+          reject(new Error("level change idle timeout"));
+        }, 10_000);
+
+        const cleanup = (): void => {
+          window.clearTimeout(timeout);
+          map.off("dataloading", onDataLoading);
+          map.off("sourcedata", onSourceData);
+          map.off("render", onRender);
+          map.off("idle", onIdle);
+          for (const restore of restoreSources) {
+            restore();
+          }
+          if (longTaskObserver != null) {
+            recordLongTasks(longTaskObserver.takeRecords());
+            longTaskObserver.disconnect();
+          }
+        };
+
+        const mutationObserver = new MutationObserver(() => {
+          if (container.dataset.mapIdle !== "true") {
+            return;
+          }
+          mutationObserver.disconnect();
+          requestAnimationFrame(() => {
+            const finalFrameMs = performance.now() - start!;
+            cleanup();
+            const clickToFirstSourceMs = sourceUpdates[0]?.startMs ?? null;
+            const sourceWorkEndMs =
+              sourceUpdates.length === 0
+                ? null
+                : Math.max(...sourceUpdates.map((update) => update.startMs + update.durationMs));
+            resolve({
+              sample: sampleIndex,
+              label: levelLabel,
+              elapsedMs: finalFrameMs,
+              phases: {
+                clickToFirstSourceMs,
+                sourceWorkEndMs,
+                sourceEndToIdleMs:
+                  sourceWorkEndMs === null || idleMs === null ? null : idleMs - sourceWorkEndMs,
+                idleToFinalFrameMs: idleMs === null ? null : finalFrameMs - idleMs,
+              },
+              sourceUpdates,
+              sourceEvents,
+              render: {
+                count: renderCount,
+                firstMs: firstRenderMs,
+                lastMs: lastRenderMs,
+                idleMs,
+                finalFrameMs,
+              },
+              longTaskObserverSupported,
+              longTasks,
+            });
+          });
+        });
+        mutationObserver.observe(container, {
+          attributes: true,
+          attributeFilter: ["data-map-idle"],
+        });
+        button.click();
+      });
+    },
+    { levelLabel: label, sampleIndex: sample, sourceIds: LEVEL_SOURCE_IDS },
+  );
+}
+
+async function levelChangeEnvironment(page: Page): Promise<LevelChangeEnvironment> {
+  const renderer = await page.evaluate(() => {
+    const canvas = document.querySelector(".indoor-map canvas");
+    if (!(canvas instanceof HTMLCanvasElement)) {
+      return { webglVendor: "unavailable", webglRenderer: "unavailable" };
+    }
+    try {
+      const gl = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
+      if (gl == null) {
+        return { webglVendor: "unavailable", webglRenderer: "unavailable" };
+      }
+      const debug = gl.getExtension("WEBGL_debug_renderer_info") as {
+        UNMASKED_VENDOR_WEBGL: number;
+        UNMASKED_RENDERER_WEBGL: number;
+      } | null;
+      const vendor = gl.getParameter(debug?.UNMASKED_VENDOR_WEBGL ?? gl.VENDOR);
+      const webglRenderer = gl.getParameter(debug?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER);
+      return {
+        webglVendor: typeof vendor === "string" ? vendor : "unknown",
+        webglRenderer: typeof webglRenderer === "string" ? webglRenderer : "unknown",
+      };
+    } catch {
+      return { webglVendor: "unavailable", webglRenderer: "unavailable" };
+    }
+  });
+  return {
+    browserVersion: page.context().browser()?.version() ?? "unknown",
+    ...renderer,
+  };
+}
+
+const LEVEL_LABELS = [LEVEL_B1_SHORT, LEVEL_1F_SHORT, LEVEL_2F_SHORT, LEVEL_1F_SHORT];
+
+async function prepareLevelChanges(page: Page): Promise<void> {
+  // Measure setData + idle, not camera ease (FIT_DURATION_MS = 500).
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const zipBuffer = await minimalImdfZipBuffer();
+  await page.goto(VIEWER_URL);
+  await page.waitForLoadState("load");
+  await uploadZip(page, zipBuffer);
+  await waitForReadyVenue(page, VENUE_NAME_JA);
+  await waitForMapIdle(page);
+  await zeroMapLibreTransitions(page);
+
+  // 3 unmeasured warm-ups.
+  for (let i = 0; i < 3; i += 1) {
+    const label = LEVEL_LABELS[i % LEVEL_LABELS.length]!;
+    await floorButton(page, label).click();
+    await waitForMapIdle(page);
+  }
+}
+
+async function safeLevelChangeEnvironment(page: Page): Promise<LevelChangeEnvironment> {
+  try {
+    return await levelChangeEnvironment(page);
+  } catch {
+    return {
+      browserVersion: page.context().browser()?.version() ?? "unknown",
+      webglVendor: "unavailable",
+      webglRenderer: "unavailable",
+    };
+  }
+}
+
+async function runLevelChangeControls(
+  page: Page,
+  interSampleDwellMs = 0,
+): Promise<LevelChangeControlRun> {
+  await prepareLevelChanges(page);
+  const samples: number[] = [];
+  for (let i = 0; i < 30; i += 1) {
+    const label = LEVEL_LABELS[i % LEVEL_LABELS.length]!;
+    samples.push(await measureLevelChangeElapsed(page, label));
+    if (interSampleDwellMs > 0 && i < 29) {
+      await page.waitForTimeout(interSampleDwellMs);
+    }
+  }
+
+  // Renderer inspection runs after all control samples and is best-effort, so
+  // it cannot perturb or determine the unchanged acceptance result.
+  return { samples, environment: await safeLevelChangeEnvironment(page) };
+}
+
+async function runLevelChangeDiagnosticProbes(
+  page: Page,
+  interSampleDwellMs = 0,
+): Promise<LevelChangeDiagnosticRun> {
+  const diagnostics: LevelChangeDiagnostic[] = [];
+  let error: string | null = null;
+  try {
+    await prepareLevelChanges(page);
+    for (let i = 0; i < 30; i += 1) {
+      const label = LEVEL_LABELS[i % LEVEL_LABELS.length]!;
+      diagnostics.push(await measureLevelChangeDiagnostic(page, label, i + 1));
+      if (interSampleDwellMs > 0 && i < 29) {
+        await page.waitForTimeout(interSampleDwellMs);
+      }
+    }
+  } catch (cause) {
+    error = cause instanceof Error ? cause.message : String(cause);
+  }
+  return {
+    diagnostics,
+    environment: await safeLevelChangeEnvironment(page),
+    error,
+  };
+}
+
+function logLevelChangeControls(
+  run: LevelChangeControlRun,
+  prefix = "level-change",
+): number {
+  const p95 = percentileNearestRank(run.samples, 0.95);
+  console.log(
+    `${prefix} samples(ms)=${run.samples.map((n) => n.toFixed(1)).join(", ")} P95=${p95.toFixed(1)}`,
+  );
+  console.log(`${prefix} environment=${JSON.stringify(run.environment)}`);
+  return p95;
+}
+
+function logLevelChangeDiagnostics(
+  run: LevelChangeDiagnosticRun,
+  prefix = "level-change",
+): void {
+  console.log(
+    `${prefix} diagnostics=${JSON.stringify({
+      environment: run.environment,
+      error: run.error,
+      slowSamples: run.diagnostics.filter((sample) => sample.elapsedMs > 150),
+    })}`,
+  );
+}
+
+async function writeP95FailureOutcome(p95: number): Promise<void> {
+  const outputPath = process.env.KIRIKO_PERF_P95_FAILURE_FILE;
+  if (outputPath === undefined || outputPath === "" || p95 <= 150) {
+    return;
+  }
+  await writeFile(
+    outputPath,
+    `${JSON.stringify({
+      kind: "level-change-p95-failure",
+      p95,
+      budgetMs: 150,
+      warmUps: 3,
+      samples: 30,
+      percentile: "nearest-rank-p95",
+      interSampleDwellMs: 0,
+    })}\n`,
+    "utf8",
+  );
+}
 
 test.describe("viewer performance", () => {
   test.skip(({ browserName }) => browserName !== "chromium", "performance samples are Chromium-only");
@@ -152,77 +656,56 @@ test.describe("viewer performance", () => {
 
   test("level-change P95 ≤ 150ms after 3 warm-ups over 30 alternating clicks", async ({
     page,
-  }) => {
+  }, testInfo) => {
     test.setTimeout(120_000);
-    // Measure setData + idle, not camera ease (FIT_DURATION_MS = 500).
-    await page.emulateMedia({ reducedMotion: "reduce" });
-    const zipBuffer = await minimalImdfZipBuffer();
-    await page.goto(VIEWER_URL);
-    await page.waitForLoadState("load");
-    await uploadZip(page, zipBuffer);
-    await waitForReadyVenue(page, VENUE_NAME_JA);
-    await waitForMapIdle(page);
-    await zeroMapLibreTransitions(page);
-    const labels = [LEVEL_B1_SHORT, LEVEL_1F_SHORT, LEVEL_2F_SHORT, LEVEL_1F_SHORT];
-    // 3 unmeasured warm-ups.
-    for (let i = 0; i < 3; i += 1) {
-      const label = labels[i % labels.length]!;
-      await floorButton(page, label).click();
-      await waitForMapIdle(page);
-    }
-
-    const samples: number[] = [];
-    for (let i = 0; i < 30; i += 1) {
-      const label = labels[i % labels.length]!;
-      const ms = await page.evaluate(async (levelLabel) => {
-        const container = document.querySelector(".indoor-map");
-        if (!(container instanceof HTMLElement)) {
-          throw new Error("map container missing");
-        }
-        delete container.dataset.mapIdle;
-
-        const buttons = Array.from(
-          document.querySelectorAll<HTMLButtonElement>(".floor-stack__btn"),
-        );
-        const button = buttons.find((b) => b.textContent?.trim() === levelLabel);
-        if (!button) {
-          throw new Error(`floor button not found: ${levelLabel}`);
-        }
-
-        return await new Promise<number>((resolve, reject) => {
-          const start = performance.now();
-          const timeout = window.setTimeout(() => {
-            observer.disconnect();
-            reject(new Error("level change idle timeout"));
-          }, 10_000);
-
-          const observer = new MutationObserver(() => {
-            if (container.dataset.mapIdle === "true") {
-              observer.disconnect();
-              requestAnimationFrame(() => {
-                window.clearTimeout(timeout);
-                resolve(performance.now() - start);
-              });
-            }
-          });
-          observer.observe(container, {
-            attributes: true,
-            attributeFilter: ["data-map-idle"],
-          });
-          button.click();
-        });
-      }, label);
-      samples.push(ms);
-    }
-
-    const p95 = percentileNearestRank(samples, 0.95);
-    console.log(
-      `level-change samples(ms)=${samples.map((n) => n.toFixed(1)).join(", ")} P95=${p95.toFixed(1)}`,
-    );
+    const run = await runLevelChangeControls(page);
+    const p95 = logLevelChangeControls(run);
+    await testInfo.attach("level-change-controls", {
+      body: Buffer.from(JSON.stringify(run, null, 2)),
+      contentType: "application/json",
+    });
+    await writeP95FailureOutcome(p95);
     expect(p95, `level-change P95 ${p95.toFixed(1)}ms exceeds 150ms`).toBeLessThanOrEqual(150);
   });
 
-  test("1s drag keeps ≥30 frames and no longtask > 100ms", async ({ page }) => {
+  test("diagnostic: level-change phase/source probes", async ({ page }, testInfo) => {
+    test.setTimeout(120_000);
+    const run = await runLevelChangeDiagnosticProbes(page);
+    logLevelChangeDiagnostics(run);
+    await testInfo.attach("level-change-diagnostics", {
+      body: Buffer.from(JSON.stringify(run, null, 2)),
+      contentType: "application/json",
+    });
+    // Evidence only: private instrumentation failure must never decide the
+    // unchanged control result in the separate test above.
+  });
+
+  test("diagnostic: level-change with 250ms unmeasured inter-sample dwell", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      process.env.KIRIKO_PERF_DWELL_DIAGNOSTIC !== "1",
+      "run only as the conditional burst-carryover counterfactual",
+    );
+    test.setTimeout(120_000);
+    const controls = await runLevelChangeControls(page, 250);
+    const p95 = logLevelChangeControls(controls, "level-change 250ms-dwell diagnostic");
+    const diagnostics = await runLevelChangeDiagnosticProbes(page, 250);
+    logLevelChangeDiagnostics(diagnostics, "level-change 250ms-dwell diagnostic");
+    await testInfo.attach("level-change-250ms-dwell-diagnostics", {
+      body: Buffer.from(JSON.stringify({ controls, diagnostics }, null, 2)),
+      contentType: "application/json",
+    });
+    // This counterfactual is evidence only. The no-dwell control jobs retain
+    // the unchanged 150ms assertion and are what decide whether the correction
+    // is valid; a deliberately conditional diagnostic must not create a
+    // second, substitute gate.
+    console.log(
+      `250ms-dwell counterfactual ${p95 <= 150 ? "meets" : "does not meet"} the unchanged 150ms budget`,
+    );
+  });
+
+  test("diagnostic: 1s drag keeps ≥30 frames and no longtask > 100ms", async ({ page }) => {
     test.setTimeout(60_000);
     const zipBuffer = await minimalImdfZipBuffer();
     await page.goto(VIEWER_URL);

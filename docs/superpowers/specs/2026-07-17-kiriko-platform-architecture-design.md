@@ -350,10 +350,12 @@ OIDC/SSO, tenant administration UI, API keys, and customer-facing capability sco
 Current performance acceptance in the executable browser suite includes:
 
 - fresh local upload to map-ready-and-idle P95 at or below 3 seconds;
-- warm floor change P95 at or below 150 ms;
+- warm floor change nearest-rank P95 at or below 150 ms after three unmeasured warm-ups and 30 immediate alternating clicks in a dedicated one-worker Chromium project;
 - a one-second drag sustaining at least 30 frames with no long task above 100 ms.
 
-These thresholds are regression budgets for the tested fixtures and workstation class, not universal customer SLAs.
+Floor-change runs preserve the unchanged control samples and runner/WebGL identity separately from best-effort instrumented phase/source and long-task probes, so diagnostic failure cannot determine acceptance. Pull requests supplement the gate with five independent Ubuntu 24.04 replicas at the same SHA; only an explicit no-dwell P95 assertion failure triggers the 250 ms unmeasured inter-sample dwell diagnostic, which does not replace or relax the gate.
+
+These thresholds are regression budgets for the tested fixtures and hosted-runner class, not universal customer SLAs.
 
 ## 12. Operations posture
 

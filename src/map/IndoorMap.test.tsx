@@ -13,7 +13,7 @@ import {
   ROUTE_SOURCE_ID,
 } from "./featureLayers";
 import { defaultLayerVisibility } from "./layerGroups";
-import { IndoorMap, type IndoorMapProps } from "./IndoorMap";
+import { buildIndoorSourceDiff, IndoorMap, type IndoorMapProps } from "./IndoorMap";
 import type { MapIssuePin } from "./useIssuePins";
 
 interface FakeMapEvent {
@@ -38,6 +38,9 @@ const mapState = vi.hoisted(() => {
     readonly easeToCalls: Array<{ center: [number, number]; duration?: number }> = [];
     readonly jumpToCalls: Array<{ center: [number, number] }> = [];
     readonly sourceData: unknown[] = [];
+    readonly sourceDataDiffs: unknown[] = [];
+    readonly indoorFloorOperations: Array<"fit" | "update"> = [];
+    indoorSourceData: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
     readonly routeSourceData: unknown[] = [];
     readonly facilitySourceData: unknown[] = [];
     readonly networkSourceData: unknown[] = [];
@@ -46,6 +49,7 @@ const mapState = vi.hoisted(() => {
     styleLoaded = initialStyleLoaded;
     sourceLoaded = true;
     center = { lng: 0, lat: 0 };
+    zoom = 0;
     removed = false;
 
     constructor(options: { container: HTMLElement }) {
@@ -111,7 +115,11 @@ const mapState = vi.hoisted(() => {
       return this.queryResult;
     }
 
-    getSource(id?: string): { type: string; setData: (data: unknown) => void } {
+    getSource(id?: string): {
+      type: string;
+      setData: (data: unknown) => void;
+      updateData: (diff: { remove?: Array<string | number>; add?: GeoJSON.Feature[] }) => void;
+    } {
       return {
         type: "geojson",
         setData: (data: unknown) => {
@@ -124,6 +132,25 @@ const mapState = vi.hoisted(() => {
                   ? this.networkSourceData
                   : this.sourceData;
           bucket.push(data);
+          if (id === INDOOR_SOURCE_ID) {
+            this.indoorSourceData = data as GeoJSON.FeatureCollection;
+          }
+        },
+        updateData: (diff) => {
+          if (id !== INDOOR_SOURCE_ID) {
+            return;
+          }
+          this.sourceDataDiffs.push(diff);
+          this.indoorFloorOperations.push("update");
+          const removed = new Set(diff.remove ?? []);
+          const retained = this.indoorSourceData.features.filter((feature) => {
+            const featureId = feature.id ?? feature.properties?.["__feature_id"];
+            return !removed.has(featureId as string | number);
+          });
+          this.indoorSourceData = {
+            type: "FeatureCollection",
+            features: [...retained, ...(diff.add ?? [])],
+          };
         },
       };
     }
@@ -165,7 +192,27 @@ const mapState = vi.hoisted(() => {
       return { x: lng, y: lat };
     }
 
-    fitBounds(): void {}
+    cameraForBounds(bounds: [[number, number], [number, number]]): {
+      center: { lng: number; lat: number };
+      zoom: number;
+      bearing: number;
+    } {
+      return {
+        center: {
+          lng: (bounds[0][0] + bounds[1][0]) / 2,
+          lat: (bounds[0][1] + bounds[1][1]) / 2,
+        },
+        zoom: 16,
+        bearing: 0,
+      };
+    }
+
+    fitBounds(bounds: [[number, number], [number, number]]): void {
+      this.indoorFloorOperations.push("fit");
+      const camera = this.cameraForBounds(bounds);
+      this.center = camera.center;
+      this.zoom = camera.zoom;
+    }
     easeTo(options: { center: [number, number]; duration?: number }): void {
       this.easeToCalls.push(options);
     }
@@ -176,6 +223,12 @@ const mapState = vi.hoisted(() => {
     zoomOut(): void {}
     getCenter(): { lng: number; lat: number } {
       return this.center;
+    }
+    getZoom(): number {
+      return this.zoom;
+    }
+    getBearing(): number {
+      return 0;
     }
     remove(): void {
       this.removed = true;
@@ -647,6 +700,138 @@ describe("IndoorMap issue highlight", () => {
   });
 });
 
+describe("IndoorMap floor source", () => {
+  function floorRenderFeature(id: string, levelId: string, longitude: number): GeoJSON.Feature {
+    return {
+      type: "Feature",
+      id,
+      properties: {
+        __feature_id: id,
+        __feature_type: "unit",
+        __level_id: levelId,
+        __category: null,
+        __restricted: false,
+      },
+      geometry: { type: "Point", coordinates: [longitude, 35.6] },
+    };
+  }
+
+  it("applies one ID delta and leaves the final source on the selected floor", () => {
+    const venue = baseVenue();
+    venue.renderFeaturesByLevel.set("level-1", {
+      type: "FeatureCollection",
+      features: [floorRenderFeature("floor-1", "level-1", 139.1)],
+    });
+    venue.renderFeaturesByLevel.set("level-2", {
+      type: "FeatureCollection",
+      features: [floorRenderFeature("floor-2", "level-2", 139.2)],
+    });
+    venue.boundsByLevel.set("level-1", [139.0, 35.5, 139.2, 35.7]);
+    venue.boundsByLevel.set("level-2", [139.1, 35.5, 139.3, 35.7]);
+    const { map, rerender } = renderMap(baseProps({ venue, levelId: "level-1" }));
+    const fullUpdatesBeforeFloorChange = map.sourceData.length;
+    const deltaUpdatesBeforeFloorChange = map.sourceDataDiffs.length;
+    map.indoorFloorOperations.length = 0;
+
+    rerender(baseProps({ venue, levelId: "level-2" }));
+
+    expect(map.indoorFloorOperations).toEqual(["fit", "update"]);
+    expect(map.sourceData).toHaveLength(fullUpdatesBeforeFloorChange);
+    expect(map.sourceDataDiffs).toHaveLength(deltaUpdatesBeforeFloorChange + 1);
+    expect(map.sourceDataDiffs.at(-1)).toEqual({
+      remove: ["floor-1"],
+      add: [venue.renderFeaturesByLevel.get("level-2")!.features[0]],
+    });
+    expect(map.indoorSourceData.features.map((feature) => feature.id)).toEqual(["floor-2"]);
+  });
+
+  it("does not refit shared bounds before applying the floor delta", () => {
+    const venue = baseVenue();
+    venue.renderFeaturesByLevel.set("level-1", {
+      type: "FeatureCollection",
+      features: [floorRenderFeature("floor-1", "level-1", 139.1)],
+    });
+    venue.renderFeaturesByLevel.set("level-2", {
+      type: "FeatureCollection",
+      features: [floorRenderFeature("floor-2", "level-2", 139.2)],
+    });
+    const sharedBounds: [number, number, number, number] = [139.0, 35.5, 139.2, 35.7];
+    venue.boundsByLevel.set("level-1", sharedBounds);
+    venue.boundsByLevel.set("level-2", sharedBounds);
+    const { map, rerender } = renderMap(baseProps({ venue, levelId: "level-1" }));
+    map.indoorFloorOperations.length = 0;
+
+    rerender(baseProps({ venue, levelId: "level-2" }));
+
+    expect(map.indoorFloorOperations).toEqual(["update"]);
+    expect(map.indoorSourceData.features.map((feature) => feature.id)).toEqual(["floor-2"]);
+  });
+
+  it("does not invalidate the source when grouped-floor render data is unchanged", () => {
+    const venue = baseVenue();
+    venue.levels[1]!.ordinal = 0;
+    venue.renderFeaturesByLevel.set("level-1", {
+      type: "FeatureCollection",
+      features: [floorRenderFeature("floor-1", "level-1", 139.1)],
+    });
+    venue.renderFeaturesByLevel.set("level-2", {
+      type: "FeatureCollection",
+      features: [floorRenderFeature("floor-2", "level-2", 139.2)],
+    });
+    const { map, rerender } = renderMap(baseProps({ venue, levelId: "level-1" }));
+    const fullUpdatesBeforeRepresentativeChange = map.sourceData.length;
+    const deltaUpdatesBeforeRepresentativeChange = map.sourceDataDiffs.length;
+
+    rerender(baseProps({ venue, levelId: "level-2" }));
+
+    expect(map.sourceData).toHaveLength(fullUpdatesBeforeRepresentativeChange);
+    expect(map.sourceDataDiffs).toHaveLength(deltaUpdatesBeforeRepresentativeChange);
+    expect(map.indoorSourceData.features.map((feature) => feature.id)).toEqual([
+      "floor-1",
+      "floor-2",
+    ]);
+  });
+
+  it("fully replaces source data when the immutable venue changes", () => {
+    const firstVenue = baseVenue();
+    firstVenue.renderFeaturesByLevel.set("level-1", {
+      type: "FeatureCollection",
+      features: [floorRenderFeature("floor-1", "level-1", 139.1)],
+    });
+    const secondVenue = baseVenue();
+    secondVenue.renderFeaturesByLevel.set("level-1", {
+      type: "FeatureCollection",
+      features: [floorRenderFeature("floor-1", "level-1", 140.1)],
+    });
+    const { map, rerender } = renderMap(baseProps({ venue: firstVenue }));
+    const fullUpdatesBeforeVenueChange = map.sourceData.length;
+    const deltaUpdatesBeforeVenueChange = map.sourceDataDiffs.length;
+
+    rerender(baseProps({ venue: secondVenue }));
+
+    expect(map.sourceData).toHaveLength(fullUpdatesBeforeVenueChange + 1);
+    expect(map.sourceDataDiffs).toHaveLength(deltaUpdatesBeforeVenueChange);
+    expect(map.indoorSourceData.features[0]?.geometry).toEqual({
+      type: "Point",
+      coordinates: [140.1, 35.6],
+    });
+  });
+
+  it("falls back to a full replacement when a feature has no stable ID", () => {
+    const unidentified: GeoJSON.Feature = {
+      type: "Feature",
+      properties: {},
+      geometry: { type: "Point", coordinates: [0, 0] },
+    };
+    expect(
+      buildIndoorSourceDiff(
+        { type: "FeatureCollection", features: [] },
+        { type: "FeatureCollection", features: [unidentified] },
+      ),
+    ).toBeNull();
+  });
+});
+
 describe("IndoorMap directions", () => {
   function directions(
     overrides: Partial<NonNullable<IndoorMapProps["directions"]>> = {},
@@ -739,7 +924,7 @@ describe("IndoorMap directions", () => {
     expect(nonSegments).toEqual(["connector", "origin"]);
   });
 
-  it("re-segments the route source when the active floor changes", () => {
+  it("re-segments the route source exactly once when the active floor changes", () => {
     const { map, rerender } = renderMap(
       baseProps({
         levelId: "level-1",
@@ -754,6 +939,7 @@ describe("IndoorMap directions", () => {
       ],
     });
 
+    const updatesBeforeFloorChange = map.routeSourceData.length;
     rerender(
       baseProps({
         levelId: "level-2",
@@ -761,6 +947,7 @@ describe("IndoorMap directions", () => {
       }),
     );
 
+    expect(map.routeSourceData).toHaveLength(updatesBeforeFloorChange + 1);
     expect(segmentsOf(lastRouteData(map))[0]!.geometry).toEqual({
       type: "LineString",
       coordinates: [
@@ -770,7 +957,25 @@ describe("IndoorMap directions", () => {
     });
   });
 
-  it("empties the route source when directions are cleared", () => {
+  it("keeps the initial inactive route data without invalidating it on floor changes", () => {
+    const inactiveDirections = directions({
+      active: false,
+      origin: { longitude: 139.0, latitude: 35.0, ordinal: 0 },
+      route: CROSS_FLOOR_ROUTE,
+    });
+    const { map, rerender } = renderMap(
+      baseProps({ directions: inactiveDirections, levelId: "level-1" }),
+    );
+    expect(lastRouteData(map).features).toEqual([]);
+    const updatesBeforeFloorChange = map.routeSourceData.length;
+
+    rerender(baseProps({ directions: inactiveDirections, levelId: "level-2" }));
+
+    expect(map.routeSourceData).toHaveLength(updatesBeforeFloorChange);
+    expect(lastRouteData(map).features).toEqual([]);
+  });
+
+  it("clears active route data exactly once when directions are cleared", () => {
     const { map, rerender } = renderMap(
       baseProps({
         directions: directions({
@@ -780,9 +985,11 @@ describe("IndoorMap directions", () => {
       }),
     );
     expect(lastRouteData(map).features.length).toBeGreaterThan(0);
+    const updatesBeforeDirectionsOff = map.routeSourceData.length;
 
-    rerender(baseProps({ directions: null }));
+    rerender(baseProps({ directions: directions({ active: false }) }));
 
+    expect(map.routeSourceData).toHaveLength(updatesBeforeDirectionsOff + 1);
     expect(lastRouteData(map)).toEqual({ type: "FeatureCollection", features: [] });
   });
 });
@@ -826,13 +1033,36 @@ describe("IndoorMap network review", () => {
     expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([1, 1]);
   });
 
-  it("re-filters the network source when the active floor changes", () => {
+  it("updates the network source exactly once with the active floor's data", () => {
     const { map, rerender } = renderMap(baseProps({ network: NETWORK, levelId: "level-1" }));
     expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([1, 1]);
+    const updatesBeforeFloorChange = map.networkSourceData.length;
 
     rerender(baseProps({ network: NETWORK, levelId: "level-2" }));
 
+    expect(map.networkSourceData).toHaveLength(updatesBeforeFloorChange + 1);
     expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([2, 2]);
+  });
+
+  it("keeps the initial empty network data without invalidating it on floor changes", () => {
+    const { map, rerender } = renderMap(baseProps({ network: null, levelId: "level-1" }));
+    expect(lastNetworkData(map).features).toEqual([]);
+    const updatesBeforeFloorChange = map.networkSourceData.length;
+
+    rerender(baseProps({ network: null, levelId: "level-2" }));
+
+    expect(map.networkSourceData).toHaveLength(updatesBeforeFloorChange);
+    expect(lastNetworkData(map).features).toEqual([]);
+  });
+
+  it("clears active network data exactly once when review is turned off", () => {
+    const { map, rerender } = renderMap(baseProps({ network: NETWORK }));
+    const updatesBeforeReviewOff = map.networkSourceData.length;
+
+    rerender(baseProps({ network: null }));
+
+    expect(map.networkSourceData).toHaveLength(updatesBeforeReviewOff + 1);
+    expect(lastNetworkData(map).features).toEqual([]);
   });
 });
 
@@ -858,16 +1088,43 @@ describe("IndoorMap facilities", () => {
     { lon: 139.8, lat: 35.7, ordinal: 1, name: "Upstairs shop", icon: "", anchor: null },
   ];
 
-  it("populates the facility source with only the active floor's markers", () => {
+  it("updates the facility source exactly once with the active floor's markers", () => {
     const { map, rerender } = renderMap(baseProps({ facilities }));
     const first = map.facilitySourceData.at(-1) as GeoJSON.FeatureCollection;
     expect(first.features).toHaveLength(1);
     expect(first.features[0]?.properties?.["name"]).toBe("Gate");
+    const updatesBeforeFloorChange = map.facilitySourceData.length;
 
     rerender(baseProps({ facilities, levelId: "level-2" }));
+
+    expect(map.facilitySourceData).toHaveLength(updatesBeforeFloorChange + 1);
     const second = map.facilitySourceData.at(-1) as GeoJSON.FeatureCollection;
     expect(second.features).toHaveLength(1);
     expect(second.features[0]?.properties?.["name"]).toBe("Upstairs shop");
+  });
+
+  it("keeps the initial empty facility data without invalidating it on floor changes", () => {
+    const { map, rerender } = renderMap(baseProps({ facilities: [], levelId: "level-1" }));
+    const initial = map.facilitySourceData.at(-1) as GeoJSON.FeatureCollection;
+    expect(initial.features).toEqual([]);
+    const updatesBeforeFloorChange = map.facilitySourceData.length;
+
+    rerender(baseProps({ facilities: [], levelId: "level-2" }));
+
+    expect(map.facilitySourceData).toHaveLength(updatesBeforeFloorChange);
+    const final = map.facilitySourceData.at(-1) as GeoJSON.FeatureCollection;
+    expect(final.features).toEqual([]);
+  });
+
+  it("clears active facility data exactly once when facilities are removed", () => {
+    const { map, rerender } = renderMap(baseProps({ facilities }));
+    const updatesBeforeFacilitiesRemoved = map.facilitySourceData.length;
+
+    rerender(baseProps({ facilities: [] }));
+
+    expect(map.facilitySourceData).toHaveLength(updatesBeforeFacilitiesRemoved + 1);
+    const final = map.facilitySourceData.at(-1) as GeoJSON.FeatureCollection;
+    expect(final.features).toEqual([]);
   });
 
   it("reports a tapped facility through onSelectFacility", () => {
