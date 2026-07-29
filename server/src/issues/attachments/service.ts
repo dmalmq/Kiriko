@@ -134,25 +134,30 @@ export class IssueAttachmentService {
       processAttachmentImage(bytes, this.imageLimits),
     );
 
-    const originalPut = this.store.put(processed.original.bytes);
-    const thumbnailPut = this.store.put(processed.thumbnail.bytes);
-    const original: AttachmentBlobRow = {
-      hash: originalPut.hash,
-      byteSize: originalPut.size,
-      contentType: processed.original.contentType,
-      width: processed.original.width,
-      height: processed.original.height,
-    };
-    const thumbnail: AttachmentBlobRow = {
-      hash: thumbnailPut.hash,
-      byteSize: thumbnailPut.size,
-      contentType: processed.thumbnail.contentType,
-      width: processed.thumbnail.width,
-      height: processed.thumbnail.height,
-    };
-
+    const writtenHashes: string[] = [];
     const id = randomUUID();
+    let original: AttachmentBlobRow;
+    let thumbnail: AttachmentBlobRow;
     try {
+      const originalPut = this.store.put(processed.original.bytes);
+      writtenHashes.push(originalPut.hash);
+      const thumbnailPut = this.store.put(processed.thumbnail.bytes);
+      writtenHashes.push(thumbnailPut.hash);
+      original = {
+        hash: originalPut.hash,
+        byteSize: originalPut.size,
+        contentType: processed.original.contentType,
+        width: processed.original.width,
+        height: processed.original.height,
+      };
+      thumbnail = {
+        hash: thumbnailPut.hash,
+        byteSize: thumbnailPut.size,
+        contentType: processed.thumbnail.contentType,
+        width: processed.thumbnail.width,
+        height: processed.thumbnail.height,
+      };
+
       const created = this.repository.createStagedUpload({
         id,
         versionId: version.versionId,
@@ -169,7 +174,7 @@ export class IssueAttachmentService {
         throw new IssueServiceError("quota_exceeded", "The attachment storage quota is exhausted.");
       }
     } catch (error) {
-      // Concurrent identical request: resolve as a replay instead of a 500.
+      this.rollbackWrittenFiles(writtenHashes);
       if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) {
         const replay = this.repository.findUploadByRequestId(user.id, requestId);
         if (replay !== null) {
@@ -222,10 +227,24 @@ export class IssueAttachmentService {
     let bytes: Buffer;
     try {
       bytes = await this.store.readAsync(hash);
-    } catch {
+    } catch (error) {
+      if (
+        error !== null
+        && typeof error === "object"
+        && "code" in error
+        && error.code === "ENOENT"
+      ) {
+        throw new IssueServiceError("not_found", NOT_FOUND_MESSAGE);
+      }
       throw new IssueServiceError("internal_error", "Could not read the attachment.");
     }
     return { bytes, contentType, etag: `"${hash}"` };
+  }
+
+  private rollbackWrittenFiles(writtenHashes: string[]): void {
+    for (const hash of this.repository.releaseUnreferencedBlobHashes(writtenHashes)) {
+      this.store.remove(hash);
+    }
   }
 
   /** Removes blob rows/files no attachment references (post-delete GC). */

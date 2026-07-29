@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -386,6 +386,10 @@ describe("attachment upload API", () => {
       await expect(
         service.upload(user, PUBLIC_ID, randomUUID(), null, png),
       ).rejects.toMatchObject({ code: "quota_exceeded" });
+      expect(store.list()).toEqual([]);
+      expect(
+        (db.prepare("SELECT COUNT(*) AS n FROM issue_attachment_blobs").get() as { n: number }).n,
+      ).toBe(0);
 
       const generous = new IssueAttachmentService({
         db,
@@ -506,6 +510,31 @@ describe("attachment binding and media reads", () => {
       expect(response.headers["etag"]).toMatch(/^"[0-9a-f]{64}"$/);
       expect(response.rawPayload.byteLength).toBeGreaterThan(0);
     }
+  });
+
+  it("returns the opaque not-found response when attached media is missing", async () => {
+    const { app, memberCookie } = await seededApp();
+    const staged = await upload(app, memberCookie, await pngBuffer());
+    const created = await postIssue(app, memberCookie, {
+      bodyMarkdown: `![a](attachment:${staged.id})`,
+      attachmentIds: [staged.id],
+    });
+    expect(created.status).toBe(200);
+    const row = app.db.prepare(
+      "SELECT original_hash AS hash FROM issue_attachments WHERE id = ?",
+    ).get(staged.id) as { hash: string };
+    unlinkSync(new IssueAttachmentStore(app.config.dataDir).path(row.hash));
+
+    const missing = await app.inject({
+      method: "GET",
+      url: `/api/issue-attachments/${staged.id}/content`,
+    });
+    const unknown = await app.inject({
+      method: "GET",
+      url: `/api/issue-attachments/${randomUUID()}/content`,
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.body).toBe(unknown.body);
   });
 
   it("rejects mismatched, foreign, and cross-version attachment references opaquely", async () => {

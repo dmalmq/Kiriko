@@ -41,8 +41,15 @@ export class IssueAttachmentStore {
       const dir = join(this.root, hash.slice(0, 2));
       mkdirSync(dir, { recursive: true });
       const tmp = join(dir, `.tmp-${randomBytes(6).toString("hex")}`);
-      writeFileSync(tmp, bytes);
-      renameSync(tmp, target);
+      try {
+        writeFileSync(tmp, bytes);
+        renameSync(tmp, target);
+      } catch (error) {
+        try {
+          unlinkSync(tmp);
+        } catch {}
+        throw error;
+      }
     }
     return { hash, size: bytes.byteLength };
   }

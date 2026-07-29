@@ -313,6 +313,30 @@ export class IssueAttachmentRepository {
     })();
   }
 
+  releaseUnreferencedBlobHashes(hashes: string[]): string[] {
+    if (hashes.length === 0) {
+      return [];
+    }
+    const referenced = this.db.prepare(
+      `SELECT 1
+       FROM issue_attachments
+       WHERE original_hash = ? OR thumbnail_hash = ?
+       LIMIT 1`,
+    );
+    const deleteBlob = this.db.prepare("DELETE FROM issue_attachment_blobs WHERE hash = ?");
+    return this.db.transaction(() => {
+      const released: string[] = [];
+      for (const hash of new Set(hashes)) {
+        if (referenced.get(hash, hash) !== undefined) {
+          continue;
+        }
+        deleteBlob.run(hash);
+        released.push(hash);
+      }
+      return released;
+    }).immediate();
+  }
+
   allBlobHashes(): Set<string> {
     const rows = this.db.prepare("SELECT hash FROM issue_attachment_blobs").all() as {
       hash: string;

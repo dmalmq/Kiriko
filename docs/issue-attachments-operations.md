@@ -22,17 +22,24 @@ attachment set.
 
 ## Backup and restore
 
-Back up `$KIRIKO_DATA_DIR` **atomically** (SQLite database and the
-`issue-attachments/` tree in the same snapshot), exactly as already required
-for `blobs/`:
+The database, WAL files, `blobs/`, and `issue-attachments/` must come from one
+consistent capture. Use either of these supported procedures:
 
-```bash
-sqlite3 "$KIRIKO_DATA_DIR/kiriko.db" ".backup '$BACKUP_DIR/kiriko.db'"
-cp -a "$KIRIKO_DATA_DIR/issue-attachments" "$BACKUP_DIR/"
-```
+1. Stop every Kiriko server instance that uses the data directory and wait for
+   clean shutdown. This quiesces uploads, attachment deletion, and the janitor.
+   With no Kiriko process or standalone janitor running, copy the entire
+   `$KIRIKO_DATA_DIR` to the backup destination. Restart the servers only after
+   the copy has completed successfully.
+2. Keep the servers running only when the storage platform can create one
+   atomic filesystem snapshot spanning the entire `$KIRIKO_DATA_DIR`. Retain
+   the whole snapshot, including `kiriko.db-wal` and `kiriko.db-shm` when
+   present; do not combine a SQLite backup from one instant with attachment
+   files copied at another.
 
-Restore both together; a database without its files yields media 404s, and
-files without metadata are swept by the janitor after a 24 h safety age.
+For restore, stop every server and janitor, replace the entire data directory
+from one capture, verify its ownership and permissions, then restart. A
+database without its corresponding files yields media 404s, and files without
+metadata are swept by the janitor after a 24 h safety age.
 
 ## Limits and retention (defaults)
 
