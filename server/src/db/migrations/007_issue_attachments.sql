@@ -24,6 +24,7 @@ CREATE TABLE issue_attachments (
   comment_id TEXT,
   original_hash TEXT NOT NULL REFERENCES issue_attachment_blobs(hash),
   thumbnail_hash TEXT NOT NULL REFERENCES issue_attachment_blobs(hash),
+  input_byte_size INTEGER NOT NULL CHECK (input_byte_size > 0),
   original_name TEXT,
   state TEXT NOT NULL DEFAULT 'staged' CHECK (state IN ('staged','attached','detached')),
   created_at TEXT NOT NULL,

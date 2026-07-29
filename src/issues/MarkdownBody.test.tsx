@@ -217,17 +217,27 @@ describe("MarkdownBody attachments", () => {
   it("opens an accessible lightbox with the full content and returns focus", async () => {
     const user = userEvent.setup();
     render(
-      <MarkdownBody body={`![gate](attachment:${id})`} attachments={[metadata]} locale="en" />,
+      <>
+        <MarkdownBody body={`![gate](attachment:${id})`} attachments={[metadata]} locale="en" />
+        <button type="button">Background action</button>
+      </>,
     );
     const trigger = screen.getByRole("button", { name: "Enlarge image: gate" });
+    const background = screen.getByRole("button", { name: "Background action" });
     await user.click(trigger);
     const dialog = screen.getByRole("dialog", { name: "gate" });
     const full = dialog.querySelector(".issue-lightbox__image");
     expect(full?.getAttribute("src")).toBe(`/api/issue-attachments/${id}/content`);
     const close = screen.getByRole("button", { name: "Close" });
     expect(document.activeElement).toBe(close);
+    expect(background.inert).toBe(true);
+    await user.tab();
+    expect(document.activeElement).toBe(close);
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(close);
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).toBeNull();
+    expect(background.inert).toBe(false);
     expect(document.activeElement).toBe(trigger);
   });
 

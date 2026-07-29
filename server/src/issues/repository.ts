@@ -742,9 +742,8 @@ export class IssueRepository {
     }
     const aggregate = this.db
       .prepare(
-        `SELECT COALESCE(SUM(o.byte_size), 0) AS total
+        `SELECT COALESCE(SUM(a.input_byte_size), 0) AS total
          FROM issue_attachments a
-         JOIN issue_attachment_blobs o ON o.hash = a.original_hash
          WHERE a.comment_id = ? AND a.version_id = ? AND a.state = 'attached'`,
       )
       .get(commentId, versionId) as { total: number };

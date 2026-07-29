@@ -33,6 +33,7 @@ export interface StagedUploadInsert {
   uploadRequestHash: string;
   original: AttachmentBlobRow;
   thumbnail: AttachmentBlobRow;
+  inputByteSize: number;
   originalName: string | null;
   now: string;
 }
@@ -109,14 +110,15 @@ export class IssueAttachmentRepository {
     };
   }
 
-  /** Total original bytes held (staged + attached) for a version, for quota. */
+  /** Total governed bytes held in every retained state for a version. */
   versionAttachmentBytes(versionId: number): number {
     const row = this.db
       .prepare(
-        `SELECT COALESCE(SUM(o.byte_size), 0) AS total
+        `SELECT COALESCE(SUM(o.byte_size + t.byte_size), 0) AS total
          FROM issue_attachments a
          JOIN issue_attachment_blobs o ON o.hash = a.original_hash
-         WHERE a.version_id = ? AND a.state IN ('staged','attached')`,
+         JOIN issue_attachment_blobs t ON t.hash = a.thumbnail_hash
+         WHERE a.version_id = ? AND a.state IN ('staged','attached','detached')`,
       )
       .get(versionId) as { total: number };
     return row.total;
@@ -127,16 +129,22 @@ export class IssueAttachmentRepository {
    * staged attachment row atomically. Relies on the
    * UNIQUE(uploader_id, upload_request_id) constraint for retry safety.
    */
-  createStagedUpload(insert: StagedUploadInsert): void {
-    this.db.transaction(() => {
+  createStagedUpload(insert: StagedUploadInsert, versionQuotaBytes: number): boolean {
+    return this.db.transaction(() => {
+      const projectedBytes = this.versionAttachmentBytes(insert.versionId)
+        + insert.original.byteSize
+        + insert.thumbnail.byteSize;
+      if (projectedBytes > versionQuotaBytes) {
+        return false;
+      }
       this.insertBlob(insert.original, insert.now);
       this.insertBlob(insert.thumbnail, insert.now);
       this.db
         .prepare(
           `INSERT INTO issue_attachments (
              id, version_id, uploader_id, upload_request_id, upload_request_hash,
-             original_hash, thumbnail_hash, original_name, state, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?)`,
+             original_hash, thumbnail_hash, input_byte_size, original_name, state, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?)`,
         )
         .run(
           insert.id,
@@ -146,9 +154,11 @@ export class IssueAttachmentRepository {
           insert.uploadRequestHash,
           insert.original.hash,
           insert.thumbnail.hash,
+          insert.inputByteSize,
           insert.originalName,
           insert.now,
         );
+      return true;
     }).immediate();
   }
 

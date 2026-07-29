@@ -137,26 +137,74 @@ interface LightboxProps {
  * to the triggering thumbnail. Opens no new browsing context.
  */
 function AttachmentLightbox({ image, locale, onClose }: LightboxProps): ReactElement {
+  const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog === null) {
+      return;
+    }
+    const background: Array<{ element: HTMLElement; inert: boolean }> = [];
+    let active: HTMLElement = dialog;
+    while (active.parentElement !== null) {
+      for (const sibling of active.parentElement.children) {
+        if (sibling !== active && sibling instanceof HTMLElement) {
+          background.push({ element: sibling, inert: sibling.inert });
+          sibling.inert = true;
+        }
+      }
+      active = active.parentElement;
+      if (active === document.body) {
+        break;
+      }
+    }
     closeRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         event.stopPropagation();
         onClose();
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (
+        (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement)))
+        || (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement)))
+      ) {
+        event.preventDefault();
+        (event.shiftKey ? last : first)?.focus();
       }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
+      for (const { element, inert } of background) {
+        element.inert = inert;
+      }
     };
   }, [onClose]);
   return (
     <div
+      ref={dialogRef}
       className="issue-lightbox"
       role="dialog"
       aria-modal="true"
       aria-label={image.alt}
+      tabIndex={-1}
       onClick={onClose}
     >
       <button
@@ -192,11 +240,16 @@ export function MarkdownBody({ body, attachments, locale }: MarkdownBodyProps): 
     return map;
   }, [attachments]);
 
-  const closeLightbox = () => {
+  const closeLightbox = useCallback(() => {
     setLightbox(null);
-    triggerRef.current?.focus();
-    triggerRef.current = null;
-  };
+  }, []);
+
+  useEffect(() => {
+    if (lightbox === null && triggerRef.current !== null) {
+      triggerRef.current.focus();
+      triggerRef.current = null;
+    }
+  }, [lightbox]);
 
   // Per-render occurrence counter for the image cap. Kept in a ref (reset at
   // the top of every render) so the img component identity can stay stable —

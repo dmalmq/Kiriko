@@ -151,14 +151,9 @@ export class IssueAttachmentService {
       height: processed.thumbnail.height,
     };
 
-    const used = this.repository.versionAttachmentBytes(version.versionId);
-    if (used + original.byteSize > this.versionQuotaBytes) {
-      throw new IssueServiceError("quota_exceeded", "The attachment storage quota is exhausted.");
-    }
-
     const id = randomUUID();
     try {
-      this.repository.createStagedUpload({
+      const created = this.repository.createStagedUpload({
         id,
         versionId: version.versionId,
         uploaderId: user.id,
@@ -166,9 +161,13 @@ export class IssueAttachmentService {
         uploadRequestHash,
         original,
         thumbnail,
+        inputByteSize: bytes.byteLength,
         originalName: originalName === null ? null : sanitizeOriginalName(originalName),
         now: this.clock().toISOString(),
-      });
+      }, this.versionQuotaBytes);
+      if (!created) {
+        throw new IssueServiceError("quota_exceeded", "The attachment storage quota is exhausted.");
+      }
     } catch (error) {
       // Concurrent identical request: resolve as a replay instead of a 500.
       if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) {

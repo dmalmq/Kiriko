@@ -10,6 +10,7 @@ import { buildApp } from "../src/app";
 import { createSession } from "../src/auth/sessions";
 import { processAttachmentImage } from "../src/issues/attachments/image";
 import { runIssueAttachmentJanitor } from "../src/issues/attachments/janitor";
+import { IssueAttachmentRepository } from "../src/issues/attachments/repository";
 import { IssueAttachmentService } from "../src/issues/attachments/service";
 import { IssueAttachmentStore } from "../src/issues/attachments/store";
 import {
@@ -260,6 +261,10 @@ describe("attachment upload API", () => {
     expect(metadata.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(metadata).toMatchObject({ contentType: "image/png", width: 40, height: 30 });
     expect(attachmentState(app, metadata.id)).toBe("staged");
+    expect(
+      (app.db.prepare("SELECT input_byte_size AS size FROM issue_attachments WHERE id = ?")
+        .get(metadata.id) as { size: number }).size,
+    ).toBe((await pngBuffer()).byteLength);
     const rows = app.db.prepare("SELECT COUNT(*) AS n FROM issue_attachment_blobs").get() as { n: number };
     expect(rows.n).toBe(2);
     // Staged media is never served.
@@ -391,7 +396,16 @@ describe("attachment upload API", () => {
         uploadRateWindowMs: 60_000,
         processingConcurrency: 1,
       });
-      await generous.upload(user, PUBLIC_ID, randomUUID(), null, png);
+      const retained = await generous.upload(user, PUBLIC_ID, randomUUID(), null, png);
+      db.prepare("UPDATE issue_attachments SET state = 'detached' WHERE id = ?").run(retained.id);
+      const governedBytes = (db.prepare(
+        `SELECT o.byte_size + t.byte_size AS total
+         FROM issue_attachments a
+         JOIN issue_attachment_blobs o ON o.hash = a.original_hash
+         JOIN issue_attachment_blobs t ON t.hash = a.thumbnail_hash
+         WHERE a.id = ?`,
+      ).get(retained.id) as { total: number }).total;
+      expect(new IssueAttachmentRepository(db).versionAttachmentBytes(100)).toBe(governedBytes);
       const referencedHashes = store.list();
       expect(referencedHashes.length).toBeGreaterThan(0);
       const restrictive = new IssueAttachmentService({
@@ -614,6 +628,33 @@ describe("attachment binding and media reads", () => {
     expect((data.issues[0] as { rowVersion: number }).rowVersion).toBe(3);
   });
 
+  it("enforces the aggregate limit using admitted input bytes", async () => {
+    const { app, memberCookie } = await seededApp();
+    const staged = await Promise.all([
+      upload(app, memberCookie, await pngBuffer()),
+      upload(app, memberCookie, await pngBuffer(), randomUUID()),
+      upload(app, memberCookie, await pngBuffer(), randomUUID()),
+    ]);
+    app.db.prepare("UPDATE issue_attachments SET input_byte_size = ? WHERE id = ?")
+      .run(9 * 1024 * 1024, staged[0]?.id);
+    app.db.prepare("UPDATE issue_attachments SET input_byte_size = ? WHERE id = ?")
+      .run(9 * 1024 * 1024, staged[1]?.id);
+    app.db.prepare("UPDATE issue_attachments SET input_byte_size = ? WHERE id = ?")
+      .run(9 * 1024 * 1024, staged[2]?.id);
+    const bodyMarkdown = staged.map((item) => `![a](attachment:${item.id})`).join(" ");
+    const response = await postIssue(app, memberCookie, {
+      bodyMarkdown,
+      attachmentIds: staged.map((item) => item.id),
+    });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ error: "invalid_attachment" });
+    expect(staged.map((item) => attachmentState(app, item.id))).toEqual([
+      "staged",
+      "staged",
+      "staged",
+    ]);
+  });
+
   it("creates replies with attachments and keeps reply media live under a deleted root", async () => {
     const { app, memberCookie } = await seededApp();
     const created = await postIssue(app, memberCookie, { bodyMarkdown: "root" });
@@ -809,8 +850,8 @@ describe("attachment janitor", () => {
     const insert = db.prepare(
       `INSERT INTO issue_attachments (
          id, version_id, uploader_id, upload_request_id, upload_request_hash,
-         original_hash, thumbnail_hash, state, created_at
-       ) VALUES (?, 100, 1, ?, ?, ?, ?, ?, ?)`,
+         original_hash, thumbnail_hash, input_byte_size, state, created_at
+       ) VALUES (?, 100, 1, ?, ?, ?, ?, 10, ?, ?)`,
     );
     expect(() =>
       insert.run("not-a-uuid", randomUUID(), "b".repeat(64), "a".repeat(64), "a".repeat(64), "staged", now),
