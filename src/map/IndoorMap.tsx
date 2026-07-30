@@ -935,7 +935,17 @@ export function IndoorMap({
     const clearIdle = (): void => {
       delete container.dataset.mapIdle;
     };
+    const markLoadedRenderIdle = (): void => {
+      // Firefox can dispatch late dataloading/move notifications after the
+      // corresponding idle event. Reconcile on render as well: loaded() means
+      // all requested style/source work is complete, while isMoving() keeps
+      // animation frames from being reported as settled.
+      if (map.loaded() && !map.isMoving()) {
+        markIdle();
+      }
+    };
     map.on("idle", markIdle);
+    map.on("render", markLoadedRenderIdle);
     map.on("dataloading", clearIdle);
     // A movement always starts with movestart. Do not also clear on every
     // move: Firefox can deliver its final move notification after idle, which
@@ -954,6 +964,7 @@ export function IndoorMap({
       map.off("mousemove", onMouseMove);
       map.off("mouseout", onMouseLeave);
       map.off("idle", markIdle);
+      map.off("render", markLoadedRenderIdle);
       map.off("dataloading", clearIdle);
       map.off("movestart", clearIdle);
       onControlsRef.current?.(null);

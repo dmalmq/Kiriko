@@ -169,6 +169,14 @@ const mapState = vi.hoisted(() => {
       return this.sourceLoaded;
     }
 
+    loaded(): boolean {
+      return this.styleLoaded && this.sourceLoaded;
+    }
+
+    isMoving(): boolean {
+      return false;
+    }
+
     isStyleLoaded(): boolean {
       return this.styleLoaded;
     }
@@ -365,6 +373,22 @@ describe("IndoorMap idle marker", () => {
       map.emit("movestart");
     });
     expect(container.getAttribute("data-map-idle")).toBeNull();
+  });
+
+  it("recovers from a late data-loading notification on the next loaded render", () => {
+    const { map } = renderMap(baseProps());
+    const container = screen.getByRole("application", { name: "Indoor map" });
+
+    act(() => {
+      map.emit("idle");
+      map.emit("dataloading");
+    });
+    expect(container.getAttribute("data-map-idle")).toBeNull();
+
+    act(() => {
+      map.emit("render");
+    });
+    expect(container.getAttribute("data-map-idle")).toBe("true");
   });
 });
 
