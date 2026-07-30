@@ -38,10 +38,17 @@ fn ring_coords(v: &Value) -> Vec<[f64; 2]> {
 
 /// All rings (exteriors + holes) of a Polygon/MultiPolygon.
 fn all_rings(geom: &Value) -> Vec<Vec<[f64; 2]>> {
-    let Some(obj) = geom.as_object() else { return Vec::new() };
-    let Some(coords) = obj.get("coordinates") else { return Vec::new() };
+    let Some(obj) = geom.as_object() else {
+        return Vec::new();
+    };
+    let Some(coords) = obj.get("coordinates") else {
+        return Vec::new();
+    };
     match obj.get("type").and_then(Value::as_str) {
-        Some("Polygon") => coords.as_array().map(|a| a.iter().map(ring_coords).collect()).unwrap_or_default(),
+        Some("Polygon") => coords
+            .as_array()
+            .map(|a| a.iter().map(ring_coords).collect())
+            .unwrap_or_default(),
         Some("MultiPolygon") => {
             let mut out = Vec::new();
             if let Some(polys) = coords.as_array() {
@@ -108,7 +115,9 @@ fn ring_centroid(ring: &[[f64; 2]]) -> [f64; 2] {
         cy += (y0 + y1) * cross;
     }
     if area2.abs() < 1e-14 {
-        let (sx, sy) = ring.iter().fold((0.0, 0.0), |(sx, sy), &[x, y]| (sx + x, sy + y));
+        let (sx, sy) = ring
+            .iter()
+            .fold((0.0, 0.0), |(sx, sy), &[x, y]| (sx + x, sy + y));
         return [sx / n as f64, sy / n as f64];
     }
     [ox + cx / (3.0 * area2), oy + cy / (3.0 * area2)]
@@ -116,7 +125,10 @@ fn ring_centroid(ring: &[[f64; 2]]) -> [f64; 2] {
 
 fn polygon_centroid(geom: &Value) -> Option<[f64; 2]> {
     let rings = all_rings(geom);
-    rings.first().filter(|r| !r.is_empty()).map(|r| ring_centroid(r))
+    rings
+        .first()
+        .filter(|r| !r.is_empty())
+        .map(|r| ring_centroid(r))
 }
 
 fn linestring_midpoint(geom: &Value) -> Option<[f64; 2]> {
@@ -149,7 +161,10 @@ fn linestring_midpoint(geom: &Value) -> Option<[f64; 2]> {
         let seg = haversine_m(w[0], w[1]);
         if acc + seg >= target {
             let t = if seg > 0.0 { (target - acc) / seg } else { 0.0 };
-            return Some([w[0][0] + (w[1][0] - w[0][0]) * t, w[0][1] + (w[1][1] - w[0][1]) * t]);
+            return Some([
+                w[0][0] + (w[1][0] - w[0][0]) * t,
+                w[0][1] + (w[1][1] - w[0][1]) * t,
+            ]);
         }
         acc += seg;
     }
@@ -168,7 +183,9 @@ enum Kind {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: analyze_synth <imdf.zip|bundle.kvb> [--dump ordinal out.json]");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: analyze_synth <imdf.zip|bundle.kvb> [--dump ordinal out.json]");
     let source = fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     // A raw `kvb1` bundle decodes directly; anything else is an IMDF zip that
     // is compiled with synthesis first (before/after comparisons).
@@ -177,7 +194,10 @@ fn main() {
     } else {
         let compiled = compile_imdf_with_network(
             &source,
-            BundleMetadata { dataset_id: "diag".into(), version: 1 },
+            BundleMetadata {
+                dataset_id: "diag".into(),
+                version: 1,
+            },
             None,
             None,
             None,
@@ -190,16 +210,25 @@ fn main() {
     let graph = doc.graph.as_ref().expect("synthesized graph present");
 
     // level_id -> ordinal
-    let level_ordinal: BTreeMap<&str, f64> =
-        doc.levels.iter().map(|l| (l.id.as_str(), l.ordinal)).collect();
+    let level_ordinal: BTreeMap<&str, f64> = doc
+        .levels
+        .iter()
+        .map(|l| (l.id.as_str(), l.ordinal))
+        .collect();
 
     // Collect opening midpoints and transit units per ordinal.
     let mut openings: Vec<(f64, [f64; 2])> = Vec::new(); // (ordinal, midpoint)
     let mut transits: Vec<(f64, [f64; 2], String, Value)> = Vec::new(); // (ordinal, centroid, category, geom)
     for f in &doc.features {
-        let Some(level_id) = f.level_id.as_deref() else { continue };
-        let Some(&ord) = level_ordinal.get(level_id) else { continue };
-        let Some(geom) = f.geometry.as_ref() else { continue };
+        let Some(level_id) = f.level_id.as_deref() else {
+            continue;
+        };
+        let Some(&ord) = level_ordinal.get(level_id) else {
+            continue;
+        };
+        let Some(geom) = f.geometry.as_ref() else {
+            continue;
+        };
         match f.feature_type {
             FeatureType::Opening => {
                 if let Some(m) = linestring_midpoint(geom) {
@@ -226,7 +255,10 @@ fn main() {
             let p = [n.lon, n.lat];
             if openings.iter().any(|(o, m)| *o == n.ordinal && *m == p) {
                 Kind::Opening
-            } else if transits.iter().any(|(o, c, _, _)| *o == n.ordinal && *c == p) {
+            } else if transits
+                .iter()
+                .any(|(o, c, _, _)| *o == n.ordinal && *c == p)
+            {
                 Kind::Transit
             } else {
                 Kind::Skeleton
@@ -237,8 +269,15 @@ fn main() {
     let n_open = kinds.iter().filter(|&&k| k == Kind::Opening).count();
     let n_transit = kinds.iter().filter(|&&k| k == Kind::Transit).count();
     let n_skel = kinds.iter().filter(|&&k| k == Kind::Skeleton).count();
-    println!("nodes: {} total | skeleton {n_skel} opening {n_open} transit {n_transit}", graph.nodes.len());
-    println!("features: {} openings, {} transit units", openings.len(), transits.len());
+    println!(
+        "nodes: {} total | skeleton {n_skel} opening {n_open} transit {n_transit}",
+        graph.nodes.len()
+    );
+    println!(
+        "features: {} openings, {} transit units",
+        openings.len(),
+        transits.len()
+    );
     println!("edges: {}", graph.edges.len());
 
     // Adjacency.
@@ -275,7 +314,9 @@ fn main() {
         for &nb in &adj[node_idx] {
             let same_floor = graph.nodes[nb].ordinal == *ord;
             if same_floor {
-                *t_edge_kinds.entry(format!("{cat}->{:?}", kinds[nb])).or_default() += 1;
+                *t_edge_kinds
+                    .entry(format!("{cat}->{:?}", kinds[nb]))
+                    .or_default() += 1;
             }
         }
         // parallel path: a belonging opening has its own node with a skeleton edge
@@ -285,9 +326,13 @@ fn main() {
             t_parallel += 1;
         }
     }
-    println!("\n[complaint 1] transit units: {t_with_opening} with opening on boundary, {t_without_opening} without");
+    println!(
+        "\n[complaint 1] transit units: {t_with_opening} with opening on boundary, {t_without_opening} without"
+    );
     println!("[complaint 1] transit->centroid edge targets (same floor): {t_edge_kinds:?}");
-    println!("[complaint 1] transit units with BOTH a boundary opening and a direct centroid->skeleton edge (parallel attach): {t_parallel}");
+    println!(
+        "[complaint 1] transit units with BOTH a boundary opening and a direct centroid->skeleton edge (parallel attach): {t_parallel}"
+    );
 
     // --- Complaint 2: multiple connections ---
     // Edge-kind breakdown.
@@ -302,7 +347,13 @@ fn main() {
         let cross = graph.nodes[e.from as usize].ordinal != graph.nodes[e.to as usize].ordinal;
         let mut pair = [name(a), name(b)];
         pair.sort();
-        *kind_pairs.entry(format!("{}{}", pair.join("-"), if cross { " (vertical)" } else { "" })).or_default() += 1;
+        *kind_pairs
+            .entry(format!(
+                "{}{}",
+                pair.join("-"),
+                if cross { " (vertical)" } else { "" }
+            ))
+            .or_default() += 1;
     }
     println!("\nedge kinds: {kind_pairs:?}");
 
@@ -316,13 +367,17 @@ fn main() {
         x
     }
     for e in &graph.edges {
-        let (a, b) = (find(&mut parent, e.from as usize), find(&mut parent, e.to as usize));
+        let (a, b) = (
+            find(&mut parent, e.from as usize),
+            find(&mut parent, e.to as usize),
+        );
         if a != b {
             parent[a] = b;
         }
     }
-    let comps: std::collections::BTreeSet<usize> =
-        (0..graph.nodes.len()).map(|i| find(&mut parent, i)).collect();
+    let comps: std::collections::BTreeSet<usize> = (0..graph.nodes.len())
+        .map(|i| find(&mut parent, i))
+        .collect();
     println!("connected components (whole venue): {}", comps.len());
 
     // opening degree split by neighbor kind
@@ -332,8 +387,14 @@ fn main() {
         if k != Kind::Opening {
             continue;
         }
-        let skel = adj[i].iter().filter(|&&nb| kinds[nb] == Kind::Skeleton).count();
-        let trans = adj[i].iter().filter(|&&nb| kinds[nb] == Kind::Transit).count();
+        let skel = adj[i]
+            .iter()
+            .filter(|&&nb| kinds[nb] == Kind::Skeleton)
+            .count();
+        let trans = adj[i]
+            .iter()
+            .filter(|&&nb| kinds[nb] == Kind::Transit)
+            .count();
         *skel_deg_hist.entry(skel).or_default() += 1;
         *trans_deg_hist.entry(trans).or_default() += 1;
     }
@@ -376,8 +437,12 @@ fn main() {
     println!("skeleton leaf edges: {leaf_total} by length: {leaf_hist:?}");
 
     // duplicate doorway nodes: pairs of opening nodes <2 m apart on same floor
-    let opening_nodes: Vec<usize> =
-        kinds.iter().enumerate().filter(|&(_, &k)| k == Kind::Opening).map(|(i, _)| i).collect();
+    let opening_nodes: Vec<usize> = kinds
+        .iter()
+        .enumerate()
+        .filter(|&(_, &k)| k == Kind::Opening)
+        .map(|(i, _)| i)
+        .collect();
     let mut dup_pairs = 0usize;
     for (ai, &a) in opening_nodes.iter().enumerate() {
         for &b in &opening_nodes[ai + 1..] {
@@ -390,7 +455,9 @@ fn main() {
             }
         }
     }
-    println!("[complaint 2] opening-node pairs closer than 2 m on one floor (duplicate doorways): {dup_pairs}");
+    println!(
+        "[complaint 2] opening-node pairs closer than 2 m on one floor (duplicate doorways): {dup_pairs}"
+    );
 
     // Optional per-floor dump for external plotting: --dump <ordinal> <out.json>
     let args: Vec<String> = std::env::args().collect();
@@ -416,7 +483,13 @@ fn main() {
             if graph.nodes[a].ordinal != ord && graph.nodes[b].ordinal != ord {
                 continue;
             }
-            js.push_str(&format!("[{},{},\"{}-{}\"],", a, b, name(kinds[a]), name(kinds[b])));
+            js.push_str(&format!(
+                "[{},{},\"{}-{}\"],",
+                a,
+                b,
+                name(kinds[a]),
+                name(kinds[b])
+            ));
         }
         js.pop();
         js.push_str("]}");

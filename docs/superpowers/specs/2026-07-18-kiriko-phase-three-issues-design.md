@@ -1,7 +1,7 @@
 # Kiriko Phase Three: Version-Pinned Review Issues
 
 **Date:** 2026-07-18  
-**Status:** Approved
+**Status:** Approved; amended for rich comments and first-party attachments
 **Depends on:** Phase Two immutable KVB publication and dataset viewer cutover
 
 ## 1. Context
@@ -21,7 +21,7 @@ Phase Three ships one complete vertical slice:
 - Pins synchronized with the current floor and the selected issue.
 - An Issues rail panel with active, assigned-to-me, unassigned, and closed views.
 - One optional assignee, immutable creation date, visible update date, and one optional date-only due date per root issue.
-- Limited Markdown rendered safely.
+- Canonical Markdown rendered safely, with first-party raster image attachments.
 - Version-pinned history: publishing a new venue version starts with an empty issue collection.
 - Near-real-time updates through server-sent event invalidations and canonical REST refetches.
 - End-to-end coverage across server, viewer, and two concurrent browser contexts.
@@ -31,7 +31,8 @@ Phase Three ships one complete vertical slice:
 Phase Three does not add:
 
 - Mentions, notifications, email, presence, typing indicators, or read receipts.
-- Attachments, pasted media, reactions, rich-text editing, or arbitrary HTML.
+- Reactions, stored rich-text/editor JSON, WYSIWYG editing, or arbitrary HTML/MDX.
+- Remote images, data URLs, SVG, or media embedded in KVB/local ZIP/export/carry-forward.
 - Nested replies beyond one root plus one reply level.
 - Issue transfer or automatic carry-forward to a newly published venue version.
 - Routing, positioning, or KVB schema changes.
@@ -85,19 +86,19 @@ Coordinates and floor are required. A feature under the placement click is attac
 
 “New issue” enters placement mode. The next valid map click captures the current floor, WGS84 coordinate, and optional rendered feature. The panel then shows:
 
-- Markdown body
+- Markdown body in the shared Write/Preview editor, with formatting and image controls
 - Optional assignee
 - Optional due date
 - Captured floor/coordinate
 - Optional feature context
 
-Assignment and due date never block creation. A viewer-role author may leave the issue unassigned or assign it to themselves; members/admins may choose any existing account. If sign-in is required after the draft begins, placement, text, and permitted metadata survive the sign-in flow.
+Assignment and due date never block creation. The image control supports file picking, clipboard paste, and drag/drop with progress, retry/cancel, editable alt text, and staged thumbnails; accepted formats and budgets are owned by `docs/issue-attachments-operations.md`. A viewer-role author may leave the issue unassigned or assign it to themselves; members/admins may choose any existing account. If sign-in is required after the draft begins, placement, text, and permitted metadata survive the sign-in flow.
 
 Creation time and author are assigned by the server and cannot be edited.
 
 ### 4.5 Issue detail and discussion
 
-The detail view shows root text, status, assignee, due date, created date/author, updated date, anchor context, and chronological replies. Replies are one level deep and contain only author, Markdown body, edit/deletion state, and timestamps.
+The detail view shows root text and first-party images, status, assignee, due date, created date/author, updated date, anchor context, and chronological replies. Root/reply create and edit use the same native-textarea Write/Preview editor; its preview uses the production renderer. Replies are one level deep and contain only author, Markdown body and attachments, edit/deletion state, and timestamps.
 
 Deleted content is rendered as **Comment deleted**. Replies, root metadata, pin history, and timestamps remain visible. Deleting a root permanently closes it; a deleted root cannot be reopened.
 
@@ -130,7 +131,7 @@ Issue routes use the exact error contract in Section 8.1. A signed-out draft ope
 
 ## 6. Data model
 
-Add one migration that backfills permanent public identities on existing version rows and creates two issue tables.
+The original phase adds one migration that backfills permanent public identities and creates the issue tables. Rich comments add an additive attachment migration; the authoritative storage and lifecycle contract is `docs/issue-attachments-operations.md`.
 
 ### 6.1 Public version identity
 
@@ -176,7 +177,7 @@ The state row is created lazily in the same transaction as the first read or wri
 
 Database checks enforce root/reply field separation, valid statuses, body/tombstone consistency, coordinate ranges, unique `(version_id, pin_number)`, and unique `(author_id, create_request_id)`. Foreign keys and repository checks additionally verify that a reply’s parent belongs to the same version and is a root before insertion.
 
-Root and reply creation require a client-generated UUID v4 `requestId`. The SHA-256 input is a canonical JSON object with sorted keys and explicit nulls for absent optionals. A root hash includes `{ kind: \"root\", versionId, bodyMarkdown, levelId, longitude, latitude, featureId, assigneeId, dueDate }`; a reply hash includes `{ kind: \"reply\", versionId, parentIssueId, bodyMarkdown }`. IDs are the server-resolved database IDs, and Markdown uses the newline-normalized value that will be stored. This binds a key to its operation and exact target. Replaying the same request ID as the same author with the same hash returns the existing resource ID and current collection revision without allocating a pin, inserting a row, incrementing revision, or broadcasting SSE. Reusing that ID with a different hash returns `409 idempotency_conflict`.
+Root and reply creation require a client-generated UUID v4 `requestId`. The SHA-256 input is a canonical JSON object with sorted keys and explicit nulls for absent optionals. A root hash includes `{ assigneeId, attachmentIds, bodyMarkdown, dueDate, featureId, kind: \"root\", latitude, levelId, longitude, versionId }`; a reply hash includes `{ attachmentIds, bodyMarkdown, kind: \"reply\", parentIssueId, versionId }`. IDs are the server-resolved database IDs, attachment IDs are sorted and unique (an empty array when absent), and Markdown uses the newline-normalized value that will be stored. This binds a key to its operation and exact target. Replaying the same request ID as the same author with the same hash returns the existing resource ID and current collection revision without allocating a pin, inserting a row, incrementing revision, or broadcasting SSE. Reusing that ID with a different hash returns `409 idempotency_conflict`.
 
 Every successful, non-replayed mutation updates the affected row and increments `comment_state.revision` in one SQLite transaction. SSE publication occurs only after commit.
 
@@ -203,6 +204,7 @@ interface ReviewIssue {
     featureId?: string
   }
   bodyMarkdown: string | null
+  attachments: IssueAttachmentMetadata[]
   status: 'open' | 'in_review' | 'closed'
   author: ReviewerSummary
   assignee: ReviewerSummary | null
@@ -217,10 +219,20 @@ interface IssueReply {
   id: string
   rowVersion: number
   bodyMarkdown: string | null
+  attachments: IssueAttachmentMetadata[]
   author: ReviewerSummary
   createdAt: string
   updatedAt: string
   deletedAt: string | null
+}
+
+interface IssueAttachmentMetadata {
+  id: string
+  contentType: 'image/png' | 'image/jpeg' | 'image/webp'
+  width: number
+  height: number
+  thumbnailWidth: number
+  thumbnailHeight: number
 }
 
 interface ReviewerSummary {
@@ -232,7 +244,7 @@ interface ReviewerSummary {
 
 Every `createdAt`, `updatedAt`, and `deletedAt` wire value is UTC RFC 3339 with a trailing `Z`, emitted exactly from the stored application-generated value. Clients never parse SQLite’s space-separated `datetime('now')` format. `dueDate` remains the unchanged date-only value.
 
-The list is sorted by pin number and replies by creation time plus ID as a deterministic tie-breaker. A deleted resource returns `bodyMarkdown: null` and its tombstone timestamp; deleted text is never returned publicly.
+The list is sorted by pin number and replies by creation time plus ID as a deterministic tie-breaker. A deleted resource returns `bodyMarkdown: null`, an empty `attachments` array, and its tombstone timestamp; deleted text and media are never returned publicly.
 
 ## 8. HTTP and SSE API
 
@@ -248,11 +260,15 @@ PATCH  /api/issues/:issueId
 PATCH  /api/replies/:replyId
 DELETE /api/issues/:issueId
 DELETE /api/replies/:replyId
+POST   /api/review/versions/:publicVersionId/issue-attachments
+DELETE /api/issue-attachments/:attachmentId
+GET    /api/issue-attachments/:attachmentId/content
+GET    /api/issue-attachments/:attachmentId/thumbnail
 ```
 
 The version-scoped GET and event stream are public only while that exact public ID resolves to a published version. There is intentionally no mutable “latest issues” alias. Collection, reviewer, and mutation JSON responses set `Cache-Control: no-store`; SSE uses its separate no-cache stream headers. Every mutation and reviewer-directory request requires a valid session. The mutation service resolves each opaque issue/reply ID back to its version and rechecks publication state and role permissions.
 
-Create accepts `requestId` plus root body, anchor, optional assignee, and optional due date. Reply create accepts `requestId` plus body. Patch is a typed discriminated operation for exactly one of:
+Create accepts `requestId` plus root body, anchor, optional assignee, optional due date, and optional `attachmentIds`. Reply create and body patches likewise accept optional `attachmentIds`. When omitted, the server derives IDs from canonical `attachment:<id>` image tokens for old-client compatibility; when present, the field must have exact set equality with those tokens. Binding/detaching is transactional with the body mutation. Attachment upload is authenticated multipart with one `file` and UUID-v4 `requestId`; retries by the same uploader are idempotent only for identical bytes and the same version. Patch is a typed discriminated operation for exactly one of:
 
 - body edit
 - assignment change
@@ -274,12 +290,15 @@ interface IssueApiError {
     | 'invalid_anchor'
     | 'invalid_due_date'
     | 'invalid_markdown'
+    | 'invalid_attachment'
     | 'unauthorized'
     | 'forbidden'
+    | 'quota_exceeded'
     | 'not_found'
     | 'stale_issue'
     | 'idempotency_conflict'
     | 'issue_deleted'
+    | 'rate_limited'
     | 'sse_capacity'
     | 'internal_error'
   message: string
@@ -292,7 +311,7 @@ interface IssueApiError {
 }
 ```
 
-`400` uses the validation codes and optional field details; `401 unauthorized`, `403 forbidden`, and `404 not_found` do not expose private resource existence; `409` uses the three conflict codes and includes `current`/`revision` only for `stale_issue`; `500 internal_error` covers unexpected database, blob, and native/storage failures without exposing internals; `503 sse_capacity` includes `Retry-After: 15`. Fastify TypeBox response schemas and the issue client preserve this exact shape.
+`400` uses the validation codes and optional field details; `401 unauthorized`, `403 forbidden` or `quota_exceeded`, and `404 not_found` do not expose private resource existence; `409` uses the three conflict codes and includes `current`/`revision` only for `stale_issue`; `429 rate_limited` rejects excess uploads; `500 internal_error` covers unexpected database, blob, and native/storage failures without exposing internals; `503 sse_capacity` includes `Retry-After: 15`. Fastify TypeBox response schemas and the issue client preserve this exact shape.
 
 ### 8.2 SSE event contract
 
@@ -335,11 +354,12 @@ The server stores that normalized Markdown. The web app renders with a Markdown 
 
 - Does not enable raw HTML parsing.
 - Allows paragraphs, line breaks, emphasis, strong text, ordered/unordered lists, links, and inline code.
-- Does not render images, iframes, embedded media, tables, headings, or executable HTML.
+- Renders images only for canonical `attachment:<id>` tokens resolved against attachment metadata projected with that body; remote, relative, data, unknown, and SVG sources render no image.
+- Does not render iframes, other embedded media, tables, headings, or executable HTML.
 - Allows only safe `http`, `https`, and `mailto` link protocols.
 - Adds safe external-link attributes.
 
-Plain text remains readable without Markdown. The editor includes a concise formatting hint, character count, and accessible limit error—not a rich toolbar.
+Plain text remains readable without Markdown. Every root/reply create and edit surface uses the shared native-textarea editor with accessible bilingual Bold, Italic, Inline code, Bulleted, Numbered, Link, and Image controls plus single-pane Write/Preview tabs. Preview uses this exact production renderer; editor state is never persisted.
 
 ## 11. Client state and synchronization
 
@@ -388,6 +408,7 @@ No issue API error is converted into a generic archive/bundle load error.
 - Focus moves into the composer after map placement and returns to the initiating control on cancel.
 - Opening sign-in from a draft returns focus to the draft after successful authentication.
 - Status, due-soon, and overdue indicators include text labels.
+- Attachment thumbnails have meaningful alt text and open an accessible modal lightbox that traps focus, makes the background inert, closes with Escape, and returns focus to its trigger.
 - At narrow widths, the floating panel becomes the existing mobile sheet pattern; the map remains available behind it.
 - `prefers-reduced-motion` removes nonessential pin/panel transitions.
 

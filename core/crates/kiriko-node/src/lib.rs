@@ -72,18 +72,20 @@ impl Task for CompileTask {
             dataset_id: self.dataset_id.clone(),
             version: self.version,
         };
-        Ok(match compile_imdf_with_network(
-            &self.source,
-            metadata,
-            self.network_junctions_geojson.as_deref(),
-            self.network_paths_geojson.as_deref(),
-            self.facilities_geojson.as_deref(),
-            self.synthesize_network.unwrap_or(false),
-            self.clip_to_venue.unwrap_or(false),
-        ) {
-            Ok(compiled) => CompileOutcome::Success(compiled),
-            Err(err) => CompileOutcome::Failure(err),
-        })
+        Ok(
+            match compile_imdf_with_network(
+                &self.source,
+                metadata,
+                self.network_junctions_geojson.as_deref(),
+                self.network_paths_geojson.as_deref(),
+                self.facilities_geojson.as_deref(),
+                self.synthesize_network.unwrap_or(false),
+                self.clip_to_venue.unwrap_or(false),
+            ) {
+                Ok(compiled) => CompileOutcome::Success(compiled),
+                Err(err) => CompileOutcome::Failure(err),
+            },
+        )
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -172,6 +174,9 @@ fn error_json(err: &CompileError) -> Value {
 /// entirely off the Node.js event loop via `AsyncTask`; the returned promise
 /// always resolves to a [`NativeCompileResponse`], never rejecting for
 /// domain (IMDF, route-build, facility-build, or bundle-codec) failures.
+// Positional napi FFI signature mirrored by the TS bridge; grouping args
+// into a struct would change the JS-facing API.
+#[allow(clippy::too_many_arguments)]
 #[napi]
 pub fn compile_imdf(
     source: Buffer,
@@ -300,7 +305,10 @@ impl Task for ExportTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         Ok(match export_network_pure(&self.bundle) {
-            Ok(net) => ExportOutcome::Success { junctions: net.junctions, paths: net.paths },
+            Ok(net) => ExportOutcome::Success {
+                junctions: net.junctions,
+                paths: net.paths,
+            },
             Err(err) => ExportOutcome::Failure(export_error_json(&err).to_string()),
         })
     }
@@ -336,5 +344,7 @@ fn export_error_json(err: &ExportError) -> Value {
 /// rejecting for domain (bundle-codec or no-graph) failures.
 #[napi]
 pub fn export_network(bundle: Buffer) -> AsyncTask<ExportTask> {
-    AsyncTask::new(ExportTask { bundle: bundle.to_vec() })
+    AsyncTask::new(ExportTask {
+        bundle: bundle.to_vec(),
+    })
 }

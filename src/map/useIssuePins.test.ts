@@ -44,9 +44,9 @@ function issue(
     replies: [],
   };
   if (deletedAt === null) {
-    return { ...fields, bodyMarkdown: overrides.body ?? "Body", deletedAt: null };
+    return { ...fields, bodyMarkdown: overrides.body ?? "Body", attachments: [], deletedAt: null };
   }
-  return { ...fields, bodyMarkdown: null, deletedAt };
+  return { ...fields, bodyMarkdown: null, attachments: [], deletedAt };
 }
 
 /** Minimal controllable MapLibre stand-in for the DOM overlay. */

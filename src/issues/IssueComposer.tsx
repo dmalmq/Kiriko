@@ -1,8 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { LocaleCode } from "../imdf/types";
+import { IssueMarkdownEditor, attachmentIdsForSubmit } from "./IssueMarkdownEditor";
 import {
   checkIssueBody,
-  MarkdownEditorFeedback,
   normalizeIssueMarkdown,
 } from "./MarkdownBody";
 import type {
@@ -42,6 +42,8 @@ export interface IssueComposerProps {
   draft: IssueDraft;
   currentUser: IssueActor | null;
   reviewers: ReviewerSummary[];
+  /** Published version identity for staged attachment uploads. */
+  publicVersionId: string | null;
   /** True while any mutation is in flight; posting disables. */
   pending: boolean;
   onUpdateDraft: (patch: IssueDraftPatch) => void;
@@ -60,6 +62,7 @@ export function IssueComposer({
   draft,
   currentUser,
   reviewers,
+  publicVersionId,
   pending,
   onUpdateDraft,
   onSubmit,
@@ -67,6 +70,7 @@ export function IssueComposer({
   onRequestSignIn,
 }: IssueComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [uploadsBlocked, setUploadsBlocked] = useState(false);
   useEffect(() => {
     // Placement just completed — move focus into the composer.
     textareaRef.current?.focus();
@@ -130,19 +134,21 @@ export function IssueComposer({
     <div className="issue-composer">
       <h3 className="panel-caption">{ui.heading[locale]}</h3>
 
-      <textarea
-        ref={textareaRef}
-        className="issue-composer__input"
-        aria-label={ui.bodyLabel[locale]}
+      <IssueMarkdownEditor
+        locale={locale}
+        value={draft.bodyMarkdown}
+        onChange={(bodyMarkdown) => {
+          onUpdateDraft({ bodyMarkdown });
+        }}
+        disabled={pending}
+        ariaLabel={ui.bodyLabel[locale]}
         placeholder={ui.bodyPlaceholder[locale]}
         rows={5}
-        value={draft.bodyMarkdown}
-        disabled={pending}
-        onChange={(event) => {
-          onUpdateDraft({ bodyMarkdown: event.target.value });
-        }}
+        textareaClassName="issue-composer__input"
+        publicVersionId={publicVersionId}
+        onSubmitBlockedChange={setUploadsBlocked}
+        textareaRef={textareaRef}
       />
-      <MarkdownEditorFeedback locale={locale} check={check} />
 
       {signedIn ? (
         <label className="issue-composer__field">
@@ -222,11 +228,12 @@ export function IssueComposer({
           <button
             type="button"
             className="btn-primary"
-            disabled={pending || check.problem !== null}
+            disabled={pending || check.problem !== null || uploadsBlocked}
             onClick={() => {
               onSubmit({
                 requestId: draft.requestId,
                 bodyMarkdown: normalized,
+                attachmentIds: attachmentIdsForSubmit(normalized),
                 anchor: {
                   levelId: draft.anchor.levelId,
                   longitude: draft.anchor.longitude,

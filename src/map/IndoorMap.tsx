@@ -7,6 +7,7 @@ import {
 } from "react";
 import maplibregl, {
   type GeoJSONSource,
+  type GeoJSONSourceDiff,
   type Map as MapLibreMap,
   type MapMouseEvent,
   type PointLike,
@@ -197,7 +198,7 @@ function setRouteSourceData(
     return;
   }
   const ordinal = activeOrdinalFor(venue, levelId);
-  const active = directions != null && ordinal !== null;
+  const active = directions?.active === true && ordinal !== null;
   source.setData(
     buildRouteFeatures(
       active ? { origin: directions.origin, destination: directions.destination, route: directions.route } : null,
@@ -401,30 +402,155 @@ function fitLevelBounds(
   ) {
     return;
   }
+  const bounds: [[number, number], [number, number]] = [
+    [west, south],
+    [east, north],
+  ];
   const reduced = prefersReducedMotion();
-  map.fitBounds(
-    [
-      [west, south],
-      [east, north],
-    ],
-    {
-      padding: FIT_PADDING,
-      maxZoom: FIT_MAX_ZOOM,
-      duration: reduced ? 0 : FIT_DURATION_MS,
-    },
+  const options = {
+    padding: FIT_PADDING,
+    maxZoom: FIT_MAX_ZOOM,
+    duration: reduced ? 0 : FIT_DURATION_MS,
+  };
+
+  // Re-fitting an already exact camera still makes MapLibre expire and rebuild
+  // the visible GeoJSON tiles. Floors in one building commonly share bounds,
+  // so avoid that no-op invalidation while retaining the normal refit after a
+  // user pan or for a floor whose bounds differ.
+  const camera = map.cameraForBounds(bounds, options);
+  if (
+    camera?.center != null &&
+    typeof camera.zoom === "number" &&
+    typeof camera.bearing === "number"
+  ) {
+    const center = map.getCenter();
+    const targetLng = Array.isArray(camera.center)
+      ? camera.center[0]
+      : "lng" in camera.center
+        ? camera.center.lng
+        : camera.center.lon;
+    const targetLat = Array.isArray(camera.center) ? camera.center[1] : camera.center.lat;
+    const epsilon = 1e-7;
+    if (
+      Math.abs(center.lng - targetLng) <= epsilon &&
+      Math.abs(center.lat - targetLat) <= epsilon &&
+      Math.abs(map.getZoom() - camera.zoom) <= epsilon &&
+      Math.abs(map.getBearing() - camera.bearing) <= epsilon
+    ) {
+      return;
+    }
+  }
+
+  map.fitBounds(bounds, options);
+}
+
+interface IndoorSourceState {
+  venue: LoadedVenue;
+  data: GeoJSON.FeatureCollection;
+}
+
+function renderFeatureId(feature: GeoJSON.Feature): string | number | null {
+  if (typeof feature.id === "string" || typeof feature.id === "number") {
+    return feature.id;
+  }
+  const promoted = feature.properties?.["__feature_id"];
+  return typeof promoted === "string" || typeof promoted === "number" ? promoted : null;
+}
+
+function sameRenderFeature(left: GeoJSON.Feature, right: GeoJSON.Feature): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.geometry !== right.geometry) {
+    return false;
+  }
+  const leftProperties = left.properties ?? {};
+  const rightProperties = right.properties ?? {};
+  const leftKeys = Object.keys(leftProperties);
+  const rightKeys = Object.keys(rightProperties);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => Object.is(leftProperties[key], rightProperties[key]))
   );
+}
+
+/**
+ * Build an ID-based floor delta for one immutable venue. Shared context and
+ * same-ordinal features stay in the worker index; only departed/arriving or
+ * changed features are removed/added. null falls back to a full setData when
+ * IDs are missing or duplicated.
+ */
+export function buildIndoorSourceDiff(
+  previous: GeoJSON.FeatureCollection,
+  next: GeoJSON.FeatureCollection,
+): GeoJSONSourceDiff | null {
+  const previousById = new Map<string | number, GeoJSON.Feature>();
+  const nextById = new Map<string | number, GeoJSON.Feature>();
+  for (const [features, byId] of [
+    [previous.features, previousById],
+    [next.features, nextById],
+  ] as const) {
+    for (const feature of features) {
+      const id = renderFeatureId(feature);
+      if (id === null || byId.has(id)) {
+        return null;
+      }
+      byId.set(id, feature);
+    }
+  }
+
+  const remove: Array<string | number> = [];
+  const add: GeoJSON.Feature[] = [];
+  for (const [id, previousFeature] of previousById) {
+    const nextFeature = nextById.get(id);
+    if (nextFeature === undefined || !sameRenderFeature(previousFeature, nextFeature)) {
+      remove.push(id);
+    }
+  }
+  for (const [id, nextFeature] of nextById) {
+    const previousFeature = previousById.get(id);
+    if (previousFeature === undefined || !sameRenderFeature(previousFeature, nextFeature)) {
+      add.push(nextFeature);
+    }
+  }
+  return {
+    ...(remove.length > 0 ? { remove } : {}),
+    ...(add.length > 0 ? { add } : {}),
+  };
 }
 
 function setSourceData(
   map: MapLibreMap,
   venue: LoadedVenue,
   levelId: string,
-): void {
+): GeoJSON.FeatureCollection | null {
   const source = getIndoorSource(map);
   if (source == null) {
-    return;
+    return null;
   }
-  source.setData(buildRenderFeatures(venue, levelId));
+  const data = buildRenderFeatures(venue, levelId);
+  source.setData(data);
+  return data;
+}
+
+function updateSourceData(
+  map: MapLibreMap,
+  venue: LoadedVenue,
+  levelId: string,
+  previous: IndoorSourceState | null,
+): IndoorSourceState | null {
+  const source = getIndoorSource(map);
+  if (source == null) {
+    return null;
+  }
+  const data = buildRenderFeatures(venue, levelId);
+  const diff = previous?.venue === venue ? buildIndoorSourceDiff(previous.data, data) : null;
+  if (diff === null) {
+    source.setData(data);
+  } else if (diff.remove !== undefined || diff.add !== undefined || diff.update !== undefined) {
+    source.updateData(diff);
+  }
+  return { venue, data };
 }
 
 type FeatureStateKey = "hover" | "selected" | "issueHighlight";
@@ -552,6 +678,10 @@ export function IndoorMap({
   const directionsRef = useRef(directions);
   const networkRef = useRef(network);
   const networkEditingRef = useRef(networkEditing);
+  const routeSourceActiveRef = useRef(directions?.active === true);
+  const networkSourceActiveRef = useRef(network != null || networkEditing != null);
+  const facilitySourceActiveRef = useRef(facilities.length > 0);
+  const indoorSourceStateRef = useRef<IndoorSourceState | null>(null);
   const [mapInstance, setMapInstance] = useState<MapLibreMap | null>(null);
 
   onSelectRef.current = onSelectFeature;
@@ -763,8 +893,11 @@ export function IndoorMap({
     };
 
     const onLoad = (): void => {
-      setSourceData(map, venueRef.current, levelIdRef.current);
+      const indoorData = setSourceData(map, venueRef.current, levelIdRef.current);
+      indoorSourceStateRef.current =
+        indoorData === null ? null : { venue: venueRef.current, data: indoorData };
       setRouteSourceData(map, venueRef.current, levelIdRef.current, directionsRef.current);
+      routeSourceActiveRef.current = directionsRef.current?.active === true;
       setNetworkSourceData(
         map,
         venueRef.current,
@@ -772,8 +905,11 @@ export function IndoorMap({
         networkRef.current,
         networkEditingRef.current == null ? undefined : networkRenderState(networkEditingRef.current),
       );
+      networkSourceActiveRef.current =
+        networkRef.current != null || networkEditingRef.current != null;
       registerFacilityImages(map);
       setFacilitySourceData(map, venueRef.current, levelIdRef.current, facilitiesRef.current);
+      facilitySourceActiveRef.current = facilitiesRef.current.length > 0;
       applyLayerVisibility(map, visibilityRef.current);
       fitLevelBounds(map, venueRef.current, levelIdRef.current);
       setMapInstance(map);
@@ -799,10 +935,22 @@ export function IndoorMap({
     const clearIdle = (): void => {
       delete container.dataset.mapIdle;
     };
+    const markLoadedRenderIdle = (): void => {
+      // Firefox can dispatch late dataloading/move notifications after the
+      // corresponding idle event. Reconcile on render as well: loaded() means
+      // all requested style/source work is complete, while isMoving() keeps
+      // animation frames from being reported as settled.
+      if (map.loaded() && !map.isMoving()) {
+        markIdle();
+      }
+    };
     map.on("idle", markIdle);
+    map.on("render", markLoadedRenderIdle);
     map.on("dataloading", clearIdle);
+    // A movement always starts with movestart. Do not also clear on every
+    // move: Firefox can deliver its final move notification after idle, which
+    // would erase the settled marker with no later idle event to restore it.
     map.on("movestart", clearIdle);
-    map.on("move", clearIdle);
 
     return () => {
       cancelReadyRef.current?.();
@@ -816,9 +964,9 @@ export function IndoorMap({
       map.off("mousemove", onMouseMove);
       map.off("mouseout", onMouseLeave);
       map.off("idle", markIdle);
+      map.off("render", markLoadedRenderIdle);
       map.off("dataloading", clearIdle);
       map.off("movestart", clearIdle);
-      map.off("move", clearIdle);
       onControlsRef.current?.(null);
       map.remove();
       mapRef.current = null;
@@ -827,6 +975,7 @@ export function IndoorMap({
       appliedSelectedRef.current = null;
       appliedIssueHighlightRef.current = null;
       appliedCameraKeyRef.current = null;
+      indoorSourceStateRef.current = null;
     };
     // Map is created once; theme/venue/level are applied via later effects.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -852,15 +1001,16 @@ export function IndoorMap({
       hoverIdRef.current = null;
     }
 
-    setSourceData(map, venue, levelId);
-    setNetworkSourceData(
+    // Move the camera first so MapLibre computes the floor delta only for the
+    // final viewport. Updating the source before fitBounds makes the worker
+    // parse tiles for both the departing and arriving viewports.
+    fitLevelBounds(map, venue, levelId);
+    indoorSourceStateRef.current = updateSourceData(
       map,
       venue,
       levelId,
-      network,
-      networkEditing == null ? undefined : networkRenderState(networkEditing),
+      indoorSourceStateRef.current,
     );
-    fitLevelBounds(map, venue, levelId);
 
     const selected = selectedIdRef.current;
     if (selected != null) {
@@ -1022,13 +1172,20 @@ export function IndoorMap({
   }, [issueReview?.cameraRequest, levelId]);
 
   // Directions overlay: re-segment the route per active floor whenever the
-  // route, endpoints, floor, or venue change; empty when Directions is off.
+  // route, endpoints, floor, or venue change. onLoad initializes it to empty;
+  // while Directions stays off, floor changes cannot alter that data. A
+  // transition from active to off still clears the source exactly once.
   useEffect(() => {
     const map = mapRef.current;
     if (map == null || !map.isStyleLoaded()) {
       return;
     }
+    const active = directions?.active === true;
+    if (!active && !routeSourceActiveRef.current) {
+      return;
+    }
     setRouteSourceData(map, venue, levelId, directions);
+    routeSourceActiveRef.current = active;
   }, [directions, venue, levelId]);
 
   // Network-review overlay: re-filter the generated network to the active
@@ -1039,18 +1196,34 @@ export function IndoorMap({
     if (map == null || !map.isStyleLoaded()) {
       return;
     }
+    // onLoad has already initialized the source to empty. While review remains
+    // off, floor changes cannot alter that data, so do not enqueue another
+    // empty GeoJSON worker/render cycle. A transition from active to off must
+    // still clear the source once; active floor changes still update once.
+    const active = network != null || networkEditing != null;
+    if (!active && !networkSourceActiveRef.current) {
+      return;
+    }
     const render = networkEditing != null ? networkRenderState(networkEditing) : undefined;
     setNetworkSourceData(map, venue, levelId, network, render);
+    networkSourceActiveRef.current = active;
   }, [network, networkEditing, venue, levelId]);
 
   // Facility symbols: refresh per active floor (and when the facility set or
-  // venue changes). Icons are registered once on load.
+  // venue changes). onLoad initializes the source to empty, so an empty set
+  // needs no floor invalidations; removing active facilities clears it once.
+  // Icons are registered once on load.
   useEffect(() => {
     const map = mapRef.current;
     if (map == null || !map.isStyleLoaded()) {
       return;
     }
+    const active = facilities.length > 0;
+    if (!active && !facilitySourceActiveRef.current) {
+      return;
+    }
     setFacilitySourceData(map, venue, levelId, facilities);
+    facilitySourceActiveRef.current = active;
   }, [facilities, venue, levelId]);
 
   // Layer-group visibility toggles (Layers panel).

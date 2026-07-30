@@ -92,8 +92,18 @@ pub fn build_facilities(
     }
 
     items.sort_by(|a, b| {
-        (a.ordinal.to_bits(), a.lon.to_bits(), a.lat.to_bits(), &a.name)
-            .cmp(&(b.ordinal.to_bits(), b.lon.to_bits(), b.lat.to_bits(), &b.name))
+        (
+            a.ordinal.to_bits(),
+            a.lon.to_bits(),
+            a.lat.to_bits(),
+            &a.name,
+        )
+            .cmp(&(
+                b.ordinal.to_bits(),
+                b.lon.to_bits(),
+                b.lat.to_bits(),
+                &b.name,
+            ))
     });
 
     Ok((Facilities { items }, warnings))

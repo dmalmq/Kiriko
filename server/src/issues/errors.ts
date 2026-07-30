@@ -5,12 +5,15 @@ export const ISSUE_ERROR_STATUS = {
   invalid_anchor: 400,
   invalid_due_date: 400,
   invalid_markdown: 400,
+  invalid_attachment: 400,
   unauthorized: 401,
   forbidden: 403,
+  quota_exceeded: 403,
   not_found: 404,
   stale_issue: 409,
   idempotency_conflict: 409,
   issue_deleted: 409,
+  rate_limited: 429,
   internal_error: 500,
   sse_capacity: 503,
 } as const satisfies Record<IssueErrorCode, number>;
@@ -22,6 +25,7 @@ const VALIDATION_ERROR_CODES = [
   "invalid_anchor",
   "invalid_due_date",
   "invalid_markdown",
+  "invalid_attachment",
 ] as const;
 
 export type IssueValidationErrorCode = (typeof VALIDATION_ERROR_CODES)[number];

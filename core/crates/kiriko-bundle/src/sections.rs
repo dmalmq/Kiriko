@@ -602,9 +602,7 @@ fn validate_graph_edge(
     if from as usize >= node_count || to as usize >= node_count {
         return Err(BundleError::new(
             BundleErrorCode::InvalidBundle,
-            format!(
-                "graph edge endpoint ({from}, {to}) is out of bounds for {node_count} node(s)"
-            ),
+            format!("graph edge endpoint ({from}, {to}) is out of bounds for {node_count} node(s)"),
         ));
     }
     if !weight.is_finite() || !ordinal.is_finite() {
@@ -619,7 +617,10 @@ fn validate_graph_edge(
             "graph edge weight must be non-negative",
         ));
     }
-    if interior.iter().any(|c| !c[0].is_finite() || !c[1].is_finite()) {
+    if interior
+        .iter()
+        .any(|c| !c[0].is_finite() || !c[1].is_finite())
+    {
         return Err(BundleError::new(
             BundleErrorCode::InvalidBundle,
             "graph edge interior coordinate must be finite",
@@ -640,7 +641,14 @@ pub(crate) fn encode_graph(graph: &kiriko_route::RouteGraph) -> Result<Vec<u8>, 
     }
     let mut edges = Vec::with_capacity(graph.edges.len());
     for edge in &graph.edges {
-        validate_graph_edge(edge.from, edge.to, edge.weight, edge.ordinal, &edge.interior, node_count)?;
+        validate_graph_edge(
+            edge.from,
+            edge.to,
+            edge.weight,
+            edge.ordinal,
+            &edge.interior,
+            node_count,
+        )?;
         let mut interior = Vec::with_capacity(edge.interior.len());
         for c in &edge.interior {
             interior.push([canonical_f64(c[0])?, canonical_f64(c[1])?]);
@@ -662,8 +670,7 @@ pub(crate) fn encode_graph(graph: &kiriko_route::RouteGraph) -> Result<Vec<u8>, 
 }
 
 pub(crate) fn decode_graph(bytes: &[u8]) -> Result<kiriko_route::RouteGraph, BundleError> {
-    let dto: GraphSectionDto =
-        crate::codec::postcard_take_exact(bytes, "decode graph section")?;
+    let dto: GraphSectionDto = crate::codec::postcard_take_exact(bytes, "decode graph section")?;
     let node_count = dto.nodes.len();
     let mut nodes = Vec::with_capacity(node_count);
     for node in &dto.nodes {
@@ -675,7 +682,14 @@ pub(crate) fn decode_graph(bytes: &[u8]) -> Result<kiriko_route::RouteGraph, Bun
     }
     let mut edges = Vec::with_capacity(dto.edges.len());
     for edge in &dto.edges {
-        validate_graph_edge(edge.from, edge.to, edge.weight, edge.ordinal, &edge.interior, node_count)?;
+        validate_graph_edge(
+            edge.from,
+            edge.to,
+            edge.weight,
+            edge.ordinal,
+            &edge.interior,
+            node_count,
+        )?;
         let mut interior = Vec::with_capacity(edge.interior.len());
         for c in &edge.interior {
             interior.push([canonical_f64(c[0])?, canonical_f64(c[1])?]);
@@ -999,8 +1013,16 @@ mod tests {
         let mut doc = minimal_document();
         doc.graph = Some(RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.002,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
             edges: vec![RouteEdge {
                 from: 0,
@@ -1014,7 +1036,6 @@ mod tests {
         let back = crate::decode_bundle(&bytes).expect("decodes");
         assert_eq!(back.graph, doc.graph);
     }
-
 
     #[test]
     fn no_graph_section_when_absent() {
@@ -1191,10 +1212,24 @@ mod tests {
         let mut doc = minimal_document();
         doc.graph = Some(RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
-            edges: vec![RouteEdge { from: 0, to: 1, weight: 100.0, ordinal: 0.0, interior: Vec::new() }],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 100.0,
+                ordinal: 0.0,
+                interior: Vec::new(),
+            }],
         });
         doc.facilities = Some(kiriko_facilities::Facilities {
             items: vec![facility(139.0, 35.0, 0.0, "Gate A", "gate", None)],
@@ -1218,8 +1253,8 @@ mod tests {
 
     #[test]
     fn rejects_graph_edge_out_of_bounds() {
-        let manifest_bytes = postcard::to_allocvec(&manifest_section_with_ordinal(1.0))
-            .expect("dto encodes");
+        let manifest_bytes =
+            postcard::to_allocvec(&manifest_section_with_ordinal(1.0)).expect("dto encodes");
         let graph_bytes = postcard::to_allocvec(&GraphSectionDto {
             nodes: vec![GraphNodeDto {
                 lon: 139.0,
@@ -1244,12 +1279,20 @@ mod tests {
 
     #[test]
     fn rejects_negative_graph_edge_weight_on_decode() {
-        let manifest_bytes = postcard::to_allocvec(&manifest_section_with_ordinal(1.0))
-            .expect("dto encodes");
+        let manifest_bytes =
+            postcard::to_allocvec(&manifest_section_with_ordinal(1.0)).expect("dto encodes");
         let graph_bytes = postcard::to_allocvec(&GraphSectionDto {
             nodes: vec![
-                GraphNodeDto { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                GraphNodeDto { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+                GraphNodeDto {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                GraphNodeDto {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
             edges: vec![GraphEdgeDto {
                 from: 0,
@@ -1271,11 +1314,28 @@ mod tests {
         use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
         let graph = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
-            edges: vec![RouteEdge { from: 0, to: 1, weight: -1.0, ordinal: 0.0, interior: vec![] }],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: -1.0,
+                ordinal: 0.0,
+                interior: vec![],
+            }],
         };
-        assert!(encode_graph(&graph).is_err(), "encoding a negative-weight edge must fail");
+        assert!(
+            encode_graph(&graph).is_err(),
+            "encoding a negative-weight edge must fail"
+        );
     }
 }

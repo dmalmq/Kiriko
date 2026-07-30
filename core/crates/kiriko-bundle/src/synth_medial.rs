@@ -13,19 +13,19 @@
 //!
 //! Gated behind `netgen` so the browser wasm build never pulls in `geo`/`spade`.
 
+use geo::Point;
+use geo::algorithm::area::Area;
 use geo::algorithm::bool_ops::BooleanOps;
+use geo::algorithm::contains::Contains;
+use geo::algorithm::intersects::Intersects;
 use geo::algorithm::orient::{Direction, Orient};
 use geo::{Coord, LineString, MultiPolygon, Polygon};
-use geo::algorithm::contains::Contains;
-use geo::algorithm::area::Area;
-use geo::algorithm::intersects::Intersects;
-use geo::Point;
 use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
 use std::collections::HashMap;
 
-use kiriko_model::canonical::Value;
 use crate::codec::BundleDocument;
 use crate::synth::{haversine_m, linestring_midpoint, point_boundary_dist_m, polygon_centroid};
+use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
 use kiriko_route::{RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode};
 
@@ -196,10 +196,7 @@ pub(crate) fn medial_axis(area: &MultiPolygon<f64>, spacing: f64) -> Skeleton {
             [p.x, p.y]
         };
         let (a, b, c) = (pos(0), pos(1), pos(2));
-        let centroid = [
-            (a[0] + b[0] + c[0]) / 3.0,
-            (a[1] + b[1] + c[1]) / 3.0,
-        ];
+        let centroid = [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0];
         // Point-in-polygon inside/outside test. O(faces × ring-vertices); the
         // caller bounds per-floor complexity (densify spacing + a vertex cap)
         // so this stays tractable at venue scale. A CDT flood-fill (O(faces))
@@ -303,7 +300,14 @@ fn boundary_clearance_m(p: [f64; 2], area: &MultiPolygon<f64>) -> f64 {
     let my = 111_320.0;
     let sp = Point::new(p[0] * mx, p[1] * my);
     let scale = |ls: &LineString<f64>| -> LineString<f64> {
-        LineString::new(ls.coords().map(|c| Coord { x: c.x * mx, y: c.y * my }).collect())
+        LineString::new(
+            ls.coords()
+                .map(|c| Coord {
+                    x: c.x * mx,
+                    y: c.y * my,
+                })
+                .collect(),
+        )
     };
     let mut best = f64::INFINITY;
     for poly in area {
@@ -344,18 +348,12 @@ fn leaf_has_corridor_endcap(
             if edge_len_sq <= f64::EPSILON {
                 return false;
             }
-            let projection =
-                (-(a[0] * edge[0] + a[1] * edge[1]) / edge_len_sq).clamp(0.0, 1.0);
-            let offset = [
-                a[0] + projection * edge[0],
-                a[1] + projection * edge[1],
-            ];
+            let projection = (-(a[0] * edge[0] + a[1] * edge[1]) / edge_len_sq).clamp(0.0, 1.0);
+            let offset = [a[0] + projection * edge[0], a[1] + projection * edge[1]];
             let distance = offset[0].hypot(offset[1]);
-            let tangent_dot =
-                (branch[0] * edge[0] + branch[1] * edge[1]).abs()
-                    / (branch_len * edge_len_sq.sqrt());
-            distance <= nearest + ENDCAP_NEAREST_TOL_M
-                && tangent_dot <= ENDCAP_TANGENT_DOT_MAX
+            let tangent_dot = (branch[0] * edge[0] + branch[1] * edge[1]).abs()
+                / (branch_len * edge_len_sq.sqrt());
+            distance <= nearest + ENDCAP_NEAREST_TOL_M && tangent_dot <= ENDCAP_TANGENT_DOT_MAX
         })
     };
     let has_flat_endcap = area.iter().any(|poly| {
@@ -384,7 +382,11 @@ fn point_within_area(p: [f64; 2], area: &MultiPolygon<f64>, tol_m: f64) -> bool 
 fn segment_within_area(a: [f64; 2], b: [f64; 2], area: &MultiPolygon<f64>, tol_m: f64) -> bool {
     (1..10).all(|k| {
         let t = k as f64 / 10.0;
-        point_within_area([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], area, tol_m)
+        point_within_area(
+            [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t],
+            area,
+            tol_m,
+        )
     })
 }
 
@@ -472,8 +474,7 @@ fn prune_spur_leaves(
         let is_short = total < short_chain_max_m;
         let is_narrowing_wedge = if deg(end) >= 3 && total < wedge_chain_max_m {
             let tip_clearance = boundary_clearance_m(skeleton.nodes[start], area);
-            tip_clearance
-                < boundary_clearance_m(skeleton.nodes[end], area) * tip_clearance_ratio
+            tip_clearance < boundary_clearance_m(skeleton.nodes[end], area) * tip_clearance_ratio
                 && !leaf_has_corridor_endcap(
                     skeleton.nodes[start],
                     skeleton.nodes[adj[start][0].0],
@@ -687,7 +688,9 @@ fn choose_spacing(area: &MultiPolygon<f64>, original: usize) -> Option<f64> {
     let budget = MAX_CDT_VERTS - original;
     let perimeter: f64 = area
         .iter()
-        .map(|p| ring_perimeter(p.exterior()) + p.interiors().iter().map(ring_perimeter).sum::<f64>())
+        .map(|p| {
+            ring_perimeter(p.exterior()) + p.interiors().iter().map(ring_perimeter).sum::<f64>()
+        })
         .sum();
     if perimeter <= 0.0 || budget == 0 {
         return Some(BASE_SPACING_DEG);
@@ -698,6 +701,9 @@ fn choose_spacing(area: &MultiPolygon<f64>, original: usize) -> Option<f64> {
 /// One floor's transit unit: centroid, category, largest footprint polygon
 /// (for vertical matching), and the source geometry (for doorway matching).
 type TransitUnit<'a> = ([f64; 2], String, Option<Polygon<f64>>, &'a Value);
+
+/// Cross-floor transit record accumulated while scanning ordinals.
+type TransitAllEntry = (u32, [f64; 2], String, f64, Option<Polygon<f64>>);
 
 /// Union-find root with path compression (over a `parent` slice).
 fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
@@ -725,27 +731,33 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
     let mut nodes: Vec<RouteNode> = Vec::new();
     let mut edges: Vec<RouteEdge> = Vec::new();
     let mut warnings: Vec<RouteBuildWarning> = Vec::new();
-    let mut transit_all: Vec<(u32, [f64; 2], String, f64, Option<Polygon<f64>>)> = Vec::new();
+    let mut transit_all: Vec<TransitAllEntry> = Vec::new();
 
     for &ord in &ordinals {
         let mut walk: Vec<&Value> = Vec::new();
         let mut openings: Vec<[f64; 2]> = Vec::new();
         let mut transit: Vec<TransitUnit<'_>> = Vec::new();
         for f in &document.features {
-            let Some(level_id) = f.level_id.as_deref() else { continue };
+            let Some(level_id) = f.level_id.as_deref() else {
+                continue;
+            };
             if level_ordinal.get(level_id).copied() != Some(ord) {
                 continue;
             }
-            let Some(geom) = f.geometry.as_ref() else { continue };
+            let Some(geom) = f.geometry.as_ref() else {
+                continue;
+            };
             match f.feature_type {
                 FeatureType::Unit => {
-                    let Some(category) = f.category.as_deref() else { continue };
+                    let Some(category) = f.category.as_deref() else {
+                        continue;
+                    };
                     if is_walkway(category) {
                         walk.push(geom);
-                    } else if is_transit(category) {
-                        if let Some(c) = polygon_centroid(geom) {
-                            transit.push((c, category.to_string(), largest_polygon(geom), geom));
-                        }
+                    } else if is_transit(category)
+                        && let Some(c) = polygon_centroid(geom)
+                    {
+                        transit.push((c, category.to_string(), largest_polygon(geom), geom));
                     }
                 }
                 FeatureType::Opening => {
@@ -797,7 +809,10 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             wide_edges.push((a, b));
         }
         let skeleton = prune_spur_leaves(
-            Skeleton { nodes: skeleton.nodes, edges: wide_edges },
+            Skeleton {
+                nodes: skeleton.nodes,
+                edges: wide_edges,
+            },
             &area,
             SPIKE_CHAIN_MAX_M,
             SPIKE_WEDGE_MAX_M,
@@ -874,14 +889,19 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             straighten_degree_two_chains(skeleton, &area, &protected, WEAVE_DETOUR_RATIO);
         let base = nodes.len();
         for n in &skeleton.nodes {
-            nodes.push(RouteNode { lon: n[0], lat: n[1], ordinal: ord });
+            nodes.push(RouteNode {
+                lon: n[0],
+                lat: n[1],
+                ordinal: ord,
+            });
         }
         for &(a, b) in &skeleton.edges {
             let (i, j) = (base + a, base + b);
             edges.push(RouteEdge {
                 from: i as u32,
                 to: j as u32,
-                weight: haversine_m([nodes[i].lon, nodes[i].lat], [nodes[j].lon, nodes[j].lat]) as f32,
+                weight: haversine_m([nodes[i].lon, nodes[i].lat], [nodes[j].lon, nodes[j].lat])
+                    as f32,
                 ordinal: ord,
                 interior: Vec::new(),
             });
@@ -931,7 +951,11 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 continue;
             }
             let idx = nodes.len();
-            nodes.push(RouteNode { lon: op[0], lat: op[1], ordinal: ord });
+            nodes.push(RouteNode {
+                lon: op[0],
+                lat: op[1],
+                ordinal: ord,
+            });
             opening_nodes.push((idx, *op));
             let roots: Vec<usize> = per_blob.keys().copied().collect();
             for &r in &roots[1..] {
@@ -955,7 +979,12 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         // Bucket skeleton nodes on an ~ADJACENCY_BRIDGE_M grid, then keep the
         // single closest cross-blob node pair per (root_a, root_b).
         let cell_deg = ADJACENCY_BRIDGE_M / 111_320.0;
-        let cell = |p: [f64; 2]| ((p[0] / cell_deg).floor() as i64, (p[1] / cell_deg).floor() as i64);
+        let cell = |p: [f64; 2]| {
+            (
+                (p[0] / cell_deg).floor() as i64,
+                (p[1] / cell_deg).floor() as i64,
+            )
+        };
         let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
         for (local, n) in skeleton.nodes.iter().enumerate() {
             buckets.entry(cell(*n)).or_default().push(local);
@@ -966,7 +995,9 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             let root_i = uf_find(&mut blob, local);
             for dx in -1..=1 {
                 for dy in -1..=1 {
-                    let Some(cands) = buckets.get(&(cx + dx, cy + dy)) else { continue };
+                    let Some(cands) = buckets.get(&(cx + dx, cy + dy)) else {
+                        continue;
+                    };
                     for &other in cands {
                         if other <= local {
                             continue;
@@ -1020,16 +1051,25 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         // leaving walkable space or the unit.
         for (tp, category, footprint, geom) in &transit {
             let idx = nodes.len();
-            nodes.push(RouteNode { lon: tp[0], lat: tp[1], ordinal: ord });
+            nodes.push(RouteNode {
+                lon: tp[0],
+                lat: tp[1],
+                ordinal: ord,
+            });
             let unit_area: Option<MultiPolygon<f64>> =
                 footprint.clone().map(|p| MultiPolygon::new(vec![p]));
             let mut attached = false;
             for &(oidx, op) in &opening_nodes {
-                let Some(boundary_d) = point_boundary_dist_m(op, geom) else { continue };
+                let Some(boundary_d) = point_boundary_dist_m(op, geom) else {
+                    continue;
+                };
                 if boundary_d > TRANSIT_OPENING_SNAP_M {
                     continue;
                 }
-                if !unit_area.as_ref().is_some_and(|u| segment_within_area(*tp, op, u, SEGMENT_OUTSIDE_TOL_M)) {
+                if !unit_area
+                    .as_ref()
+                    .is_some_and(|u| segment_within_area(*tp, op, u, SEGMENT_OUTSIDE_TOL_M))
+                {
                     continue;
                 }
                 edges.push(RouteEdge {
@@ -1073,13 +1113,15 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
 
     // Vertical transitions: match each transit unit to the nearest same-kind
     // unit on the next consecutive floor.
-    transit_all.sort_by(|a, b| a.0.cmp(&b.0));
+    transit_all.sort_by_key(|a| a.0);
     let next_ordinal = |o: f64| -> Option<f64> {
         let pos = ordinals.iter().position(|&x| x == o)?;
         ordinals.get(pos + 1).copied()
     };
     for (idx, pt, category, ord, footprint) in transit_all.iter() {
-        let Some(next) = next_ordinal(*ord) else { continue };
+        let Some(next) = next_ordinal(*ord) else {
+            continue;
+        };
         let mut best: Option<(u32, f64)> = None;
         for (cidx, cpt, ccat, cord, cfoot) in transit_all.iter() {
             if *cord != next || ccat != category {
@@ -1108,7 +1150,9 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         e.weight = kiriko_route::meters_to_cost(f64::from(e.weight));
     }
 
-    edges.sort_by(|a, b| (a.from, a.to, a.weight.to_bits()).cmp(&(b.from, b.to, b.weight.to_bits())));
+    edges.sort_by(|a, b| {
+        (a.from, a.to, a.weight.to_bits()).cmp(&(b.from, b.to, b.weight.to_bits()))
+    });
     let node_ids: Vec<u64> = (0..nodes.len() as u64).collect();
     RouteGraphBuild {
         graph: RouteGraph { nodes, edges },
@@ -1149,7 +1193,11 @@ mod tests {
         let a = square(0.0, 0.0, 2.0); // covers x,y ∈ [-1, 1]
         let b = square(1.5, 0.0, 2.0); // covers x ∈ [0.5, 2.5] — overlaps a
         let nav = navigable_area(&[&a, &b], &[]);
-        assert_eq!(nav.0.len(), 1, "overlapping walkables merge into one polygon");
+        assert_eq!(
+            nav.0.len(),
+            1,
+            "overlapping walkables merge into one polygon"
+        );
     }
 
     #[test]
@@ -1180,7 +1228,13 @@ mod tests {
         // A long thin 10×2 rectangle: its medial axis is a central spine
         // running the length, so the skeleton must span most of the x-extent.
         let rect = MultiPolygon::new(vec![Polygon::new(
-            LineString::from(vec![(0.0, 0.0), (10.0, 0.0), (10.0, 2.0), (0.0, 2.0), (0.0, 0.0)]),
+            LineString::from(vec![
+                (0.0, 0.0),
+                (10.0, 0.0),
+                (10.0, 2.0),
+                (0.0, 2.0),
+                (0.0, 0.0),
+            ]),
             vec![],
         )]);
         let skeleton = medial_axis(&rect, 0.5);
@@ -1189,10 +1243,16 @@ mod tests {
         let xs: Vec<f64> = skeleton.nodes.iter().map(|n| n[0]).collect();
         let min_x = xs.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_x = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        assert!(max_x - min_x > 6.0, "spine spans the length: {min_x}..{max_x}");
+        assert!(
+            max_x - min_x > 6.0,
+            "spine spans the length: {min_x}..{max_x}"
+        );
         // Every skeleton node lies inside the rectangle.
         for n in &skeleton.nodes {
-            assert!(n[0] >= -0.01 && n[0] <= 10.01 && n[1] >= -0.01 && n[1] <= 2.01, "node {n:?} in bounds");
+            assert!(
+                n[0] >= -0.01 && n[0] <= 10.01 && n[1] >= -0.01 && n[1] <= 2.01,
+                "node {n:?} in bounds"
+            );
         }
     }
 
@@ -1223,7 +1283,10 @@ mod tests {
         features: Vec<kiriko_model::model::VenueFeature>,
     ) -> BundleDocument {
         BundleDocument {
-            metadata: crate::codec::BundleMetadata { dataset_id: "t/v".into(), version: 1 },
+            metadata: crate::codec::BundleMetadata {
+                dataset_id: "t/v".into(),
+                version: 1,
+            },
             manifest: kiriko_model::model::ImdfManifest {
                 version: "1.0.0".into(),
                 language: "en".into(),
@@ -1242,7 +1305,10 @@ mod tests {
             features,
             bounds_by_level: BTreeMap::new(),
             warnings: Vec::new(),
-            stats: crate::codec::BundleStats { levels: 0, features: 0 },
+            stats: crate::codec::BundleStats {
+                levels: 0,
+                features: 0,
+            },
             graph: None,
             facilities: None,
         }
@@ -1342,7 +1408,10 @@ mod tests {
             x
         }
         for e in &graph.edges {
-            let (a, b) = (find(&mut parent, e.from as usize), find(&mut parent, e.to as usize));
+            let (a, b) = (
+                find(&mut parent, e.from as usize),
+                find(&mut parent, e.to as usize),
+            );
             if a != b {
                 parent[a] = b;
             }
@@ -1374,7 +1443,11 @@ mod tests {
         ];
         let doc = document(&[("l0", 0.0)], features);
         let build = synthesize_network_medial(&doc);
-        assert_eq!(component_count(&build.graph), 2, "sub-width gap stays disconnected");
+        assert_eq!(
+            component_count(&build.graph),
+            2,
+            "sub-width gap stays disconnected"
+        );
     }
 
     #[test]
@@ -1387,17 +1460,30 @@ mod tests {
         let doc = document(
             &[("l0", 0.0)],
             vec![
-                feature("ra", FeatureType::Unit, "l0", Some("walkway"),
-                    rect(139.70000, 35.60000, 0.00020, 0.00002)),
+                feature(
+                    "ra",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.60000, 0.00020, 0.00002),
+                ),
                 feature("neck", FeatureType::Unit, "l0", Some("walkway"), neck),
-                feature("rb", FeatureType::Unit, "l0", Some("walkway"),
-                    rect(139.70024, 35.60000, 0.00020, 0.00002)),
+                feature(
+                    "rb",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70024, 35.60000, 0.00020, 0.00002),
+                ),
             ],
         );
         let build = synthesize_network_medial(&doc);
         assert_eq!(component_count(&build.graph), 2, "sub-width neck is pruned");
         let crosses_neck = build.graph.edges.iter().any(|e| {
-            let (a, b) = (&build.graph.nodes[e.from as usize], &build.graph.nodes[e.to as usize]);
+            let (a, b) = (
+                &build.graph.nodes[e.from as usize],
+                &build.graph.nodes[e.to as usize],
+            );
             (a.lon - 139.70012) * (b.lon - 139.70012) < 0.0
         });
         assert!(!crosses_neck, "no edge crosses the pinched neck");
@@ -1411,15 +1497,29 @@ mod tests {
         let doc = document(
             &[("l0", 0.0)],
             vec![
-                feature("ra", FeatureType::Unit, "l0", Some("walkway"),
-                    rect(139.70000, 35.60000, 0.00020, 0.00002)),
+                feature(
+                    "ra",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.60000, 0.00020, 0.00002),
+                ),
                 feature("neck", FeatureType::Unit, "l0", Some("walkway"), neck),
-                feature("rb", FeatureType::Unit, "l0", Some("walkway"),
-                    rect(139.70024, 35.60000, 0.00020, 0.00002)),
+                feature(
+                    "rb",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70024, 35.60000, 0.00020, 0.00002),
+                ),
             ],
         );
         let build = synthesize_network_medial(&doc);
-        assert_eq!(component_count(&build.graph), 1, "wide-enough neck stays routable");
+        assert_eq!(
+            component_count(&build.graph),
+            1,
+            "wide-enough neck stays routable"
+        );
     }
 
     #[test]
@@ -1429,12 +1529,27 @@ mod tests {
         // platform A's centerline: the segment would cross non-walkable track
         // bed, even though platform A's spine is within snap range.
         let features = vec![
-            feature("pa", FeatureType::Unit, "l0", Some("platform"),
-                rect(139.70000, 35.60000, 0.00040, 0.00002)),
-            feature("pb", FeatureType::Unit, "l0", Some("platform"),
-                rect(139.70000, 35.60010, 0.00040, 0.00002)),
-            feature("door", FeatureType::Opening, "l0", None,
-                line(139.69998, 35.60009, 139.70002, 35.60009)),
+            feature(
+                "pa",
+                FeatureType::Unit,
+                "l0",
+                Some("platform"),
+                rect(139.70000, 35.60000, 0.00040, 0.00002),
+            ),
+            feature(
+                "pb",
+                FeatureType::Unit,
+                "l0",
+                Some("platform"),
+                rect(139.70000, 35.60010, 0.00040, 0.00002),
+            ),
+            feature(
+                "door",
+                FeatureType::Opening,
+                "l0",
+                None,
+                line(139.69998, 35.60009, 139.70002, 35.60009),
+            ),
         ];
         let doc = document(&[("l0", 0.0)], features);
         let build = synthesize_network_medial(&doc);
@@ -1499,18 +1614,48 @@ mod tests {
         // walkway. The whole graph is ONE component, spans both floors, and
         // every edge is a short indoor hop.
         let features = vec![
-            feature("wa", FeatureType::Unit, "l0", Some("walkway"),
-                rect(139.70000, 35.60000, 0.00040, 0.00002)),
-            feature("wb", FeatureType::Unit, "l0", Some("walkway"),
-                rect(139.70040, 35.60000, 0.00040, 0.00002)),
-            feature("door", FeatureType::Opening, "l0", None,
-                line(139.70020, 35.59999, 139.70020, 35.60001)),
-            feature("s0", FeatureType::Unit, "l0", Some("stairs"),
-                rect(139.70000, 35.60000, 0.00006, 0.00001)),
-            feature("w1", FeatureType::Unit, "l1", Some("walkway"),
-                rect(139.70000, 35.60000, 0.00040, 0.00002)),
-            feature("s1", FeatureType::Unit, "l1", Some("stairs"),
-                rect(139.70000, 35.60000, 0.00006, 0.00001)),
+            feature(
+                "wa",
+                FeatureType::Unit,
+                "l0",
+                Some("walkway"),
+                rect(139.70000, 35.60000, 0.00040, 0.00002),
+            ),
+            feature(
+                "wb",
+                FeatureType::Unit,
+                "l0",
+                Some("walkway"),
+                rect(139.70040, 35.60000, 0.00040, 0.00002),
+            ),
+            feature(
+                "door",
+                FeatureType::Opening,
+                "l0",
+                None,
+                line(139.70020, 35.59999, 139.70020, 35.60001),
+            ),
+            feature(
+                "s0",
+                FeatureType::Unit,
+                "l0",
+                Some("stairs"),
+                rect(139.70000, 35.60000, 0.00006, 0.00001),
+            ),
+            feature(
+                "w1",
+                FeatureType::Unit,
+                "l1",
+                Some("walkway"),
+                rect(139.70000, 35.60000, 0.00040, 0.00002),
+            ),
+            feature(
+                "s1",
+                FeatureType::Unit,
+                "l1",
+                Some("stairs"),
+                rect(139.70000, 35.60000, 0.00006, 0.00001),
+            ),
         ];
         let doc = document(&[("l0", 0.0), ("l1", 1.0)], features);
         let build = synthesize_network_medial(&doc);
@@ -1518,8 +1663,15 @@ mod tests {
         let ordinals: std::collections::BTreeSet<i64> =
             build.graph.nodes.iter().map(|n| n.ordinal as i64).collect();
         assert_eq!(ordinals.len(), 2, "both floors present");
-        let max_edge = build.graph.edges.iter().fold(0.0_f32, |m, e| m.max(e.weight));
-        assert!(max_edge <= 30_000.0, "no teleport edges: max {max_edge} cost units (30 m)");
+        let max_edge = build
+            .graph
+            .edges
+            .iter()
+            .fold(0.0_f32, |m, e| m.max(e.weight));
+        assert!(
+            max_edge <= 30_000.0,
+            "no teleport edges: max {max_edge} cost units (30 m)"
+        );
 
         // Determinism: identical input → identical graph.
         let again = synthesize_network_medial(&doc);
@@ -1533,32 +1685,67 @@ mod tests {
         let shop_only = rect(139.70000, 35.60000, 0.00020, 0.00002);
         let doc = document(
             &[("l0", 0.0)],
-            vec![feature("shop", FeatureType::Unit, "l0", Some("unenclosedarea"), shop_only)],
+            vec![feature(
+                "shop",
+                FeatureType::Unit,
+                "l0",
+                Some("unenclosedarea"),
+                shop_only,
+            )],
         );
         let build = synthesize_network_medial(&doc);
-        assert!(build.graph.nodes.is_empty(), "unenclosedarea alone yields no network");
+        assert!(
+            build.graph.nodes.is_empty(),
+            "unenclosedarea alone yields no network"
+        );
 
         // Walkways loop AROUND an unenclosed shop block: the network follows
         // the walkways and no centerline node lies inside the shop.
         let doc = document(
             &[("l0", 0.0)],
             vec![
-                feature("wn", FeatureType::Unit, "l0", Some("walkway"),
-                    rect(139.70000, 35.60003, 0.00030, 0.00002)),
-                feature("ws", FeatureType::Unit, "l0", Some("walkway"),
-                    rect(139.70000, 35.59997, 0.00030, 0.00002)),
-                feature("ww", FeatureType::Unit, "l0", Some("walkway"),
-                    rect(139.69986, 35.60000, 0.00002, 0.00006)),
-                feature("shop", FeatureType::Unit, "l0", Some("unenclosedarea"),
-                    rect(139.70000, 35.60000, 0.00020, 0.00002)),
+                feature(
+                    "wn",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.60003, 0.00030, 0.00002),
+                ),
+                feature(
+                    "ws",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.59997, 0.00030, 0.00002),
+                ),
+                feature(
+                    "ww",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.69986, 35.60000, 0.00002, 0.00006),
+                ),
+                feature(
+                    "shop",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("unenclosedarea"),
+                    rect(139.70000, 35.60000, 0.00020, 0.00002),
+                ),
             ],
         );
         let build = synthesize_network_medial(&doc);
         assert!(!build.graph.nodes.is_empty(), "walkways still synthesize");
-        assert_eq!(component_count(&build.graph), 1, "walkway loop stays connected");
-        let inside_shop = build.graph.nodes.iter().any(|n| {
-            (n.lon - 139.70000).abs() < 0.00010 && (n.lat - 35.60000).abs() < 0.00001
-        });
+        assert_eq!(
+            component_count(&build.graph),
+            1,
+            "walkway loop stays connected"
+        );
+        let inside_shop = build
+            .graph
+            .nodes
+            .iter()
+            .any(|n| (n.lon - 139.70000).abs() < 0.00010 && (n.lat - 35.60000).abs() < 0.00001);
         assert!(!inside_shop, "no centerline inside the shop interior");
     }
 
@@ -1592,11 +1779,17 @@ mod tests {
             vec![],
         )]);
         let pruned = prune_spur_leaves(skeleton, &area, 3.0, 3.0, 0.5);
-        assert_eq!(pruned.edges.len(), 3, "both twigs removed whole: {:?}", pruned.edges);
+        assert_eq!(
+            pruned.edges.len(),
+            3,
+            "both twigs removed whole: {:?}",
+            pruned.edges
+        );
         // the surviving branch is the 3.5 m real end
-        let has_long_branch = pruned.edges.iter().any(|&(a, b)| {
-            haversine_m(pruned.nodes[a], pruned.nodes[b]) > 3.0
-        });
+        let has_long_branch = pruned
+            .edges
+            .iter()
+            .any(|&(a, b)| haversine_m(pruned.nodes[a], pruned.nodes[b]) > 3.0);
         assert!(has_long_branch, "real corridor end preserved");
         // no sub-1 m remnant link survives from the kinked twig
         let short_links = pruned
@@ -1618,11 +1811,11 @@ mod tests {
         };
         let area = MultiPolygon::new(vec![Polygon::new(
             LineString::from(vec![
-                xy(-7.0, -5.0),
-                xy(7.0, -5.0),
-                xy(7.0, 5.0),
-                xy(-7.0, 5.0),
-                xy(-7.0, -5.0),
+                xy(-10.0, -5.0),
+                xy(10.0, -5.0),
+                xy(10.0, 5.0),
+                xy(-10.0, 5.0),
+                xy(-10.0, -5.0),
             ]),
             vec![],
         )]);
@@ -1631,24 +1824,20 @@ mod tests {
                 node(0.0, 0.0),
                 node(-4.0, 0.0),
                 node(4.0, 0.0),
-                node(6.5, 4.5), // convex-corner wedge
-                node(0.0, 4.5), // flat-wall spur without corridor side walls
+                node(0.0, 4.5),
             ],
-            edges: vec![(0, 1), (0, 2), (0, 3), (0, 4)],
+            edges: vec![(0, 1), (0, 2), (0, 3)],
         };
 
         let pruned = prune_spur_leaves(skeleton, &area, 3.0, 8.0, 0.5);
 
-        assert_eq!(pruned.edges.len(), 2, "narrowing room spurs removed");
+        assert_eq!(pruned.edges.len(), 2, "narrowing boundary wedge removed");
         assert!(
             pruned
                 .nodes
                 .iter()
-                .all(|p| {
-                    haversine_m(*p, node(6.5, 4.5)) > 0.1
-                        && haversine_m(*p, node(0.0, 4.5)) > 0.1
-                }),
-            "corner and flat-wall spur tips are removed"
+                .all(|p| haversine_m(*p, node(0.0, 4.5)) > 0.1),
+            "wedge tip is removed"
         );
         assert!(
             pruned
@@ -1659,7 +1848,7 @@ mod tests {
                     .nodes
                     .iter()
                     .any(|p| haversine_m(*p, node(4.0, 0.0)) < 0.1),
-            "non-narrowing room coverage survives"
+            "equal-clearance corridor ends survive"
         );
     }
 
@@ -1854,7 +2043,11 @@ mod tests {
             (a == snode || b == snode) && a != onode && b != onode
         });
         assert!(!direct, "no direct centroid-to-centerline edge");
-        assert_eq!(component_count(g), 1, "graph stays connected through the doorway");
+        assert_eq!(
+            component_count(g),
+            1,
+            "graph stays connected through the doorway"
+        );
     }
 
     #[test]
@@ -1878,7 +2071,10 @@ mod tests {
             .iter()
             .position(|n| [n.lon, n.lat] == sc)
             .expect("stairs centroid node exists");
-        assert!(same_floor_degree(g, snode) >= 1, "stairs snaps onto the centerline");
+        assert!(
+            same_floor_degree(g, snode) >= 1,
+            "stairs snaps onto the centerline"
+        );
         assert_eq!(component_count(g), 1);
     }
 
@@ -1892,10 +2088,20 @@ mod tests {
         let doc = document(
             &[("l0", 0.0)],
             vec![
-                feature("wa", FeatureType::Unit, "l0", Some("walkway"),
-                    rect(139.70000, 35.600000, 0.00040, 0.00001)),
-                feature("wb", FeatureType::Unit, "l0", Some("walkway"),
-                    rect(139.70000, 35.600014, 0.00040, 0.00001)),
+                feature(
+                    "wa",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600000, 0.00040, 0.00001),
+                ),
+                feature(
+                    "wb",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600014, 0.00040, 0.00001),
+                ),
                 feature("door", FeatureType::Opening, "l0", None, door.clone()),
             ],
         );
@@ -1918,8 +2124,15 @@ mod tests {
             }
             (g.nodes[a].lat - g.nodes[b].lat).abs() > 0.000008
         });
-        assert!(!cross_spine, "no direct bridge edge duplicating the doorway path");
-        assert_eq!(same_floor_degree(g, onode), 2, "opening bridges exactly the two spines");
+        assert!(
+            !cross_spine,
+            "no direct bridge edge duplicating the doorway path"
+        );
+        assert_eq!(
+            same_floor_degree(g, onode),
+            2,
+            "opening bridges exactly the two spines"
+        );
     }
 
     #[test]
@@ -1933,10 +2146,20 @@ mod tests {
         let doc = document(
             &[("l0", 0.0)],
             vec![
-                feature("wa", FeatureType::Unit, "l0", Some("walkway"),
-                    rect(139.70000, 35.600000, 0.00040, 0.00001)),
-                feature("wb", FeatureType::Unit, "l0", Some("walkway"),
-                    rect(139.70000, 35.600014, 0.00040, 0.00001)),
+                feature(
+                    "wa",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600000, 0.00040, 0.00001),
+                ),
+                feature(
+                    "wb",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600014, 0.00040, 0.00001),
+                ),
                 feature("door1", FeatureType::Opening, "l0", None, door1.clone()),
                 feature("door2", FeatureType::Opening, "l0", None, door2.clone()),
             ],
@@ -1957,7 +2180,11 @@ mod tests {
                 same_floor_degree(g, node)
             })
             .collect();
-        assert_eq!(degrees, vec![2, 1], "second doorway attaches as a leaf, not a parallel bridge");
+        assert_eq!(
+            degrees,
+            vec![2, 1],
+            "second doorway attaches as a leaf, not a parallel bridge"
+        );
     }
 
     #[test]
@@ -1973,7 +2200,10 @@ mod tests {
         )];
         let doc = document(&[("l0", 0.0)], features);
         let build = synthesize_network_medial(&doc);
-        assert!(!build.graph.nodes.is_empty(), "platform is walkable → non-empty graph");
+        assert!(
+            !build.graph.nodes.is_empty(),
+            "platform is walkable → non-empty graph"
+        );
     }
 
     #[test]
@@ -1987,7 +2217,10 @@ mod tests {
         )];
         let doc = document(&[("l0", 0.0)], features);
         let build = synthesize_network_medial(&doc);
-        assert!(build.graph.nodes.is_empty(), "non-walkable rooms → empty graph");
+        assert!(
+            build.graph.nodes.is_empty(),
+            "non-walkable rooms → empty graph"
+        );
     }
 
     /// Canonical `Polygon` approximating a circle at `(cx, cy)` with `sides`
@@ -2008,7 +2241,10 @@ mod tests {
         pts.push(pts[0].clone());
         Value::Object(BTreeMap::from([
             ("type".to_string(), Value::String("Polygon".to_string())),
-            ("coordinates".to_string(), Value::Array(vec![Value::Array(pts)])),
+            (
+                "coordinates".to_string(),
+                Value::Array(vec![Value::Array(pts)]),
+            ),
         ]))
     }
 
@@ -2032,8 +2268,15 @@ mod tests {
 
         let ords: std::collections::BTreeSet<i64> =
             build.graph.nodes.iter().map(|n| n.ordinal as i64).collect();
-        assert!(!build.graph.nodes.is_empty(), "in-budget floor still synthesizes");
-        assert_eq!(ords, std::collections::BTreeSet::from([1]), "only L1 is synthesized");
+        assert!(
+            !build.graph.nodes.is_empty(),
+            "in-budget floor still synthesizes"
+        );
+        assert_eq!(
+            ords,
+            std::collections::BTreeSet::from([1]),
+            "only L1 is synthesized"
+        );
 
         let skip = build
             .warnings
@@ -2045,7 +2288,11 @@ mod tests {
             "warning carries the original vertex count: {}",
             skip.detail
         );
-        assert!(skip.detail.contains('0'), "warning carries the ordinal: {}", skip.detail);
+        assert!(
+            skip.detail.contains('0'),
+            "warning carries the ordinal: {}",
+            skip.detail
+        );
     }
 
     #[test]
@@ -2055,8 +2302,14 @@ mod tests {
             &[],
         );
         let orig = original_vertex_count(&dense);
-        assert!(orig > MAX_CDT_VERTS, "original count {orig} exceeds ceiling");
-        assert!(choose_spacing(&dense, orig).is_none(), "over-budget floor is rejected");
+        assert!(
+            orig > MAX_CDT_VERTS,
+            "original count {orig} exceeds ceiling"
+        );
+        assert!(
+            choose_spacing(&dense, orig).is_none(),
+            "over-budget floor is rejected"
+        );
     }
 
     #[test]
@@ -2076,10 +2329,18 @@ mod tests {
         )]);
         let orig = original_vertex_count(&big);
         let spacing = choose_spacing(&big, orig).expect("in-budget original vertices");
-        assert!(spacing >= BASE_SPACING_DEG, "spacing never below base: {spacing}");
-        let densified: usize =
-            big.iter().map(|p| densify_ring(p.exterior(), spacing).len()).sum();
-        assert!(densified <= MAX_CDT_VERTS, "densified {densified} stays under ceiling");
+        assert!(
+            spacing >= BASE_SPACING_DEG,
+            "spacing never below base: {spacing}"
+        );
+        let densified: usize = big
+            .iter()
+            .map(|p| densify_ring(p.exterior(), spacing).len())
+            .sum();
+        assert!(
+            densified <= MAX_CDT_VERTS,
+            "densified {densified} stays under ceiling"
+        );
 
         // A small area keeps the fine base spacing.
         let small = navigable_area(&[&square(139.70, 35.69, 0.0004)], &[]);

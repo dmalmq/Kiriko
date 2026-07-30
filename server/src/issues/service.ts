@@ -13,6 +13,8 @@ import type {
   IssueCollection,
   IssueMutationResult,
   IssuePatch,
+  NormalizedIssuePatch,
+  NormalizedReplyPatch,
   ReplyCreateBody,
   ReplyPatch,
   ReviewerSummary,
@@ -23,6 +25,7 @@ import {
   hashRootCreate,
   normalizeReplyCreate,
   normalizeRootCreate,
+  resolveAttachmentIds,
   validateCoordinates,
   validateDueDate,
   validateMarkdownBody,
@@ -125,6 +128,7 @@ export class IssueService {
     const requestId = validateRequestId(input.requestId);
     const normalized = normalizeRootCreate(input);
     normalized.bodyMarkdown = validateMarkdownBody(normalized.bodyMarkdown);
+    normalized.attachmentIds = resolveAttachmentIds(normalized.bodyMarkdown, input.attachmentIds);
     validateCoordinates(normalized.longitude, normalized.latitude);
     assertAssigneeId(normalized.assigneeId);
     if (normalized.dueDate !== null) {
@@ -172,6 +176,7 @@ export class IssueService {
     const requestId = validateRequestId(input.requestId);
     const normalized = normalizeReplyCreate(input);
     normalized.bodyMarkdown = validateMarkdownBody(normalized.bodyMarkdown);
+    normalized.attachmentIds = resolveAttachmentIds(normalized.bodyMarkdown, input.attachmentIds);
 
     const context = this.repository.getIssueContext(issueId);
     if (context === null) {
@@ -339,11 +344,17 @@ export class IssueService {
     }
   }
 
-  private normalizeIssuePatch(patch: IssuePatch): IssuePatch {
+  private normalizeIssuePatch(patch: IssuePatch): NormalizedIssuePatch {
     assertExpectedVersion(patch.expectedVersion);
     switch (patch.type) {
-      case "body":
-        return { ...patch, bodyMarkdown: validateMarkdownBody(patch.bodyMarkdown) };
+      case "body": {
+        const bodyMarkdown = validateMarkdownBody(patch.bodyMarkdown);
+        return {
+          ...patch,
+          bodyMarkdown,
+          attachmentIds: resolveAttachmentIds(bodyMarkdown, patch.attachmentIds),
+        };
+      }
       case "assignment":
         assertAssigneeId(patch.assigneeId);
         return { ...patch };
@@ -357,9 +368,14 @@ export class IssueService {
     }
   }
 
-  private normalizeReplyPatch(patch: ReplyBodyPatch): ReplyBodyPatch {
+  private normalizeReplyPatch(patch: ReplyBodyPatch): NormalizedReplyPatch {
     assertExpectedVersion(patch.expectedVersion);
-    return { ...patch, bodyMarkdown: validateMarkdownBody(patch.bodyMarkdown) };
+    const bodyMarkdown = validateMarkdownBody(patch.bodyMarkdown);
+    return {
+      ...patch,
+      bodyMarkdown,
+      attachmentIds: resolveAttachmentIds(bodyMarkdown, patch.attachmentIds),
+    };
   }
 
   private authorizeIssuePatch(

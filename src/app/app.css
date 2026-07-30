@@ -2522,3 +2522,223 @@ button {
   color: var(--color-accent);
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Issue Markdown editor (toolbar, tabs, uploads) and attachment rendering
+ * ------------------------------------------------------------------------- */
+
+.issue-markdown-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.issue-markdown-editor__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.issue-markdown-editor__tabs {
+  display: inline-flex;
+  gap: var(--space-1);
+}
+
+.issue-markdown-editor__tab {
+  border: 1px solid var(--line, currentColor);
+  background: transparent;
+  color: inherit;
+  border-radius: 6px;
+  padding: 2px 10px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.issue-markdown-editor__tab--active {
+  font-weight: 600;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.issue-markdown-editor__toolbar {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+}
+
+.issue-markdown-editor__tool {
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  border-radius: 6px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 2px 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.issue-markdown-editor__tool:hover:not(:disabled),
+.issue-markdown-editor__tool:focus-visible {
+  border-color: currentColor;
+}
+
+.issue-markdown-editor__tool:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.issue-markdown-editor__link-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 8px;
+  padding: var(--space-2);
+  font-size: 0.85rem;
+}
+
+.issue-markdown-editor__link-dialog label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.issue-markdown-editor__link-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
+.issue-markdown-editor__error {
+  color: var(--danger, #c00);
+  margin: 0;
+}
+
+.issue-markdown-editor__preview {
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 8px;
+  padding: var(--space-2);
+  min-height: 4.5rem;
+  overflow-wrap: anywhere;
+}
+
+.issue-markdown-editor__uploads {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.issue-markdown-editor__upload {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+
+.issue-markdown-editor__thumb {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+}
+
+.issue-markdown-editor__progress {
+  flex: 1;
+  min-width: 80px;
+}
+
+.issue-markdown-editor__upload-error {
+  color: var(--danger, #c00);
+}
+
+.issue-markdown-editor__alt {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 1;
+}
+
+.issue-markdown-editor__alt input {
+  flex: 1;
+  min-width: 120px;
+}
+
+.issue-markdown-editor__warning {
+  margin: 0;
+  font-size: 0.78rem;
+  opacity: 0.8;
+}
+
+/* Rendered attachment thumbnails */
+
+.issue-image {
+  display: inline-block;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  padding: 2px;
+  cursor: zoom-in;
+  max-width: 100%;
+}
+
+.issue-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+/* Attachment lightbox */
+
+.issue-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4, 16px);
+}
+
+.issue-lightbox__image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+.issue-lightbox__close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  min-width: 40px;
+  min-height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 1.4rem;
+  cursor: pointer;
+}
+
+@media (max-width: 899px) {
+  .issue-markdown-editor__tool {
+    min-width: 36px;
+    min-height: 36px;
+  }
+
+  .issue-image img {
+    max-height: 220px;
+  }
+}

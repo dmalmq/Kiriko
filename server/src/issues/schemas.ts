@@ -21,6 +21,43 @@ export const RequestIdSchema = Type.String({
   pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
 });
 
+/** Canonical lowercase attachment IDs (opaque UUIDs). */
+export const AttachmentIdSchema = Type.String({
+  pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+});
+
+export const IssueAttachmentMetadataSchema = Type.Object(
+  {
+    id: AttachmentIdSchema,
+    contentType: Type.Union([
+      Type.Literal("image/png"),
+      Type.Literal("image/jpeg"),
+      Type.Literal("image/webp"),
+    ]),
+    width: Type.Integer({ minimum: 1 }),
+    height: Type.Integer({ minimum: 1 }),
+    thumbnailWidth: Type.Integer({ minimum: 1 }),
+    thumbnailHeight: Type.Integer({ minimum: 1 }),
+  },
+  strict,
+);
+
+export const AttachmentUploadResponseSchema = Type.Object(
+  {
+    id: AttachmentIdSchema,
+    contentType: Type.Union([
+      Type.Literal("image/png"),
+      Type.Literal("image/jpeg"),
+      Type.Literal("image/webp"),
+    ]),
+    width: Type.Integer({ minimum: 1 }),
+    height: Type.Integer({ minimum: 1 }),
+    thumbnailWidth: Type.Integer({ minimum: 1 }),
+    thumbnailHeight: Type.Integer({ minimum: 1 }),
+  },
+  strict,
+);
+
 const DueDateSchema = Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" });
 
 const TimestampSchema = Type.String({ format: UTC_TIMESTAMP_FORMAT });
@@ -65,8 +102,24 @@ export const IssueAnchorSchema = Type.Object(
  */
 function tombstoneUnion<T extends TProperties>(fields: T) {
   return Type.Union([
-    Type.Object({ ...fields, bodyMarkdown: Type.String(), deletedAt: Type.Null() }, strict),
-    Type.Object({ ...fields, bodyMarkdown: Type.Null(), deletedAt: TimestampSchema }, strict),
+    Type.Object(
+      {
+        ...fields,
+        bodyMarkdown: Type.String(),
+        attachments: Type.Array(IssueAttachmentMetadataSchema),
+        deletedAt: Type.Null(),
+      },
+      strict,
+    ),
+    Type.Object(
+      {
+        ...fields,
+        bodyMarkdown: Type.Null(),
+        attachments: Type.Array(IssueAttachmentMetadataSchema, { maxItems: 0 }),
+        deletedAt: TimestampSchema,
+      },
+      strict,
+    ),
   ]);
 }
 
@@ -104,6 +157,7 @@ export const RootCreateBodySchema = Type.Object(
   {
     requestId: RequestIdSchema,
     bodyMarkdown: Type.String(),
+    attachmentIds: Type.Optional(Type.Array(AttachmentIdSchema, { maxItems: 10 })),
     anchor: Type.Object(
       {
         levelId: Type.String({ minLength: 1 }),
@@ -123,6 +177,7 @@ export const ReplyCreateBodySchema = Type.Object(
   {
     requestId: RequestIdSchema,
     bodyMarkdown: Type.String(),
+    attachmentIds: Type.Optional(Type.Array(AttachmentIdSchema, { maxItems: 10 })),
   },
   strict,
 );
@@ -133,6 +188,7 @@ export const IssuePatchBodySchema = Type.Object(
   {
     type: Type.Literal("body"),
     bodyMarkdown: Type.String(),
+    attachmentIds: Type.Optional(Type.Array(AttachmentIdSchema, { maxItems: 10 })),
     expectedVersion: ExpectedVersionSchema,
   },
   strict,
@@ -198,6 +254,7 @@ export const IssueApiErrorSchema = Type.Union([
         Type.Literal("invalid_anchor"),
         Type.Literal("invalid_due_date"),
         Type.Literal("invalid_markdown"),
+        Type.Literal("invalid_attachment"),
       ]),
       message: Type.String(),
       details: Type.Optional(
@@ -231,6 +288,8 @@ export const IssueApiErrorSchema = Type.Union([
         Type.Literal("not_found"),
         Type.Literal("idempotency_conflict"),
         Type.Literal("issue_deleted"),
+        Type.Literal("rate_limited"),
+        Type.Literal("quota_exceeded"),
         Type.Literal("sse_capacity"),
         Type.Literal("internal_error"),
       ]),

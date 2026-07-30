@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { LocaleCode } from "../imdf/types";
+import { IssueMarkdownEditor, attachmentIdsForSubmit } from "./IssueMarkdownEditor";
 import { formatIssueInstant } from "./issueDates";
 import { dueDateText, issueStatusLabel, issueSummary } from "./IssueQueue";
 import {
   checkIssueBody,
   MarkdownBody,
-  MarkdownEditorFeedback,
   normalizeIssueMarkdown,
 } from "./MarkdownBody";
 import type {
   CreateReplyInput,
+  IssueAttachmentMetadata,
   IssuePatch,
   IssueReply,
   IssueStatus,
@@ -62,6 +63,8 @@ export interface IssueDetailProps {
   issue: ReviewIssue;
   currentUser: IssueActor | null;
   reviewers: ReviewerSummary[];
+  /** Published version identity for staged attachment uploads. */
+  publicVersionId: string | null;
   /** True while any mutation is in flight; submit controls disable. */
   pending: boolean;
   /**
@@ -92,6 +95,9 @@ interface BodyEditorProps {
   locale: LocaleCode;
   label: string;
   initial: string;
+  /** Canonical attachments of the body being edited (for preview). */
+  attachments: IssueAttachmentMetadata[];
+  publicVersionId: string | null;
   /**
    * The current actor is the live resource's author. Save is shown only while
    * true; losing authorship (session lost or a different account) hides Save
@@ -116,6 +122,8 @@ function BodyEditor({
   locale,
   label,
   initial,
+  attachments,
+  publicVersionId,
   authorized,
   locked,
   pending,
@@ -123,6 +131,7 @@ function BodyEditor({
   onCancel,
 }: BodyEditorProps) {
   const [text, setText] = useState(initial);
+  const [uploadsBlocked, setUploadsBlocked] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const wasUnauthorizedRef = useRef(!authorized);
   useEffect(() => {
@@ -135,18 +144,19 @@ function BodyEditor({
   const check = checkIssueBody(normalized);
   return (
     <div className="issue-editor">
-      <textarea
-        ref={textareaRef}
-        className="issue-editor__input"
-        aria-label={label}
-        rows={4}
+      <IssueMarkdownEditor
+        locale={locale}
         value={text}
+        onChange={setText}
         disabled={locked}
-        onChange={(event) => {
-          setText(event.target.value);
-        }}
+        ariaLabel={label}
+        rows={4}
+        textareaClassName="issue-editor__input"
+        publicVersionId={publicVersionId}
+        existingAttachments={attachments}
+        onSubmitBlockedChange={setUploadsBlocked}
+        textareaRef={textareaRef}
       />
-      <MarkdownEditorFeedback locale={locale} check={check} />
       <div className="issue-editor__actions">
         <button type="button" className="btn-ghost" onClick={onCancel}>
           {ui.cancel[locale]}
@@ -155,7 +165,7 @@ function BodyEditor({
           <button
             type="button"
             className="btn-primary"
-            disabled={locked || pending || check.problem !== null}
+            disabled={locked || pending || check.problem !== null || uploadsBlocked}
             onClick={() => {
               onSave(normalized);
             }}
@@ -174,6 +184,7 @@ interface ReplyComposerProps {
   pending: boolean;
   mutationFailed: boolean;
   idempotencyConflict: boolean;
+  publicVersionId: string | null;
   /** False while a body editor is open, so it keeps auth-return focus. */
   focusOnReturn: boolean;
   onSubmit: (input: CreateReplyInput) => void;
@@ -196,6 +207,7 @@ function ReplyComposer({
   pending,
   mutationFailed,
   idempotencyConflict,
+  publicVersionId,
   focusOnReturn,
   onSubmit,
   onRequestSignIn,
@@ -204,6 +216,7 @@ function ReplyComposer({
   const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const [inFlight, setInFlight] = useState(false);
   const [restart, setRestart] = useState(false);
+  const [uploadsBlocked, setUploadsBlocked] = useState(false);
   const phaseRef = useRef<"idle" | "submitted" | "inflight">("idle");
   const submittedBodyRef = useRef("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -246,27 +259,25 @@ function ReplyComposer({
     phaseRef.current = "submitted";
     setInFlight(true);
     setRestart(false);
-    onSubmit({ requestId: id, bodyMarkdown: normalized });
+    onSubmit({ requestId: id, bodyMarkdown: normalized, attachmentIds: attachmentIdsForSubmit(normalized) });
   };
 
   return (
     <div className="issue-reply-composer">
       {showTextarea ? (
-        <>
-          <textarea
-            ref={textareaRef}
-            className="issue-reply-composer__input"
-            aria-label={ui.reply[locale]}
-            placeholder={ui.replyPlaceholder[locale]}
-            rows={3}
-            value={text}
-            disabled={inFlight}
-            onChange={(event) => {
-              setText(event.target.value);
-            }}
-          />
-          <MarkdownEditorFeedback locale={locale} check={check} />
-        </>
+        <IssueMarkdownEditor
+          locale={locale}
+          value={text}
+          onChange={setText}
+          disabled={inFlight}
+          ariaLabel={ui.reply[locale]}
+          placeholder={ui.replyPlaceholder[locale]}
+          rows={3}
+          textareaClassName="issue-reply-composer__input"
+          publicVersionId={publicVersionId}
+          onSubmitBlockedChange={setUploadsBlocked}
+          textareaRef={textareaRef}
+        />
       ) : null}
       <div className="issue-reply-composer__actions">
         {!signedIn ? (
@@ -277,7 +288,7 @@ function ReplyComposer({
           <button
             type="button"
             className="btn-primary"
-            disabled={pending || check.problem !== null}
+            disabled={pending || check.problem !== null || uploadsBlocked}
             onClick={() => {
               const id = crypto.randomUUID();
               setRequestId(id);
@@ -290,7 +301,7 @@ function ReplyComposer({
           <button
             type="button"
             className="btn-primary"
-            disabled={inFlight || pending || check.problem !== null}
+            disabled={inFlight || pending || check.problem !== null || uploadsBlocked}
             onClick={() => {
               submit(requestId);
             }}
@@ -310,6 +321,7 @@ interface ReplyRowProps {
   pending: boolean;
   editing: boolean;
   locked: boolean;
+  publicVersionId: string | null;
   onStartEdit: () => void;
   onCancelEdit: () => void;
   onSaveEdit: (normalized: string) => void;
@@ -323,6 +335,7 @@ function ReplyRow({
   pending,
   editing,
   locked,
+  publicVersionId,
   onStartEdit,
   onCancelEdit,
   onSaveEdit,
@@ -346,6 +359,8 @@ function ReplyRow({
           locale={locale}
           label={ui.editReplyBody[locale]}
           initial={reply.bodyMarkdown ?? ""}
+          attachments={reply.attachments}
+          publicVersionId={publicVersionId}
           authorized={canEdit}
           locked={locked}
           pending={pending}
@@ -354,7 +369,7 @@ function ReplyRow({
         />
       ) : live ? (
         <div className="issue-reply__body">
-          <MarkdownBody body={reply.bodyMarkdown ?? ""} />
+          <MarkdownBody body={reply.bodyMarkdown ?? ""} attachments={reply.attachments} locale={locale} />
         </div>
       ) : (
         <p className="issue-reply__tombstone">{issueSummary(null, locale)}</p>
@@ -393,6 +408,7 @@ export function IssueDetail({
   issue,
   currentUser,
   reviewers,
+  publicVersionId,
   pending,
   mutationFailed,
   idempotencyConflict,
@@ -512,6 +528,8 @@ export function IssueDetail({
           locale={locale}
           label={ui.editIssueBody[locale]}
           initial={issue.bodyMarkdown ?? ""}
+          attachments={issue.attachments}
+          publicVersionId={publicVersionId}
           authorized={canEditRoot}
           locked={editorLocked}
           pending={pending}
@@ -527,7 +545,7 @@ export function IssueDetail({
         />
       ) : live ? (
         <div className="issue-detail__body">
-          <MarkdownBody body={issue.bodyMarkdown ?? ""} />
+          <MarkdownBody body={issue.bodyMarkdown ?? ""} attachments={issue.attachments} locale={locale} />
         </div>
       ) : (
         <p className="issue-detail__tombstone">{issueSummary(null, locale)}</p>
@@ -741,6 +759,7 @@ export function IssueDetail({
                 pending={pending}
                 editing={editing?.kind === "reply" && editing.replyId === reply.id}
                 locked={editorLocked}
+                publicVersionId={publicVersionId}
                 onStartEdit={() => {
                   openEditor({ kind: "reply", replyId: reply.id });
                 }}
@@ -765,6 +784,7 @@ export function IssueDetail({
             pending={pending}
             mutationFailed={mutationFailed}
             idempotencyConflict={idempotencyConflict}
+            publicVersionId={publicVersionId}
             focusOnReturn={editing === null}
             onSubmit={onCreateReply}
             onRequestSignIn={onRequestSignIn}

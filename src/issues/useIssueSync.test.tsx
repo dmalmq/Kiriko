@@ -76,8 +76,8 @@ function issue(id: string, deletedAt: string | null = null): ReviewIssue {
     replies: [],
   };
   return deletedAt === null
-    ? { ...shared, bodyMarkdown: "Body", deletedAt: null }
-    : { ...shared, bodyMarkdown: null, deletedAt };
+    ? { ...shared, bodyMarkdown: "Body", attachments: [], deletedAt: null }
+    : { ...shared, bodyMarkdown: null, attachments: [], deletedAt };
 }
 
 function collection(revision: number, issues: ReviewIssue[] = []): IssueCollection {

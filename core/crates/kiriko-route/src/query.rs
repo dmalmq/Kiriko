@@ -135,7 +135,13 @@ fn snap_to_edge(graph: &RouteGraph, p: &Point3) -> Option<EdgeSnap> {
         };
         if better {
             best = Some((
-                EdgeSnap { edge_index: i, projected: proj, along, total, ordinal: e.ordinal },
+                EdgeSnap {
+                    edge_index: i,
+                    projected: proj,
+                    along,
+                    total,
+                    ordinal: e.ordinal,
+                },
                 same,
                 dist,
             ));
@@ -183,7 +189,10 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
             segments: group_segments(
                 coords
                     .into_iter()
-                    .map(|c| TaggedVertex { coord: c, ordinal: e.ordinal })
+                    .map(|c| TaggedVertex {
+                        coord: c,
+                        ordinal: e.ordinal,
+                    })
                     .collect(),
             ),
             total_weight: weight,
@@ -202,7 +211,12 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
         }
         adj[from].push((to, ei, e.weight));
         adj[to].push((from, ei, e.weight));
-        let m = haversine_m(graph.nodes[from].lon, graph.nodes[from].lat, graph.nodes[to].lon, graph.nodes[to].lat);
+        let m = haversine_m(
+            graph.nodes[from].lon,
+            graph.nodes[from].lat,
+            graph.nodes[to].lon,
+            graph.nodes[to].lat,
+        );
         if m > 0.0 {
             k = k.min(f64::from(e.weight) / m);
         }
@@ -231,7 +245,11 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
     for (node, g0) in seed {
         if g0 < dist[node] {
             dist[node] = g0;
-            heap.push(Open { f: g0 + h(node), g: g0, node });
+            heap.push(Open {
+                f: g0 + h(node),
+                g: g0,
+                node,
+            });
         }
     }
     let (dp, dq) = (de.from as usize, de.to as usize);
@@ -256,14 +274,26 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
             if ng < dist[next] {
                 dist[next] = ng;
                 parent[next] = Some((node, ei));
-                heap.push(Open { f: ng + h(next), g: ng, node: next });
+                heap.push(Open {
+                    f: ng + h(next),
+                    g: ng,
+                    node: next,
+                });
             }
         }
     }
 
     // Pick the destination endpoint minimizing (dist + partial-to-dest).
-    let cand_p = if dist[dp].is_finite() { Some((dp, dist[dp] + d_from_cost)) } else { None };
-    let cand_q = if dist[dq].is_finite() { Some((dq, dist[dq] + d_to_cost)) } else { None };
+    let cand_p = if dist[dp].is_finite() {
+        Some((dp, dist[dp] + d_from_cost))
+    } else {
+        None
+    };
+    let cand_q = if dist[dq].is_finite() {
+        Some((dq, dist[dq] + d_to_cost))
+    } else {
+        None
+    };
     let (goal, total) = [cand_p, cand_q]
         .into_iter()
         .flatten()
@@ -285,11 +315,17 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
     // Assemble tagged vertices: origin projection → first node partial → edge
     // polylines (oriented) → last node → dest projection partial.
     let mut verts: Vec<TaggedVertex> = Vec::new();
-    verts.push(TaggedVertex { coord: [origin_projected[0], origin_projected[1]], ordinal: oe.ordinal });
+    verts.push(TaggedVertex {
+        coord: [origin_projected[0], origin_projected[1]],
+        ordinal: oe.ordinal,
+    });
     // Partial from origin projection to the first node along the origin edge.
     let first_node = node_path[0];
     for c in partial_polyline(graph, oe, o.along, first_node == oe.from as usize) {
-        verts.push(TaggedVertex { coord: c, ordinal: oe.ordinal });
+        verts.push(TaggedVertex {
+            coord: c,
+            ordinal: oe.ordinal,
+        });
     }
     // Node-to-node edge polylines (skip the shared leading vertex each time).
     for w in 0..edge_path.len() {
@@ -300,16 +336,28 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
             poly.reverse();
         }
         for c in poly.into_iter().skip(1) {
-            verts.push(TaggedVertex { coord: c, ordinal: e.ordinal });
+            verts.push(TaggedVertex {
+                coord: c,
+                ordinal: e.ordinal,
+            });
         }
     }
     // Partial from the last node to the dest projection along the dest edge.
     let last_node = *node_path.last().unwrap();
-    for c in partial_polyline(graph, de, d.along, last_node == de.from as usize).into_iter().rev() {
+    for c in partial_polyline(graph, de, d.along, last_node == de.from as usize)
+        .into_iter()
+        .rev()
+    {
         // partial_polyline returns projection→endpoint; we need endpoint→projection.
-        verts.push(TaggedVertex { coord: c, ordinal: de.ordinal });
+        verts.push(TaggedVertex {
+            coord: c,
+            ordinal: de.ordinal,
+        });
     }
-    verts.push(TaggedVertex { coord: [dest_projected[0], dest_projected[1]], ordinal: de.ordinal });
+    verts.push(TaggedVertex {
+        coord: [dest_projected[0], dest_projected[1]],
+        ordinal: de.ordinal,
+    });
 
     Some(Route {
         segments: group_segments(verts),
@@ -323,7 +371,12 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
 /// the endpoint indicated by `to_from` (`true` = the edge's `from` endpoint),
 /// EXCLUDING the projection point itself (the caller already emitted it) and
 /// INCLUDING the endpoint node.
-fn partial_polyline(graph: &RouteGraph, edge: &RouteEdge, along: f64, to_from: bool) -> Vec<[f64; 2]> {
+fn partial_polyline(
+    graph: &RouteGraph,
+    edge: &RouteEdge,
+    along: f64,
+    to_from: bool,
+) -> Vec<[f64; 2]> {
     let poly = graph.edge_polyline(edge);
     let mut acc = 0.0;
     let mut out: Vec<[f64; 2]> = Vec::new();
@@ -366,13 +419,16 @@ fn group_segments(verts: Vec<TaggedVertex>) -> Vec<RouteSegment> {
             }
             _ => {
                 let mut coordinates = Vec::new();
-                if let Some(seg) = segments.last() {
-                    if let Some(&junction) = seg.coordinates.last() {
-                        coordinates.push(junction);
-                    }
+                if let Some(seg) = segments.last()
+                    && let Some(&junction) = seg.coordinates.last()
+                {
+                    coordinates.push(junction);
                 }
                 coordinates.push(v.coord);
-                segments.push(RouteSegment { ordinal: v.ordinal, coordinates });
+                segments.push(RouteSegment {
+                    ordinal: v.ordinal,
+                    coordinates,
+                });
             }
         }
     }
@@ -391,19 +447,51 @@ mod tests {
         // from(139.0) --bend(139.001,35.001)--> mid(139.002) --> to(139.003)
         let graph = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.003, lat: 35.0, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.002,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.003,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
             edges: vec![
-                RouteEdge { from: 0, to: 1, weight: 100.0, ordinal: 0.0, interior: vec![[139.001, 35.001]] },
-                RouteEdge { from: 1, to: 2, weight: 100.0, ordinal: 0.0, interior: vec![] },
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 100.0,
+                    ordinal: 0.0,
+                    interior: vec![[139.001, 35.001]],
+                },
+                RouteEdge {
+                    from: 1,
+                    to: 2,
+                    weight: 100.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
             ],
         };
         let r = route(
             &graph,
-            Point3 { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-            Point3 { lon: 139.003, lat: 35.0, ordinal: 0.0 },
+            Point3 {
+                lon: 139.0,
+                lat: 35.0,
+                ordinal: 0.0,
+            },
+            Point3 {
+                lon: 139.003,
+                lat: 35.0,
+                ordinal: 0.0,
+            },
         )
         .expect("endpoints route");
         assert_eq!(r.segments.len(), 1);
@@ -418,41 +506,101 @@ mod tests {
     fn route_from_mid_corridor_click_starts_at_projection() {
         let graph = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.002,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
-            edges: vec![RouteEdge { from: 0, to: 1, weight: 100.0, ordinal: 0.0, interior: vec![] }],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 100.0,
+                ordinal: 0.0,
+                interior: vec![],
+            }],
         };
         // Both clicks land mid-edge (same edge) → straight slice between them.
         let r = route(
             &graph,
-            Point3 { lon: 139.0005, lat: 35.0002, ordinal: 0.0 },
-            Point3 { lon: 139.0015, lat: 35.0002, ordinal: 0.0 },
+            Point3 {
+                lon: 139.0005,
+                lat: 35.0002,
+                ordinal: 0.0,
+            },
+            Point3 {
+                lon: 139.0015,
+                lat: 35.0002,
+                ordinal: 0.0,
+            },
         )
         .expect("same-edge route");
         let first = r.origin_projected;
         assert!((first[0] - 139.0005).abs() < 1e-3);
-        assert_eq!(r.segments[0].coordinates.first().map(|c| c[0]), Some(r.origin_projected[0]));
-        assert_eq!(r.segments[0].coordinates.last().map(|c| c[0]), Some(r.dest_projected[0]));
+        assert_eq!(
+            r.segments[0].coordinates.first().map(|c| c[0]),
+            Some(r.origin_projected[0])
+        );
+        assert_eq!(
+            r.segments[0].coordinates.last().map(|c| c[0]),
+            Some(r.dest_projected[0])
+        );
     }
 
     #[test]
     fn route_splits_segments_at_floor_change() {
         let graph = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.001, lat: 35.0, ordinal: 1.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 1.0,
+                },
             ],
             edges: vec![
-                RouteEdge { from: 0, to: 1, weight: 100.0, ordinal: 0.0, interior: vec![] },
-                RouteEdge { from: 1, to: 2, weight: 5000.0, ordinal: 1.0, interior: vec![] },
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 100.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
+                RouteEdge {
+                    from: 1,
+                    to: 2,
+                    weight: 5000.0,
+                    ordinal: 1.0,
+                    interior: vec![],
+                },
             ],
         };
         let r = route(
             &graph,
-            Point3 { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-            Point3 { lon: 139.001, lat: 35.0, ordinal: 1.0 },
+            Point3 {
+                lon: 139.0,
+                lat: 35.0,
+                ordinal: 0.0,
+            },
+            Point3 {
+                lon: 139.001,
+                lat: 35.0,
+                ordinal: 1.0,
+            },
         )
         .expect("cross-floor route");
         let ords: Vec<f64> = r.segments.iter().map(|s| s.ordinal).collect();
@@ -464,8 +612,16 @@ mod tests {
         // via a bend at (139.001, 35.001).
         RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.002,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
             edges: vec![RouteEdge {
                 from: 0,
@@ -481,8 +637,15 @@ mod tests {
     fn snaps_click_onto_nearest_edge() {
         let g = geom_graph();
         // Click near the bend, slightly off it.
-        let s = snap_to_edge(&g, &Point3 { lon: 139.001, lat: 35.0009, ordinal: 0.0 })
-            .expect("snaps to the only edge");
+        let s = snap_to_edge(
+            &g,
+            &Point3 {
+                lon: 139.001,
+                lat: 35.0009,
+                ordinal: 0.0,
+            },
+        )
+        .expect("snaps to the only edge");
         assert_eq!(s.edge_index, 0);
         // Projection lands at/near the bend vertex.
         assert!((s.projected[0] - 139.001).abs() < 1e-4);
@@ -492,11 +655,33 @@ mod tests {
     #[test]
     fn snap_prefers_same_ordinal_edge() {
         let mut g = geom_graph();
-        g.nodes.push(RouteNode { lon: 139.001, lat: 35.0, ordinal: -1.0 });
-        g.nodes.push(RouteNode { lon: 139.0011, lat: 35.0, ordinal: -1.0 });
-        g.edges.push(RouteEdge { from: 2, to: 3, weight: 10.0, ordinal: -1.0, interior: vec![] });
+        g.nodes.push(RouteNode {
+            lon: 139.001,
+            lat: 35.0,
+            ordinal: -1.0,
+        });
+        g.nodes.push(RouteNode {
+            lon: 139.0011,
+            lat: 35.0,
+            ordinal: -1.0,
+        });
+        g.edges.push(RouteEdge {
+            from: 2,
+            to: 3,
+            weight: 10.0,
+            ordinal: -1.0,
+            interior: vec![],
+        });
         // Click on ordinal 0 sitting right over the B1 edge still snaps to the F1 edge.
-        let s = snap_to_edge(&g, &Point3 { lon: 139.001, lat: 35.0, ordinal: 0.0 }).unwrap();
+        let s = snap_to_edge(
+            &g,
+            &Point3 {
+                lon: 139.001,
+                lat: 35.0,
+                ordinal: 0.0,
+            },
+        )
+        .unwrap();
         assert_eq!(g.edges[s.edge_index].ordinal, 0.0);
     }
 
@@ -504,16 +689,44 @@ mod tests {
     fn route_rejects_non_finite_endpoints() {
         let graph = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.002,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
             edges: vec![
-                RouteEdge { from: 0, to: 1, weight: 100.0, ordinal: 0.0, interior: vec![] },
-                RouteEdge { from: 1, to: 2, weight: 100.0, ordinal: 0.0, interior: vec![] },
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 100.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
+                RouteEdge {
+                    from: 1,
+                    to: 2,
+                    weight: 100.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
             ],
         };
-        let ok = Point3 { lon: 139.0, lat: 35.0, ordinal: 0.0 };
+        let ok = Point3 {
+            lon: 139.0,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             // A controlled `None` — never a panic — for any non-finite coord.
             assert!(route(&graph, Point3 { lon: bad, ..ok }, ok).is_none());
@@ -521,5 +734,4 @@ mod tests {
             assert!(route(&graph, ok, Point3 { ordinal: bad, ..ok }).is_none());
         }
     }
-
 }

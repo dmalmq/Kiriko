@@ -7,12 +7,15 @@ export type IssueErrorCode =
   | "invalid_anchor"
   | "invalid_due_date"
   | "invalid_markdown"
+  | "invalid_attachment"
   | "unauthorized"
   | "forbidden"
   | "not_found"
   | "stale_issue"
   | "idempotency_conflict"
   | "issue_deleted"
+  | "rate_limited"
+  | "quota_exceeded"
   | "sse_capacity"
   | "internal_error";
 
@@ -35,13 +38,27 @@ export interface IssueAnchor {
 }
 
 /**
+ * Public attachment metadata for a live body. IDs are opaque; URLs are never
+ * stored or projected — the client derives same-origin media URLs from `id`.
+ */
+export interface IssueAttachmentMetadata {
+  id: string;
+  contentType: "image/png" | "image/jpeg" | "image/webp";
+  width: number;
+  height: number;
+  thumbnailWidth: number;
+  thumbnailHeight: number;
+}
+
+/**
  * Tombstone correlation: a live resource carries its Markdown and a null
  * `deletedAt`; a tombstone carries a null body and its deletion timestamp.
- * Deleted Markdown can never appear in a public shape.
+ * Deleted Markdown can never appear in a public shape, and tombstones always
+ * project an empty attachment list (media access is revoked on deletion).
  */
 export type Tombstone<Live> =
-  | (Live & { bodyMarkdown: string; deletedAt: null })
-  | (Live & { bodyMarkdown: null; deletedAt: string });
+  | (Live & { bodyMarkdown: string; attachments: IssueAttachmentMetadata[]; deletedAt: null })
+  | (Live & { bodyMarkdown: null; attachments: []; deletedAt: string });
 
 export type IssueReply = Tombstone<{
   id: string;
@@ -77,6 +94,9 @@ export interface IssueCollection {
 export interface RootCreateBody {
   requestId: string;
   bodyMarkdown: string;
+  /** Canonical attachment IDs referenced by the body. Optional for old
+   * clients; when present it must equal the IDs parsed from the body. */
+  attachmentIds?: string[];
   anchor: {
     levelId: string;
     longitude: number;
@@ -90,10 +110,11 @@ export interface RootCreateBody {
 export interface ReplyCreateBody {
   requestId: string;
   bodyMarkdown: string;
+  attachmentIds?: string[];
 }
 
 export type IssuePatch =
-  | { type: "body"; bodyMarkdown: string; expectedVersion: number }
+  | { type: "body"; bodyMarkdown: string; expectedVersion: number; attachmentIds?: string[] }
   | { type: "assignment"; assigneeId: number | null; expectedVersion: number }
   | { type: "due_date"; dueDate: string | null; expectedVersion: number }
   | { type: "status"; status: IssueStatus; expectedVersion: number };
@@ -111,6 +132,8 @@ export interface DeleteBody {
 
 export interface NormalizedRootCreate {
   bodyMarkdown: string;
+  /** Sorted unique canonical IDs; part of the idempotency hash. */
+  attachmentIds: string[];
   levelId: string;
   longitude: number;
   latitude: number;
@@ -121,7 +144,15 @@ export interface NormalizedRootCreate {
 
 export interface NormalizedReplyCreate {
   bodyMarkdown: string;
+  attachmentIds: string[];
 }
+
+/** Body patch after attachment-ID resolution (absent wire field → parsed). */
+export type NormalizedIssuePatch =
+  | { type: "body"; bodyMarkdown: string; expectedVersion: number; attachmentIds: string[] }
+  | Exclude<IssuePatch, { type: "body" }>;
+
+export type NormalizedReplyPatch = Extract<NormalizedIssuePatch, { type: "body" }>;
 
 export interface IssueMutationResult {
   revision: number;
