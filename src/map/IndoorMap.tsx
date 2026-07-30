@@ -937,8 +937,10 @@ export function IndoorMap({
     };
     map.on("idle", markIdle);
     map.on("dataloading", clearIdle);
+    // A movement always starts with movestart. Do not also clear on every
+    // move: Firefox can deliver its final move notification after idle, which
+    // would erase the settled marker with no later idle event to restore it.
     map.on("movestart", clearIdle);
-    map.on("move", clearIdle);
 
     return () => {
       cancelReadyRef.current?.();
@@ -954,7 +956,6 @@ export function IndoorMap({
       map.off("idle", markIdle);
       map.off("dataloading", clearIdle);
       map.off("movestart", clearIdle);
-      map.off("move", clearIdle);
       onControlsRef.current?.(null);
       map.remove();
       mapRef.current = null;

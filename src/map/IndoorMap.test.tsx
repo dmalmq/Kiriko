@@ -350,6 +350,24 @@ afterEach(() => {
   window.matchMedia = originalMatchMedia;
 });
 
+describe("IndoorMap idle marker", () => {
+  it("keeps the marker when a browser delivers a final move after idle", () => {
+    const { map } = renderMap(baseProps());
+    const container = screen.getByRole("application", { name: "Indoor map" });
+
+    act(() => {
+      map.emit("idle");
+      map.emit("move");
+    });
+    expect(container.getAttribute("data-map-idle")).toBe("true");
+
+    act(() => {
+      map.emit("movestart");
+    });
+    expect(container.getAttribute("data-map-idle")).toBeNull();
+  });
+});
+
 describe("IndoorMap placement", () => {
   it("captures the map point and queried feature on canvas click while placing", () => {
     const onSelectFeature = vi.fn();
