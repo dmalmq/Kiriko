@@ -26,7 +26,7 @@ async function openIssues(page: Page): Promise<void> {
 }
 
 async function pastePng(page: Page, label: string): Promise<void> {
-  const handled = await page.getByLabel(label).evaluate((element, base64) => {
+  const pasteResult = await page.getByLabel(label).evaluate((element, base64) => {
     const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
     const transfer = new DataTransfer();
     transfer.items.add(new File([bytes], "paste.png", { type: "image/png" }));
@@ -42,9 +42,12 @@ async function pastePng(page: Page, label: string): Promise<void> {
       Object.defineProperty(event, "clipboardData", { value: transfer });
     }
     element.dispatchEvent(event);
-    return event.defaultPrevented;
+    return {
+      fileCount: event.clipboardData?.files.length ?? 0,
+      handled: event.defaultPrevented,
+    };
   }, TINY_PNG_BASE64);
-  expect(handled).toBe(true);
+  expect(pasteResult).toEqual({ fileCount: 1, handled: true });
 }
 
 async function pickerPng(page: Page): Promise<void> {
