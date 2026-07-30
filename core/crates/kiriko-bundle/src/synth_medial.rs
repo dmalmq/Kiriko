@@ -269,6 +269,25 @@ const MIN_PASSAGE_M: f64 = 0.8;
 /// Leaf centerline branches shorter than this (m) tip-to-junction are
 /// medial-axis serration twigs, not real corridor ends — pruned whole.
 const SPIKE_CHAIN_MAX_M: f64 = 3.0;
+/// Longer narrowing-wedge branches below this length (m) are also visual
+/// medial-axis artifacts. Longer branches stay as useful corridor coverage.
+const SPIKE_WEDGE_MAX_M: f64 = 8.0;
+/// A wedge tip with less than this fraction of its junction clearance narrows
+/// into a boundary corner rather than continuing through a corridor.
+const SPIKE_TIP_CLEARANCE_RATIO: f64 = 0.5;
+/// A flat corridor end has a nearest boundary segment approximately
+/// perpendicular to the branch tangent. Corner wedges do not. Allow about
+/// 20 degrees of CDT/sampling noise around perpendicular.
+const ENDCAP_TANGENT_DOT_MAX: f64 = 0.35;
+/// Distance tolerance (m) when collecting boundary segments tied for nearest
+/// to a leaf tip; corridor tips can be equidistant from side walls and endcap.
+const ENDCAP_NEAREST_TOL_M: f64 = 0.1;
+/// A real dead-end corridor retains roughly the same half-width immediately
+/// behind its endcap. Open-room spurs widen much faster and remain prunable.
+const ENDCAP_CHANNEL_CLEARANCE_RATIO: f64 = 1.5;
+/// Degree-2 centerline chains with at least this much path detour are aligned
+/// to their chord when that chord remains fully passable.
+const WEAVE_DETOUR_RATIO: f64 = 1.15;
 /// Tolerance (m) for samples to lie just OUTSIDE the walkable area when
 /// validating that an attach segment stays within walkable space — covers
 /// openings digitized slightly off a unit boundary. Gaps this rule rejects
@@ -294,6 +313,63 @@ fn boundary_clearance_m(p: [f64; 2], area: &MultiPolygon<f64>) -> f64 {
         }
     }
     best
+}
+
+/// True when the leaf faces a flat endcap and remains inside a narrow channel
+/// immediately behind it. The endcap is perpendicular to the branch tangent;
+/// stable clearance supplies the side-wall evidence that distinguishes a
+/// genuine dead-end corridor from an open-room spur aimed at a flat wall.
+fn leaf_has_corridor_endcap(
+    tip: [f64; 2],
+    inward: [f64; 2],
+    tip_clearance_m: f64,
+    area: &MultiPolygon<f64>,
+) -> bool {
+    let mx = 111_320.0 * tip[1].to_radians().cos();
+    let my = 111_320.0;
+    let branch = [(inward[0] - tip[0]) * mx, (inward[1] - tip[1]) * my];
+    let branch_len = branch[0].hypot(branch[1]);
+    if branch_len <= f64::EPSILON {
+        return false;
+    }
+    let nearest = tip_clearance_m;
+    let ring_has_endcap = |ring: &LineString<f64>| {
+        ring.0.windows(2).any(|segment| {
+            let a = [(segment[0].x - tip[0]) * mx, (segment[0].y - tip[1]) * my];
+            let edge = [
+                (segment[1].x - segment[0].x) * mx,
+                (segment[1].y - segment[0].y) * my,
+            ];
+            let edge_len_sq = edge[0] * edge[0] + edge[1] * edge[1];
+            if edge_len_sq <= f64::EPSILON {
+                return false;
+            }
+            let projection =
+                (-(a[0] * edge[0] + a[1] * edge[1]) / edge_len_sq).clamp(0.0, 1.0);
+            let offset = [
+                a[0] + projection * edge[0],
+                a[1] + projection * edge[1],
+            ];
+            let distance = offset[0].hypot(offset[1]);
+            let tangent_dot =
+                (branch[0] * edge[0] + branch[1] * edge[1]).abs()
+                    / (branch_len * edge_len_sq.sqrt());
+            distance <= nearest + ENDCAP_NEAREST_TOL_M
+                && tangent_dot <= ENDCAP_TANGENT_DOT_MAX
+        })
+    };
+    let has_flat_endcap = area.iter().any(|poly| {
+        ring_has_endcap(poly.exterior()) || poly.interiors().iter().any(ring_has_endcap)
+    });
+    if !has_flat_endcap {
+        return false;
+    }
+    let probe = [
+        tip[0] + branch[0] / branch_len * nearest / mx,
+        tip[1] + branch[1] / branch_len * nearest / my,
+    ];
+    boundary_clearance_m(probe, area)
+        <= nearest * ENDCAP_CHANNEL_CLEARANCE_RATIO + ENDCAP_NEAREST_TOL_M
 }
 
 /// True when `p` lies inside `area` or within `tol_m` of it.
@@ -333,12 +409,32 @@ fn bridge_passable(a: [f64; 2], b: [f64; 2], area: &MultiPolygon<f64>) -> bool {
     })
 }
 
-/// Short-branch prune of medial-axis spur artifacts. A chain starting at a
-/// leaf (degree-1) node and continuing through degree-2 nodes is removed
-/// WHOLE when its total length tip-to-junction is under `chain_max_m` —
-/// those are boundary-serration twigs. Longer chains (real dead-end
-/// corridors, alcoves) survive untouched, so no useful tip is ever eaten.
-fn prune_spur_leaves(skeleton: Skeleton, chain_max_m: f64) -> Skeleton {
+/// Stronger passability proof for centerline chords. Samples at most half a
+/// minimum-passage width apart, including both endpoints, so a long chord
+/// cannot skip a thin wall or hole between the fixed bridge samples.
+fn centerline_chord_passable(a: [f64; 2], b: [f64; 2], area: &MultiPolygon<f64>) -> bool {
+    let min_clear = MIN_PASSAGE_M / 2.0;
+    let steps = (haversine_m(a, b) / min_clear).ceil().max(1.0) as usize;
+    (0..=steps).all(|k| {
+        let t = k as f64 / steps as f64;
+        let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+        area.contains(&Point::new(p[0], p[1])) && boundary_clearance_m(p, area) >= min_clear
+    })
+}
+
+/// Prune useless leaf branches without truncating equal-width corridor ends.
+/// Every chain shorter than `short_chain_max_m` is removed, preserving the
+/// original whole-chain rule. A longer chain up to `wedge_chain_max_m` is
+/// removed only when it ends at a junction and its tip clearance is below
+/// `tip_clearance_ratio` of that junction's clearance — the narrowing wedge
+/// created by a convex boundary corner.
+fn prune_spur_leaves(
+    skeleton: Skeleton,
+    area: &MultiPolygon<f64>,
+    short_chain_max_m: f64,
+    wedge_chain_max_m: f64,
+    tip_clearance_ratio: f64,
+) -> Skeleton {
     let n = skeleton.nodes.len();
     let mut adj: Vec<Vec<(usize, usize, f64)>> = vec![Vec::new(); n]; // (neighbor, edge_idx, len)
     for (ei, &(a, b)) in skeleton.edges.iter().enumerate() {
@@ -347,6 +443,7 @@ fn prune_spur_leaves(skeleton: Skeleton, chain_max_m: f64) -> Skeleton {
         adj[b].push((a, ei, d));
     }
     let deg = |i: usize| adj[i].len();
+    let walk_max_m = short_chain_max_m.max(wedge_chain_max_m);
     let mut remove = vec![false; skeleton.edges.len()];
     for start in 0..n {
         if deg(start) != 1 {
@@ -356,22 +453,37 @@ fn prune_spur_leaves(skeleton: Skeleton, chain_max_m: f64) -> Skeleton {
         let mut chain: Vec<usize> = Vec::new();
         let mut total = 0.0;
         let (mut cur, mut prev) = (start, usize::MAX);
-        let junction_reached = loop {
+        let endpoint = loop {
             let Some(&(nb, ei, d)) = adj[cur].iter().find(|(nb, _, _)| *nb != prev) else {
-                break true; // isolated node (shouldn't happen for a leaf)
+                break Some(cur); // isolated node (shouldn't happen for a leaf)
             };
             chain.push(ei);
             total += d;
             if deg(nb) != 2 {
-                break true; // junction (deg >= 3) or the other end of a free segment
+                break Some(nb); // junction or the other end of a free segment
             }
-            if total >= chain_max_m || chain.len() > n {
-                break false; // long real stub — keep it
+            if total >= walk_max_m || chain.len() > n {
+                break None; // long real stub — keep it
             }
             prev = cur;
             cur = nb;
         };
-        if junction_reached && total < chain_max_m {
+        let Some(end) = endpoint else { continue };
+        let is_short = total < short_chain_max_m;
+        let is_narrowing_wedge = if deg(end) >= 3 && total < wedge_chain_max_m {
+            let tip_clearance = boundary_clearance_m(skeleton.nodes[start], area);
+            tip_clearance
+                < boundary_clearance_m(skeleton.nodes[end], area) * tip_clearance_ratio
+                && !leaf_has_corridor_endcap(
+                    skeleton.nodes[start],
+                    skeleton.nodes[adj[start][0].0],
+                    tip_clearance,
+                    area,
+                )
+        } else {
+            false
+        };
+        if is_short || is_narrowing_wedge {
             for ei in chain {
                 remove[ei] = true;
             }
@@ -396,6 +508,94 @@ fn prune_spur_leaves(skeleton: Skeleton, chain_max_m: f64) -> Skeleton {
         edges.push((ia, ib));
     }
     Skeleton { nodes, edges }
+}
+
+/// Remove degree-2 sawtooth geometry without changing graph topology or node
+/// density. Interior nodes are redistributed along the endpoint chord by
+/// cumulative path distance, but only when the original chain is at least
+/// `min_detour_ratio` longer and the entire chord remains fully passable.
+/// `protected` semantic snap targets divide chains and never move.
+fn straighten_degree_two_chains(
+    mut skeleton: Skeleton,
+    area: &MultiPolygon<f64>,
+    protected: &[bool],
+    min_detour_ratio: f64,
+) -> Skeleton {
+    debug_assert_eq!(protected.len(), skeleton.nodes.len());
+    let n = skeleton.nodes.len();
+    let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n]; // (neighbor, edge_idx)
+    for (ei, &(a, b)) in skeleton.edges.iter().enumerate() {
+        adj[a].push((b, ei));
+        adj[b].push((a, ei));
+    }
+    let mut visited = vec![false; skeleton.edges.len()];
+    for start in 0..n {
+        if adj[start].len() == 2 && !protected[start] {
+            continue;
+        }
+        for &(_, first_edge) in &adj[start] {
+            if visited[first_edge] {
+                continue;
+            }
+            let mut chain_nodes = vec![start];
+            let mut step_lengths = Vec::new();
+            let mut total = 0.0;
+            let mut cur = start;
+            let mut edge = first_edge;
+            let mut complete = false;
+            loop {
+                if visited[edge] {
+                    break;
+                }
+                visited[edge] = true;
+                let (a, b) = skeleton.edges[edge];
+                let next = if a == cur { b } else { a };
+                let step = haversine_m(skeleton.nodes[cur], skeleton.nodes[next]);
+                total += step;
+                step_lengths.push(step);
+                chain_nodes.push(next);
+                if adj[next].len() != 2 || protected[next] {
+                    complete = true;
+                    break;
+                }
+                let Some(&(_, next_edge)) =
+                    adj[next].iter().find(|(_, edge_idx)| *edge_idx != edge)
+                else {
+                    break;
+                };
+                cur = next;
+                edge = next_edge;
+                if chain_nodes.len() > n {
+                    break;
+                }
+            }
+            if !complete || chain_nodes.len() < 3 {
+                continue;
+            }
+            let end = *chain_nodes.last().expect("complete chain has endpoint");
+            if end == start {
+                continue;
+            }
+            let (from, to) = (skeleton.nodes[start], skeleton.nodes[end]);
+            let chord = haversine_m(from, to);
+            if chord <= f64::EPSILON
+                || total / chord < min_detour_ratio
+                || !centerline_chord_passable(from, to, area)
+            {
+                continue;
+            }
+            let mut traversed = 0.0;
+            for i in 1..chain_nodes.len() - 1 {
+                traversed += step_lengths[i - 1];
+                let t = traversed / total;
+                skeleton.nodes[chain_nodes[i]] = [
+                    from[0] + (to[0] - from[0]) * t,
+                    from[1] + (to[1] - from[1]) * t,
+                ];
+            }
+        }
+    }
+    skeleton
 }
 
 fn is_walkway(category: &str) -> bool {
@@ -580,9 +780,9 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         }
 
         // Prune centerline edges through sub-width passages (wall–column
-        // pinches, slivers): an edge survives only when the passage along it
-        // is at least MIN_PASSAGE_M wide. Then drop short spur twigs
-        // (boundary-serration artifacts) and the nodes they orphan.
+        // pinches, slivers), remove short and narrowing wedge spurs, then
+        // align passable degree-2 sawtooth chains without changing topology
+        // or doorway snap-target density.
         let min_clear = MIN_PASSAGE_M / 2.0;
         let mut wide_edges: Vec<(usize, usize)> = Vec::new();
         for &(a, b) in &skeleton.edges {
@@ -598,14 +798,17 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         }
         let skeleton = prune_spur_leaves(
             Skeleton { nodes: skeleton.nodes, edges: wide_edges },
+            &area,
             SPIKE_CHAIN_MAX_M,
+            SPIKE_WEDGE_MAX_M,
+            SPIKE_TIP_CLEARANCE_RATIO,
         );
         if skeleton.nodes.is_empty() || skeleton.edges.is_empty() {
             continue;
         }
 
-        // Centerline nodes + edges for this floor; union-find over the skeleton
-        // marks disjoint walkable blobs so doorways can bridge them below.
+        // Establish components before geometric cleanup. Straightening keeps
+        // topology unchanged, so these roots remain valid for doorway snaps.
         let mut blob: Vec<usize> = (0..skeleton.nodes.len()).collect();
         for &(a, b) in &skeleton.edges {
             let (ra, rb) = (uf_find(&mut blob, a), uf_find(&mut blob, b));
@@ -613,6 +816,62 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 blob[ra] = rb;
             }
         }
+
+        // Preserve the original nearest valid snap targets. These semantic
+        // anchors split degree-2 chains, preventing visual smoothing from
+        // moving a doorway or transit fallback behind a wall or out of range.
+        let mut protected = vec![false; skeleton.nodes.len()];
+        for op in &openings {
+            let mut cands: Vec<(usize, usize, f64)> = skeleton
+                .nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(local, n)| {
+                    let d = haversine_m(*n, *op);
+                    (d <= SNAP_MAX_M).then(|| (uf_find(&mut blob, local), local, d))
+                })
+                .collect();
+            cands.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.1.cmp(&b.1)));
+            let mut seen_roots: HashMap<usize, ()> = HashMap::new();
+            for (root, local, _) in cands {
+                if seen_roots.contains_key(&root)
+                    || !segment_within_area(
+                        *op,
+                        skeleton.nodes[local],
+                        &area,
+                        SEGMENT_OUTSIDE_TOL_M,
+                    )
+                {
+                    continue;
+                }
+                protected[local] = true;
+                seen_roots.insert(root, ());
+            }
+        }
+        for (tp, _, footprint, _) in &transit {
+            let unit_area = footprint.clone().map(|p| MultiPolygon::new(vec![p]));
+            let mut areas: Vec<&MultiPolygon<f64>> = vec![&area];
+            if let Some(unit) = unit_area.as_ref() {
+                areas.push(unit);
+            }
+            let mut cands: Vec<(usize, f64)> = skeleton
+                .nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(local, n)| {
+                    let d = haversine_m(*n, *tp);
+                    (d <= SNAP_MAX_M).then_some((local, d))
+                })
+                .collect();
+            cands.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+            if let Some((local, _)) = cands.into_iter().find(|(local, _)| {
+                segment_within_any(*tp, skeleton.nodes[*local], &areas, SEGMENT_OUTSIDE_TOL_M)
+            }) {
+                protected[local] = true;
+            }
+        }
+        let skeleton =
+            straighten_degree_two_chains(skeleton, &area, &protected, WEAVE_DETOUR_RATIO);
         let base = nodes.len();
         for n in &skeleton.nodes {
             nodes.push(RouteNode { lon: n[0], lat: n[1], ordinal: ord });
@@ -1322,7 +1581,17 @@ mod tests {
             ],
             edges: vec![(0, 1), (1, 2), (1, 3), (2, 4), (1, 5), (5, 6), (6, 7)],
         };
-        let pruned = prune_spur_leaves(skeleton, 3.0);
+        let area = MultiPolygon::new(vec![Polygon::new(
+            LineString::from(vec![
+                (139.69, 35.59),
+                (139.71, 35.59),
+                (139.71, 35.61),
+                (139.69, 35.61),
+                (139.69, 35.59),
+            ]),
+            vec![],
+        )]);
+        let pruned = prune_spur_leaves(skeleton, &area, 3.0, 3.0, 0.5);
         assert_eq!(pruned.edges.len(), 3, "both twigs removed whole: {:?}", pruned.edges);
         // the surviving branch is the 3.5 m real end
         let has_long_branch = pruned.edges.iter().any(|&(a, b)| {
@@ -1336,6 +1605,195 @@ mod tests {
             .filter(|&&(a, b)| haversine_m(pruned.nodes[a], pruned.nodes[b]) < 1.0)
             .count();
         assert_eq!(short_links, 0, "no twig remnant links");
+    }
+
+    #[test]
+    fn prune_spur_leaves_removes_narrowing_wedges_but_keeps_equal_width_ends() {
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let mx = 111_320.0 * cy.to_radians().cos();
+        let xy = |x_m: f64, y_m: f64| (cx + x_m / mx, cy + y_m / 111_320.0);
+        let node = |x_m: f64, y_m: f64| {
+            let (x, y) = xy(x_m, y_m);
+            [x, y]
+        };
+        let area = MultiPolygon::new(vec![Polygon::new(
+            LineString::from(vec![
+                xy(-7.0, -5.0),
+                xy(7.0, -5.0),
+                xy(7.0, 5.0),
+                xy(-7.0, 5.0),
+                xy(-7.0, -5.0),
+            ]),
+            vec![],
+        )]);
+        let skeleton = Skeleton {
+            nodes: vec![
+                node(0.0, 0.0),
+                node(-4.0, 0.0),
+                node(4.0, 0.0),
+                node(6.5, 4.5), // convex-corner wedge
+                node(0.0, 4.5), // flat-wall spur without corridor side walls
+            ],
+            edges: vec![(0, 1), (0, 2), (0, 3), (0, 4)],
+        };
+
+        let pruned = prune_spur_leaves(skeleton, &area, 3.0, 8.0, 0.5);
+
+        assert_eq!(pruned.edges.len(), 2, "narrowing room spurs removed");
+        assert!(
+            pruned
+                .nodes
+                .iter()
+                .all(|p| {
+                    haversine_m(*p, node(6.5, 4.5)) > 0.1
+                        && haversine_m(*p, node(0.0, 4.5)) > 0.1
+                }),
+            "corner and flat-wall spur tips are removed"
+        );
+        assert!(
+            pruned
+                .nodes
+                .iter()
+                .any(|p| haversine_m(*p, node(-4.0, 0.0)) < 0.1)
+                && pruned
+                    .nodes
+                    .iter()
+                    .any(|p| haversine_m(*p, node(4.0, 0.0)) < 0.1),
+            "non-narrowing room coverage survives"
+        );
+    }
+
+    #[test]
+    fn prune_spur_leaves_keeps_short_dead_end_corridor() {
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let mx = 111_320.0 * cy.to_radians().cos();
+        let xy = |x_m: f64, y_m: f64| (cx + x_m / mx, cy + y_m / 111_320.0);
+        let node = |x_m: f64, y_m: f64| {
+            let (x, y) = xy(x_m, y_m);
+            [x, y]
+        };
+        // A 1 m-wide, 6 m-long side corridor branches from a 4 m-wide main
+        // corridor and ends at a flat wall. Its leaf clearance is 0.5 m while
+        // the junction clearance is 2 m, so clearance ratio alone is unsafe.
+        let area = MultiPolygon::new(vec![Polygon::new(
+            LineString::from(vec![
+                xy(-10.0, -2.0),
+                xy(10.0, -2.0),
+                xy(10.0, 2.0),
+                xy(0.5, 2.0),
+                xy(0.5, 8.0),
+                xy(-0.5, 8.0),
+                xy(-0.5, 2.0),
+                xy(-10.0, 2.0),
+                xy(-10.0, -2.0),
+            ]),
+            vec![],
+        )]);
+        let skeleton = Skeleton {
+            nodes: vec![
+                node(0.0, 0.0),
+                node(-4.0, 0.0),
+                node(4.0, 0.0),
+                node(0.0, 4.0),
+                node(0.0, 7.5),
+            ],
+            edges: vec![(0, 1), (0, 2), (0, 3), (3, 4)],
+        };
+
+        let pruned = prune_spur_leaves(skeleton, &area, 3.0, 8.0, 0.5);
+
+        assert_eq!(pruned.edges.len(), 4, "flat-end corridor remains routable");
+        assert!(
+            pruned
+                .nodes
+                .iter()
+                .any(|p| haversine_m(*p, node(0.0, 7.5)) < 0.1),
+            "dead-end tip is preserved"
+        );
+    }
+
+    #[test]
+    fn straightens_passable_weaves_without_cutting_through_obstacles() {
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let mx = 111_320.0 * cy.to_radians().cos();
+        let xy = |x_m: f64, y_m: f64| (cx + x_m / mx, cy + y_m / 111_320.0);
+        let node = |x_m: f64, y_m: f64| {
+            let (x, y) = xy(x_m, y_m);
+            [x, y]
+        };
+        let outer = LineString::from(vec![
+            xy(-10.0, -5.0),
+            xy(10.0, -5.0),
+            xy(10.0, 5.0),
+            xy(-10.0, 5.0),
+            xy(-10.0, -5.0),
+        ]);
+        let open_area = MultiPolygon::new(vec![Polygon::new(outer.clone(), vec![])]);
+        let make_weave = || Skeleton {
+            nodes: vec![
+                node(-6.0, 0.0),
+                node(-3.0, 1.3),
+                node(0.0, -1.3),
+                node(3.0, 1.3),
+                node(6.0, 0.0),
+            ],
+            edges: vec![(0, 1), (1, 2), (2, 3), (3, 4)],
+        };
+
+        let straight = straighten_degree_two_chains(make_weave(), &open_area, &[false; 5], 1.15);
+        assert_eq!(
+            straight.nodes.len(),
+            5,
+            "snap-target node density is preserved"
+        );
+        assert_eq!(straight.edges.len(), 4, "chain topology is preserved");
+        assert!(
+            straight
+                .nodes
+                .iter()
+                .all(|p| haversine_m(*p, [p[0], cy]) < 0.05),
+            "every weave node lies on the straight chord: {:?}",
+            straight.nodes
+        );
+
+        let anchored = straighten_degree_two_chains(
+            make_weave(),
+            &open_area,
+            &[false, false, true, false, false],
+            1.15,
+        );
+        assert!(
+            haversine_m(anchored.nodes[2], node(0.0, -1.3)) < 0.05,
+            "semantic snap anchor is not repositioned"
+        );
+
+        let hole = LineString::from(vec![
+            xy(-2.0, -1.0),
+            xy(-2.0, 1.0),
+            xy(2.0, 1.0),
+            xy(2.0, -1.0),
+            xy(-2.0, -1.0),
+        ]);
+        let obstructed_area = MultiPolygon::new(vec![Polygon::new(outer, vec![hole])]);
+        let around_wall = Skeleton {
+            nodes: vec![
+                node(-5.0, 0.0),
+                node(-3.0, 2.0),
+                node(0.0, 2.0),
+                node(3.0, 2.0),
+                node(5.0, 0.0),
+            ],
+            edges: vec![(0, 1), (1, 2), (2, 3), (3, 4)],
+        };
+
+        let preserved =
+            straighten_degree_two_chains(around_wall, &obstructed_area, &[false; 5], 1.15);
+        assert_eq!(preserved.nodes.len(), 5, "wall detour nodes remain");
+        assert_eq!(preserved.edges.len(), 4, "wall detour topology remains");
+        assert!(
+            preserved.nodes[2][1] > cy + 1.5 / 111_320.0,
+            "wall detour geometry is not flattened"
+        );
     }
 
     /// Same-floor neighbor count of one graph node.
