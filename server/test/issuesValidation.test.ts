@@ -245,6 +245,7 @@ describe("normalization to explicit nulls", () => {
     expect(normalizeRootCreate({ ...BASE_ROOT, bodyMarkdown: "a\r\nb" }).bodyMarkdown).toBe("a\nb");
     expect(normalizeReplyCreate({ requestId: BASE_ROOT.requestId, bodyMarkdown: "a\rb" })).toEqual({
       bodyMarkdown: "a\nb",
+      attachmentIds: [],
     });
   });
 });
@@ -263,6 +264,7 @@ describe("idempotency hashing", () => {
       .update(
         JSON.stringify({
           assigneeId: null,
+          attachmentIds: [],
           bodyMarkdown: "Fix the door label",
           dueDate: null,
           featureId: null,
@@ -277,9 +279,17 @@ describe("idempotency hashing", () => {
     expect(hashRootCreate(root, 41)).toBe(expectedRoot);
 
     const expectedReply = createHash("sha256")
-      .update(JSON.stringify({ bodyMarkdown: "hello", kind: "reply", parentIssueId: "c_9", versionId: 41 }))
+      .update(
+        JSON.stringify({
+          attachmentIds: [],
+          bodyMarkdown: "hello",
+          kind: "reply",
+          parentIssueId: "c_9",
+          versionId: 41,
+        }),
+      )
       .digest("hex");
-    expect(hashReplyCreate({ bodyMarkdown: "hello" }, 41, "c_9")).toBe(expectedReply);
+    expect(hashReplyCreate({ bodyMarkdown: "hello", attachmentIds: [] }, 41, "c_9")).toBe(expectedReply);
   });
 
   it("equates absent and null-normalized optional fields", () => {
@@ -311,10 +321,10 @@ describe("idempotency hashing", () => {
   });
 
   it("reply hash changes across body, parent, version id, and kind", () => {
-    const base = hashReplyCreate({ bodyMarkdown: "hello" }, 41, "c_9");
-    expect(hashReplyCreate({ bodyMarkdown: "hello!" }, 41, "c_9")).not.toBe(base);
-    expect(hashReplyCreate({ bodyMarkdown: "hello" }, 41, "c_10")).not.toBe(base);
-    expect(hashReplyCreate({ bodyMarkdown: "hello" }, 42, "c_9")).not.toBe(base);
+    const base = hashReplyCreate({ bodyMarkdown: "hello", attachmentIds: [] }, 41, "c_9");
+    expect(hashReplyCreate({ bodyMarkdown: "hello!", attachmentIds: [] }, 41, "c_9")).not.toBe(base);
+    expect(hashReplyCreate({ bodyMarkdown: "hello", attachmentIds: [] }, 41, "c_10")).not.toBe(base);
+    expect(hashReplyCreate({ bodyMarkdown: "hello", attachmentIds: [] }, 42, "c_9")).not.toBe(base);
     // Same body and version, different kind: root and reply hashes never collide structurally.
     expect(hashRootCreate({ ...root, bodyMarkdown: "hello" }, 41)).not.toBe(base);
   });
@@ -328,7 +338,7 @@ describe("idempotency hashing", () => {
     expectServiceError(() => hashRootCreate({ ...root, assigneeId: 1.5 }, 41), "invalid_request");
     expectServiceError(() => hashRootCreate(root, Number.NaN), "internal_error");
     expectServiceError(() => hashRootCreate(root, 1.5), "internal_error");
-    expectServiceError(() => hashReplyCreate({ bodyMarkdown: "hello" }, Number.NaN, "c_9"), "internal_error");
+    expectServiceError(() => hashReplyCreate({ bodyMarkdown: "hello", attachmentIds: [] }, Number.NaN, "c_9"), "internal_error");
   });
 });
 
@@ -339,12 +349,15 @@ describe("issue error contract", () => {
       invalid_anchor: 400,
       invalid_due_date: 400,
       invalid_markdown: 400,
+      invalid_attachment: 400,
       unauthorized: 401,
       forbidden: 403,
+      quota_exceeded: 403,
       not_found: 404,
       stale_issue: 409,
       idempotency_conflict: 409,
       issue_deleted: 409,
+      rate_limited: 429,
       internal_error: 500,
       sse_capacity: 503,
     });
@@ -438,6 +451,7 @@ const ISSUE_DTO = {
   rowVersion: 2,
   anchor: { levelId: "lvl-1", longitude: 139.7671, latitude: 35.6812, featureId: "unit-7" },
   bodyMarkdown: "Fix the door label",
+  attachments: [],
   status: "open",
   author: { id: 7, username: "reviewer" },
   assignee: null,
@@ -450,6 +464,7 @@ const ISSUE_DTO = {
       id: "c_2",
       rowVersion: 1,
       bodyMarkdown: null,
+      attachments: [],
       author: { id: 8, username: "author" },
       createdAt: "2026-07-18T02:03:04.123Z",
       updatedAt: "2026-07-18T02:04:05Z",
@@ -473,6 +488,7 @@ describe("strict TypeBox schemas", () => {
       id: "c_3",
       rowVersion: 1,
       bodyMarkdown: "still here",
+      attachments: [],
       author: { id: 8, username: "author" },
       createdAt: "2026-07-18T02:03:04Z",
       updatedAt: "2026-07-18T02:03:04Z",
@@ -507,10 +523,10 @@ describe("strict TypeBox schemas", () => {
       createdAt: "2026-07-18T00:00:00Z",
       updatedAt: "2026-07-18T00:00:00Z",
     };
-    const live: IssueReply = { ...base, bodyMarkdown: "text", deletedAt: null };
-    const deleted: IssueReply = { ...base, bodyMarkdown: null, deletedAt: "2026-07-18T01:00:00Z" };
+    const live: IssueReply = { ...base, bodyMarkdown: "text", attachments: [], deletedAt: null };
+    const deleted: IssueReply = { ...base, bodyMarkdown: null, attachments: [], deletedAt: "2026-07-18T01:00:00Z" };
     // @ts-expect-error — a tombstoned reply cannot carry Markdown
-    const leaked: IssueReply = { ...base, bodyMarkdown: "leaked", deletedAt: "2026-07-18T01:00:00Z" };
+    const leaked: IssueReply = { ...base, bodyMarkdown: "leaked", attachments: [], deletedAt: "2026-07-18T01:00:00Z" };
     expect([live.deletedAt, deleted.bodyMarkdown, leaked.id]).toEqual([null, null, "c_9"]);
   });
 

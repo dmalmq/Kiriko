@@ -158,6 +158,7 @@ export function IssuesPanel({
         draft={state.draft}
         currentUser={currentUser}
         reviewers={reviewers}
+        publicVersionId={state.publicVersionId}
         pending={composerPending}
         onUpdateDraft={controller.ui.updateDraft}
         onSubmit={(input) => {
@@ -175,6 +176,7 @@ export function IssuesPanel({
         issue={selected}
         currentUser={currentUser}
         reviewers={reviewers}
+        publicVersionId={state.publicVersionId}
         pending={pending}
         mutationFailed={mutationFailed || state.conflict !== null || state.authRequired}
         idempotencyConflict={state.conflict?.error === "idempotency_conflict"}

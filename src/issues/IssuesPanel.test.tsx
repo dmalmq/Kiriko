@@ -83,8 +83,8 @@ function makeIssue(options: IssueOptions): ReviewIssue {
     replies: options.replies ?? [],
   };
   return deletedAt === null
-    ? { ...shared, bodyMarkdown: options.body ?? "Body text", deletedAt: null }
-    : { ...shared, bodyMarkdown: null, deletedAt };
+    ? { ...shared, bodyMarkdown: options.body ?? "Body text", attachments: [], deletedAt: null }
+    : { ...shared, bodyMarkdown: null, attachments: [], deletedAt };
 }
 
 interface ReplyOptions {
@@ -106,8 +106,8 @@ function makeReply(options: ReplyOptions): IssueReply {
     updatedAt: "2026-07-18T09:30:00Z",
   };
   return deletedAt === null
-    ? { ...shared, bodyMarkdown: options.body ?? "Reply text", deletedAt: null }
-    : { ...shared, bodyMarkdown: null, deletedAt };
+    ? { ...shared, bodyMarkdown: options.body ?? "Reply text", attachments: [], deletedAt: null }
+    : { ...shared, bodyMarkdown: null, attachments: [], deletedAt };
 }
 
 function makeDraft(patch: Partial<IssueDraft> = {}): IssueDraft {
@@ -354,6 +354,14 @@ describe("issueSummary", () => {
   it("localizes the deleted-root tombstone", () => {
     expect(issueSummary(null, "en")).toBe("Comment deleted");
     expect(issueSummary(null, "ja")).toBe("コメントは削除されました");
+  });
+
+  it("strips image syntax and falls back for image-only bodies", () => {
+    const id = "11111111-2222-4333-8444-555555555555";
+    expect(issueSummary(`![gate](attachment:${id})`, "en")).toBe("Image attachment");
+    expect(issueSummary(`![gate](attachment:${id})`, "ja")).toBe("画像添付");
+    expect(issueSummary(`Broken gate ![gate](attachment:${id})`, "en")).toBe("Broken gate");
+    expect(issueSummary(`![x](https://example.com/x.png)`, "en")).toBe("");
   });
 });
 
@@ -877,6 +885,7 @@ describe("IssueComposer", () => {
     expect(harness.commands.createIssue).toHaveBeenCalledWith({
       requestId: "req-1",
       bodyMarkdown: "Needs work\nASAP",
+      attachmentIds: [],
       anchor: { levelId: "level-1f", longitude: 139.7, latitude: 35.68, featureId: "f1" },
       assigneeId: 3,
       dueDate: "2026-08-01",

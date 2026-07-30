@@ -251,8 +251,10 @@ versions       venue · sequence · permanent public id
                network/facility blob hashes · synthesized flag
 jobs           kind · status · payload/result/error
 blobs          hash · size · creation time
-comment_state  version revision · next pin number
-comments       versioned root issues and one-level replies
+comment_state          version revision · next pin number
+comments               versioned root issues and one-level replies
+issue_attachments      staged/attached/detached per-upload rows
+issue_attachment_blobs content-addressed normalized image metadata
 ```
 
 The on-disk layout is:
@@ -260,9 +262,10 @@ The on-disk layout is:
 ```text
 data/kiriko.db
 data/blobs/sha256/<first-two-hex>/<sha256>
+data/issue-attachments/sha256/<first-two-hex>/<sha256>
 ```
 
-SQLite migrations are additive. The current schema includes the initial platform tables, version-pinned review issues, retained GDB reprocessing inputs, and the synthesized-network marker.
+SQLite migrations are additive. The current schema includes the initial platform tables, version-pinned review issues and their first-party image attachments, retained GDB reprocessing inputs, and the synthesized-network marker. Attachment storage, lifecycle, security, backup, and rollback are owned by `docs/issue-attachments-operations.md`.
 
 ### 8.2 Implemented HTTP surface
 
@@ -298,13 +301,17 @@ GET         /api/reviewers
 POST        /api/issues/:issueId/replies
 PATCH/DELETE /api/issues/:issueId
 PATCH/DELETE /api/replies/:replyId
+POST         /api/review/versions/:publicVersionId/issue-attachments
+DELETE       /api/issue-attachments/:attachmentId
+GET          /api/issue-attachments/:attachmentId/content
+GET          /api/issue-attachments/:attachmentId/thumbnail
 ```
 
-Fastify route schemas generate `/api/openapi.json`. GDB inspection and all mutations require a human session. Published bundle reads and issue collection reads are public. Machine API keys are not yet implemented.
+Fastify route schemas generate `/api/openapi.json`. GDB inspection and all mutations, including attachment upload/cancel, require a human session. Published bundle reads, issue collection reads, and media attached to a live comment on the currently published version are public. Machine API keys are not yet implemented.
 
 ### 8.3 Review synchronization
 
-Root comments are map-anchored issues; child comments are replies. `comment_state.revision` is a version-scoped monotonic collection revision and each comment has an optimistic-concurrency row version.
+Root comments are map-anchored issues; child comments are replies. Markdown remains canonical in `comments.body_markdown`; attachment IDs are bound transactionally from first-party image tokens. `comment_state.revision` is a version-scoped monotonic collection revision and each comment has an optimistic-concurrency row version.
 
 Mutations support idempotent request IDs and expected-version checks. The SSE stream carries revision notifications only; clients coalesce notifications and refetch canonical state. Connection limits are configurable globally and per public version.
 
@@ -333,7 +340,7 @@ The network overlay reports connectivity, islands, and linked floors. In edit mo
 Implemented human authentication uses server-side sessions stored by token hash. Roles are `admin`, `member`, and `viewer`.
 
 - Anonymous users can read published bundles and existing issue collections.
-- Authenticated users can create issues and replies subject to role and ownership rules.
+- Authenticated users can create issues/replies and stage image attachments subject to role, ownership, and attachment-budget rules.
 - Members/admins can manage issue status, due dates, and broader assignments.
 - Producer gallery, upload, GDB, network, and reviewer-directory operations require a session.
 - Secure-cookie behavior is configurable and must be enabled behind production TLS.
@@ -360,8 +367,8 @@ These thresholds are regression budgets for the tested fixtures and workstation 
 ### 12.1 Implemented
 
 - one process and in-process queue;
-- environment-based data directory, port, secure-cookie, bootstrap-user, development-user, and SSE-capacity configuration;
-- content-addressed disk storage;
+- environment-based data directory, port, secure-cookie, bootstrap-user, development-user, SSE-capacity, and issue-attachment budget/janitor configuration;
+- content-addressed disk storage, including a separately garbage-collected issue-attachment tree;
 - startup migrations and legacy bundle recompilation;
 - stdout-compatible Fastify logging;
 - health and OpenAPI endpoints.

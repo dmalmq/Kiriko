@@ -1,4 +1,10 @@
 import { createHash } from "node:crypto";
+import {
+  ATTACHMENT_ALT_MAX_SCALARS,
+  ATTACHMENT_ID_PATTERN,
+  parseAttachmentTokens,
+} from "./attachments/tokens";
+import { ATTACHMENT_MAX_PER_COMMENT } from "./attachments/limits";
 import { IssueServiceError } from "./errors";
 import type {
   NormalizedReplyCreate,
@@ -150,6 +156,7 @@ export function validateRequestId(input: string): string {
 export function normalizeRootCreate(input: RootCreateBody): NormalizedRootCreate {
   return {
     bodyMarkdown: normalizeMarkdown(input.bodyMarkdown),
+    attachmentIds: input.attachmentIds ?? [],
     levelId: input.anchor.levelId,
     longitude: input.anchor.longitude,
     latitude: input.anchor.latitude,
@@ -161,7 +168,62 @@ export function normalizeRootCreate(input: RootCreateBody): NormalizedRootCreate
 
 /** Canonicalizes a reply create payload to its newline-normalized body. */
 export function normalizeReplyCreate(input: ReplyCreateBody): NormalizedReplyCreate {
-  return { bodyMarkdown: normalizeMarkdown(input.bodyMarkdown) };
+  return { bodyMarkdown: normalizeMarkdown(input.bodyMarkdown), attachmentIds: input.attachmentIds ?? [] };
+}
+
+/**
+ * Resolves the canonical attachment ID set for a normalized body. The wire
+ * field is optional for old clients; when present it must exactly equal the
+ * unique canonical IDs parsed from the body (set equality, order-free), so a
+ * client can never bind attachments the body does not reference or reference
+ * attachments it does not bind. Also enforces the per-comment count cap and
+ * the alt-text scalar cap.
+ */
+export function resolveAttachmentIds(
+  normalizedBody: string,
+  provided: string[] | undefined,
+): string[] {
+  const tokens = parseAttachmentTokens(normalizedBody);
+  for (const token of tokens) {
+    if ([...token.alt].length > ATTACHMENT_ALT_MAX_SCALARS) {
+      throw new IssueServiceError("invalid_attachment", "invalid_attachment", {
+        details: [{ field: "bodyMarkdown", reason: "attachment alt text is too long" }],
+      });
+    }
+  }
+  const parsed = tokens.map((token) => token.id);
+  if (parsed.length > ATTACHMENT_MAX_PER_COMMENT) {
+    throw new IssueServiceError("invalid_attachment", "invalid_attachment", {
+      details: [
+        { field: "attachmentIds", reason: `at most ${ATTACHMENT_MAX_PER_COMMENT} attachments per comment` },
+      ],
+    });
+  }
+  if (provided === undefined) {
+    return [...parsed].sort();
+  }
+  const seen = new Set<string>();
+  for (const id of provided) {
+    if (!ATTACHMENT_ID_PATTERN.test(id) || seen.has(id)) {
+      throw new IssueServiceError("invalid_attachment", "invalid_attachment", {
+        details: [{ field: "attachmentIds", reason: "expected unique canonical attachment IDs" }],
+      });
+    }
+    seen.add(id);
+  }
+  const sortedProvided = [...provided].sort();
+  const sortedParsed = [...parsed].sort();
+  if (
+    sortedProvided.length !== sortedParsed.length
+    || sortedProvided.some((id, index) => id !== sortedParsed[index])
+  ) {
+    throw new IssueServiceError("invalid_attachment", "invalid_attachment", {
+      details: [
+        { field: "attachmentIds", reason: "must equal the attachment references in bodyMarkdown" },
+      ],
+    });
+  }
+  return sortedProvided;
 }
 
 function assertResolvedVersionId(versionId: number): void {
@@ -191,6 +253,7 @@ export function hashRootCreate(input: NormalizedRootCreate, versionId: number): 
     .update(
       JSON.stringify({
         assigneeId: input.assigneeId,
+        attachmentIds: input.attachmentIds,
         bodyMarkdown: input.bodyMarkdown,
         dueDate: input.dueDate,
         featureId: input.featureId,
@@ -217,6 +280,7 @@ export function hashReplyCreate(
   return createHash("sha256")
     .update(
       JSON.stringify({
+        attachmentIds: input.attachmentIds,
         bodyMarkdown: input.bodyMarkdown,
         kind: "reply",
         parentIssueId,

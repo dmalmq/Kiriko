@@ -1,13 +1,23 @@
-import type { ReactElement } from "react";
-import ReactMarkdown from "react-markdown";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import type { LocaleCode } from "../imdf/types";
+import {
+  ATTACHMENT_ID_PATTERN,
+  ATTACHMENT_SCHEME,
+  attachmentContentUrl,
+  attachmentThumbnailUrl,
+} from "./attachmentTokens";
+import type { IssueAttachmentMetadata } from "./types";
 
 /**
  * The only Markdown rendering boundary in the app. Raw HTML is never parsed
  * (no rehype-raw, `skipHtml` drops it), only a small allowlist of elements
  * renders, and every link URL passes the http/https/mailto protocol filter
- * before reaching the DOM.
+ * before reaching the DOM. Images render exclusively from first-party
+ * `attachment:<id>` tokens resolved against server-projected metadata (or a
+ * local blob preview inside the editor); remote, data:, and SVG sources can
+ * never reach an `<img>`.
  */
 
 export const ISSUE_MARKDOWN_MAX_SCALARS = 4000;
@@ -96,21 +106,237 @@ export function safeIssueUrl(url: string): string | undefined {
 export interface MarkdownBodyProps {
   /** Normalized Markdown source as stored on the server. */
   body: string;
+  /** Attachment metadata projected with the body (plus editor previews). */
+  attachments?: IssueAttachmentMetadata[];
+  /** Lightbox labeling; defaults to English when absent. */
+  locale?: LocaleCode;
 }
 
-export function MarkdownBody({ body }: MarkdownBodyProps): ReactElement {
+/** Caps rendered image occurrences against pathological token repetition. */
+const MAX_RENDERED_IMAGES = 20;
+
+const lightboxUi = {
+  close: { ja: "閉じる", en: "Close" },
+  enlarge: { ja: "画像を拡大", en: "Enlarge image" },
+} as const;
+
+interface LightboxImage {
+  url: string;
+  alt: string;
+}
+
+interface LightboxProps {
+  image: LightboxImage;
+  locale: LocaleCode;
+  onClose: () => void;
+}
+
+/**
+ * Accessible lightbox: modal dialog with a real close button, Escape and
+ * backdrop dismissal, initial focus on the close control, and focus return
+ * to the triggering thumbnail. Opens no new browsing context.
+ */
+function AttachmentLightbox({ image, locale, onClose }: LightboxProps): ReactElement {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog === null) {
+      return;
+    }
+    const background: Array<{ element: HTMLElement; inert: boolean }> = [];
+    let active: HTMLElement = dialog;
+    while (active.parentElement !== null) {
+      for (const sibling of active.parentElement.children) {
+        if (sibling !== active && sibling instanceof HTMLElement) {
+          background.push({ element: sibling, inert: sibling.inert === true });
+          sibling.inert = true;
+        }
+      }
+      active = active.parentElement;
+      if (active === document.body) {
+        break;
+      }
+    }
+    closeRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (
+        (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement)))
+        || (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement)))
+      ) {
+        event.preventDefault();
+        (event.shiftKey ? last : first)?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      for (const { element, inert } of background) {
+        element.inert = inert;
+      }
+    };
+  }, [onClose]);
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkBreaks]}
-      allowedElements={["p", "br", "em", "strong", "ol", "ul", "li", "a", "code"]}
-      skipHtml
-      urlTransform={safeIssueUrl}
-      components={{
-        a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
-      }}
+    <div
+      ref={dialogRef}
+      className="issue-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label={image.alt}
+      tabIndex={-1}
+      onClick={onClose}
     >
-      {body}
-    </ReactMarkdown>
+      <button
+        ref={closeRef}
+        type="button"
+        className="issue-lightbox__close"
+        aria-label={lightboxUi.close[locale]}
+        onClick={onClose}
+      >
+        ×
+      </button>
+      <img
+        className="issue-lightbox__image"
+        src={image.url}
+        alt={image.alt}
+        onClick={(event) => {
+          event.stopPropagation();
+        }}
+      />
+    </div>
+  );
+}
+
+export function MarkdownBody({ body, attachments, locale }: MarkdownBodyProps): ReactElement {
+  const resolvedLocale = locale ?? "en";
+  const [lightbox, setLightbox] = useState<LightboxImage | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const metadataById = useMemo(() => {
+    const map = new Map<string, IssueAttachmentMetadata>();
+    for (const metadata of attachments ?? []) {
+      map.set(metadata.id, metadata);
+    }
+    return map;
+  }, [attachments]);
+
+  const closeLightbox = useCallback(() => {
+    setLightbox(null);
+  }, []);
+
+  useEffect(() => {
+    if (lightbox === null && triggerRef.current !== null) {
+      triggerRef.current.focus();
+      triggerRef.current = null;
+    }
+  }, [lightbox]);
+
+  // Per-render occurrence counter for the image cap. Kept in a ref (reset at
+  // the top of every render) so the img component identity can stay stable —
+  // a remounting img would detach the lightbox's focus-return target.
+  const renderCountRef = useRef(0);
+  renderCountRef.current = 0;
+
+  const openLightbox = useCallback((trigger: HTMLButtonElement, image: LightboxImage) => {
+    triggerRef.current = trigger;
+    setLightbox(image);
+  }, []);
+
+  const renderImage = useCallback(
+    (props: { node?: unknown; src?: unknown; alt?: unknown }): ReactElement => {
+      const { node: _node, src, alt } = props;
+      const id =
+        typeof src === "string" && src.startsWith(ATTACHMENT_SCHEME)
+          ? src.slice(ATTACHMENT_SCHEME.length)
+          : null;
+      const metadata = id === null ? undefined : metadataById.get(id);
+      if (metadata !== undefined && renderCountRef.current < MAX_RENDERED_IMAGES) {
+        renderCountRef.current += 1;
+        const thumbnailUrl = metadata.previewUrl ?? attachmentThumbnailUrl(metadata.id);
+        const fullUrl = metadata.previewUrl ?? attachmentContentUrl(metadata.id);
+        const altText = typeof alt === "string" ? alt : "";
+        return (
+          <button
+            type="button"
+            className="issue-image"
+            aria-label={`${lightboxUi.enlarge[resolvedLocale]}: ${altText}`}
+            onClick={(event) => {
+              openLightbox(event.currentTarget, { url: fullUrl, alt: altText });
+            }}
+          >
+            <img
+              src={thumbnailUrl}
+              alt={altText}
+              width={metadata.thumbnailWidth}
+              height={metadata.thumbnailHeight}
+              loading="lazy"
+              decoding="async"
+            />
+          </button>
+        );
+      }
+      // Unknown/foreign/remote/data sources never render as images;
+      // the escaped alt text remains as plain text.
+      return <>{typeof alt === "string" ? alt : ""}</>;
+    },
+    [metadataById, openLightbox, resolvedLocale],
+  );
+
+  const components = useMemo<Components>(
+    () => ({
+      a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+      img: renderImage as NonNullable<Components["img"]>,
+    }),
+    [renderImage],
+  );
+
+  return (
+    <>
+      <ReactMarkdown
+        remarkPlugins={[remarkBreaks]}
+        allowedElements={["p", "br", "em", "strong", "ol", "ul", "li", "a", "code", "img"]}
+        skipHtml
+        urlTransform={(url, key, node) => {
+          // Only `attachment:` image sources pass through (for our own img
+          // component to resolve); links keep the strict protocol filter.
+          if (
+            key === "src"
+            && node.tagName === "img"
+            && url.startsWith(ATTACHMENT_SCHEME)
+            && ATTACHMENT_ID_PATTERN.test(url.slice(ATTACHMENT_SCHEME.length))
+          ) {
+            return url;
+          }
+          return safeIssueUrl(url);
+        }}
+        components={components}
+      >
+        {body}
+      </ReactMarkdown>
+      {lightbox !== null ? (
+        <AttachmentLightbox image={lightbox} locale={resolvedLocale} onClose={closeLightbox} />
+      ) : null}
+    </>
   );
 }
 

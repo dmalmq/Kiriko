@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import {
   checkIssueBody,
@@ -174,5 +175,122 @@ describe("checkIssueBody", () => {
     const check = checkIssueBody("x".repeat(4001));
     expect(check.scalars).toBe(4001);
     expect(check.problem).toBe("too_long");
+  });
+});
+
+describe("MarkdownBody attachments", () => {
+  const id = "11111111-2222-4333-8444-555555555555";
+  const metadata = {
+    id,
+    contentType: "image/png" as const,
+    width: 400,
+    height: 300,
+    thumbnailWidth: 400,
+    thumbnailHeight: 300,
+  };
+
+  it("renders an attachment token as a thumbnail from server-derived URLs", () => {
+    const container = render(
+      <MarkdownBody body={`See ![gate](attachment:${id})`} attachments={[metadata]} locale="en" />,
+    ).container;
+    const image = container.querySelector(".issue-image img");
+    expect(image?.getAttribute("src")).toBe(`/api/issue-attachments/${id}/thumbnail`);
+    expect(image?.getAttribute("alt")).toBe("gate");
+    expect(image?.getAttribute("width")).toBe("400");
+    expect(image?.getAttribute("height")).toBe("300");
+    expect(image?.getAttribute("loading")).toBe("lazy");
+    expect(image?.getAttribute("decoding")).toBe("async");
+    expect(screen.getByRole("button", { name: "Enlarge image: gate" })).toBeTruthy();
+  });
+
+  it("prefers a local blob preview URL (staged editor preview) when present", () => {
+    const container = render(
+      <MarkdownBody
+        body={`![shot](attachment:${id})`}
+        attachments={[{ ...metadata, previewUrl: "blob:local-preview" }]}
+        locale="en"
+      />,
+    ).container;
+    expect(container.querySelector(".issue-image img")?.getAttribute("src")).toBe("blob:local-preview");
+  });
+
+  it("opens an accessible lightbox with the full content and returns focus", async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <MarkdownBody body={`![gate](attachment:${id})`} attachments={[metadata]} locale="en" />
+        <button type="button">Background action</button>
+      </>,
+    );
+    const trigger = screen.getByRole("button", { name: "Enlarge image: gate" });
+    const background = screen.getByRole("button", { name: "Background action" });
+    await user.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "gate" });
+    const full = dialog.querySelector(".issue-lightbox__image");
+    expect(full?.getAttribute("src")).toBe(`/api/issue-attachments/${id}/content`);
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(document.activeElement).toBe(close);
+    expect(background.inert).toBe(true);
+    await user.tab();
+    expect(document.activeElement).toBe(close);
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(close);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(background.inert).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("localizes lightbox controls", async () => {
+    const user = userEvent.setup();
+    render(
+      <MarkdownBody body={`![ゲート](attachment:${id})`} attachments={[metadata]} locale="ja" />,
+    );
+    await user.click(screen.getByRole("button", { name: "画像を拡大: ゲート" }));
+    expect(screen.getByRole("button", { name: "閉じる" })).toBeTruthy();
+  });
+
+  it("never renders remote, data:, SVG, or unknown-attachment images", () => {
+    const remote = renderBody("![x](https://evil.example/x.png)");
+    expect(remote.querySelector("img")).toBeNull();
+    expect(remote.textContent).toContain("x");
+    const data = renderBody("![x](data:image/png;base64,AAAA)");
+    expect(data.querySelector("img")).toBeNull();
+    const svg = renderBody(`![x](attachment:${id}.svg)`);
+    expect(svg.querySelector("img")).toBeNull();
+    const unknown = render(
+      <MarkdownBody body={`![alt text](attachment:${id})`} attachments={[]} locale="en" />,
+    ).container;
+    expect(unknown.querySelector("img")).toBeNull();
+    expect(unknown.textContent).toContain("alt text");
+  });
+
+  it("strips attachment: hrefs from links", () => {
+    const container = render(
+      <MarkdownBody body={`[click](attachment:${id})`} attachments={[metadata]} locale="en" />,
+    ).container;
+    const link = container.querySelector("a");
+    expect(link?.getAttribute("href")).toBeNull();
+  });
+
+  it("caps rendered image occurrences", () => {
+    const body = Array.from({ length: 25 }, () => `![a](attachment:${id})`).join("\n");
+    const container = render(
+      <MarkdownBody body={body} attachments={[metadata]} locale="en" />,
+    ).container;
+    expect(container.querySelectorAll(".issue-image")).toHaveLength(20);
+  });
+
+  it("escapes alt text and never attaches event handlers from markup", () => {
+    const container = render(
+      <MarkdownBody
+        body={`![<b>bold</b>" onmouseover="x](attachment:${id})`}
+        attachments={[metadata]}
+        locale="en"
+      />,
+    ).container;
+    const image = container.querySelector(".issue-image img");
+    expect(image?.getAttribute("alt")).toBe('<b>bold</b>" onmouseover="x');
+    expect(image?.getAttribute("onmouseover")).toBeNull();
   });
 });

@@ -5,6 +5,10 @@ export interface AppConfig {
   issueSseMaxConnections: number;
   jobShutdownGraceMs?: number;
   issueSseMaxPerVersion: number;
+  /** Defaults: 512 MiB per version, 30 uploads / 10 min, hourly janitor. */
+  issueAttachmentVersionQuotaBytes?: number;
+  issueAttachmentUploadRateMax?: number;
+  issueAttachmentJanitorIntervalMs?: number;
   bootstrapUser?: string;
   bootstrapPassword?: string;
   seedDevUsers?: boolean;
@@ -25,6 +29,18 @@ export function configFromEnv(): AppConfig & { port: number } {
     secureCookies: /^(1|true)$/i.test(process.env["KIRIKO_SECURE_COOKIES"] ?? ""),
     issueSseMaxConnections: positiveInt(process.env["KIRIKO_ISSUE_SSE_MAX_CONNECTIONS"], 512),
     issueSseMaxPerVersion: positiveInt(process.env["KIRIKO_ISSUE_SSE_MAX_PER_VERSION"], 128),
+    issueAttachmentVersionQuotaBytes: positiveInt(
+      process.env["KIRIKO_ISSUE_ATTACHMENT_VERSION_QUOTA_BYTES"],
+      512 * 1024 * 1024,
+    ),
+    issueAttachmentUploadRateMax: positiveInt(
+      process.env["KIRIKO_ISSUE_ATTACHMENT_UPLOAD_RATE_MAX"],
+      30,
+    ),
+    issueAttachmentJanitorIntervalMs: positiveInt(
+      process.env["KIRIKO_ISSUE_ATTACHMENT_JANITOR_INTERVAL_MS"],
+      3_600_000,
+    ),
     jobShutdownGraceMs: positiveInt(process.env["KIRIKO_JOB_SHUTDOWN_GRACE_MS"], 5_000),
     seedDevUsers: process.env["KIRIKO_SEED_DEV_USERS"] === "1",
     port: Number(process.env["KIRIKO_PORT"] ?? 8790),

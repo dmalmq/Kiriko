@@ -199,10 +199,13 @@ test.describe("viewer performance", () => {
           const observer = new MutationObserver(() => {
             if (container.dataset.mapIdle === "true") {
               observer.disconnect();
-              requestAnimationFrame(() => {
-                window.clearTimeout(timeout);
-                resolve(performance.now() - start);
-              });
+              // MapLibre emits idle from its render loop only after the map has
+              // no pending transitions or requested tiles. Waiting for another
+              // animation frame adds one display-refresh interval to every
+              // sample, making this map-work budget depend on runner refresh
+              // cadence rather than level-change latency.
+              window.clearTimeout(timeout);
+              resolve(performance.now() - start);
             }
           });
           observer.observe(container, {
