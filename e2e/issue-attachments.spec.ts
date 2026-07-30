@@ -44,7 +44,7 @@ async function pastePng(page: Page, label: string): Promise<void> {
       mimeType: "image/png",
       buffer: Buffer.from(TINY_PNG_BASE64, "base64"),
     });
-    await page.getByLabel(label).evaluate((element) => {
+    const handled = await page.getByLabel(label).evaluate((element) => {
       const input = document.querySelector<HTMLInputElement>('input[data-e2e-paste-file="true"]');
       if (input?.files === null || input?.files === undefined) {
         throw new Error("Paste fixture FileList was not created");
@@ -52,7 +52,9 @@ async function pastePng(page: Page, label: string): Promise<void> {
       const event = new ClipboardEvent("paste", { bubbles: true, cancelable: true });
       Object.defineProperty(event, "clipboardData", { value: { files: input.files } });
       element.dispatchEvent(event);
+      return event.defaultPrevented;
     });
+    expect(handled).toBe(true);
   } finally {
     await fileInput.evaluate((input) => input.remove());
   }
