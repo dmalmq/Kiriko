@@ -22,6 +22,7 @@ use geo::algorithm::orient::{Direction, Orient};
 use geo::{Coord, LineString, MultiPolygon, Polygon};
 use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
 use std::collections::HashMap;
+use std::cmp::Ordering;
 
 use crate::codec::BundleDocument;
 use crate::synth::{haversine_m, linestring_midpoint, point_boundary_dist_m, polygon_centroid};
@@ -290,6 +291,18 @@ const WEAVE_DETOUR_RATIO: f64 = 1.15;
 /// openings digitized slightly off a unit boundary. Gaps this rule rejects
 /// (track strips, walls) are an order of magnitude wider.
 const SEGMENT_OUTSIDE_TOL_M: f64 = 0.3;
+/// Doorway stub length (m) each side of an opening's midpoint, along the
+/// opening's axis: routes cross the doorway collinear with the opening line —
+/// straight in from the front — instead of entering at the angle of the
+/// nearest centerline node.
+const DOORWAY_STUB_M: f64 = 1.2;
+/// Maximum chord length (m) considered for an open-space shortcut.
+const CHORD_MAX_M: f64 = 40.0;
+/// A chord is a real shortcut only when it beats the existing graph path by
+/// at least this factor (chord length < ratio × graph distance).
+const CHORD_SAVINGS_RATIO: f64 = 0.7;
+
+
 
 /// Distance (m) from `p` to the nearest boundary ring of `area`
 /// (equirectangular metres at `p`'s latitude). Inside the area this is the
@@ -714,6 +727,216 @@ fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
     x
 }
 
+/// Vertices of a canonical `LineString` coordinate array as `[lon, lat]`.
+fn line_verts(coords: &Value) -> Vec<[f64; 2]> {
+    coords
+        .as_array()
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| {
+                    let pair = p.as_array()?;
+                    Some([pair.first()?.as_f64()?, pair.get(1)?.as_f64()?])
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// An opening's midpoint plus unit axis (metre frame at the midpoint's
+/// latitude) from its first→last vertex of the longest part. The axis is the
+/// walking direction through the doorway: openings are digitized as connector
+/// lines spanning the gap between spaces. `None` for degenerate geometry.
+fn opening_axis(geom: &Value) -> Option<([f64; 2], [f64; 2])> {
+    let obj = geom.as_object()?;
+    let coords = obj.get("coordinates")?;
+    let verts: Vec<[f64; 2]> = match obj.get("type")?.as_str()? {
+        "LineString" => line_verts(coords),
+        "MultiLineString" => {
+            let mut best: Vec<[f64; 2]> = Vec::new();
+            let mut best_len = -1.0;
+            for part in coords.as_array()? {
+                let vs = line_verts(part);
+                let len: f64 = vs.windows(2).map(|w| haversine_m(w[0], w[1])).sum();
+                if len > best_len {
+                    best_len = len;
+                    best = vs;
+                }
+            }
+            best
+        }
+        _ => return None,
+    };
+    let (Some(first), Some(last)) = (verts.first(), verts.last()) else {
+        return None;
+    };
+    let mid = linestring_midpoint(geom)?;
+    let mx = 111_320.0 * mid[1].to_radians().cos();
+    let (dx, dy) = ((last[0] - first[0]) * mx, (last[1] - first[1]) * 111_320.0);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len <= f64::EPSILON {
+        return None;
+    }
+    Some((mid, [dx / len, dy / len]))
+}
+
+/// One doorway's graph nodes: the opening midpoint plus, when walkable, the
+/// two axis stubs. Attach edges land on the stub of the attaching side; a
+/// side whose stub fails validation falls back to the midpoint.
+struct DoorwayNodes {
+    mid: usize,
+    fwd: Option<usize>, // midpoint + axis·δ
+    bwd: Option<usize>, // midpoint − axis·δ
+    mid_pt: [f64; 2],
+    axis: [f64; 2], // metre-frame unit vector
+}
+
+/// Min-heap entry for the bounded Dijkstra inside [`shortcut_chords`].
+#[derive(Clone, Copy, PartialEq)]
+struct Visit(f64, usize);
+
+impl Eq for Visit {}
+
+impl Ord for Visit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.0.total_cmp(&self.0).then(self.1.cmp(&other.1))
+    }
+}
+
+impl PartialOrd for Visit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Open-space shortcut chords between same-component skeleton nodes: a
+/// straight, fully passable segment that beats the current graph path by
+/// [`CHORD_SAVINGS_RATIO`]. This is what lets a route cut diagonally across
+/// an open concourse instead of following the centerline's detour. Returns
+/// the added `(node_a, node_b)` pairs (skeleton-local), deterministic by
+/// construction (pairs processed in sorted order).
+///
+/// `blob` is the **chord-eligibility** union-find (skeleton edges + accepted
+/// near-blob bridges only). Doorway-only unions must not appear here: their
+/// stub paths are absent from chord adjacency, so opposite-side nodes would
+/// otherwise look disconnected to the savings Dijkstra and get a free chord
+/// that bypasses the doorway approach.
+///
+/// `existing` are skeleton-local metre-weighted edges already present in the
+/// floor graph but not in `skeleton.edges` (accepted near-blob bridges). They
+/// seed adjacency for the savings test so those pairs are never re-emitted,
+/// and so Dijkstra sees the true current path cost.
+pub(crate) fn shortcut_chords(
+    skeleton: &Skeleton,
+    blob: &[usize],
+    area: &MultiPolygon<f64>,
+    existing: &[(usize, usize, f64)],
+) -> Vec<(usize, usize)> {
+    let n = skeleton.nodes.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // Metre-weighted adjacency: skeleton edges, accepted bridges, plus chords
+    // added so far. Bridges must participate in savings without being returned.
+    let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for &(a, b) in &skeleton.edges {
+        let d = haversine_m(skeleton.nodes[a], skeleton.nodes[b]);
+        adj[a].push((b, d));
+        adj[b].push((a, d));
+    }
+    for &(a, b, d) in existing {
+        adj[a].push((b, d));
+        adj[b].push((a, d));
+    }
+    // Candidate pairs: same-blob nodes within CHORD_MAX_M, via local-metre
+    // grid buckets (degree cells under-count longitude span at high latitude).
+    let ref_lat = skeleton.nodes[0][1];
+    let mut mx = 111_320.0 * ref_lat.to_radians().cos().abs();
+    if !mx.is_finite() || mx < 1.0 {
+        // Near-polar / non-finite guard: fall back to a 1 m/deg floor so
+        // bucketing stays well-defined; the haversine filter is authoritative.
+        mx = 1.0;
+    }
+    let cell = |p: [f64; 2]| {
+        (
+            (p[0] * mx / CHORD_MAX_M).floor() as i64,
+            (p[1] * 111_320.0 / CHORD_MAX_M).floor() as i64,
+        )
+    };
+    let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    for (i, np) in skeleton.nodes.iter().enumerate() {
+        buckets.entry(cell(*np)).or_default().push(i);
+    }
+    let mut pairs: Vec<(usize, usize, f64)> = Vec::new();
+    let mut uf = blob.to_vec();
+    for (i, p) in skeleton.nodes.iter().enumerate() {
+        let (cx, cy) = cell(*p);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let Some(cands) = buckets.get(&(cx + dx, cy + dy)) else {
+                    continue;
+                };
+                for &j in cands {
+                    if j <= i {
+                        continue;
+                    }
+                    let d = haversine_m(*p, skeleton.nodes[j]);
+                    if d > CHORD_MAX_M || uf_find(&mut uf, i) != uf_find(&mut uf, j) {
+                        continue;
+                    }
+                    pairs.push((i, j, d));
+                }
+            }
+        }
+    }
+    pairs.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+
+    // Bounded Dijkstra: true when `dst` is reachable from `src` within `cutoff`.
+    let reachable_within = |adj: &[Vec<(usize, f64)>], src: usize, dst: usize, cutoff: f64| {
+        let mut dist = vec![f64::INFINITY; adj.len()];
+        dist[src] = 0.0;
+        let mut heap = std::collections::BinaryHeap::new();
+        heap.push(Visit(0.0, src));
+        while let Some(Visit(g, u)) = heap.pop() {
+            if g > cutoff {
+                break;
+            }
+            if u == dst {
+                return true;
+            }
+            if g > dist[u] {
+                continue;
+            }
+            for &(v, w) in &adj[u] {
+                let ng = g + w;
+                if ng < dist[v] {
+                    dist[v] = ng;
+                    heap.push(Visit(ng, v));
+                }
+            }
+        }
+        false
+    };
+
+    let mut added: Vec<(usize, usize)> = Vec::new();
+    for (i, j, c) in pairs {
+        // Fully inside walkable space at passage width (rejects chords
+        // across kiosks, walls, and track strips).
+        if !centerline_chord_passable(skeleton.nodes[i], skeleton.nodes[j], area) {
+            continue;
+        }
+        // Only a real shortcut: the existing graph path (including bridges
+        // and chords already added) must be longer than c / CHORD_SAVINGS_RATIO.
+        if reachable_within(&adj, i, j, c / CHORD_SAVINGS_RATIO) {
+            continue;
+        }
+        adj[i].push((j, c));
+        adj[j].push((i, c));
+        added.push((i, j));
+    }
+    added
+}
+
 /// Synthesize a routing graph whose horizontal edges are true corridor
 /// centerlines (medial axis of the walkable area), with doorway `opening`s and
 /// transit units snapped on as junctions and transit stacked vertically across
@@ -735,7 +958,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
 
     for &ord in &ordinals {
         let mut walk: Vec<&Value> = Vec::new();
-        let mut openings: Vec<[f64; 2]> = Vec::new();
+        let mut openings: Vec<([f64; 2], [f64; 2])> = Vec::new();
         let mut transit: Vec<TransitUnit<'_>> = Vec::new();
         for f in &document.features {
             let Some(level_id) = f.level_id.as_deref() else {
@@ -761,8 +984,8 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     }
                 }
                 FeatureType::Opening => {
-                    if let Some(m) = linestring_midpoint(geom) {
-                        openings.push(m);
+                    if let Some(ma) = opening_axis(geom) {
+                        openings.push(ma);
                     }
                 }
                 _ => {}
@@ -836,13 +1059,13 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         // anchors split degree-2 chains, preventing visual smoothing from
         // moving a doorway or transit fallback behind a wall or out of range.
         let mut protected = vec![false; skeleton.nodes.len()];
-        for op in &openings {
+        for &(mid, _) in &openings {
             let mut cands: Vec<(usize, usize, f64)> = skeleton
                 .nodes
                 .iter()
                 .enumerate()
                 .filter_map(|(local, n)| {
-                    let d = haversine_m(*n, *op);
+                    let d = haversine_m(*n, mid);
                     (d <= SNAP_MAX_M).then(|| (uf_find(&mut blob, local), local, d))
                 })
                 .collect();
@@ -851,7 +1074,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             for (root, local, _) in cands {
                 if seen_roots.contains_key(&root)
                     || !segment_within_area(
-                        *op,
+                        mid,
                         skeleton.nodes[local],
                         &area,
                         SEGMENT_OUTSIDE_TOL_M,
@@ -908,21 +1131,34 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         }
         let skeleton_range = base..nodes.len();
 
+        // Chord eligibility tracks skeleton + near-blob bridge connectivity
+        // only. Doorway attachments union production `blob` so downstream
+        // passes see one component, but those stub paths are NOT in the chord
+        // adjacency — keep opposite-side doorway components ineligible for
+        // open-space chords that would bypass the stub-mid-stub approach.
+        let mut chord_blob = blob.clone();
+
         // Doorways: bridge each opening to the nearest centerline node of every
         // distinct blob within range, merging areas that share the doorway.
         // Blobs connected here are UNIONED as they are processed, so a second
         // doorway into the same area attaches as a leaf instead of fanning out
         // a parallel bridge, and the near-blob pass below never duplicates a
         // doorway path with a direct skeleton-skeleton edge.
-        let mut opening_nodes: Vec<(usize, [f64; 2])> = Vec::new();
-        for op in &openings {
+        //
+        // Each doorway is a midpoint node flanked by two axis stubs (when
+        // walkable): attaching blobs and transit units connect through the
+        // stub on their side, so routes cross the doorway straight in from
+        // the front. A side whose stub fails validation falls back to the
+        // midpoint (the previous single-node behavior).
+        let mut doorway_nodes: Vec<DoorwayNodes> = Vec::new();
+        for &(mid, axis) in &openings {
             // Nearest VALID node per blob: candidates in distance order, the
             // first whose segment from the opening stays within walkable
             // space. Rejecting blocked snaps is what stops doorways from
             // teleporting across track strips and walls.
             let mut cands: Vec<(usize, usize, f64)> = Vec::new();
             for (local, n) in skeleton.nodes.iter().enumerate() {
-                let d = haversine_m(*n, *op);
+                let d = haversine_m(*n, mid);
                 if d <= SNAP_MAX_M {
                     let root = uf_find(&mut blob, local);
                     cands.push((root, local, d));
@@ -934,7 +1170,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 if per_blob.contains_key(&root) {
                     continue;
                 }
-                if !segment_within_area(*op, skeleton.nodes[local], &area, SEGMENT_OUTSIDE_TOL_M) {
+                if !segment_within_area(mid, skeleton.nodes[local], &area, SEGMENT_OUTSIDE_TOL_M) {
                     continue;
                 }
                 per_blob.insert(root, (local, d));
@@ -945,18 +1181,63 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     detail: format!(
                         "opening ({:.6}, {:.6}) on ordinal {ord} has no centerline node reachable \
                          within walkable space (>{SNAP_MAX_M} m away or blocked)",
-                        op[0], op[1]
+                        mid[0], mid[1]
                     ),
                 });
                 continue;
             }
-            let idx = nodes.len();
+
+            // Axis stubs: midpoint ± axis·δ, kept only when they and their
+            // link to the midpoint stay in walkable space.
+            let mx = 111_320.0 * mid[1].to_radians().cos();
+            let stub_pt = |sign: f64| {
+                [
+                    mid[0] + sign * axis[0] * DOORWAY_STUB_M / mx,
+                    mid[1] + sign * axis[1] * DOORWAY_STUB_M / 111_320.0,
+                ]
+            };
+            let stub_valid = |pt: [f64; 2]| {
+                point_within_area(pt, &area, SEGMENT_OUTSIDE_TOL_M)
+                    && segment_within_area(pt, mid, &area, SEGMENT_OUTSIDE_TOL_M)
+            };
+            let mid_idx = nodes.len();
             nodes.push(RouteNode {
-                lon: op[0],
-                lat: op[1],
+                lon: mid[0],
+                lat: mid[1],
                 ordinal: ord,
             });
-            opening_nodes.push((idx, *op));
+            let mut doorway = DoorwayNodes {
+                mid: mid_idx,
+                fwd: None,
+                bwd: None,
+                mid_pt: mid,
+                axis,
+            };
+            for (sign, is_fwd) in [(1.0_f64, true), (-1.0_f64, false)] {
+                let pt = stub_pt(sign);
+                if !stub_valid(pt) {
+                    continue;
+                }
+                let idx = nodes.len();
+                nodes.push(RouteNode {
+                    lon: pt[0],
+                    lat: pt[1],
+                    ordinal: ord,
+                });
+                edges.push(RouteEdge {
+                    from: mid_idx as u32,
+                    to: idx as u32,
+                    weight: haversine_m(mid, pt) as f32,
+                    ordinal: ord,
+                    interior: Vec::new(),
+                });
+                if is_fwd {
+                    doorway.fwd = Some(idx);
+                } else {
+                    doorway.bwd = Some(idx);
+                }
+            }
+
             let roots: Vec<usize> = per_blob.keys().copied().collect();
             for &r in &roots[1..] {
                 let (ra, rb) = (uf_find(&mut blob, roots[0]), uf_find(&mut blob, r));
@@ -964,15 +1245,35 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     blob[ra] = rb;
                 }
             }
-            for (_root, (local, d)) in per_blob {
+            // Attach each blob through the stub on ITS side of the doorway
+            // (deterministic order); the midpoint stays the fallback target.
+            let mut attach: Vec<(usize, usize)> =
+                per_blob.into_iter().map(|(r, (local, _))| (r, local)).collect();
+            attach.sort_unstable();
+            for (_, local) in attach {
+                let c = skeleton.nodes[local];
+                let dot = axis[0] * (c[0] - mid[0]) * mx + axis[1] * (c[1] - mid[1]) * 111_320.0;
+                let stub = if dot >= 0.0 { doorway.fwd } else { doorway.bwd };
+                let (t_idx, t_pt) = match stub {
+                    Some(i) => (i, [nodes[i].lon, nodes[i].lat]),
+                    None => (mid_idx, mid),
+                };
+                let (t_idx, t_pt) = if t_idx != mid_idx
+                    && !segment_within_area(t_pt, c, &area, SEGMENT_OUTSIDE_TOL_M)
+                {
+                    (mid_idx, mid)
+                } else {
+                    (t_idx, t_pt)
+                };
                 edges.push(RouteEdge {
-                    from: idx as u32,
+                    from: t_idx as u32,
                     to: (base + local) as u32,
-                    weight: d as f32,
+                    weight: haversine_m(t_pt, c) as f32,
                     ordinal: ord,
                     interior: Vec::new(),
                 });
             }
+            doorway_nodes.push(doorway);
         }
 
         // Near-blob bridging: fuse distinct blobs that abut without a doorway.
@@ -1021,6 +1322,9 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         }
         let mut keys: Vec<(usize, usize)> = bridges.keys().copied().collect();
         keys.sort_unstable();
+        // Skeleton-local accepted bridges (metre weights) — feed the chord
+        // pass so savings Dijkstra sees them and does not re-emit the pair.
+        let mut accepted_bridges: Vec<(usize, usize, f64)> = Vec::new();
         for key in keys {
             let (li, lj, d) = bridges[&key];
             if uf_find(&mut blob, li) == uf_find(&mut blob, lj) {
@@ -1034,10 +1338,31 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             }
             let (ra, rb) = (uf_find(&mut blob, li), uf_find(&mut blob, lj));
             blob[ra] = rb;
+            // Bridges are in chord savings adjacency — eligibility must match.
+            let (cra, crb) = (uf_find(&mut chord_blob, li), uf_find(&mut chord_blob, lj));
+            if cra != crb {
+                chord_blob[cra] = crb;
+            }
+            accepted_bridges.push((li, lj, d));
             edges.push(RouteEdge {
                 from: (base + li) as u32,
                 to: (base + lj) as u32,
                 weight: d as f32,
+                ordinal: ord,
+                interior: Vec::new(),
+            });
+        }
+
+        // Open-space shortcuts: straight, fully passable chords that beat the
+        // centerline path through open areas (concourse diagonals). Same
+        // chord-eligible component only (skeleton + bridges; not doorway-only
+        // unions), so they never merge components or duplicate doorway/bridge
+        // paths (the savings test rejects those).
+        for (a, b) in shortcut_chords(&skeleton, &chord_blob, &area, &accepted_bridges) {
+            edges.push(RouteEdge {
+                from: (base + a) as u32,
+                to: (base + b) as u32,
+                weight: haversine_m(skeleton.nodes[a], skeleton.nodes[b]) as f32,
                 ordinal: ord,
                 interior: Vec::new(),
             });
@@ -1059,23 +1384,41 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             let unit_area: Option<MultiPolygon<f64>> =
                 footprint.clone().map(|p| MultiPolygon::new(vec![p]));
             let mut attached = false;
-            for &(oidx, op) in &opening_nodes {
-                let Some(boundary_d) = point_boundary_dist_m(op, geom) else {
+            for doorway in &doorway_nodes {
+                let Some(boundary_d) = point_boundary_dist_m(doorway.mid_pt, geom) else {
                     continue;
                 };
                 if boundary_d > TRANSIT_OPENING_SNAP_M {
                     continue;
                 }
-                if !unit_area
-                    .as_ref()
-                    .is_some_and(|u| segment_within_area(*tp, op, u, SEGMENT_OUTSIDE_TOL_M))
-                {
+                // The unit's own side of the doorway (toward its centroid).
+                let dmx = 111_320.0 * doorway.mid_pt[1].to_radians().cos();
+                let dot = doorway.axis[0] * (tp[0] - doorway.mid_pt[0]) * dmx
+                    + doorway.axis[1] * (tp[1] - doorway.mid_pt[1]) * 111_320.0;
+                let stub = if dot >= 0.0 { doorway.fwd } else { doorway.bwd };
+                let (t_idx, t_pt) = match stub {
+                    Some(i) => (i, [nodes[i].lon, nodes[i].lat]),
+                    None => (doorway.mid, doorway.mid_pt),
+                };
+                // The stub must be reachable THROUGH the unit itself (its real
+                // door); otherwise fall back to the midpoint under the same
+                // rule, and skip the opening when neither is reachable.
+                let reachable = |pt: [f64; 2]| {
+                    unit_area
+                        .as_ref()
+                        .is_some_and(|u| segment_within_area(*tp, pt, u, SEGMENT_OUTSIDE_TOL_M))
+                };
+                let (t_idx, t_pt) = if reachable(t_pt) {
+                    (t_idx, t_pt)
+                } else if t_idx != doorway.mid && reachable(doorway.mid_pt) {
+                    (doorway.mid, doorway.mid_pt)
+                } else {
                     continue;
-                }
+                };
                 edges.push(RouteEdge {
                     from: idx as u32,
-                    to: oidx as u32,
-                    weight: haversine_m(*tp, op) as f32,
+                    to: t_idx as u32,
+                    weight: haversine_m(*tp, t_pt) as f32,
                     ordinal: ord,
                     interior: Vec::new(),
                 });
@@ -2131,7 +2474,7 @@ mod tests {
         assert_eq!(
             same_floor_degree(g, onode),
             2,
-            "opening bridges exactly the two spines"
+            "midpoint touches only its two stubs"
         );
     }
 
@@ -2168,23 +2511,20 @@ mod tests {
         let g = &build.graph;
         assert_eq!(component_count(g), 1);
 
-        let degrees: Vec<usize> = [door1, door2]
-            .iter()
-            .map(|d| {
-                let dm = linestring_midpoint(d).unwrap();
-                let node = g
-                    .nodes
-                    .iter()
-                    .position(|n| [n.lon, n.lat] == dm)
-                    .expect("opening node exists");
-                same_floor_degree(g, node)
-            })
-            .collect();
-        assert_eq!(
-            degrees,
-            vec![2, 1],
-            "second doorway attaches as a leaf, not a parallel bridge"
-        );
+        // The doorway group (midpoint + axis stubs) of the first door bridges
+        // both spines (two attach edges); the second door's group attaches as
+        // a leaf (exactly one attach edge to the skeleton).
+        let attach_count = |d: &Value| {
+            let group = doorway_group(g, d);
+            g.edges
+                .iter()
+                .filter(|e| {
+                    group.contains(&(e.from as usize)) != group.contains(&(e.to as usize))
+                })
+                .count()
+        };
+        assert_eq!(attach_count(&door1), 2, "first doorway bridges both spines");
+        assert_eq!(attach_count(&door2), 1, "second doorway attaches as a leaf");
     }
 
     #[test]
@@ -2346,5 +2686,416 @@ mod tests {
         let small = navigable_area(&[&square(139.70, 35.69, 0.0004)], &[]);
         let so = original_vertex_count(&small);
         assert_eq!(choose_spacing(&small, so), Some(BASE_SPACING_DEG));
+    }
+
+    /// Node indices at the doorway midpoint and (when present) its two axis
+    /// stubs, located by exact geometry.
+    fn doorway_group(g: &kiriko_route::RouteGraph, door: &Value) -> Vec<usize> {
+        let mid = linestring_midpoint(door).unwrap();
+        let mx = 111_320.0 * mid[1].to_radians().cos();
+        // Door axis from the line's first→last vertex (test doors are 2-vertex).
+        let coords = door
+            .as_object()
+            .and_then(|o| o.get("coordinates"))
+            .and_then(Value::as_array)
+            .unwrap();
+        let pt = |i: usize| {
+            let p = coords[i].as_array().unwrap();
+            [p[0].as_f64().unwrap(), p[1].as_f64().unwrap()]
+        };
+        let (a, b) = (pt(0), pt(coords.len() - 1));
+        let (dx, dy) = ((b[0] - a[0]) * mx, (b[1] - a[1]) * 111_320.0);
+        let len = (dx * dx + dy * dy).sqrt();
+        let (ux, uy) = (dx / len, dy / len);
+        let stub = |sign: f64| {
+            [
+                mid[0] + sign * ux * DOORWAY_STUB_M / mx,
+                mid[1] + sign * uy * DOORWAY_STUB_M / 111_320.0,
+            ]
+        };
+        let want = [mid, stub(1.0), stub(-1.0)];
+        g.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| want.iter().any(|w| (n.lon - w[0]).abs() < 1e-9 && (n.lat - w[1]).abs() < 1e-9))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[test]
+    fn doorway_stubs_align_with_the_opening_axis() {
+        // One 36 m × 11 m walkway with a doorway across its middle (axis in
+        // latitude): the doorway midpoint must be flanked by two stub nodes on
+        // the opening axis, and the centerline must attach through a stub —
+        // never directly to the midpoint.
+        let walk = rect(139.70000, 35.600002, 0.00040, 0.00010);
+        let door = line(139.70000, 35.599995, 139.70000, 35.600005);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        let dm = linestring_midpoint(&door).unwrap();
+        let onode = g
+            .nodes
+            .iter()
+            .position(|n| [n.lon, n.lat] == dm)
+            .expect("opening midpoint node exists");
+        let group = doorway_group(g, &door);
+        assert_eq!(group.len(), 3, "midpoint plus both axis stubs");
+        // Midpoint degree is exactly 2: edges to the two stubs, nothing else.
+        assert_eq!(same_floor_degree(g, onode), 2, "midpoint touches only its stubs");
+        // Both stubs lie on the door axis: same lon as the midpoint, ±δ lat.
+        for &s in &group {
+            if s == onode {
+                continue;
+            }
+            assert!((g.nodes[s].lon - dm[0]).abs() < 1e-9, "stub on the opening axis");
+        }
+        // The centerline attaches through a stub: some stub has a non-midpoint edge.
+        let attached = group.iter().any(|&s| {
+            s != onode
+                && g.edges.iter().any(|e| {
+                    let (a, b) = (e.from as usize, e.to as usize);
+                    (a == s && b != onode) || (b == s && a != onode)
+                })
+        });
+        assert!(attached, "centerline attaches through a stub");
+    }
+
+    #[test]
+    fn stub_attach_is_side_aware() {
+        // Two parallel walkways joined by a doorway (axis in latitude): each
+        // blob's centerline attaches to the stub on ITS side of the doorway.
+        let door = line(139.70000, 35.600004, 139.70000, 35.600010);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("wa", FeatureType::Unit, "l0", Some("walkway"), rect(139.70000, 35.600000, 0.00040, 0.00001)),
+                feature("wb", FeatureType::Unit, "l0", Some("walkway"), rect(139.70000, 35.600014, 0.00040, 0.00001)),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        assert_eq!(component_count(g), 1, "doorway connects the two walkways");
+        let dm = linestring_midpoint(&door).unwrap();
+        let onode = g.nodes.iter().position(|n| [n.lon, n.lat] == dm).unwrap();
+        let group = doorway_group(g, &door);
+        assert_eq!(group.len(), 3);
+        // Every attach edge from the doorway group to the skeleton lands on
+        // the side-appropriate stub: a neighbor on the lower walkway's side
+        // has lat below the midpoint, and vice versa.
+        for e in &g.edges {
+            let (a, b) = (e.from as usize, e.to as usize);
+            let (inside, outside) = match (group.contains(&a), group.contains(&b)) {
+                (true, false) => (a, b),
+                (false, true) => (b, a),
+                _ => continue,
+            };
+            assert_ne!(inside, onode, "no direct midpoint attach");
+            assert_eq!(
+                (g.nodes[inside].lat - dm[1]).signum(),
+                (g.nodes[outside].lat - dm[1]).signum(),
+                "attach lands on the stub of the same side"
+            );
+        }
+    }
+
+    #[test]
+    fn outside_stub_side_is_dropped() {
+        // A doorway on the walkway's outer wall: the stub pointing outside
+        // the walkable area is dropped; the midpoint and inside stub remain.
+        let walk = rect(139.70000, 35.60000, 0.00040, 0.00002);
+        let door = line(139.70000, 35.599990, 139.70000, 35.600000);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        let dm = linestring_midpoint(&door).unwrap();
+        assert!(g.nodes.iter().any(|n| [n.lon, n.lat] == dm), "midpoint node exists");
+        let group = doorway_group(g, &door);
+        assert_eq!(group.len(), 2, "only the inside stub survives");
+        assert_eq!(component_count(g), 1);
+    }
+
+    #[test]
+    fn multilinestring_axis_matches_the_midpoints_part() {
+        // Two exactly equal-length parts (binary-exact 0.0625 lon spans at
+        // the same latitude) with opposite orientations: midpoint and axis
+        // must both come from the FIRST part (linestring_midpoint keeps the
+        // first on ties; a last-wins axis pick flips the sign).
+        let geom = Value::Object(BTreeMap::from([
+            ("type".to_string(), Value::String("MultiLineString".to_string())),
+            (
+                "coordinates".to_string(),
+                Value::Array(vec![
+                    Value::Array(vec![
+                        Value::Array(vec![Value::Number(139.0), Value::Number(35.0)]),
+                        Value::Array(vec![Value::Number(139.0625), Value::Number(35.0)]),
+                    ]),
+                    Value::Array(vec![
+                        Value::Array(vec![Value::Number(139.1875), Value::Number(35.0)]),
+                        Value::Array(vec![Value::Number(139.125), Value::Number(35.0)]),
+                    ]),
+                ]),
+            ),
+        ]));
+        let (mid, axis) = opening_axis(&geom).expect("axis parses");
+        assert!(
+            (mid[0] - 139.03125).abs() < 1e-9 && (mid[1] - 35.0).abs() < 1e-9,
+            "midpoint from the first part: {mid:?}"
+        );
+        assert!(
+            axis[0] > 0.99 && axis[1].abs() < 0.01,
+            "axis along the first part (+lon): {axis:?}"
+        );
+    }
+
+    /// Metre-offset coordinate helper for chord tests (lat 35.6).
+    fn xy_at(cx: f64, cy: f64) -> impl Fn(f64, f64) -> [f64; 2] {
+        let mx = 111_320.0 * cy.to_radians().cos();
+        move |x_m: f64, y_m: f64| [cx + x_m / mx, cy + y_m / 111_320.0]
+    }
+
+    fn rect_poly(cx: f64, cy: f64, x0: f64, y0: f64, x1: f64, y1: f64) -> Polygon<f64> {
+        let xy = xy_at(cx, cy);
+        Polygon::new(
+            LineString::from(vec![
+                (xy(x0, y0)[0], xy(x0, y0)[1]),
+                (xy(x1, y0)[0], xy(x1, y0)[1]),
+                (xy(x1, y1)[0], xy(x1, y1)[1]),
+                (xy(x0, y1)[0], xy(x0, y1)[1]),
+                (xy(x0, y0)[0], xy(x0, y0)[1]),
+            ]),
+            vec![],
+        )
+    }
+
+    /// Union-find parent vec with `edges` unioned in (mirrors production,
+    /// where `blob` is already unioned by skeleton/doorway/bridge passes).
+    fn unioned_blob(n: usize, edges: &[(usize, usize)]) -> Vec<usize> {
+        let mut blob: Vec<usize> = (0..n).collect();
+        for &(a, b) in edges {
+            let (ra, rb) = (uf_find(&mut blob, a), uf_find(&mut blob, b));
+            if ra != rb {
+                blob[ra] = rb;
+            }
+        }
+        blob
+    }
+
+    #[test]
+    fn chords_cut_a_detour_but_not_a_straight_spine() {
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -45.0, 70.0, 5.0)]);
+        // V-detour skeleton: A(0,0) → B(20,-30) → C(40,0) → D(60,0). The A–C
+        // chord (40 m) beats the 72 m graph path; everything else is adjacent
+        // or out of range.
+        let detour = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(20.0, -30.0), xy(40.0, 0.0), xy(60.0, 0.0)],
+            edges: vec![(0, 1), (1, 2), (2, 3)],
+        };
+        let blob = unioned_blob(4, &detour.edges);
+        let chords = shortcut_chords(&detour, &blob, &area, &[]);
+        assert_eq!(chords, vec![(0, 2)], "A–C chord cuts the V detour");
+
+        let straight = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(20.0, 0.0), xy(40.0, 0.0)],
+            edges: vec![(0, 1), (1, 2)],
+        };
+        let blob = unioned_blob(3, &straight.edges);
+        assert!(
+            shortcut_chords(&straight, &blob, &area, &[]).is_empty(),
+            "straight spine gains no chords"
+        );
+    }
+
+    #[test]
+    fn chords_never_cross_a_hole() {
+        // Same V detour, but a non-walkable hole blocks the A–C chord.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let hole = LineString::from(vec![
+            (xy(10.0, -5.0)[0], xy(10.0, -5.0)[1]),
+            (xy(30.0, -5.0)[0], xy(30.0, -5.0)[1]),
+            (xy(30.0, 4.0)[0], xy(30.0, 4.0)[1]),
+            (xy(10.0, 4.0)[0], xy(10.0, 4.0)[1]),
+            (xy(10.0, -5.0)[0], xy(10.0, -5.0)[1]),
+        ]);
+        let mut poly = rect_poly(cx, cy, -10.0, -45.0, 70.0, 5.0);
+        poly.interiors_push(hole);
+        let area = MultiPolygon::new(vec![poly]);
+        let detour = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(20.0, -30.0), xy(40.0, 0.0)],
+            edges: vec![(0, 1), (1, 2)],
+        };
+        let blob = unioned_blob(3, &detour.edges);
+        assert!(
+            shortcut_chords(&detour, &blob, &area, &[]).is_empty(),
+            "the chord across the hole is rejected"
+        );
+    }
+
+    #[test]
+    fn zigzag_chain_gains_shortcut_chords_with_feedback() {
+        // Ten-node zigzag chain zi = (10·i, −15·(i mod 2)) (18 m hops) in an
+        // open area. Two-hop chords (20 m vs 36 m graph) all qualify; three-
+        // and four-hop candidates become reachable through the chords already
+        // added (the savings test sees them), so only the two-hop set lands.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -15.0, -25.0, 100.0, 5.0)]);
+        let nodes: Vec<[f64; 2]> = (0..10)
+            .map(|i| xy(10.0 * i as f64, -15.0 * (i % 2) as f64))
+            .collect();
+        let edges: Vec<(usize, usize)> = (0..9).map(|i| (i, i + 1)).collect();
+        let skeleton = Skeleton { nodes, edges };
+        let blob = unioned_blob(10, &skeleton.edges);
+        let chords = shortcut_chords(&skeleton, &blob, &area, &[]);
+        assert_eq!(
+            chords,
+            vec![
+                (0, 2),
+                (1, 3),
+                (2, 4),
+                (3, 5),
+                (4, 6),
+                (5, 7),
+                (6, 8),
+                (7, 9),
+            ],
+            "exact sorted chord set, feedback-aware"
+        );
+        // Determinism: same input, same chords.
+        let again = shortcut_chords(&skeleton, &unioned_blob(10, &skeleton.edges), &area, &[]);
+        assert_eq!(chords, again);
+    }
+
+    #[test]
+    fn chords_do_not_reemit_an_existing_bridge() {
+        // Two disconnected skeleton components whose blob roots are already
+        // unified (as after near-blob bridging). The accepted bridge is
+        // supplied as an existing local edge; the chord pass must see it in
+        // adjacency and exclude the pair rather than re-emit it.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -10.0, 30.0, 10.0)]);
+        let skeleton = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(1.5, 0.0)],
+            edges: vec![],
+        };
+        // Blob already unified as if the bridge was accepted.
+        let blob = unioned_blob(2, &[(0, 1)]);
+        let bridge_d = haversine_m(skeleton.nodes[0], skeleton.nodes[1]);
+        assert!(bridge_d < CHORD_MAX_M);
+        // Without the existing edge the pair would qualify (no graph path).
+        let without = shortcut_chords(&skeleton, &blob, &area, &[]);
+        assert_eq!(without, vec![(0, 1)], "precondition: bare pair is a chord");
+        // With the bridge seeded, savings Dijkstra rejects the pair.
+        let with = shortcut_chords(&skeleton, &blob, &area, &[(0, 1, bridge_d)]);
+        assert!(
+            with.is_empty(),
+            "accepted bridge pair must not be re-emitted as a chord: {with:?}"
+        );
+    }
+
+    #[test]
+    fn chords_find_pairs_at_high_latitude_metre_buckets() {
+        // At lat 60°, lon m/deg ≈ half of 111_320. Old degree-grid cells of
+        // size CHORD_MAX_M/111_320 put a sub-40 m east-west pair two columns
+        // apart when the pair straddles two cell boundaries, so the ±1
+        // neighbor scan missed them. Local-metre buckets must still surface
+        // the pair.
+        let cy: f64 = 60.00000;
+        let old_cell_deg = CHORD_MAX_M / 111_320.0;
+        // Place A near the end of a degree-grid cell and C 1.1 cells east so
+        // floor(lon/cell) differs by 2 while haversine stays well under 40 m
+        // (≈ 22 m at lat 60°).
+        let a_lon = (10.0_f64 / old_cell_deg).floor() * old_cell_deg + old_cell_deg * 0.95;
+        let c_lon = a_lon + old_cell_deg * 1.1;
+        let b_lon = (a_lon + c_lon) / 2.0;
+        let a = [a_lon, cy];
+        let b = [b_lon, cy - 30.0 / 111_320.0];
+        let c = [c_lon, cy];
+        // Wide open walkable rect covering the V (metre offsets around A).
+        let area = MultiPolygon::new(vec![rect_poly(a_lon, cy, -10.0, -45.0, 50.0, 5.0)]);
+        let detour = Skeleton {
+            nodes: vec![a, b, c],
+            edges: vec![(0, 1), (1, 2)],
+        };
+        let old_ax = (a[0] / old_cell_deg).floor() as i64;
+        let old_cx = (c[0] / old_cell_deg).floor() as i64;
+        assert!(
+            (old_cx - old_ax).abs() >= 2,
+            "precondition: old degree grid separates A–C by ≥2 lon cells ({old_ax} vs {old_cx})"
+        );
+        let d_ac = haversine_m(a, c);
+        assert!(d_ac < CHORD_MAX_M, "precondition: A–C within chord range ({d_ac})");
+        // Graph path A–B–C is a deep V (~60 m+), so the chord qualifies.
+        let d_ab = haversine_m(a, b);
+        let d_bc = haversine_m(b, c);
+        assert!(
+            d_ab + d_bc > d_ac / CHORD_SAVINGS_RATIO,
+            "precondition: detour beats savings cutoff"
+        );
+
+        let blob = unioned_blob(3, &detour.edges);
+        let chords = shortcut_chords(&detour, &blob, &area, &[]);
+        assert_eq!(
+            chords,
+            vec![(0, 2)],
+            "metre-scale buckets must find the high-latitude A–C chord"
+        );
+    }
+
+    #[test]
+    fn chords_skip_doorway_only_unions() {
+        // Two skeleton components joined only through a doorway (no skeleton
+        // edge, no near-blob bridge). Nodes sit ~20 m apart in open space so
+        // a straight chord is passable and would beat any missing graph path.
+        // Production `blob` is already doorway-unified; chord eligibility
+        // keeps the pre-doorway roots separate. The pair must NOT become a
+        // chord (that would bypass the stub-mid-stub doorway approach).
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -10.0, 40.0, 10.0)]);
+        let skeleton = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(20.0, 0.0)],
+            edges: vec![],
+        };
+        let d = haversine_m(skeleton.nodes[0], skeleton.nodes[1]);
+        assert!(d < CHORD_MAX_M && d > 0.0);
+        assert!(centerline_chord_passable(
+            skeleton.nodes[0],
+            skeleton.nodes[1],
+            &area
+        ));
+
+        // Old final-blob input (doorway-unioned): pair looks same-component
+        // and disconnected in chord adjacency → free chord.
+        let door_unified = unioned_blob(2, &[(0, 1)]);
+        assert_eq!(
+            shortcut_chords(&skeleton, &door_unified, &area, &[]),
+            vec![(0, 1)],
+            "precondition: doorway-unified blob would accept the cross-door chord"
+        );
+
+        // Chord-eligibility UF (skeleton only — no doorway union): suppressed.
+        let chord_eligible = unioned_blob(2, &[]);
+        assert!(
+            shortcut_chords(&skeleton, &chord_eligible, &area, &[]).is_empty(),
+            "doorway-only unions must not make opposite-side nodes chord-eligible"
+        );
     }
 }

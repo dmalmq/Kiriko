@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use crate::graph::{RouteEdge, RouteGraph};
+use crate::graph::{meters_to_cost, RouteEdge, RouteGraph};
 
 /// A query endpoint: position plus venue level ordinal.
 #[derive(Debug, Clone, Copy)]
@@ -56,17 +56,21 @@ struct Open {
     f: f64,
     g: f64,
     node: usize,
+    /// Actual origin edge index that seeded this path (not candidate rank).
+    origin_edge: usize,
 }
 
 impl Eq for Open {}
 
 impl Ord for Open {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Min-heap by f, ties broken by node index for determinism.
+        // BinaryHeap is a max-heap: reverse each key so lower values pop first
+        // (min f, then lower origin edge index, then lower node index).
         other
             .f
             .total_cmp(&self.f)
-            .then_with(|| self.node.cmp(&other.node))
+            .then_with(|| other.origin_edge.cmp(&self.origin_edge))
+            .then_with(|| other.node.cmp(&self.node))
     }
 }
 
@@ -116,89 +120,93 @@ fn project_point_on_polyline(poly: &[[f64; 2]], px: f64, py: f64) -> ([f64; 2], 
     (best.0, best.1, total)
 }
 
-/// Nearest edge projection to `p`; same-ordinal edges beat closer off-floor
-/// edges. `None` only when the graph has no edges.
-fn snap_to_edge(graph: &RouteGraph, p: &Point3) -> Option<EdgeSnap> {
-    let mut best: Option<(EdgeSnap, bool, f64)> = None; // (snap, same_floor, dist)
+/// Snap candidates evaluated per endpoint click, best first.
+const SNAP_CANDIDATES: usize = 3;
+
+/// The up-to-[`SNAP_CANDIDATES`] nearest same-floor edges by projection
+/// distance (ties by edge index). When no same-floor edge exists, the single
+/// nearest off-floor edge — the fallback for floors the network does not
+/// cover.
+fn snap_candidates(graph: &RouteGraph, p: &Point3) -> Vec<EdgeSnap> {
+    let mut same: Vec<(usize, EdgeSnap, f64)> = Vec::new();
+    let mut best_off: Option<(EdgeSnap, f64)> = None;
     for (i, e) in graph.edges.iter().enumerate() {
         let poly = graph.edge_polyline(e);
         let (proj, along, total) = project_point_on_polyline(&poly, p.lon, p.lat);
         let dist = haversine_m(p.lon, p.lat, proj[0], proj[1]);
-        let same = e.ordinal == p.ordinal;
-        let better = match &best {
-            None => true,
-            Some((_, bsame, bdist)) => {
-                // Prefer same-floor; within the same class, prefer nearer.
-                (same, -dist).partial_cmp(&(*bsame, -*bdist)).unwrap()
-                    == std::cmp::Ordering::Greater
-            }
+        let snap = EdgeSnap {
+            edge_index: i,
+            projected: proj,
+            along,
+            total,
+            ordinal: e.ordinal,
         };
-        if better {
-            best = Some((
-                EdgeSnap {
-                    edge_index: i,
-                    projected: proj,
-                    along,
-                    total,
-                    ordinal: e.ordinal,
-                },
-                same,
-                dist,
-            ));
+        if e.ordinal == p.ordinal {
+            same.push((i, snap, dist));
+        } else if best_off.as_ref().is_none_or(|(_, bd)| dist < *bd) {
+            best_off = Some((snap, dist));
         }
     }
-    best.map(|(s, _, _)| s)
+    if same.is_empty() {
+        return best_off.map_or_else(Vec::new, |(s, _)| vec![s]);
+    }
+    same.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.0.cmp(&b.0)));
+    same.truncate(SNAP_CANDIDATES);
+    same.into_iter().map(|(_, s, _)| s).collect()
+}
+
+/// Off-network connector cost (click → projection) in routing-cost units.
+fn connector_cost(p: &Point3, s: &EdgeSnap) -> f64 {
+    f64::from(meters_to_cost(haversine_m(
+        p.lon,
+        p.lat,
+        s.projected[0],
+        s.projected[1],
+    )))
 }
 
 /// Route from `origin` to `dest` over the graph: project both endpoints onto
-/// their nearest edge, then A* between the four virtual endpoints (edges
-/// traversed in both directions). Returns floor-grouped corridor polylines
-/// that hug the edge geometry, or `None` when the projections are
-/// disconnected.
+/// their best same-floor edge candidates, then A* between the virtual
+/// endpoints of every candidate pair (edges traversed in both directions),
+/// choosing the snap pair and path with the lowest total walked cost (graph
+/// + connector legs). A shared-edge pair also competes as a direct
+/// junction-free walk. Returns floor-grouped corridor polylines that hug the
+/// edge geometry, or `None` when the projections are disconnected.
 pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> {
-    // Reject non-finite endpoint coordinates with a controlled `None` — never a
-    // panic or NaN-poisoned comparison (which would trap the WASM instance).
+    // Reject non-finite endpoint coordinates with a controlled `None` — never
+    // a panic or NaN-poisoned comparison (which would trap the WASM instance).
     if !endpoint_is_finite(&origin) || !endpoint_is_finite(&dest) {
         return None;
     }
-    let o = snap_to_edge(graph, &origin)?;
-    let d = snap_to_edge(graph, &dest)?;
-    let origin_projected = [o.projected[0], o.projected[1], o.ordinal];
-    let dest_projected = [d.projected[0], d.projected[1], d.ordinal];
+    let ocands = snap_candidates(graph, &origin);
+    let dcands = snap_candidates(graph, &dest);
+    if ocands.is_empty() || dcands.is_empty() {
+        return None;
+    }
 
-    // Same-edge shortcut: walk straight along the one edge between projections.
-    if o.edge_index == d.edge_index {
-        let e = &graph.edges[o.edge_index];
-        let poly = graph.edge_polyline(e);
-        let (lo, hi) = (o.along.min(d.along), o.along.max(d.along));
-        let mut coords = vec![[origin_projected[0], origin_projected[1]]];
-        // Interior polyline vertices whose arc-length falls strictly between.
-        let mut acc = 0.0;
-        for w in poly.windows(2) {
-            acc += haversine_m(w[0][0], w[0][1], w[1][0], w[1][1]);
-            if acc > lo && acc < hi {
-                coords.push(w[1]);
+    // Direct same-edge candidates: walk straight along the one shared edge.
+    // Selection key: (sel cost, origin edge index, dest edge index).
+    let mut best_direct: Option<(Route, f64, usize, usize)> = None;
+    for o in &ocands {
+        for d in &dcands {
+            if o.edge_index != d.edge_index {
+                continue;
+            }
+            let r = same_edge_route(graph, o, d);
+            let sel =
+                f64::from(r.total_weight) + connector_cost(&origin, o) + connector_cost(&dest, d);
+            let better = match &best_direct {
+                None => true,
+                Some((_, bs, bo, bd)) => {
+                    sel.total_cmp(bs) == Ordering::Less
+                        || (sel.total_cmp(bs) == Ordering::Equal
+                            && (o.edge_index, d.edge_index) < (*bo, *bd))
+                }
+            };
+            if better {
+                best_direct = Some((r, sel, o.edge_index, d.edge_index));
             }
         }
-        coords.push([dest_projected[0], dest_projected[1]]);
-        if o.along > d.along {
-            coords.reverse();
-        }
-        let weight = (e.weight as f64 * (hi - lo) / o.total.max(f64::EPSILON)) as f32;
-        return Some(Route {
-            segments: group_segments(
-                coords
-                    .into_iter()
-                    .map(|c| TaggedVertex {
-                        coord: c,
-                        ordinal: e.ordinal,
-                    })
-                    .collect(),
-            ),
-            total_weight: weight,
-            origin_projected,
-            dest_projected,
-        });
     }
 
     let n = graph.nodes.len();
@@ -224,147 +232,272 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
     if !k.is_finite() {
         k = 0.0;
     }
-    // Partial-edge costs from each projection to that edge's endpoints.
-    let oe = &graph.edges[o.edge_index];
-    let de = &graph.edges[d.edge_index];
-    let o_from_cost = f64::from(oe.weight) * o.along / o.total.max(f64::EPSILON);
-    let o_to_cost = f64::from(oe.weight) * (o.total - o.along) / o.total.max(f64::EPSILON);
-    let d_from_cost = f64::from(de.weight) * d.along / d.total.max(f64::EPSILON);
-    let d_to_cost = f64::from(de.weight) * (d.total - d.along) / d.total.max(f64::EPSILON);
 
-    // Heuristic toward the destination projection point.
+    // Heuristic: lower bound toward the nearest destination projection.
     let h = |i: usize| {
         let node = &graph.nodes[i];
-        k * haversine_m(node.lon, node.lat, dest_projected[0], dest_projected[1])
+        dcands
+            .iter()
+            .map(|d| k * haversine_m(node.lon, node.lat, d.projected[0], d.projected[1]))
+            .fold(f64::INFINITY, f64::min)
     };
 
+    // Multi-source seeds: both endpoints of every origin candidate, with the
+    // connector leg folded in so selection accounts for the off-network walk.
+    // On equal g, keep the seed with the lower actual origin edge index.
     let mut dist = vec![f64::INFINITY; n];
     let mut parent: Vec<Option<(usize, usize)>> = vec![None; n]; // (prev_node, edge_index)
-    let seed = [(oe.from as usize, o_from_cost), (oe.to as usize, o_to_cost)];
+    let mut seed_origin_edge: Vec<Option<usize>> = vec![None; n]; // node → origin edge_index
     let mut heap = BinaryHeap::new();
-    for (node, g0) in seed {
-        if g0 < dist[node] {
-            dist[node] = g0;
-            heap.push(Open {
-                f: g0 + h(node),
-                g: g0,
-                node,
-            });
-        }
-    }
-    let (dp, dq) = (de.from as usize, de.to as usize);
-    // Run until both destination endpoints are finalized or the heap empties.
-    let mut settled_p = false;
-    let mut settled_q = false;
-    while let Some(Open { g, node, .. }) = heap.pop() {
-        if g > dist[node] {
-            continue;
-        }
-        if node == dp {
-            settled_p = true;
-        }
-        if node == dq {
-            settled_q = true;
-        }
-        if settled_p && settled_q {
-            break;
-        }
-        for &(next, ei, w) in &adj[node] {
-            let ng = g + f64::from(w);
-            if ng < dist[next] {
-                dist[next] = ng;
-                parent[next] = Some((node, ei));
+    for o in &ocands {
+        let oe = &graph.edges[o.edge_index];
+        let conn = connector_cost(&origin, o);
+        let o_from_cost = f64::from(oe.weight) * o.along / o.total.max(f64::EPSILON) + conn;
+        let o_to_cost =
+            f64::from(oe.weight) * (o.total - o.along) / o.total.max(f64::EPSILON) + conn;
+        for (node, g0) in [(oe.from as usize, o_from_cost), (oe.to as usize, o_to_cost)] {
+            let better = match (dist[node], seed_origin_edge[node]) {
+                (d, _) if g0 < d => true,
+                (d, Some(be)) if g0 == d && o.edge_index < be => true,
+                (d, None) if g0 == d => true,
+                _ => false,
+            };
+            if better {
+                dist[node] = g0;
+                seed_origin_edge[node] = Some(o.edge_index);
+                parent[node] = None;
                 heap.push(Open {
-                    f: ng + h(next),
-                    g: ng,
-                    node: next,
+                    f: g0 + h(node),
+                    g: g0,
+                    node,
+                    origin_edge: o.edge_index,
                 });
             }
         }
     }
 
-    // Pick the destination endpoint minimizing (dist + partial-to-dest).
-    let cand_p = if dist[dp].is_finite() {
-        Some((dp, dist[dp] + d_from_cost))
-    } else {
-        None
-    };
-    let cand_q = if dist[dq].is_finite() {
-        Some((dq, dist[dq] + d_to_cost))
-    } else {
-        None
-    };
-    let (goal, total) = [cand_p, cand_q]
-        .into_iter()
-        .flatten()
-        .min_by(|a, b| a.1.total_cmp(&b.1))?;
-
-    // Reconstruct the node path goal → origin endpoint.
-    let mut node_path = vec![goal];
-    let mut edge_path = Vec::new(); // edge_index used to STEP INTO each node from its parent
-    let mut cur = goal;
-    while let Some((prev, ei)) = parent[cur] {
-        edge_path.push(ei);
-        node_path.push(prev);
-        cur = prev;
+    // Goals: both endpoints of every destination candidate.
+    let mut is_goal = vec![false; n];
+    let mut goal_count = 0usize;
+    for d in &dcands {
+        let de = &graph.edges[d.edge_index];
+        for node in [de.from as usize, de.to as usize] {
+            if !is_goal[node] {
+                is_goal[node] = true;
+                goal_count += 1;
+            }
+        }
     }
-    node_path.reverse();
-    edge_path.reverse();
-    // `node_path[i] -> node_path[i+1]` traverses `edge_path[i]`.
+    let mut settled = 0usize;
+    while let Some(Open {
+        g,
+        node,
+        origin_edge,
+        ..
+    }) = heap.pop()
+    {
+        // Stale entry: worse (g, origin_edge) than the recorded best.
+        let stale = match seed_origin_edge[node] {
+            Some(be) => {
+                g > dist[node] || (g == dist[node] && origin_edge > be)
+            }
+            None => g > dist[node],
+        };
+        if stale {
+            continue;
+        }
+        if is_goal[node] {
+            settled += 1;
+            if settled == goal_count {
+                break;
+            }
+        }
+        for &(next, ei, w) in &adj[node] {
+            let ng = g + f64::from(w);
+            let better = match (dist[next], seed_origin_edge[next]) {
+                (d, _) if ng < d => true,
+                (d, Some(be)) if ng == d && origin_edge < be => true,
+                (d, None) if ng == d => true,
+                _ => false,
+            };
+            if better {
+                dist[next] = ng;
+                parent[next] = Some((node, ei));
+                seed_origin_edge[next] = Some(origin_edge);
+                heap.push(Open {
+                    f: ng + h(next),
+                    g: ng,
+                    node: next,
+                    origin_edge,
+                });
+            }
+        }
+    }
 
-    // Assemble tagged vertices: origin projection → first node partial → edge
-    // polylines (oriented) → last node → dest projection partial.
-    let mut verts: Vec<TaggedVertex> = Vec::new();
-    verts.push(TaggedVertex {
-        coord: [origin_projected[0], origin_projected[1]],
-        ordinal: oe.ordinal,
-    });
-    // Partial from origin projection to the first node along the origin edge.
-    let first_node = node_path[0];
-    for c in partial_polyline(graph, oe, o.along, first_node == oe.from as usize) {
+    // Choose the goal minimizing (sel cost, origin edge index, dest edge index,
+    // endpoint node). Candidate rank is never a semantic tie-break.
+    let mut best_goal: Option<(f64, usize, usize, usize)> = None; // (sel, o_edge, d_edge, node)
+    for d in &dcands {
+        let de = &graph.edges[d.edge_index];
+        let conn = connector_cost(&dest, d);
+        let d_from_cost = f64::from(de.weight) * d.along / d.total.max(f64::EPSILON);
+        let d_to_cost = f64::from(de.weight) * (d.total - d.along) / d.total.max(f64::EPSILON);
+        for (node, partial) in [(de.from as usize, d_from_cost), (de.to as usize, d_to_cost)] {
+            if !dist[node].is_finite() {
+                continue;
+            }
+            let Some(o_edge) = seed_origin_edge[node] else {
+                continue;
+            };
+            let sel = dist[node] + partial + conn;
+            let key = (o_edge, d.edge_index, node);
+            let better = match &best_goal {
+                None => true,
+                Some((bs, bo, bd, bnode)) => {
+                    sel.total_cmp(bs) == Ordering::Less
+                        || (sel.total_cmp(bs) == Ordering::Equal
+                            && key < (*bo, *bd, *bnode))
+                }
+            };
+            if better {
+                best_goal = Some((sel, o_edge, d.edge_index, node));
+            }
+        }
+    }
+
+    // Assemble the winning network route, if any.
+    let network_route = best_goal.map(|(sel, o_edge, d_edge, goal)| {
+        let o = ocands
+            .iter()
+            .find(|c| c.edge_index == o_edge)
+            .expect("winning origin edge is a candidate");
+        let d = dcands
+            .iter()
+            .find(|c| c.edge_index == d_edge)
+            .expect("winning dest edge is a candidate");
+        let oe = &graph.edges[o.edge_index];
+        let de = &graph.edges[d.edge_index];
+        let mut node_path = vec![goal];
+        let mut edge_path = Vec::new(); // edge used to STEP INTO each node
+        let mut cur = goal;
+        while let Some((prev, ei)) = parent[cur] {
+            edge_path.push(ei);
+            node_path.push(prev);
+            cur = prev;
+        }
+        node_path.reverse();
+        edge_path.reverse();
+        debug_assert_eq!(
+            seed_origin_edge[cur],
+            Some(o_edge),
+            "path seed origin edge matches selection"
+        );
+        let origin_projected = [o.projected[0], o.projected[1], o.ordinal];
+        let dest_projected = [d.projected[0], d.projected[1], d.ordinal];
+
+        let mut verts: Vec<TaggedVertex> = Vec::new();
         verts.push(TaggedVertex {
-            coord: c,
+            coord: [origin_projected[0], origin_projected[1]],
             ordinal: oe.ordinal,
         });
-    }
-    // Node-to-node edge polylines (skip the shared leading vertex each time).
-    for w in 0..edge_path.len() {
-        let e = &graph.edges[edge_path[w]];
-        let forward = node_path[w] == e.from as usize;
-        let mut poly = graph.edge_polyline(e);
-        if !forward {
-            poly.reverse();
-        }
-        for c in poly.into_iter().skip(1) {
+        let first_node = node_path[0];
+        for c in partial_polyline(graph, oe, o.along, first_node == oe.from as usize) {
             verts.push(TaggedVertex {
                 coord: c,
-                ordinal: e.ordinal,
+                ordinal: oe.ordinal,
             });
         }
-    }
-    // Partial from the last node to the dest projection along the dest edge.
-    let last_node = *node_path.last().unwrap();
-    for c in partial_polyline(graph, de, d.along, last_node == de.from as usize)
-        .into_iter()
-        .rev()
-    {
-        // partial_polyline returns projection→endpoint; we need endpoint→projection.
+        for w in 0..edge_path.len() {
+            let e = &graph.edges[edge_path[w]];
+            let forward = node_path[w] == e.from as usize;
+            let mut poly = graph.edge_polyline(e);
+            if !forward {
+                poly.reverse();
+            }
+            for c in poly.into_iter().skip(1) {
+                verts.push(TaggedVertex {
+                    coord: c,
+                    ordinal: e.ordinal,
+                });
+            }
+        }
+        let last_node = *node_path.last().unwrap();
+        for c in partial_polyline(graph, de, d.along, last_node == de.from as usize)
+            .into_iter()
+            .rev()
+        {
+            // partial_polyline returns projection→endpoint; we need endpoint→projection.
+            verts.push(TaggedVertex {
+                coord: c,
+                ordinal: de.ordinal,
+            });
+        }
         verts.push(TaggedVertex {
-            coord: c,
+            coord: [dest_projected[0], dest_projected[1]],
             ordinal: de.ordinal,
         });
-    }
-    verts.push(TaggedVertex {
-        coord: [dest_projected[0], dest_projected[1]],
-        ordinal: de.ordinal,
+
+        // Reported weight stays graph-only: strip the connector legs that
+        // were folded into the seed/goal costs for selection.
+        let graph_cost = sel - connector_cost(&origin, o) - connector_cost(&dest, d);
+        (
+            Route {
+                segments: group_segments(verts),
+                total_weight: graph_cost as f32,
+                origin_projected,
+                dest_projected,
+            },
+            sel,
+            o_edge,
+            d_edge,
+        )
     });
 
-    Some(Route {
-        segments: group_segments(verts),
-        total_weight: total as f32,
-        origin_projected,
-        dest_projected,
-    })
+    // Prefer lower sel cost; on exact tie the network route wins (Task 2 / 1a:
+    // traces real junctions). Direct same-edge only wins when strictly cheaper.
+    match (network_route, best_direct) {
+        (Some((net, nsel, _, _)), Some((direct, dsel, _, _))) => {
+            Some(if dsel < nsel { direct } else { net })
+        }
+        (Some((net, _, _, _)), None) => Some(net),
+        (None, Some((direct, _, _, _))) => Some(direct),
+        (None, None) => None,
+    }
+}
+
+/// Direct walk along a single shared edge between two projections (no
+/// junctions). `o` and `d` must reference the same edge.
+fn same_edge_route(graph: &RouteGraph, o: &EdgeSnap, d: &EdgeSnap) -> Route {
+    let e = &graph.edges[o.edge_index];
+    let poly = graph.edge_polyline(e);
+    let (lo, hi) = (o.along.min(d.along), o.along.max(d.along));
+    let mut coords = vec![[o.projected[0], o.projected[1]]];
+    let mut acc = 0.0;
+    for w in poly.windows(2) {
+        acc += haversine_m(w[0][0], w[0][1], w[1][0], w[1][1]);
+        if acc > lo && acc < hi {
+            coords.push(w[1]);
+        }
+    }
+    coords.push([d.projected[0], d.projected[1]]);
+    if o.along > d.along {
+        coords.reverse();
+    }
+    let weight = (e.weight as f64 * (hi - lo) / o.total.max(f64::EPSILON)) as f32;
+    Route {
+        segments: group_segments(
+            coords
+                .into_iter()
+                .map(|c| TaggedVertex {
+                    coord: c,
+                    ordinal: e.ordinal,
+                })
+                .collect(),
+        ),
+        total_weight: weight,
+        origin_projected: [o.projected[0], o.projected[1], o.ordinal],
+        dest_projected: [d.projected[0], d.projected[1], d.ordinal],
+    }
 }
 
 /// Vertices of `edge`'s polyline from the projection (at arc-length `along`) to
@@ -441,6 +574,33 @@ fn group_segments(verts: Vec<TaggedVertex>) -> Vec<RouteSegment> {
 mod tests {
     use super::*;
     use crate::graph::*;
+
+    #[test]
+    fn open_heap_pops_lower_origin_edge_first() {
+        // BinaryHeap is a max-heap; Open::Ord must reverse origin_edge so the
+        // lower actual origin edge index has higher priority on equal f.
+        let mut heap = BinaryHeap::new();
+        heap.push(Open {
+            f: 1.0,
+            g: 1.0,
+            node: 0,
+            origin_edge: 9,
+        });
+        heap.push(Open {
+            f: 1.0,
+            g: 1.0,
+            node: 0,
+            origin_edge: 2,
+        });
+        let first = heap.pop().expect("two entries");
+        assert_eq!(
+            first.origin_edge, 2,
+            "lower origin edge must pop first on equal f"
+        );
+        let second = heap.pop().expect("one entry left");
+        assert_eq!(second.origin_edge, 9);
+    }
+
 
     #[test]
     fn route_traces_the_corridor_polyline() {
@@ -636,18 +796,12 @@ mod tests {
     #[test]
     fn snaps_click_onto_nearest_edge() {
         let g = geom_graph();
-        // Click near the bend, slightly off it.
-        let s = snap_to_edge(
+        let cands = snap_candidates(
             &g,
-            &Point3 {
-                lon: 139.001,
-                lat: 35.0009,
-                ordinal: 0.0,
-            },
-        )
-        .expect("snaps to the only edge");
+            &Point3 { lon: 139.001, lat: 35.0009, ordinal: 0.0 },
+        );
+        let s = cands.first().expect("snaps to the only edge");
         assert_eq!(s.edge_index, 0);
-        // Projection lands at/near the bend vertex.
         assert!((s.projected[0] - 139.001).abs() < 1e-4);
         assert!(s.along > 0.0 && s.along < s.total);
     }
@@ -655,34 +809,227 @@ mod tests {
     #[test]
     fn snap_prefers_same_ordinal_edge() {
         let mut g = geom_graph();
-        g.nodes.push(RouteNode {
-            lon: 139.001,
-            lat: 35.0,
-            ordinal: -1.0,
-        });
-        g.nodes.push(RouteNode {
-            lon: 139.0011,
-            lat: 35.0,
-            ordinal: -1.0,
-        });
-        g.edges.push(RouteEdge {
-            from: 2,
-            to: 3,
-            weight: 10.0,
-            ordinal: -1.0,
-            interior: vec![],
-        });
-        // Click on ordinal 0 sitting right over the B1 edge still snaps to the F1 edge.
-        let s = snap_to_edge(
-            &g,
-            &Point3 {
-                lon: 139.001,
-                lat: 35.0,
-                ordinal: 0.0,
-            },
+        g.nodes.push(RouteNode { lon: 139.001, lat: 35.0, ordinal: -1.0 });
+        g.nodes.push(RouteNode { lon: 139.0011, lat: 35.0, ordinal: -1.0 });
+        g.edges.push(RouteEdge { from: 2, to: 3, weight: 10.0, ordinal: -1.0, interior: vec![] });
+        let cands = snap_candidates(&g, &Point3 { lon: 139.001, lat: 35.0, ordinal: 0.0 });
+        assert_eq!(g.edges[cands[0].edge_index].ordinal, 0.0);
+        assert!(
+            cands.iter().all(|s| g.edges[s.edge_index].ordinal == 0.0),
+            "off-floor edges are never same-floor candidates"
+        );
+    }
+
+    #[test]
+    fn second_nearest_edge_wins_when_route_is_shorter() {
+        // Corridor 0→1 along y=35 (weight 182_000 ≈ 182 m). A high-cost dead-end
+        // spur 0→2 climbs north. The origin click sits right next to the spur
+        // (nearest by projection) but the corridor is the far better entry:
+        // the spur forces a long backtrack through node 0 plus the whole
+        // corridor, so connector-aware multi-candidate selection prefers the
+        // second-nearest edge. Spur weight is inflated vs geometric length so
+        // the same-edge spur shortcut cannot undercut the corridor path via a
+        // long destination connector.
+        let graph = RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.0005, lat: 35.001, ordinal: 0.0 },
+            ],
+            edges: vec![
+                RouteEdge { from: 0, to: 1, weight: 182_000.0, ordinal: 0.0, interior: vec![] },
+                RouteEdge { from: 0, to: 2, weight: 600_000.0, ordinal: 0.0, interior: vec![] },
+            ],
+        };
+        let r = route(
+            &graph,
+            Point3 { lon: 139.0005, lat: 35.0009, ordinal: 0.0 },
+            Point3 { lon: 139.002, lat: 35.0, ordinal: 0.0 },
         )
-        .unwrap();
-        assert_eq!(g.edges[s.edge_index].ordinal, 0.0);
+        .expect("endpoints route");
+        assert_eq!(
+            r.origin_projected[1], 35.0,
+            "origin snapped to the corridor, not the nearer spur"
+        );
+        assert!(
+            r.total_weight < 150_000.0,
+            "corridor entry is cheaper overall: {}",
+            r.total_weight
+        );
+    }
+
+    #[test]
+    fn multi_candidate_route_is_deterministic() {
+        let graph = RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.0005, lat: 35.001, ordinal: 0.0 },
+            ],
+            edges: vec![
+                RouteEdge { from: 0, to: 1, weight: 182_000.0, ordinal: 0.0, interior: vec![] },
+                RouteEdge { from: 0, to: 2, weight: 600_000.0, ordinal: 0.0, interior: vec![] },
+            ],
+        };
+        let o = Point3 { lon: 139.0005, lat: 35.0009, ordinal: 0.0 };
+        let d = Point3 { lon: 139.002, lat: 35.0, ordinal: 0.0 };
+        assert_eq!(route(&graph, o, d), route(&graph, o, d));
+    }
+
+    /// Build two parallel E–W edges and tune weights so both same-edge walks
+    /// share an identical connector-inclusive selection cost, while the origin
+    /// (and dest) click is nearer the higher-index edge. Used by the equal-cost
+    /// edge-index tie-break regressions.
+    fn equal_cost_parallel_graph(
+        nearer_edge: usize,
+    ) -> (RouteGraph, Point3, Point3, [f64; 2], [f64; 2]) {
+        assert!(nearer_edge == 0 || nearer_edge == 1);
+        let y0 = 35.0;
+        let y1 = 35.001;
+        // Origin/dest slightly closer to y1 so edge 1 ranks first by snap distance.
+        let origin = Point3 {
+            lon: 139.001,
+            lat: 35.0008,
+            ordinal: 0.0,
+        };
+        let dest = Point3 {
+            lon: 139.0015,
+            lat: 35.0008,
+            ordinal: 0.0,
+        };
+        let mut graph = RouteGraph {
+            nodes: vec![
+                RouteNode {
+                    lon: 139.0,
+                    lat: y0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.002,
+                    lat: y0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.0,
+                    lat: y1,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.002,
+                    lat: y1,
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 200_000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
+                RouteEdge {
+                    from: 2,
+                    to: 3,
+                    weight: 200_000.0, // tuned below
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
+            ],
+        };
+
+        let oc = snap_candidates(&graph, &origin);
+        let dc = snap_candidates(&graph, &dest);
+        assert_eq!(oc[0].edge_index, 1, "nearer origin snap is edge 1");
+        assert_eq!(dc[0].edge_index, 1, "nearer dest snap is edge 1");
+        let o0 = *oc.iter().find(|s| s.edge_index == 0).unwrap();
+        let o1 = *oc.iter().find(|s| s.edge_index == 1).unwrap();
+        let d0 = *dc.iter().find(|s| s.edge_index == 0).unwrap();
+        let d1 = *dc.iter().find(|s| s.edge_index == 1).unwrap();
+
+        // same_edge_route weight: (e.weight as f64 * (hi-lo) / total) as f32
+        // selection: f64::from(weight) + connectors
+        let r0 = same_edge_route(&graph, &o0, &d0);
+        let sel0 = f64::from(r0.total_weight)
+            + connector_cost(&origin, &o0)
+            + connector_cost(&dest, &d0);
+        let hi_lo = (o1.along - d1.along).abs();
+        let total = o1.total.max(f64::EPSILON);
+        let need_tw = sel0 - connector_cost(&origin, &o1) - connector_cost(&dest, &d1);
+        let base = (need_tw * total / hi_lo.max(f64::EPSILON)) as f32;
+        let mut found = None;
+        for i in -2_000_000i32..2_000_001 {
+            let w = f32::from_bits(base.to_bits().wrapping_add_signed(i));
+            if !w.is_finite() || w <= 0.0 {
+                continue;
+            }
+            graph.edges[1].weight = w;
+            let r1 = same_edge_route(&graph, &o1, &d1);
+            let sel1 = f64::from(r1.total_weight)
+                + connector_cost(&origin, &o1)
+                + connector_cost(&dest, &d1);
+            if sel1 == sel0 {
+                found = Some(w);
+                break;
+            }
+        }
+        graph.edges[1].weight = found.expect("bit-identical parallel same-edge selection cost");
+
+        // Sanity: both same-edge selection costs match; edge 0 is the lower index.
+        let r0 = same_edge_route(&graph, &o0, &d0);
+        let r1 = same_edge_route(&graph, &o1, &d1);
+        let sel0 = f64::from(r0.total_weight)
+            + connector_cost(&origin, &o0)
+            + connector_cost(&dest, &d0);
+        let sel1 = f64::from(r1.total_weight)
+            + connector_cost(&origin, &o1)
+            + connector_cost(&dest, &d1);
+        assert_eq!(sel0, sel1, "fixture selection costs must tie");
+        let _ = nearer_edge;
+        (
+            graph,
+            origin,
+            dest,
+            o0.projected,
+            d0.projected, // lower-index projections
+        )
+    }
+
+    #[test]
+    fn equal_cost_prefers_lower_origin_edge_index() {
+        let (graph, origin, dest, o_proj, _) = equal_cost_parallel_graph(1);
+        let r = route(&graph, origin, dest).expect("equal-cost parallel route");
+        assert!(
+            (r.origin_projected[0] - o_proj[0]).abs() < 1e-12
+                && (r.origin_projected[1] - o_proj[1]).abs() < 1e-12,
+            "lower origin edge index wins equal-cost tie: got {:?} want {:?}",
+            r.origin_projected,
+            o_proj
+        );
+    }
+
+    #[test]
+    fn equal_cost_prefers_lower_destination_edge_index() {
+        let (graph, origin, dest, _, d_proj) = equal_cost_parallel_graph(1);
+        let r = route(&graph, origin, dest).expect("equal-cost parallel route");
+        assert!(
+            (r.dest_projected[0] - d_proj[0]).abs() < 1e-12
+                && (r.dest_projected[1] - d_proj[1]).abs() < 1e-12,
+            "lower dest edge index wins equal-cost tie: got {:?} want {:?}",
+            r.dest_projected,
+            d_proj
+        );
+    }
+
+    #[test]
+    fn snap_falls_back_to_off_floor_edge_when_no_same_floor() {
+        let g = geom_graph();
+        let cands = snap_candidates(
+            &g,
+            &Point3 { lon: 139.001, lat: 35.0009, ordinal: 5.0 },
+        );
+        assert_eq!(cands.len(), 1, "single off-floor fallback candidate");
+        assert_eq!(cands[0].edge_index, 0);
     }
 
     #[test]
@@ -733,5 +1080,47 @@ mod tests {
             assert!(route(&graph, ok, Point3 { lat: bad, ..ok }).is_none());
             assert!(route(&graph, ok, Point3 { ordinal: bad, ..ok }).is_none());
         }
+    }
+
+    #[test]
+    fn network_detour_beats_same_edge_walk() {
+        // U-shaped edge 0→1 (weight 6000): bottom corners at (139,35) and
+        // (139.002,35), up 0.002 and across. Both clicks sit ON the U's arms
+        // near the bottom, so they snap to the U edge. The 0→2→1 shortcut
+        // (1000+1000) is far cheaper than walking the whole U.
+        let graph = RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.001, lat: 35.0005, ordinal: 0.0 },
+            ],
+            edges: vec![
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 6000.0,
+                    ordinal: 0.0,
+                    interior: vec![[139.0, 35.002], [139.002, 35.002]],
+                },
+                RouteEdge { from: 0, to: 2, weight: 1000.0, ordinal: 0.0, interior: vec![] },
+                RouteEdge { from: 2, to: 1, weight: 1000.0, ordinal: 0.0, interior: vec![] },
+            ],
+        };
+        let r = route(
+            &graph,
+            Point3 { lon: 139.0, lat: 35.0002, ordinal: 0.0 },
+            Point3 { lon: 139.002, lat: 35.0002, ordinal: 0.0 },
+        )
+        .expect("endpoints route");
+        assert!(
+            r.total_weight < 3000.0,
+            "network detour beats the same-edge U walk: {}",
+            r.total_weight
+        );
+        let coords: Vec<[f64; 2]> = r.segments.iter().flat_map(|s| s.coordinates.clone()).collect();
+        assert!(
+            coords.contains(&[139.001, 35.0005]),
+            "route passes through the shortcut junction"
+        );
     }
 }

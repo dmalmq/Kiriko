@@ -642,6 +642,8 @@ function applyLayerVisibility(map: MapLibreMap, visibility: LayerVisibility): vo
   }
 }
 
+const EMPTY_FACILITIES: FacilityDto[] = [];
+
 export function IndoorMap({
   venue,
   levelId,
@@ -653,7 +655,7 @@ export function IndoorMap({
   issueReview,
   directions = null,
   onControls,
-  facilities = [],
+  facilities = EMPTY_FACILITIES,
   onSelectFacility,
   network,
   networkEditing = null,
@@ -698,6 +700,81 @@ export function IndoorMap({
   const onSelectFacilityRef = useRef(onSelectFacility);
   facilitiesRef.current = facilities;
   onSelectFacilityRef.current = onSelectFacility;
+
+  const overlayStyleWaitingRef = useRef(false);
+  const overlayWaiterRef = useRef<(() => void) | null>(null);
+  // False until onLoad finishes its one-time source/overlay initialization.
+  // The unified overlay effect must not arm a sourcedata waiter (or write)
+  // before that, or onLoad and the waiter can each apply the same data.
+  const initialMapLoadCompleteRef = useRef(false);
+
+  // Applies every overlay from the latest refs; each overlay keeps its
+  // "update only while active, clear exactly once" guard. Call only when the
+  // style is fully loaded.
+  const applyOverlays = useCallback((): void => {
+    const map = mapRef.current;
+    if (map == null || !map.isStyleLoaded()) {
+      return;
+    }
+    const venue = venueRef.current;
+    const levelId = levelIdRef.current;
+
+    const dirs = directionsRef.current;
+    const routeActive = dirs?.active === true;
+    if (routeActive || routeSourceActiveRef.current) {
+      setRouteSourceData(map, venue, levelId, dirs);
+      routeSourceActiveRef.current = routeActive;
+    }
+
+    const net = networkRef.current;
+    const editing = networkEditingRef.current;
+    const networkActive = net != null || editing != null;
+    if (networkActive || networkSourceActiveRef.current) {
+      setNetworkSourceData(
+        map,
+        venue,
+        levelId,
+        net,
+        editing == null ? undefined : networkRenderState(editing),
+      );
+      networkSourceActiveRef.current = networkActive;
+    }
+
+    const facilityActive = facilitiesRef.current.length > 0;
+    if (facilityActive || facilitySourceActiveRef.current) {
+      setFacilitySourceData(map, venue, levelId, facilitiesRef.current);
+      facilitySourceActiveRef.current = facilityActive;
+    }
+
+    applyLayerVisibility(map, visibilityRef.current);
+  }, []);
+
+  // Applies overlays now when the style is ready, otherwise exactly once when
+  // a geojson source finishes loading. A floor change keeps the style busy
+  // while the indoor source reloads; updates made in that window queue behind
+  // a single `sourcedata` subscription instead of being dropped. Re-entry
+  // re-checks isStyleLoaded and re-subscribes if another source is still busy.
+  // No-ops until onLoad has performed the initial overlay write path.
+  const syncOverlays = useCallback((): void => {
+    const map = mapRef.current;
+    if (map == null || !initialMapLoadCompleteRef.current) {
+      return;
+    }
+    if (map.isStyleLoaded()) {
+      applyOverlays();
+      return;
+    }
+    if (!overlayStyleWaitingRef.current) {
+      overlayStyleWaitingRef.current = true;
+      const onSourceData = (): void => {
+        overlayWaiterRef.current = null;
+        overlayStyleWaitingRef.current = false;
+        syncOverlays();
+      };
+      overlayWaiterRef.current = onSourceData;
+      map.once("sourcedata", onSourceData);
+    }
+  }, [applyOverlays]);
 
   const onMarkerSelect = useCallback((featureId: string, center: [number, number]) => {
     const review = issueReviewRef.current;
@@ -912,6 +989,10 @@ export function IndoorMap({
       facilitySourceActiveRef.current = facilitiesRef.current.length > 0;
       applyLayerVisibility(map, visibilityRef.current);
       fitLevelBounds(map, venueRef.current, levelIdRef.current);
+      // Mark after the one-time overlay writes so any sourcedata fired by those
+      // writes cannot re-enter syncOverlays and duplicate them. Later prop/floor
+      // changes re-run the overlay effect against this flag.
+      initialMapLoadCompleteRef.current = true;
       setMapInstance(map);
 
       const selected = selectedIdRef.current;
@@ -959,6 +1040,13 @@ export function IndoorMap({
       cameraCancelRef.current = null;
       issueHighlightCancelRef.current?.();
       issueHighlightCancelRef.current = null;
+      const overlayWaiter = overlayWaiterRef.current;
+      if (overlayWaiter != null) {
+        map.off("sourcedata", overlayWaiter);
+        overlayWaiterRef.current = null;
+      }
+      overlayStyleWaitingRef.current = false;
+      initialMapLoadCompleteRef.current = false;
       map.off("load", onLoad);
       map.off("click", onClick);
       map.off("mousemove", onMouseMove);
@@ -1171,69 +1259,13 @@ export function IndoorMap({
     });
   }, [issueReview?.cameraRequest, levelId]);
 
-  // Directions overlay: re-segment the route per active floor whenever the
-  // route, endpoints, floor, or venue change. onLoad initializes it to empty;
-  // while Directions stays off, floor changes cannot alter that data. A
-  // transition from active to off still clears the source exactly once.
+  // Overlays (route, network, facilities, layer visibility): re-filter to the
+  // active floor and apply prop changes, deferring to `sourcedata` while the
+  // style is busy (e.g. right after the indoor source swap on a floor
+  // change). onLoad initializes every source, so a null map is a no-op.
   useEffect(() => {
-    const map = mapRef.current;
-    if (map == null || !map.isStyleLoaded()) {
-      return;
-    }
-    const active = directions?.active === true;
-    if (!active && !routeSourceActiveRef.current) {
-      return;
-    }
-    setRouteSourceData(map, venue, levelId, directions);
-    routeSourceActiveRef.current = active;
-  }, [directions, venue, levelId]);
-
-  // Network-review overlay: re-filter the generated network to the active
-  // floor and apply editing highlights whenever they, the floor, or the venue
-  // change; empty when off.
-  useEffect(() => {
-    const map = mapRef.current;
-    if (map == null || !map.isStyleLoaded()) {
-      return;
-    }
-    // onLoad has already initialized the source to empty. While review remains
-    // off, floor changes cannot alter that data, so do not enqueue another
-    // empty GeoJSON worker/render cycle. A transition from active to off must
-    // still clear the source once; active floor changes still update once.
-    const active = network != null || networkEditing != null;
-    if (!active && !networkSourceActiveRef.current) {
-      return;
-    }
-    const render = networkEditing != null ? networkRenderState(networkEditing) : undefined;
-    setNetworkSourceData(map, venue, levelId, network, render);
-    networkSourceActiveRef.current = active;
-  }, [network, networkEditing, venue, levelId]);
-
-  // Facility symbols: refresh per active floor (and when the facility set or
-  // venue changes). onLoad initializes the source to empty, so an empty set
-  // needs no floor invalidations; removing active facilities clears it once.
-  // Icons are registered once on load.
-  useEffect(() => {
-    const map = mapRef.current;
-    if (map == null || !map.isStyleLoaded()) {
-      return;
-    }
-    const active = facilities.length > 0;
-    if (!active && !facilitySourceActiveRef.current) {
-      return;
-    }
-    setFacilitySourceData(map, venue, levelId, facilities);
-    facilitySourceActiveRef.current = active;
-  }, [facilities, venue, levelId]);
-
-  // Layer-group visibility toggles (Layers panel).
-  useEffect(() => {
-    const map = mapRef.current;
-    if (map == null || !map.isStyleLoaded()) {
-      return;
-    }
-    applyLayerVisibility(map, layerVisibility);
-  }, [layerVisibility]);
+    syncOverlays();
+  }, [directions, network, networkEditing, facilities, layerVisibility, venue, levelId, syncOverlays]);
 
   // Theme switch: paint properties only — never rebuild style/map.
   useEffect(() => {
