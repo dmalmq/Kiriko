@@ -367,8 +367,9 @@ The following access control policies are approved target behavior for Phase 1 i
 - Revocation or token expiry removes media access along with the map read permission.
 
 **Current-state gap:**
-- Current shipped routes `GET /v/:tenant/:venue/bundle`, `GET /api/review/versions/:publicVersionId/issues`, and issue media (`GET /api/issue-attachments/*/content`) are effectively world-readable if the URL is known.
+- Current shipped read route families—latest and pinned bundles (`GET /v/:tenant/:venue/bundle` and `GET /v/:tenant/:venue/bundle@:id`), issue collection and SSE (`GET /api/review/versions/:publicVersionId/issues` and `GET /api/review/versions/:publicVersionId/issues/events`), and issue media (`GET /api/issue-attachments/:attachmentId/content` and `GET /api/issue-attachments/:attachmentId/thumbnail`)—are effectively world-readable if the URL is known.
 - This is a documented gap until Workstream 1C (Venue lifecycle and sharing) design and implementation are complete.
+- Workstream 1C must gate every variant at its route family's shared venue/version resource-resolution boundary, before reading bundle or media bytes, reading issue state, or opening an SSE stream, so token expiry and revocation apply consistently.
 - Existing public-read behavior is not removed during Phase 1 implementation; it remains alongside the new private-by-default ACL model until a separate authorization task gates the transition.
 
 ## 11. Quality and verification
