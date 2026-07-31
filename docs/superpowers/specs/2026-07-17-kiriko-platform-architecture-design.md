@@ -113,7 +113,7 @@ Every publish-like action creates a new version. The UI does not mutate a publis
 The viewer supports:
 
 - dataset-backed KVB loads, local IMDF ZIPs, dropped files, and explicit source URLs;
-- latest and sequence-pinned dataset URLs;
+- latest and permanent-ID-pinned dataset URLs;
 - one visible floor control per ordinal while retaining real IMDF level identities underneath;
 - floor-aware geometry, bounds, issue pins, facilities, routing, and network overlays;
 - localized search across venue features;
@@ -202,7 +202,7 @@ Alternatively, the producer can generate a route graph from the latest venue geo
 - A public ID is never reused, including after venue deletion and slug recreation.
 - Source and bundle blobs are independently content-addressed by SHA-256.
 - Publishing updates a version only when its source identity still matches, preventing stale jobs from publishing over replacements.
-- Latest bundle URLs revalidate; sequence-pinned URLs are immutable.
+- Latest bundle URLs revalidate; permanent-ID-pinned URLs are immutable.
 - `ETag` is the bundle hash. `Kiriko-Version-Id` is the review identity. They are intentionally different.
 - Raw retained source archives are not exposed through public read routes.
 
@@ -283,7 +283,7 @@ POST     /api/venues/:id/versions
 GET      /api/jobs/:id
 
 GET /v/:tenant/:venue/bundle
-GET /v/:tenant/:venue/bundle@:seq
+GET /v/:tenant/:venue/bundle@:id
 
 POST /api/gdb/inspect
 POST /api/gdb/inspect-network
@@ -363,8 +363,8 @@ The following access control policies are approved target behavior for Phase 1 i
 - Raw GDB/IMDF sources remain unavailable on all partner-accessible paths.
 
 **Issue attachments:**
-- Attachments inherit the same venue/version ACL as the issue and published map.
-- Revocation or token expiry removes media access along with the map read permission.
+- The target ACL, revocation behavior, and current public-read gap are specified
+  in `docs/issue-attachments-operations.md`.
 
 **Current-state gap:**
 - Current shipped read route families—latest and pinned bundles (`GET /v/:tenant/:venue/bundle` and `GET /v/:tenant/:venue/bundle@:id`), issue collection and SSE (`GET /api/review/versions/:publicVersionId/issues` and `GET /api/review/versions/:publicVersionId/issues/events`), and issue media (`GET /api/issue-attachments/:attachmentId/content` and `GET /api/issue-attachments/:attachmentId/thumbnail`)—are effectively world-readable if the URL is known.
@@ -372,7 +372,6 @@ The following access control policies are approved target behavior for Phase 1 i
 - Workstream 1C must gate every variant at its route family's shared venue/version resource-resolution boundary, before reading bundle or media bytes, reading issue state, or opening an SSE stream, so token expiry and revocation apply consistently.
 - The shared capability/SSE boundary must track active subscriptions, close each stream no later than its capability expiry, and close matching streams immediately when a capability is revoked.
 - At the shared bundle response boundary, Workstream 1C must replace the current public cache directives with an authorization-aware policy that partitions responses by authorization context and limits cache freshness to token expiry and revocation requirements; immutable bundle content does not make access authorization immutable.
-- Existing public-read behavior is not removed during Phase 1 implementation; it remains alongside the new private-by-default ACL model until a separate authorization task gates the transition.
 
 ## 11. Quality and verification
 

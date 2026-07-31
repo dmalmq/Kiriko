@@ -149,18 +149,9 @@ The dated plans under `docs/superpowers/plans/` remain execution history for the
 
 **Required design:** version history, latest-version selection/rollback semantics, share-link policy, deletion/retention, embed configuration, authorization-aware bundle caching partitioned by access context with freshness bounded by capability expiry and revocation, and active SSE subscription closure on capability expiry or revocation.
 
-**Approved sharing policy (2026-07-31):**
-
-The following partner-access and sharing policies are captain-approved and ready for design/implementation:
-
-1. **Published venues are private by default** — publication does not authorize public read access.
-2. **External partners use expiring, revocable capability tokens** scoped to tenant/venue/version and explicit permissions. Optional partner accounts may follow later.
-3. **Anonymous embeds are a separate explicit per-venue opt-in**, never implied by venue publication.
-4. **Partner access is view-only by default** for map and issue viewing; KVB bundle download requires a separate explicit `download_bundle` grant scoped to capability and venue/version.
-5. **Raw GDB/IMDF sources remain unavailable** on all partner-accessible paths.
-6. **Issue attachments inherit the same venue/version ACL** as the issue and map; revocation/expiry removes media access too.
-
-Current public-read routes remain a documented gap (`docs/superpowers/specs/2026-07-17-kiriko-platform-architecture-design.md` §10.1) until the private-by-default ACL implementation is complete.
+**Approved sharing policy (2026-07-31):** The authoritative partner-access
+policy and current implementation gap are recorded in the current-state
+platform architecture specification, §10.1.
 
 **Target outcomes:**
 
@@ -434,7 +425,7 @@ Optimize from measured customer/fixture behavior. Maintain current viewer budget
 | Routing | On-device over KVB §5 | Standing offline-navigation requirement |
 | Positioning | Exploratory | Representative data and approved evaluation protocol exist |
 | Billing | Unspecified | Commercial model and first paid integration are defined |
-| Partner sharing (approved 2026-07-31) | Private venues; expiring revocable capability tokens; separate anonymous-embed opt-in; view-only by default; no raw sources; attachments inherit ACL | Partner token format, optional account tier, or consent/audit requirements change |
+| Partner sharing (approved 2026-07-31) | See current-state platform architecture specification §10.1 | Partner token format, optional account tier, or consent/audit requirements change |
 
 ---
 
