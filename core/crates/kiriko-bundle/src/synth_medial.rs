@@ -2646,9 +2646,10 @@ mod tests {
 
     #[test]
     fn multilinestring_axis_matches_the_midpoints_part() {
-        // Two equal-length parts with opposite orientations: midpoint and
-        // axis must both come from the FIRST part (linestring_midpoint keeps
-        // the first on ties).
+        // Two exactly equal-length parts (binary-exact 0.0625 lon spans at
+        // the same latitude) with opposite orientations: midpoint and axis
+        // must both come from the FIRST part (linestring_midpoint keeps the
+        // first on ties; a last-wins axis pick flips the sign).
         let geom = Value::Object(BTreeMap::from([
             ("type".to_string(), Value::String("MultiLineString".to_string())),
             (
@@ -2656,18 +2657,18 @@ mod tests {
                 Value::Array(vec![
                     Value::Array(vec![
                         Value::Array(vec![Value::Number(139.0), Value::Number(35.0)]),
-                        Value::Array(vec![Value::Number(139.001), Value::Number(35.0)]),
+                        Value::Array(vec![Value::Number(139.0625), Value::Number(35.0)]),
                     ]),
                     Value::Array(vec![
-                        Value::Array(vec![Value::Number(139.003), Value::Number(35.0)]),
-                        Value::Array(vec![Value::Number(139.002), Value::Number(35.0)]),
+                        Value::Array(vec![Value::Number(139.1875), Value::Number(35.0)]),
+                        Value::Array(vec![Value::Number(139.125), Value::Number(35.0)]),
                     ]),
                 ]),
             ),
         ]));
         let (mid, axis) = opening_axis(&geom).expect("axis parses");
         assert!(
-            (mid[0] - 139.0005).abs() < 1e-9 && (mid[1] - 35.0).abs() < 1e-9,
+            (mid[0] - 139.03125).abs() < 1e-9 && (mid[1] - 35.0).abs() < 1e-9,
             "midpoint from the first part: {mid:?}"
         );
         assert!(
