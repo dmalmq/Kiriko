@@ -642,6 +642,8 @@ function applyLayerVisibility(map: MapLibreMap, visibility: LayerVisibility): vo
   }
 }
 
+const EMPTY_FACILITIES: FacilityDto[] = [];
+
 export function IndoorMap({
   venue,
   levelId,
@@ -653,7 +655,7 @@ export function IndoorMap({
   issueReview,
   directions = null,
   onControls,
-  facilities = [],
+  facilities = EMPTY_FACILITIES,
   onSelectFacility,
   network,
   networkEditing = null,
@@ -701,6 +703,10 @@ export function IndoorMap({
 
   const overlayStyleWaitingRef = useRef(false);
   const overlayWaiterRef = useRef<(() => void) | null>(null);
+  // False until onLoad finishes its one-time source/overlay initialization.
+  // The unified overlay effect must not arm a sourcedata waiter (or write)
+  // before that, or onLoad and the waiter can each apply the same data.
+  const initialMapLoadCompleteRef = useRef(false);
 
   // Applies every overlay from the latest refs; each overlay keeps its
   // "update only while active, clear exactly once" guard. Call only when the
@@ -748,9 +754,10 @@ export function IndoorMap({
   // while the indoor source reloads; updates made in that window queue behind
   // a single `sourcedata` subscription instead of being dropped. Re-entry
   // re-checks isStyleLoaded and re-subscribes if another source is still busy.
+  // No-ops until onLoad has performed the initial overlay write path.
   const syncOverlays = useCallback((): void => {
     const map = mapRef.current;
-    if (map == null) {
+    if (map == null || !initialMapLoadCompleteRef.current) {
       return;
     }
     if (map.isStyleLoaded()) {
@@ -982,6 +989,10 @@ export function IndoorMap({
       facilitySourceActiveRef.current = facilitiesRef.current.length > 0;
       applyLayerVisibility(map, visibilityRef.current);
       fitLevelBounds(map, venueRef.current, levelIdRef.current);
+      // Mark after the one-time overlay writes so any sourcedata fired by those
+      // writes cannot re-enter syncOverlays and duplicate them. Later prop/floor
+      // changes re-run the overlay effect against this flag.
+      initialMapLoadCompleteRef.current = true;
       setMapInstance(map);
 
       const selected = selectedIdRef.current;
@@ -1035,6 +1046,7 @@ export function IndoorMap({
         overlayWaiterRef.current = null;
       }
       overlayStyleWaitingRef.current = false;
+      initialMapLoadCompleteRef.current = false;
       map.off("load", onLoad);
       map.off("click", onClick);
       map.off("mousemove", onMouseMove);

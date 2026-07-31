@@ -1139,6 +1139,42 @@ describe("IndoorMap network review", () => {
     expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([1, 1]);
   });
 
+  it("does not arm overlay waiters or duplicate network writes before initial load", () => {
+    mapState.setInitialStyleLoaded(false);
+    const utils = render(<IndoorMap {...baseProps({ network: NETWORK, levelId: "level-1" })} />);
+    const map = lastMap();
+
+    // Pre-load sourcedata must not apply overlays or leave a deferred waiter that
+    // replays after onLoad's initial write.
+    act(() => {
+      map.emit("sourcedata", READY_EVENT);
+    });
+    expect(map.networkSourceData).toHaveLength(0);
+
+    map.styleLoaded = true;
+    act(() => {
+      map.emit("load");
+    });
+    // Source completion after onLoad must not re-apply the same overlay data.
+    act(() => {
+      map.emit("sourcedata", READY_EVENT);
+    });
+    expect(map.networkSourceData).toHaveLength(1);
+    expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([
+      1, 1,
+    ]);
+
+    const writesAfterLoad = map.networkSourceData.length;
+    act(() => {
+      utils.rerender(<IndoorMap {...baseProps({ network: NETWORK, levelId: "level-2" })} />);
+    });
+    expect(map.networkSourceData).toHaveLength(writesAfterLoad + 1);
+    expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([
+      2, 2,
+    ]);
+    utils.unmount();
+  });
+
   it("updates the network source exactly once with the active floor's data", () => {
     const { map, rerender } = renderMap(baseProps({ network: NETWORK, levelId: "level-1" }));
     expect(lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"])).toEqual([1, 1]);
