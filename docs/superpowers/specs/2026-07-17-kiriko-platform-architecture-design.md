@@ -370,6 +370,7 @@ The following access control policies are approved target behavior for Phase 1 i
 - Current shipped read route families—latest and pinned bundles (`GET /v/:tenant/:venue/bundle` and `GET /v/:tenant/:venue/bundle@:id`), issue collection and SSE (`GET /api/review/versions/:publicVersionId/issues` and `GET /api/review/versions/:publicVersionId/issues/events`), and issue media (`GET /api/issue-attachments/:attachmentId/content` and `GET /api/issue-attachments/:attachmentId/thumbnail`)—are effectively world-readable if the URL is known.
 - This is a documented gap until Workstream 1C (Venue lifecycle and sharing) design and implementation are complete.
 - Workstream 1C must gate every variant at its route family's shared venue/version resource-resolution boundary, before reading bundle or media bytes, reading issue state, or opening an SSE stream, so token expiry and revocation apply consistently.
+- At the shared bundle response boundary, Workstream 1C must replace the current public cache directives with an authorization-aware policy that partitions responses by authorization context and limits cache freshness to token expiry and revocation requirements; immutable bundle content does not make access authorization immutable.
 - Existing public-read behavior is not removed during Phase 1 implementation; it remains alongside the new private-by-default ACL model until a separate authorization task gates the transition.
 
 ## 11. Quality and verification
