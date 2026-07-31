@@ -305,6 +305,18 @@ const CHORD_MAX_M: f64 = 40.0;
 /// A chord is a real shortcut only when it beats the existing graph path by
 /// at least this factor (chord length < ratio × graph distance).
 const CHORD_SAVINGS_RATIO: f64 = 0.7;
+/// Shorter chords are medial-axis noise between nearby spur tips, not real
+/// open-space shortcuts (JR Takanawa F1 median chord was 2.66 m).
+const CHORD_MIN_M: f64 = 10.0;
+/// Absolute walking metres a chord must save. The ratio rule alone is
+/// scale-free and fires on ~3 m chords whose graph path is ~10 m.
+const CHORD_MIN_SAVINGS_M: f64 = 15.0;
+/// Minimum boundary clearance (m) along a chord — half-width of a genuinely
+/// open hall. Corridor-only venues top out near 4.7 m and must yield zero chords.
+const CHORD_MIN_CLEARANCE_M: f64 = 5.0;
+/// Cap on chords incident to any single node; dense skeletons otherwise grow
+/// degree-7 hubs of crossing shortcuts.
+const CHORD_MAX_PER_NODE: usize = 2;
 
 
 
@@ -438,6 +450,20 @@ fn centerline_chord_passable(a: [f64; 2], b: [f64; 2], area: &MultiPolygon<f64>)
         let t = k as f64 / steps as f64;
         let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
         area.contains(&Point::new(p[0], p[1])) && boundary_clearance_m(p, area) >= min_clear
+    })
+}
+
+/// True when endpoints and ~1 m samples along `a`–`b` all lie in open space:
+/// inside `area` with clearance ≥ [`CHORD_MIN_CLEARANCE_M`]. Rejects corridor
+/// chords whose graph-path savings look real but whose half-width is only a
+/// few metres (JR Takanawa F1 max clearance 4.69 m).
+fn chord_in_open_space(a: [f64; 2], b: [f64; 2], area: &MultiPolygon<f64>) -> bool {
+    let steps = (haversine_m(a, b) / 1.0).ceil().max(1.0) as usize;
+    (0..=steps).all(|k| {
+        let t = k as f64 / steps as f64;
+        let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+        area.contains(&Point::new(p[0], p[1]))
+            && boundary_clearance_m(p, area) >= CHORD_MIN_CLEARANCE_M
     })
 }
 
@@ -885,7 +911,10 @@ pub(crate) fn shortcut_chords(
                         continue;
                     }
                     let d = haversine_m(*p, skeleton.nodes[j]);
-                    if d > CHORD_MAX_M || uf_find(&mut uf, i) != uf_find(&mut uf, j) {
+                    if d < CHORD_MIN_M
+                        || d > CHORD_MAX_M
+                        || uf_find(&mut uf, i) != uf_find(&mut uf, j)
+                    {
                         continue;
                     }
                     pairs.push((i, j, d));
@@ -923,19 +952,30 @@ pub(crate) fn shortcut_chords(
     };
 
     let mut added: Vec<(usize, usize)> = Vec::new();
+    let mut chord_count = vec![0usize; n];
     for (i, j, c) in pairs {
+        if chord_count[i] >= CHORD_MAX_PER_NODE || chord_count[j] >= CHORD_MAX_PER_NODE {
+            continue;
+        }
+        // Open hall only: corridor half-widths fail CHORD_MIN_CLEARANCE_M.
+        if !chord_in_open_space(skeleton.nodes[i], skeleton.nodes[j], area) {
+            continue;
+        }
         // Fully inside walkable space at passage width (rejects chords
         // across kiosks, walls, and track strips).
         if !centerline_chord_passable(skeleton.nodes[i], skeleton.nodes[j], area) {
             continue;
         }
-        // Only a real shortcut: the existing graph path (including bridges
-        // and chords already added) must be longer than c / CHORD_SAVINGS_RATIO.
-        if reachable_within(&adj, i, j, c / CHORD_SAVINGS_RATIO) {
+        // Real shortcut: existing graph path must exceed BOTH the ratio and
+        // absolute savings bounds (one Dijkstra with the tighter cutoff).
+        let cutoff = (c / CHORD_SAVINGS_RATIO).max(c + CHORD_MIN_SAVINGS_M);
+        if reachable_within(&adj, i, j, cutoff) {
             continue;
         }
         adj[i].push((j, c));
         adj[j].push((i, c));
+        chord_count[i] += 1;
+        chord_count[j] += 1;
         added.push((i, j));
     }
     added
@@ -3052,10 +3092,11 @@ mod tests {
     fn chords_cut_a_detour_but_not_a_straight_spine() {
         let (cx, cy): (f64, f64) = (139.70000, 35.60000);
         let xy = xy_at(cx, cy);
-        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -45.0, 70.0, 5.0)]);
+        // Wide open hall: clearance at the y=0 chord is ~15 m (>> 5 m gate).
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -50.0, 70.0, 15.0)]);
         // V-detour skeleton: A(0,0) → B(20,-30) → C(40,0) → D(60,0). The A–C
-        // chord (40 m) beats the 72 m graph path; everything else is adjacent
-        // or out of range.
+        // chord (40 m) beats the 72 m graph path by >15 m absolute and the
+        // 0.7 ratio; everything else is adjacent or out of range.
         let detour = Skeleton {
             nodes: vec![xy(0.0, 0.0), xy(20.0, -30.0), xy(40.0, 0.0), xy(60.0, 0.0)],
             edges: vec![(0, 1), (1, 2), (2, 3)],
@@ -3077,7 +3118,9 @@ mod tests {
 
     #[test]
     fn chords_never_cross_a_hole() {
-        // Same V detour, but a non-walkable hole blocks the A–C chord.
+        // Same V detour in a wide-open hall (clearance and length would
+        // otherwise qualify), but a non-walkable hole blocks the A–C chord —
+        // rejected by passability, not by the open-space/length gates.
         let (cx, cy): (f64, f64) = (139.70000, 35.60000);
         let xy = xy_at(cx, cy);
         let hole = LineString::from(vec![
@@ -3087,7 +3130,7 @@ mod tests {
             (xy(10.0, 4.0)[0], xy(10.0, 4.0)[1]),
             (xy(10.0, -5.0)[0], xy(10.0, -5.0)[1]),
         ]);
-        let mut poly = rect_poly(cx, cy, -10.0, -45.0, 70.0, 5.0);
+        let mut poly = rect_poly(cx, cy, -10.0, -50.0, 70.0, 15.0);
         poly.interiors_push(hole);
         let area = MultiPolygon::new(vec![poly]);
         let detour = Skeleton {
@@ -3103,13 +3146,16 @@ mod tests {
 
     #[test]
     fn zigzag_chain_gains_shortcut_chords_with_feedback() {
-        // Ten-node zigzag chain zi = (10·i, −15·(i mod 2)) (18 m hops) in an
-        // open area. Two-hop chords (20 m vs 36 m graph) all qualify; three-
-        // and four-hop candidates become reachable through the chords already
-        // added (the savings test sees them), so only the two-hop set lands.
+        // Ten-node zigzag chain zi = (10·i, −15·(i mod 2)) (≈18 m hops) in an
+        // open hall (clearance ≫ 5 m). Two-hop chords (20 m vs 36 m graph,
+        // absolute savings 16 m ≥ 15 m) all qualify; three- and four-hop
+        // candidates become reachable through the chords already added (the
+        // savings test sees them), so only the two-hop set lands. Per-node
+        // cap 2 still admits every two-hop (each internal node is an endpoint
+        // of exactly two such chords).
         let (cx, cy): (f64, f64) = (139.70000, 35.60000);
         let xy = xy_at(cx, cy);
-        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -15.0, -25.0, 100.0, 5.0)]);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -15.0, -30.0, 100.0, 15.0)]);
         let nodes: Vec<[f64; 2]> = (0..10)
             .map(|i| xy(10.0 * i as f64, -15.0 * (i % 2) as f64))
             .collect();
@@ -3144,15 +3190,16 @@ mod tests {
         // adjacency and exclude the pair rather than re-emit it.
         let (cx, cy): (f64, f64) = (139.70000, 35.60000);
         let xy = xy_at(cx, cy);
-        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -10.0, 30.0, 10.0)]);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -15.0, 40.0, 15.0)]);
+        // 12 m gap (> CHORD_MIN_M) so the bare pair clears the length gate.
         let skeleton = Skeleton {
-            nodes: vec![xy(0.0, 0.0), xy(1.5, 0.0)],
+            nodes: vec![xy(0.0, 0.0), xy(12.0, 0.0)],
             edges: vec![],
         };
         // Blob already unified as if the bridge was accepted.
         let blob = unioned_blob(2, &[(0, 1)]);
         let bridge_d = haversine_m(skeleton.nodes[0], skeleton.nodes[1]);
-        assert!(bridge_d < CHORD_MAX_M);
+        assert!(bridge_d < CHORD_MAX_M && bridge_d >= 10.0);
         // Without the existing edge the pair would qualify (no graph path).
         let without = shortcut_chords(&skeleton, &blob, &area, &[]);
         assert_eq!(without, vec![(0, 1)], "precondition: bare pair is a chord");
@@ -3183,7 +3230,8 @@ mod tests {
         let b = [b_lon, cy - 30.0 / 111_320.0];
         let c = [c_lon, cy];
         // Wide open walkable rect covering the V (metre offsets around A).
-        let area = MultiPolygon::new(vec![rect_poly(a_lon, cy, -10.0, -45.0, 50.0, 5.0)]);
+        // Clearance at the y=0 chord is ~15 m.
+        let area = MultiPolygon::new(vec![rect_poly(a_lon, cy, -10.0, -50.0, 50.0, 15.0)]);
         let detour = Skeleton {
             nodes: vec![a, b, c],
             edges: vec![(0, 1), (1, 2)],
@@ -3196,12 +3244,14 @@ mod tests {
         );
         let d_ac = haversine_m(a, c);
         assert!(d_ac < CHORD_MAX_M, "precondition: A–C within chord range ({d_ac})");
-        // Graph path A–B–C is a deep V (~60 m+), so the chord qualifies.
+        // Graph path A–B–C is a deep V (~60 m+), so the chord qualifies under
+        // both the ratio and absolute-savings gates.
         let d_ab = haversine_m(a, b);
         let d_bc = haversine_m(b, c);
         assert!(
-            d_ab + d_bc > d_ac / CHORD_SAVINGS_RATIO,
-            "precondition: detour beats savings cutoff"
+            d_ab + d_bc > d_ac / CHORD_SAVINGS_RATIO
+                && d_ab + d_bc > d_ac + 15.0,
+            "precondition: detour beats both savings cutoffs"
         );
 
         let blob = unioned_blob(3, &detour.edges);
@@ -3223,7 +3273,7 @@ mod tests {
         // chord (that would bypass the stub-mid-stub doorway approach).
         let (cx, cy): (f64, f64) = (139.70000, 35.60000);
         let xy = xy_at(cx, cy);
-        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -10.0, 40.0, 10.0)]);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -15.0, 40.0, 15.0)]);
         let skeleton = Skeleton {
             nodes: vec![xy(0.0, 0.0), xy(20.0, 0.0)],
             edges: vec![],
@@ -3251,5 +3301,120 @@ mod tests {
             shortcut_chords(&skeleton, &chord_eligible, &area, &[]).is_empty(),
             "doorway-only unions must not make opposite-side nodes chord-eligible"
         );
+    }
+
+    #[test]
+    fn chord_needs_open_space() {
+        // Long zigzag inside a ~6 m wide corridor (half-width ~3 m < 5 m gate).
+        // Ratio and absolute savings both pass on the A–Z chord; open-space
+        // clearance must still reject it.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        // Corridor: y ∈ [-3, 3] → clearance at y=0 is 3 m.
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -5.0, -3.0, 45.0, 3.0)]);
+        // Zigzag every 4 m between y=±2.5 so the spine stays inside the
+        // corridor while the graph path A(0,0)→…→Z(40,0) is ~64 m against a
+        // 40 m chord (beats both 0.7× and +15 m savings).
+        let mut nodes = vec![xy(0.0, 0.0)];
+        let mut edges = Vec::new();
+        let mut x = 4.0;
+        let mut sign = 1.0_f64;
+        while x < 40.0 {
+            let i = nodes.len();
+            nodes.push(xy(x, sign * 2.5));
+            edges.push((i - 1, i));
+            x += 4.0;
+            sign = -sign;
+        }
+        let z = nodes.len();
+        nodes.push(xy(40.0, 0.0));
+        edges.push((z - 1, z));
+        let detour = Skeleton { nodes, edges };
+        let d_ac = haversine_m(detour.nodes[0], detour.nodes[z]);
+        let mut d_path = 0.0;
+        for &(a, b) in &detour.edges {
+            d_path += haversine_m(detour.nodes[a], detour.nodes[b]);
+        }
+        assert!(d_ac >= 10.0, "precondition: chord length {d_ac}");
+        assert!(
+            d_path > d_ac / CHORD_SAVINGS_RATIO && d_path > d_ac + 15.0,
+            "precondition: savings would pass without clearance gate (path={d_path}, c={d_ac})"
+        );
+        let blob = unioned_blob(detour.nodes.len(), &detour.edges);
+        assert!(
+            shortcut_chords(&detour, &blob, &area, &[]).is_empty(),
+            "corridor clearance ~3 m must yield no chord"
+        );
+    }
+
+    #[test]
+    fn chord_needs_absolute_savings() {
+        // Open hall: chord c ≈ 12 m, graph path ≈ 20 m. Ratio 12/20 = 0.6 < 0.7
+        // would pass the old rule, but absolute savings 8 m < 15 m must reject.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -20.0, 40.0, 20.0)]);
+        // A(0,0) → B(6,-8) → C(12,0): hops 10 m each, path 20 m, chord 12 m.
+        let detour = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(6.0, -8.0), xy(12.0, 0.0)],
+            edges: vec![(0, 1), (1, 2)],
+        };
+        let c = haversine_m(detour.nodes[0], detour.nodes[2]);
+        let path = haversine_m(detour.nodes[0], detour.nodes[1])
+            + haversine_m(detour.nodes[1], detour.nodes[2]);
+        assert!((c - 12.0).abs() < 0.1, "chord ≈12 m, got {c}");
+        assert!((path - 20.0).abs() < 0.1, "path ≈20 m, got {path}");
+        assert!(
+            c < path * CHORD_SAVINGS_RATIO,
+            "precondition: ratio rule alone would accept (c={c}, path={path})"
+        );
+        assert!(
+            path - c < 15.0,
+            "precondition: absolute savings below 15 m"
+        );
+        let blob = unioned_blob(3, &detour.edges);
+        assert!(
+            shortcut_chords(&detour, &blob, &area, &[]).is_empty(),
+            "absolute-savings gate must reject a 8 m gain"
+        );
+    }
+
+    #[test]
+    fn chord_respects_per_node_cap() {
+        // Hub H at the origin with three partners A,B,C. Each H–partner chord
+        // qualifies on length, clearance, and savings via a deep south
+        // junction J; only two chords may attach to H.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -40.0, -40.0, 40.0, 40.0)]);
+        // Nodes: H(0,0), A(25,0), B(0,25), C(-25,0), J(0,-30)
+        // Edges: H–J, J–A, J–B, J–C. Chords H–A/B/C beat H–J–partner (~55 m
+        // vs ~25 m).
+        let skeleton = Skeleton {
+            nodes: vec![
+                xy(0.0, 0.0),   // H = 0
+                xy(25.0, 0.0),  // A = 1
+                xy(0.0, 25.0),  // B = 2
+                xy(-25.0, 0.0), // C = 3
+                xy(0.0, -30.0), // J = 4
+            ],
+            edges: vec![(0, 4), (4, 1), (4, 2), (4, 3)],
+        };
+        let blob = unioned_blob(5, &skeleton.edges);
+        // Precondition: without a cap, all three H–partner chords qualify.
+        // (Implementation will cap at 2; this test asserts the cap.)
+        let chords = shortcut_chords(&skeleton, &blob, &area, &[]);
+        let hub_chords: Vec<_> = chords
+            .iter()
+            .filter(|&&(a, b)| a == 0 || b == 0)
+            .copied()
+            .collect();
+        assert_eq!(
+            hub_chords.len(),
+            2,
+            "hub gains exactly 2 chords, got {chords:?}"
+        );
+        // Deterministic: lowest partner indices win under sorted pair order.
+        assert_eq!(hub_chords, vec![(0, 1), (0, 2)]);
     }
 }
