@@ -745,17 +745,19 @@ fn opening_axis(geom: &Value) -> Option<([f64; 2], [f64; 2])> {
     let coords = obj.get("coordinates")?;
     let verts: Vec<[f64; 2]> = match obj.get("type")?.as_str()? {
         "LineString" => line_verts(coords),
-        "MultiLineString" => coords
-            .as_array()?
-            .iter()
-            .map(|part| line_verts(part))
-            .max_by(|a, b| {
-                let len = |vs: &Vec<[f64; 2]>| {
-                    vs.windows(2).map(|w| haversine_m(w[0], w[1])).sum::<f64>()
-                };
-                len(a).total_cmp(&len(b))
-            })
-            .unwrap_or_default(),
+        "MultiLineString" => {
+            let mut best: Vec<[f64; 2]> = Vec::new();
+            let mut best_len = -1.0;
+            for part in coords.as_array()? {
+                let vs = line_verts(part);
+                let len: f64 = vs.windows(2).map(|w| haversine_m(w[0], w[1])).sum();
+                if len > best_len {
+                    best_len = len;
+                    best = vs;
+                }
+            }
+            best
+        }
         _ => return None,
     };
     let (Some(first), Some(last)) = (verts.first(), verts.last()) else {
@@ -2288,7 +2290,7 @@ mod tests {
         assert_eq!(
             same_floor_degree(g, onode),
             2,
-            "opening bridges exactly the two spines"
+            "midpoint touches only its two stubs"
         );
     }
 
@@ -2640,5 +2642,37 @@ mod tests {
         let group = doorway_group(g, &door);
         assert_eq!(group.len(), 2, "only the inside stub survives");
         assert_eq!(component_count(g), 1);
+    }
+
+    #[test]
+    fn multilinestring_axis_matches_the_midpoints_part() {
+        // Two equal-length parts with opposite orientations: midpoint and
+        // axis must both come from the FIRST part (linestring_midpoint keeps
+        // the first on ties).
+        let geom = Value::Object(BTreeMap::from([
+            ("type".to_string(), Value::String("MultiLineString".to_string())),
+            (
+                "coordinates".to_string(),
+                Value::Array(vec![
+                    Value::Array(vec![
+                        Value::Array(vec![Value::Number(139.0), Value::Number(35.0)]),
+                        Value::Array(vec![Value::Number(139.001), Value::Number(35.0)]),
+                    ]),
+                    Value::Array(vec![
+                        Value::Array(vec![Value::Number(139.003), Value::Number(35.0)]),
+                        Value::Array(vec![Value::Number(139.002), Value::Number(35.0)]),
+                    ]),
+                ]),
+            ),
+        ]));
+        let (mid, axis) = opening_axis(&geom).expect("axis parses");
+        assert!(
+            (mid[0] - 139.0005).abs() < 1e-9 && (mid[1] - 35.0).abs() < 1e-9,
+            "midpoint from the first part: {mid:?}"
+        );
+        assert!(
+            axis[0] > 0.99 && axis[1].abs() < 0.01,
+            "axis along the first part (+lon): {axis:?}"
+        );
     }
 }
