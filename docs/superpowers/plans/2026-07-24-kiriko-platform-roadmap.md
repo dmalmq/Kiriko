@@ -147,7 +147,7 @@ The dated plans under `docs/superpowers/plans/` remain execution history for the
 
 ### Workstream 1C — Venue lifecycle and sharing
 
-**Required design:** version history, latest-version selection/rollback semantics, share-link policy, deletion/retention, embed configuration, and authorization-aware bundle caching partitioned by access context with freshness bounded by capability expiry and revocation.
+**Required design:** version history, latest-version selection/rollback semantics, share-link policy, deletion/retention, embed configuration, authorization-aware bundle caching partitioned by access context with freshness bounded by capability expiry and revocation, and active SSE subscription closure on capability expiry or revocation.
 
 **Approved sharing policy (2026-07-31):**
 
@@ -172,7 +172,7 @@ Current public-read routes remain a documented gap (`docs/superpowers/specs/2026
 - failed/draft versions are visible to producers but never become public accidentally;
 - partner invitation and capability-token lifetime and revocation are explicit and enforced.
 
-**Release gate:** publish two versions, share latest and pinned links, switch the latest pointer, verify pinned identity/content stays unchanged, then exercise the approved deletion/retention behavior. Validate that a revoked or expired partner capability returns 401/403 for all scoped reads and that protected bundle responses cannot be reused from browser or shared caches after authorization expires or is revoked.
+**Release gate:** publish two versions, share latest and pinned links, switch the latest pointer, verify pinned identity/content stays unchanged, then exercise the approved deletion/retention behavior. Validate that a revoked or expired partner capability returns 401/403 for all scoped reads, that an already-open issue SSE stream closes on expiry or revocation, and that protected bundle responses cannot be reused from browser or shared caches after authorization expires or is revoked.
 
 ### Workstream 1D — Release acceptance and supportability
 
