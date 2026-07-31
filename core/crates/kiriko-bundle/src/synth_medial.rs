@@ -815,23 +815,48 @@ impl PartialOrd for Visit {
 /// an open concourse instead of following the centerline's detour. Returns
 /// the added `(node_a, node_b)` pairs (skeleton-local), deterministic by
 /// construction (pairs processed in sorted order).
+///
+/// `existing` are skeleton-local metre-weighted edges already present in the
+/// floor graph but not in `skeleton.edges` (accepted near-blob bridges). They
+/// seed adjacency for the savings test so those pairs are never re-emitted,
+/// and so Dijkstra sees the true current path cost.
 pub(crate) fn shortcut_chords(
     skeleton: &Skeleton,
     blob: &[usize],
     area: &MultiPolygon<f64>,
+    existing: &[(usize, usize, f64)],
 ) -> Vec<(usize, usize)> {
     let n = skeleton.nodes.len();
-    // Metre-weighted adjacency: skeleton edges plus chords added so far.
+    if n == 0 {
+        return Vec::new();
+    }
+    // Metre-weighted adjacency: skeleton edges, accepted bridges, plus chords
+    // added so far. Bridges must participate in savings without being returned.
     let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     for &(a, b) in &skeleton.edges {
         let d = haversine_m(skeleton.nodes[a], skeleton.nodes[b]);
         adj[a].push((b, d));
         adj[b].push((a, d));
     }
-    // Candidate pairs: same-blob nodes within CHORD_MAX_M, via grid buckets.
-    let cell_deg = CHORD_MAX_M / 111_320.0;
-    let cell =
-        |p: [f64; 2]| ((p[0] / cell_deg).floor() as i64, (p[1] / cell_deg).floor() as i64);
+    for &(a, b, d) in existing {
+        adj[a].push((b, d));
+        adj[b].push((a, d));
+    }
+    // Candidate pairs: same-blob nodes within CHORD_MAX_M, via local-metre
+    // grid buckets (degree cells under-count longitude span at high latitude).
+    let ref_lat = skeleton.nodes[0][1];
+    let mut mx = 111_320.0 * ref_lat.to_radians().cos().abs();
+    if !mx.is_finite() || mx < 1.0 {
+        // Near-polar / non-finite guard: fall back to a 1 m/deg floor so
+        // bucketing stays well-defined; the haversine filter is authoritative.
+        mx = 1.0;
+    }
+    let cell = |p: [f64; 2]| {
+        (
+            (p[0] * mx / CHORD_MAX_M).floor() as i64,
+            (p[1] * 111_320.0 / CHORD_MAX_M).floor() as i64,
+        )
+    };
     let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
     for (i, np) in skeleton.nodes.iter().enumerate() {
         buckets.entry(cell(*np)).or_default().push(i);
@@ -894,8 +919,8 @@ pub(crate) fn shortcut_chords(
         if !centerline_chord_passable(skeleton.nodes[i], skeleton.nodes[j], area) {
             continue;
         }
-        // Only a real shortcut: the existing graph path (including chords
-        // already added) must be longer than c / CHORD_SAVINGS_RATIO.
+        // Only a real shortcut: the existing graph path (including bridges
+        // and chords already added) must be longer than c / CHORD_SAVINGS_RATIO.
         if reachable_within(&adj, i, j, c / CHORD_SAVINGS_RATIO) {
             continue;
         }
@@ -1284,6 +1309,9 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         }
         let mut keys: Vec<(usize, usize)> = bridges.keys().copied().collect();
         keys.sort_unstable();
+        // Skeleton-local accepted bridges (metre weights) — feed the chord
+        // pass so savings Dijkstra sees them and does not re-emit the pair.
+        let mut accepted_bridges: Vec<(usize, usize, f64)> = Vec::new();
         for key in keys {
             let (li, lj, d) = bridges[&key];
             if uf_find(&mut blob, li) == uf_find(&mut blob, lj) {
@@ -1297,6 +1325,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             }
             let (ra, rb) = (uf_find(&mut blob, li), uf_find(&mut blob, lj));
             blob[ra] = rb;
+            accepted_bridges.push((li, lj, d));
             edges.push(RouteEdge {
                 from: (base + li) as u32,
                 to: (base + lj) as u32,
@@ -1310,7 +1339,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         // centerline path through open areas (concourse diagonals). Same-blob
         // only, so they never merge components or duplicate doorway/bridge
         // paths (the savings test rejects those).
-        for (a, b) in shortcut_chords(&skeleton, &blob, &area) {
+        for (a, b) in shortcut_chords(&skeleton, &blob, &area, &accepted_bridges) {
             edges.push(RouteEdge {
                 from: (base + a) as u32,
                 to: (base + b) as u32,
@@ -2859,7 +2888,7 @@ mod tests {
             edges: vec![(0, 1), (1, 2), (2, 3)],
         };
         let blob = unioned_blob(4, &detour.edges);
-        let chords = shortcut_chords(&detour, &blob, &area);
+        let chords = shortcut_chords(&detour, &blob, &area, &[]);
         assert_eq!(chords, vec![(0, 2)], "A–C chord cuts the V detour");
 
         let straight = Skeleton {
@@ -2868,7 +2897,7 @@ mod tests {
         };
         let blob = unioned_blob(3, &straight.edges);
         assert!(
-            shortcut_chords(&straight, &blob, &area).is_empty(),
+            shortcut_chords(&straight, &blob, &area, &[]).is_empty(),
             "straight spine gains no chords"
         );
     }
@@ -2894,7 +2923,7 @@ mod tests {
         };
         let blob = unioned_blob(3, &detour.edges);
         assert!(
-            shortcut_chords(&detour, &blob, &area).is_empty(),
+            shortcut_chords(&detour, &blob, &area, &[]).is_empty(),
             "the chord across the hole is rejected"
         );
     }
@@ -2914,7 +2943,7 @@ mod tests {
         let edges: Vec<(usize, usize)> = (0..9).map(|i| (i, i + 1)).collect();
         let skeleton = Skeleton { nodes, edges };
         let blob = unioned_blob(10, &skeleton.edges);
-        let chords = shortcut_chords(&skeleton, &blob, &area);
+        let chords = shortcut_chords(&skeleton, &blob, &area, &[]);
         assert_eq!(
             chords,
             vec![
@@ -2930,7 +2959,84 @@ mod tests {
             "exact sorted chord set, feedback-aware"
         );
         // Determinism: same input, same chords.
-        let again = shortcut_chords(&skeleton, &unioned_blob(10, &skeleton.edges), &area);
+        let again = shortcut_chords(&skeleton, &unioned_blob(10, &skeleton.edges), &area, &[]);
         assert_eq!(chords, again);
+    }
+
+    #[test]
+    fn chords_do_not_reemit_an_existing_bridge() {
+        // Two disconnected skeleton components whose blob roots are already
+        // unified (as after near-blob bridging). The accepted bridge is
+        // supplied as an existing local edge; the chord pass must see it in
+        // adjacency and exclude the pair rather than re-emit it.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -10.0, 30.0, 10.0)]);
+        let skeleton = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(1.5, 0.0)],
+            edges: vec![],
+        };
+        // Blob already unified as if the bridge was accepted.
+        let blob = unioned_blob(2, &[(0, 1)]);
+        let bridge_d = haversine_m(skeleton.nodes[0], skeleton.nodes[1]);
+        assert!(bridge_d < CHORD_MAX_M);
+        // Without the existing edge the pair would qualify (no graph path).
+        let without = shortcut_chords(&skeleton, &blob, &area, &[]);
+        assert_eq!(without, vec![(0, 1)], "precondition: bare pair is a chord");
+        // With the bridge seeded, savings Dijkstra rejects the pair.
+        let with = shortcut_chords(&skeleton, &blob, &area, &[(0, 1, bridge_d)]);
+        assert!(
+            with.is_empty(),
+            "accepted bridge pair must not be re-emitted as a chord: {with:?}"
+        );
+    }
+
+    #[test]
+    fn chords_find_pairs_at_high_latitude_metre_buckets() {
+        // At lat 60°, lon m/deg ≈ half of 111_320. Old degree-grid cells of
+        // size CHORD_MAX_M/111_320 put a sub-40 m east-west pair two columns
+        // apart when the pair straddles two cell boundaries, so the ±1
+        // neighbor scan missed them. Local-metre buckets must still surface
+        // the pair.
+        let cy: f64 = 60.00000;
+        let old_cell_deg = CHORD_MAX_M / 111_320.0;
+        // Place A near the end of a degree-grid cell and C 1.1 cells east so
+        // floor(lon/cell) differs by 2 while haversine stays well under 40 m
+        // (≈ 22 m at lat 60°).
+        let a_lon = (10.0_f64 / old_cell_deg).floor() * old_cell_deg + old_cell_deg * 0.95;
+        let c_lon = a_lon + old_cell_deg * 1.1;
+        let b_lon = (a_lon + c_lon) / 2.0;
+        let a = [a_lon, cy];
+        let b = [b_lon, cy - 30.0 / 111_320.0];
+        let c = [c_lon, cy];
+        // Wide open walkable rect covering the V (metre offsets around A).
+        let area = MultiPolygon::new(vec![rect_poly(a_lon, cy, -10.0, -45.0, 50.0, 5.0)]);
+        let detour = Skeleton {
+            nodes: vec![a, b, c],
+            edges: vec![(0, 1), (1, 2)],
+        };
+        let old_ax = (a[0] / old_cell_deg).floor() as i64;
+        let old_cx = (c[0] / old_cell_deg).floor() as i64;
+        assert!(
+            (old_cx - old_ax).abs() >= 2,
+            "precondition: old degree grid separates A–C by ≥2 lon cells ({old_ax} vs {old_cx})"
+        );
+        let d_ac = haversine_m(a, c);
+        assert!(d_ac < CHORD_MAX_M, "precondition: A–C within chord range ({d_ac})");
+        // Graph path A–B–C is a deep V (~60 m+), so the chord qualifies.
+        let d_ab = haversine_m(a, b);
+        let d_bc = haversine_m(b, c);
+        assert!(
+            d_ab + d_bc > d_ac / CHORD_SAVINGS_RATIO,
+            "precondition: detour beats savings cutoff"
+        );
+
+        let blob = unioned_blob(3, &detour.edges);
+        let chords = shortcut_chords(&detour, &blob, &area, &[]);
+        assert_eq!(
+            chords,
+            vec![(0, 2)],
+            "metre-scale buckets must find the high-latitude A–C chord"
+        );
     }
 }
