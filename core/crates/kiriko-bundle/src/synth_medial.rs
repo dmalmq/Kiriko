@@ -809,12 +809,18 @@ impl PartialOrd for Visit {
     }
 }
 
-/// Open-space shortcut chords between same-blob skeleton nodes: a straight,
-/// fully passable segment that beats the current graph path by
+/// Open-space shortcut chords between same-component skeleton nodes: a
+/// straight, fully passable segment that beats the current graph path by
 /// [`CHORD_SAVINGS_RATIO`]. This is what lets a route cut diagonally across
 /// an open concourse instead of following the centerline's detour. Returns
 /// the added `(node_a, node_b)` pairs (skeleton-local), deterministic by
 /// construction (pairs processed in sorted order).
+///
+/// `blob` is the **chord-eligibility** union-find (skeleton edges + accepted
+/// near-blob bridges only). Doorway-only unions must not appear here: their
+/// stub paths are absent from chord adjacency, so opposite-side nodes would
+/// otherwise look disconnected to the savings Dijkstra and get a free chord
+/// that bypasses the doorway approach.
 ///
 /// `existing` are skeleton-local metre-weighted edges already present in the
 /// floor graph but not in `skeleton.edges` (accepted near-blob bridges). They
@@ -1125,6 +1131,13 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         }
         let skeleton_range = base..nodes.len();
 
+        // Chord eligibility tracks skeleton + near-blob bridge connectivity
+        // only. Doorway attachments union production `blob` so downstream
+        // passes see one component, but those stub paths are NOT in the chord
+        // adjacency — keep opposite-side doorway components ineligible for
+        // open-space chords that would bypass the stub-mid-stub approach.
+        let mut chord_blob = blob.clone();
+
         // Doorways: bridge each opening to the nearest centerline node of every
         // distinct blob within range, merging areas that share the doorway.
         // Blobs connected here are UNIONED as they are processed, so a second
@@ -1325,6 +1338,11 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             }
             let (ra, rb) = (uf_find(&mut blob, li), uf_find(&mut blob, lj));
             blob[ra] = rb;
+            // Bridges are in chord savings adjacency — eligibility must match.
+            let (cra, crb) = (uf_find(&mut chord_blob, li), uf_find(&mut chord_blob, lj));
+            if cra != crb {
+                chord_blob[cra] = crb;
+            }
             accepted_bridges.push((li, lj, d));
             edges.push(RouteEdge {
                 from: (base + li) as u32,
@@ -1336,10 +1354,11 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         }
 
         // Open-space shortcuts: straight, fully passable chords that beat the
-        // centerline path through open areas (concourse diagonals). Same-blob
-        // only, so they never merge components or duplicate doorway/bridge
+        // centerline path through open areas (concourse diagonals). Same
+        // chord-eligible component only (skeleton + bridges; not doorway-only
+        // unions), so they never merge components or duplicate doorway/bridge
         // paths (the savings test rejects those).
-        for (a, b) in shortcut_chords(&skeleton, &blob, &area, &accepted_bridges) {
+        for (a, b) in shortcut_chords(&skeleton, &chord_blob, &area, &accepted_bridges) {
             edges.push(RouteEdge {
                 from: (base + a) as u32,
                 to: (base + b) as u32,
@@ -3037,6 +3056,46 @@ mod tests {
             chords,
             vec![(0, 2)],
             "metre-scale buckets must find the high-latitude A–C chord"
+        );
+    }
+
+    #[test]
+    fn chords_skip_doorway_only_unions() {
+        // Two skeleton components joined only through a doorway (no skeleton
+        // edge, no near-blob bridge). Nodes sit ~20 m apart in open space so
+        // a straight chord is passable and would beat any missing graph path.
+        // Production `blob` is already doorway-unified; chord eligibility
+        // keeps the pre-doorway roots separate. The pair must NOT become a
+        // chord (that would bypass the stub-mid-stub doorway approach).
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -10.0, 40.0, 10.0)]);
+        let skeleton = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(20.0, 0.0)],
+            edges: vec![],
+        };
+        let d = haversine_m(skeleton.nodes[0], skeleton.nodes[1]);
+        assert!(d < CHORD_MAX_M && d > 0.0);
+        assert!(centerline_chord_passable(
+            skeleton.nodes[0],
+            skeleton.nodes[1],
+            &area
+        ));
+
+        // Old final-blob input (doorway-unioned): pair looks same-component
+        // and disconnected in chord adjacency → free chord.
+        let door_unified = unioned_blob(2, &[(0, 1)]);
+        assert_eq!(
+            shortcut_chords(&skeleton, &door_unified, &area, &[]),
+            vec![(0, 1)],
+            "precondition: doorway-unified blob would accept the cross-door chord"
+        );
+
+        // Chord-eligibility UF (skeleton only — no doorway union): suppressed.
+        let chord_eligible = unioned_blob(2, &[]);
+        assert!(
+            shortcut_chords(&skeleton, &chord_eligible, &area, &[]).is_empty(),
+            "doorway-only unions must not make opposite-side nodes chord-eligible"
         );
     }
 }
