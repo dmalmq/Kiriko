@@ -103,21 +103,35 @@ index).
 
 ### Slice 2 — network generation (`core/crates/kiriko-bundle/src/synth_medial.rs`)
 
-**2a. Doorway axis stubs.** Carry the opening LineString (midpoint +
-unit axis) through synthesis instead of the midpoint alone. The venue data
-digitizes openings as connector lines spanning the gap between spaces, so
-the line direction IS the walking direction through the doorway; "front of
-the opening" means collinear with the opening axis. For each opening with at
-least one attachable centerline blob:
+**2a. Doorway passage stubs.** Carry the opening LineString (midpoint + line
+direction) through synthesis instead of the midpoint alone, and place stubs
+along the **detected passage direction**, not a fixed convention. Openings are
+digitized inconsistently across sources: the hand-written fixtures draw them as
+connector lines spanning the gap between spaces (passage runs ALONG the line),
+while the JR GDB conversion emits threshold lines lying ALONG the wall (passage
+runs across the NORMAL). Measured on JR Takanawa Gateway: offsetting the
+midpoint by δ along the normal lands inside units 66/66 and in two DIFFERENT
+units 64/66; along the line only 20/66. "Front of the opening" therefore means
+collinear with whichever direction actually crosses the doorway.
 
-- Stub nodes `F = M + a·δ` and `B = M − a·δ` along the opening axis `a`,
-  δ = 1.2 m. Each stub is valid only if the point lies inside the walkable
-  area and the segment stub→M passes `segment_within_area` with
-  `SEGMENT_OUTSIDE_TOL_M`.
+For each opening with at least one attachable centerline blob:
+
+- Candidate directions: the line direction `a` and its normal. Score each by
+  probing `M ± d·δ`, δ = 1.2 m: **2** when both sides are *deep* inside the
+  walkable area AND their nearest-skeleton blob roots differ (a real crossing
+  between two components), **1** when exactly one side is deep (passage out of
+  walkable space through the door), **0** otherwise. Higher score wins; a tie
+  prefers the normal, matching IMDF semantics where an opening is the line you
+  cross. *Deep* is `area.contains` plus `boundary_clearance_m ≥ 0.5 m` —
+  deliberately stricter than `point_within_area`'s 0.3 m tolerance, which is
+  what let along-the-wall stubs pass validation.
+- Stub nodes `F = M + p·δ` and `B = M − p·δ` along the chosen passage direction
+  `p`. Each stub is valid only if the point lies inside the walkable area and
+  the segment stub→M passes `segment_within_area` with `SEGMENT_OUTSIDE_TOL_M`.
 - Side assignment for transit-adjacent openings: the side containing the
   unit centroid is "inside". For walkway↔walkway openings both stubs are
   used and "side" is decided per attaching blob by the sign of the dot
-  product of the blob's centerline node against the opening axis.
+  product of the blob's centerline node against `p`.
 - Edges: `F–M` and `M–B` with real metre distances (converted once via
   `meters_to_cost`, as all synth edges). Centerline blobs attach to the stub
   on their own side within `SNAP_MAX_M`, never directly to `M`. Transit
@@ -125,25 +139,40 @@ least one attachable centerline blob:
 - Fallbacks: a side failing validation collapses to `M` (today's attach); if
   both sides fail, keep the current midpoint attach unchanged.
 
-Result: every route crosses a doorway collinear with the opening axis over
-the last δ metres.
+Result: every route crosses a doorway collinear with the doorway's real
+passage direction over the last δ metres — straight in from the front on
+both digitization conventions.
 
-**2b. Visibility-chord densification.** After skeleton construction, doorway
+**2b. Open-space shortcut chords.** After skeleton construction, doorway
 attachment, and near-blob bridging, per floor:
 
-- Bucket skeleton nodes on a grid (same pattern as near-blob bridging, cell
-  sized to `R`).
+- Bucket skeleton nodes on a local-metre grid (same pattern as near-blob
+  bridging, cell sized to `R`).
 - For each same-blob node pair within `R = 40 m` (chord length `c`), in
   deterministic order (sorted by node indices): add a straight chord edge
-  with weight `meters_to_cost(c)` when
-  - `bridge_passable(a, b, area)` holds (full `MIN_PASSAGE_M` width inside
-    walkable space — rejects chords across kiosks, walls, track beds), and
-  - `c < 0.7 · d_graph(a, b)` where `d_graph` is the current graph distance
-    (bounded Dijkstra with cutoff `c / 0.7` on the same-blob subgraph,
-    including chords already added — which self-limits chord degrees to ~2,
-    so no per-node cap is needed).
+  with weight `meters_to_cost(c)` when ALL of the following hold
+  - `c ≥ 10 m` — shorter chords are medial-axis noise, not shortcuts;
+  - neither endpoint already has 2 added chords (per-node cap);
+  - every sample along the chord (~1 m steps, endpoints included) lies inside
+    the walkable area with `boundary_clearance_m ≥ 5 m` — the open-space test:
+    only genuinely open halls qualify;
+  - `centerline_chord_passable(a, b, area)` holds (full `MIN_PASSAGE_M` width
+    inside walkable space — rejects chords across kiosks, walls, track beds);
+  - the current graph distance exceeds BOTH `c / 0.7` and `c + 15 m`, i.e. one
+    bounded Dijkstra with cutoff `max(c / 0.7, c + 15)` on the same-blob
+    subgraph (skeleton edges, accepted near-blob bridges, and chords already
+    added, so each acceptance feeds back into later candidates).
 - Chord edges are ordinary edges: they render in the network review overlay,
   are exported, and remain deletable in the network editor.
+
+The ratio rule alone is scale-free and therefore wrong: on JR Takanawa Gateway
+it fired between spur tips ~3 m apart whose graph path was ~10 m, adding ~1100
+chords (cyclomatic 1215, 2491 crossing edge pairs) on a venue whose maximum
+walkable half-width is 4.69 m — i.e. with no open space at all. The absolute
+savings, minimum length, clearance, and per-node cap gates are what make
+"open-space shortcut" mean open space. Under them that venue gains zero chords
+(cyclomatic 104, 17 crossings), while a genuine concourse diagonal still
+qualifies.
 
 **Regeneration semantics.** Synth changes only affect newly generated
 networks. Published versions and hand-edited networks are unchanged until a
@@ -174,10 +203,12 @@ swap — order-coupled and breaks whenever any earlier effect touches a source.
 - Slice 1: no new failure modes; `route()` still returns `None` for
   non-finite endpoints or disconnected projections. A* internals unchanged.
 - Slice 2: stub/chord validation failures fall back to current behavior
-  (midpoint attach, no chord). Existing warning codes reused
+  (midpoint attach, no chord); an opening whose passage direction scores 0 on
+  both candidates keeps the midpoint-only attach. Existing warning codes reused
   (`synth_opening_no_walkway`); no new `WarningCode`s, so the TS bridge
-  allowlist is untouched. Chord savings gating (0.7× graph distance,
-  feedback-aware) bounds added edges.
+  allowlist is untouched. Chord gating (minimum length, per-node cap,
+  clearance, passability, and feedback-aware ratio plus absolute savings)
+  bounds added edges.
 - Slice 3: if the map is torn down before `styledata` fires, the subscription
   is removed by the existing cleanup path; apply is a no-op on a removed map
   (`mapRef.current == null` guard).
@@ -191,14 +222,16 @@ swap — order-coupled and breaks whenever any earlier effect touches a source.
   - connector leg breaks a tie toward the nearer snap;
   - determinism: identical inputs → byte-identical route across runs.
 - **Slice 2 (Rust, `synth_medial.rs` tests):**
-  - doorway crossing follows the opening axis: route through an opening
-    traverses `F–M–B` with the stub segments collinear with the opening
-    line;
+  - doorway crossing follows the DETECTED passage direction: a threshold
+    opening on a wall places its stub along the normal, on the walkable side,
+    with no along-the-wall stub; a gap-spanning connector still places stubs
+    along the line (score 2);
   - blob attaches only to the stub on its own side;
   - one-side-invalid stub collapses to midpoint attach;
   - open hall gains chords that shorten sampled routes, with added chords
-    shortening later candidates' graph paths (feedback); narrow corridor
-    and kiosk-blocked pairs gain none;
+    shortening later candidates' graph paths (feedback); narrow corridor,
+    kiosk-blocked, sub-10 m, and low-absolute-savings pairs gain none, and a
+    node never exceeds two added chords;
   - synthesis deterministic.
 - **Slice 3 (Vitest, `IndoorMap.test.tsx`):**
   - FakeMap mimics real semantics: indoor `setData`/`updateData` flips
