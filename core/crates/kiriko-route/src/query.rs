@@ -64,12 +64,13 @@ impl Eq for Open {}
 
 impl Ord for Open {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Min-heap by f, then lower origin edge index, then node index.
+        // BinaryHeap is a max-heap: reverse each key so lower values pop first
+        // (min f, then lower origin edge index, then lower node index).
         other
             .f
             .total_cmp(&self.f)
-            .then_with(|| self.origin_edge.cmp(&other.origin_edge))
-            .then_with(|| self.node.cmp(&other.node))
+            .then_with(|| other.origin_edge.cmp(&self.origin_edge))
+            .then_with(|| other.node.cmp(&self.node))
     }
 }
 
@@ -573,6 +574,33 @@ fn group_segments(verts: Vec<TaggedVertex>) -> Vec<RouteSegment> {
 mod tests {
     use super::*;
     use crate::graph::*;
+
+    #[test]
+    fn open_heap_pops_lower_origin_edge_first() {
+        // BinaryHeap is a max-heap; Open::Ord must reverse origin_edge so the
+        // lower actual origin edge index has higher priority on equal f.
+        let mut heap = BinaryHeap::new();
+        heap.push(Open {
+            f: 1.0,
+            g: 1.0,
+            node: 0,
+            origin_edge: 9,
+        });
+        heap.push(Open {
+            f: 1.0,
+            g: 1.0,
+            node: 0,
+            origin_edge: 2,
+        });
+        let first = heap.pop().expect("two entries");
+        assert_eq!(
+            first.origin_edge, 2,
+            "lower origin edge must pop first on equal f"
+        );
+        let second = heap.pop().expect("one entry left");
+        assert_eq!(second.origin_edge, 9);
+    }
+
 
     #[test]
     fn route_traces_the_corridor_polyline() {
