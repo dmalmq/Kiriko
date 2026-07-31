@@ -103,26 +103,30 @@ index).
 
 ### Slice 2 — network generation (`core/crates/kiriko-bundle/src/synth_medial.rs`)
 
-**2a. Perpendicular doorway stubs.** Carry the opening LineString (midpoint +
-unit direction) through synthesis instead of the midpoint alone. For each
-opening with at least one attachable centerline blob:
+**2a. Doorway axis stubs.** Carry the opening LineString (midpoint +
+unit axis) through synthesis instead of the midpoint alone. The venue data
+digitizes openings as connector lines spanning the gap between spaces, so
+the line direction IS the walking direction through the doorway; "front of
+the opening" means collinear with the opening axis. For each opening with at
+least one attachable centerline blob:
 
-- Normal `n` = unit perpendicular of the opening line.
-- Stub nodes `O = M + n·δ` and `I = M − n·δ`, δ = 1.2 m. Each stub is valid
-  only if the point lies inside the walkable area and the segment stub→M
-  passes `segment_within_area` with `SEGMENT_OUTSIDE_TOL_M`.
-- Side assignment for transit-adjacent openings: the side containing the unit
-  centroid is "inside". For walkway↔walkway openings both stubs are used and
-  "side" is decided per attaching blob by the cross-product sign of its
-  centerline node against the opening line.
-- Edges: `O–M` and `M–I` with real metre distances (converted once via
+- Stub nodes `F = M + a·δ` and `B = M − a·δ` along the opening axis `a`,
+  δ = 1.2 m. Each stub is valid only if the point lies inside the walkable
+  area and the segment stub→M passes `segment_within_area` with
+  `SEGMENT_OUTSIDE_TOL_M`.
+- Side assignment for transit-adjacent openings: the side containing the
+  unit centroid is "inside". For walkway↔walkway openings both stubs are
+  used and "side" is decided per attaching blob by the sign of the dot
+  product of the blob's centerline node against the opening axis.
+- Edges: `F–M` and `M–B` with real metre distances (converted once via
   `meters_to_cost`, as all synth edges). Centerline blobs attach to the stub
-  on their own side within `SNAP_MAX_M`, never directly to `M`. Transit units
-  keep attaching through their doorway, terminating at the inner stub.
+  on their own side within `SNAP_MAX_M`, never directly to `M`. Transit
+  units keep attaching through their doorway, terminating at the inner stub.
 - Fallbacks: a side failing validation collapses to `M` (today's attach); if
   both sides fail, keep the current midpoint attach unchanged.
 
-Result: every route crosses a doorway perpendicular over the last δ metres.
+Result: every route crosses a doorway collinear with the opening axis over
+the last δ metres.
 
 **2b. Visibility-chord densification.** After skeleton construction, doorway
 attachment, and near-blob bridging, per floor:
@@ -135,8 +139,9 @@ attachment, and near-blob bridging, per floor:
   - `bridge_passable(a, b, area)` holds (full `MIN_PASSAGE_M` width inside
     walkable space — rejects chords across kiosks, walls, track beds), and
   - `c < 0.7 · d_graph(a, b)` where `d_graph` is the current graph distance
-    (bounded Dijkstra with cutoff `c / 0.7` on the same-blob subgraph), and
-  - both nodes have fewer than 4 added chords.
+    (bounded Dijkstra with cutoff `c / 0.7` on the same-blob subgraph,
+    including chords already added — which self-limits chord degrees to ~2,
+    so no per-node cap is needed).
 - Chord edges are ordinary edges: they render in the network review overlay,
   are exported, and remain deletable in the network editor.
 
@@ -171,8 +176,8 @@ swap — order-coupled and breaks whenever any earlier effect touches a source.
 - Slice 2: stub/chord validation failures fall back to current behavior
   (midpoint attach, no chord). Existing warning codes reused
   (`synth_opening_no_walkway`); no new `WarningCode`s, so the TS bridge
-  allowlist is untouched. Chord budget guards keep degenerate floors from
-  exploding edge counts.
+  allowlist is untouched. Chord savings gating (0.7× graph distance,
+  feedback-aware) bounds added edges.
 - Slice 3: if the map is torn down before `styledata` fires, the subscription
   is removed by the existing cleanup path; apply is a no-op on a removed map
   (`mapRef.current == null` guard).
@@ -186,14 +191,15 @@ swap — order-coupled and breaks whenever any earlier effect touches a source.
   - connector leg breaks a tie toward the nearer snap;
   - determinism: identical inputs → byte-identical route across runs.
 - **Slice 2 (Rust, `synth_medial.rs` tests):**
-  - doorway crossing is perpendicular: route through an opening traverses
-    `O–M–I` with the stub segments collinear with the opening normal;
+  - doorway crossing follows the opening axis: route through an opening
+    traverses `F–M–B` with the stub segments collinear with the opening
+    line;
   - blob attaches only to the stub on its own side;
   - one-side-invalid stub collapses to midpoint attach;
-  - open hall gains a chord that shortens a sampled route; narrow corridor
+  - open hall gains chords that shorten sampled routes, with added chords
+    shortening later candidates' graph paths (feedback); narrow corridor
     and kiosk-blocked pairs gain none;
-  - chord degree cap respected; synthesis deterministic.
-  - Extend `examples/analyze_synth.rs` to report chords added per floor.
+  - synthesis deterministic.
 - **Slice 3 (Vitest, `IndoorMap.test.tsx`):**
   - FakeMap mimics real semantics: indoor `setData`/`updateData` flips
     `styleLoaded` to false until a `styledata` event is emitted.
