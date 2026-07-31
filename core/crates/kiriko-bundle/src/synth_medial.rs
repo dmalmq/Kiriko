@@ -3092,8 +3092,9 @@ mod tests {
         // One 36 m × 11 m walkway with a doorway drawn across its middle (line
         // along latitude). Passage is through the gate — perpendicular to the
         // opening line (score tie → prefer the normal). Stubs flank the
-        // midpoint on that passage axis; the centerline attaches through a
-        // stub, never directly to the midpoint.
+        // midpoint on that passage axis. The centerline attaches through a
+        // stub, or directly to the midpoint when the on-axis junction sits
+        // nearer than the stub (DOORWAY_STUB_M + margin).
         let walk = rect(139.70000, 35.600002, 0.00040, 0.00010);
         let door = line(139.70000, 35.599995, 139.70000, 35.600005);
         let doc = document(
@@ -3533,13 +3534,19 @@ mod tests {
 
     #[test]
     fn doorway_attach_falls_back_to_projection_when_the_ray_misses() {
-        // Mid-corridor gate (N–S opening across an E–W walkway). Passage axis
-        // is E–W — collinear with the medial spine — so the axis ray is
-        // parallel to every spine edge (determinant ≈ 0) and never records a
-        // hit. Projection of M onto the spine must still split the centerline
-        // at the gate, producing a T-junction the stubs attach through.
+        // Mid-corridor N–S gate across an E–W walkway. Passage axis is E–W —
+        // collinear with the medial spine — so the axis ray is parallel to every
+        // spine edge (determinant ≈ 0) and records no hit. Projection of M onto
+        // the spine must still split at the exact perpendicular foot.
+        //
+        // Door lon is placed mid-way between densification samples (~0.36 m
+        // pitch), so under nearest-node attach the target would be a sample
+        // ~0.18 m off the foot; with the projection split it lands within 1 cm.
         let walk = rect(139.70000, 35.600002, 0.00040, 0.00010); // ~36 m × 11 m
-        let door = line(139.70000, 35.599995, 139.70000, 35.600005);
+        // Mid-sample lon: spine samples include 139.7 exactly; next is
+        // ~139.70000408. Foot at 139.7000018 is ~0.16 m from 139.7.
+        let door_lon = 139.7000018;
+        let door = line(door_lon, 35.599995, door_lon, 35.600005);
         let doc = document(
             &[("l0", 0.0)],
             vec![
@@ -3553,30 +3560,58 @@ mod tests {
         let group = doorway_group(g, &door);
         assert_eq!(group.len(), 3, "mid + both stubs");
         let targets = doorway_attach_targets(g, &group);
-        // One blob, one or two attaches (both stubs' sides may share the same
-        // split node if the gate straddles a single component — typically two
-        // side-attaches to the same T-junction, or one if mid-attach merges).
+        assert_eq!(targets.len(), 1, "one attach target: {targets:?}");
+        let target = targets[0];
+        let tn = &g.nodes[target];
+        // Exact perpendicular foot of M on the E–W spine (corridor center lat).
+        let foot = [door_lon, 35.600002];
+        let d_foot = haversine_m(foot, [tn.lon, tn.lat]);
         assert!(
-            !targets.is_empty(),
-            "centerline attaches via projection split"
+            d_foot < 0.01,
+            "attach target must be the projection foot within 1 cm (got {d_foot:.3} m at lon={} lat={}); \
+             nearest-node attach lands ~0.16 m off on a densification sample",
+            tn.lon,
+            tn.lat
         );
-        // Every attach target is a T-junction on the door axis (projection
-        // split at/near M on the spine).
-        for &t in &targets {
-            let tn = &g.nodes[t];
-            let off = lateral_offset_m(dm, [1.0, 0.0], [tn.lon, tn.lat]);
-            // Axis is E–W; lateral offset is N–S distance from the gate mid.
-            assert!(
-                off < 0.5,
-                "projection target near the gate axis, off={off:.2} m"
-            );
-            assert!(
-                same_floor_degree(g, t) >= 3,
-                "projection target is a T-junction, degree={}",
-                same_floor_degree(g, t)
-            );
-        }
+        assert!(
+            same_floor_degree(g, target) >= 3,
+            "projection foot is a T-junction, degree={}",
+            same_floor_degree(g, target)
+        );
+        // Spine neighbors straddle the foot along the corridor.
+        let spine_nbrs: Vec<usize> = g
+            .edges
+            .iter()
+            .filter_map(|e| {
+                let (a, b) = (e.from as usize, e.to as usize);
+                if a == target && !group.contains(&b) {
+                    Some(b)
+                } else if b == target && !group.contains(&a) {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            spine_nbrs.len() >= 2,
+            "projection split has ≥2 spine neighbors: {spine_nbrs:?}"
+        );
+        let lons: Vec<f64> = spine_nbrs.iter().map(|&i| g.nodes[i].lon).collect();
+        let min_lon = lons.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_lon = lons.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            min_lon < tn.lon && max_lon > tn.lon,
+            "spine neighbors straddle the projection foot: lons={lons:?} foot={}",
+            tn.lon
+        );
+        let _ = dm;
     }
+
+
+
+
+
 
 
 
@@ -3644,27 +3679,71 @@ mod tests {
     }
 
     #[test]
-    fn centerline_split_preserves_components() {
+    fn centerline_split_keeps_components_and_creates_t_junction() {
         // A single walkway with one wall doorway: splitting the centerline
-        // adds a T-junction node but must not change the component count
-        // (still one connected floor graph).
+        // must (a) leave the floor as one component and (b) actually create a
+        // genuine T-junction on the spine in front of the door — degree ≥ 3,
+        // both spine arms longer than 0.1 m, lateral offset under 0.05 m.
         let walk = rect(139.70000, 35.60000, 0.00080, 0.00008);
         let door = line(139.7000665, 35.599960, 139.7001065, 35.599960);
         let doc = document(
             &[("l0", 0.0)],
             vec![
                 feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
-                feature("door", FeatureType::Opening, "l0", None, door),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
             ],
         );
         let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
         assert_eq!(
-            component_count(&build.graph),
+            component_count(g),
             1,
             "splits add nodes, never connectivity"
         );
-        // And a two-blob doorway still yields exactly one component.
-        let door = line(139.70000, 35.600045, 139.70000, 35.600055);
+        let dm = linestring_midpoint(&door).unwrap();
+        let group = doorway_group(g, &door);
+        let axis = [0.0_f64, 1.0]; // south-wall threshold → north passage
+        let mut found_split = false;
+        for (i, n) in g.nodes.iter().enumerate() {
+            if group.contains(&i) {
+                continue;
+            }
+            if same_floor_degree(g, i) < 3 {
+                continue;
+            }
+            let off = lateral_offset_m(dm, axis, [n.lon, n.lat]);
+            if off >= 0.05 || n.lat <= dm[1] {
+                continue;
+            }
+            // Two non-group neighbors at >0.1 m (spine arms, not a stub nibble).
+            let mut arm_lens: Vec<f64> = Vec::new();
+            for e in &g.edges {
+                let (a, b) = (e.from as usize, e.to as usize);
+                let other = if a == i {
+                    b
+                } else if b == i {
+                    a
+                } else {
+                    continue;
+                };
+                if group.contains(&other) {
+                    continue;
+                }
+                arm_lens.push(haversine_m([n.lon, n.lat], [g.nodes[other].lon, g.nodes[other].lat]));
+            }
+            let long_arms = arm_lens.iter().filter(|&&d| d > 0.1).count();
+            if long_arms >= 2 {
+                found_split = true;
+                break;
+            }
+        }
+        assert!(
+            found_split,
+            "expected an on-axis spine T-junction (deg≥3, two arms >0.1 m, lateral offset <0.05 m)"
+        );
+
+        // Two-blob doorway still yields exactly one component after splits.
+        let door2 = line(139.70000, 35.600045, 139.70000, 35.600055);
         let doc2 = document(
             &[("l0", 0.0)],
             vec![
@@ -3682,7 +3761,7 @@ mod tests {
                     Some("walkway"),
                     rect(139.70000, 35.600075, 0.00040, 0.000045),
                 ),
-                feature("door", FeatureType::Opening, "l0", None, door),
+                feature("door", FeatureType::Opening, "l0", None, door2),
             ],
         );
         assert_eq!(
