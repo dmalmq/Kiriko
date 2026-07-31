@@ -700,6 +700,7 @@ export function IndoorMap({
   onSelectFacilityRef.current = onSelectFacility;
 
   const overlayStyleWaitingRef = useRef(false);
+  const overlayWaiterRef = useRef<(() => void) | null>(null);
 
   // Applies every overlay from the latest refs; each overlay keeps its
   // "update only while active, clear exactly once" guard. Call only when the
@@ -743,9 +744,10 @@ export function IndoorMap({
   }, []);
 
   // Applies overlays now when the style is ready, otherwise exactly once when
-  // it settles. A floor change keeps the style busy while the indoor source
-  // reloads; updates made in that window queue behind a single `styledata`
-  // subscription instead of being dropped.
+  // a geojson source finishes loading. A floor change keeps the style busy
+  // while the indoor source reloads; updates made in that window queue behind
+  // a single `sourcedata` subscription instead of being dropped. Re-entry
+  // re-checks isStyleLoaded and re-subscribes if another source is still busy.
   const syncOverlays = useCallback((): void => {
     const map = mapRef.current;
     if (map == null) {
@@ -757,10 +759,13 @@ export function IndoorMap({
     }
     if (!overlayStyleWaitingRef.current) {
       overlayStyleWaitingRef.current = true;
-      map.once("styledata", () => {
+      const onSourceData = (): void => {
+        overlayWaiterRef.current = null;
         overlayStyleWaitingRef.current = false;
         syncOverlays();
-      });
+      };
+      overlayWaiterRef.current = onSourceData;
+      map.once("sourcedata", onSourceData);
     }
   }, [applyOverlays]);
 
@@ -1024,6 +1029,12 @@ export function IndoorMap({
       cameraCancelRef.current = null;
       issueHighlightCancelRef.current?.();
       issueHighlightCancelRef.current = null;
+      const overlayWaiter = overlayWaiterRef.current;
+      if (overlayWaiter != null) {
+        map.off("sourcedata", overlayWaiter);
+        overlayWaiterRef.current = null;
+      }
+      overlayStyleWaitingRef.current = false;
       map.off("load", onLoad);
       map.off("click", onClick);
       map.off("mousemove", onMouseMove);
@@ -1237,7 +1248,7 @@ export function IndoorMap({
   }, [issueReview?.cameraRequest, levelId]);
 
   // Overlays (route, network, facilities, layer visibility): re-filter to the
-  // active floor and apply prop changes, deferring to `styledata` while the
+  // active floor and apply prop changes, deferring to `sourcedata` while the
   // style is busy (e.g. right after the indoor source swap on a floor
   // change). onLoad initializes every source, so a null map is a no-op.
   useEffect(() => {

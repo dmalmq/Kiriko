@@ -1046,7 +1046,7 @@ describe("IndoorMap directions", () => {
     expect(lastRouteData(map)).toEqual({ type: "FeatureCollection", features: [] });
   });
 
-  it("defers the route overlay while the style is busy, applying it on styledata", () => {
+  it("defers the route overlay while the style is busy, applying it on sourcedata", () => {
     mapState.setFlipStyleLoadedOnIndoorWrite(true);
     const venue = baseVenue();
     venue.renderFeaturesByLevel.set("level-1", {
@@ -1077,7 +1077,7 @@ describe("IndoorMap directions", () => {
     const settle = (): void => {
       act(() => {
         map.styleLoaded = true;
-        map.emit("styledata");
+        map.emit("sourcedata", READY_EVENT);
       });
     };
     settle();
@@ -1171,7 +1171,7 @@ describe("IndoorMap network review", () => {
     expect(lastNetworkData(map).features).toEqual([]);
   });
 
-  it("defers the network overlay while the style is busy, applying it on styledata", () => {
+  it("defers the network overlay while the style is busy, applying it on sourcedata", () => {
     mapState.setFlipStyleLoadedOnIndoorWrite(true);
     const venue = baseVenue();
     venue.renderFeaturesByLevel.set("level-1", {
@@ -1202,7 +1202,7 @@ describe("IndoorMap network review", () => {
     const settle = (): void => {
       act(() => {
         map.styleLoaded = true;
-        map.emit("styledata");
+        map.emit("sourcedata", READY_EVENT);
       });
     };
     settle();
@@ -1245,14 +1245,14 @@ describe("IndoorMap network review", () => {
     const { map, rerender } = renderMap(baseProps({ venue, network: NETWORK, levelId: "level-1" }));
     act(() => {
       map.styleLoaded = true;
-      map.emit("styledata");
+      map.emit("sourcedata", READY_EVENT);
     });
 
     rerender(baseProps({ venue, network: NETWORK, levelId: "level-2" })); // busy; deferred
     rerender(baseProps({ venue, network: NETWORK, levelId: "level-1" })); // back before settle
     act(() => {
       map.styleLoaded = true;
-      map.emit("styledata");
+      map.emit("sourcedata", READY_EVENT);
     });
     expect(ids(map)).toEqual([1, 1]);
   });
@@ -1331,7 +1331,7 @@ describe("IndoorMap facilities", () => {
     expect(onSelectFacility).toHaveBeenCalledWith(facilities[0]);
   });
 
-  it("defers facility markers while the style is busy, applying them on styledata", () => {
+  it("defers facility markers while the style is busy, applying them on sourcedata", () => {
     mapState.setFlipStyleLoadedOnIndoorWrite(true);
     const venue = baseVenue();
     venue.renderFeaturesByLevel.set("level-1", {
@@ -1361,7 +1361,7 @@ describe("IndoorMap facilities", () => {
     const settle = (): void => {
       act(() => {
         map.styleLoaded = true;
-        map.emit("styledata");
+        map.emit("sourcedata", READY_EVENT);
       });
     };
     settle();
