@@ -133,15 +133,44 @@ For each opening with at least one attachable centerline blob:
   used and "side" is decided per attaching blob by the sign of the dot
   product of the blob's centerline node against `p`.
 - Edges: `F–M` and `M–B` with real metre distances (converted once via
-  `meters_to_cost`, as all synth edges). Centerline blobs attach to the stub
-  on their own side within `SNAP_MAX_M`, never directly to `M`. Transit
-  units keep attaching through their doorway, terminating at the inner stub.
+  `meters_to_cost`, as all synth edges). Transit units keep attaching through
+  their doorway, terminating at the inner stub.
+- **Attach point (T-junction).** Placing stubs is not enough: the hop from the
+  centerline onto the stem must also be in line with the door, otherwise it
+  arrives sideways or doubles back. Measured on JR Takanawa Gateway with stubs
+  but node-based attach: of 60 stub attaches only 15 arrived within 20° of
+  straight-in, 16 came from the side (45–90°) and 23 from behind (>90°), median
+  70.6°. So per attaching blob the target is chosen by precedence:
+  1. **Axis ray** — cast from `M` along `s·p` (`s` = ±1 for that blob's side)
+     out to `SNAP_MAX_M` against that blob's edges only; take the smallest hit
+     `t > 0.05 m` lying strictly interior to a segment, requiring
+     `segment_within_area(M, hit, area, SEGMENT_OUTSIDE_TOL_M)`; **split that
+     edge** at the hit, replacing `(u,v)` with `(u,P)` and `(P,v)`.
+  2. **Perpendicular projection** — else the nearest interior projection of `M`
+     onto that blob's edges within `SNAP_MAX_M` passing the same walkability
+     check; split there.
+  3. **Nearest node** — else the previous nearest-valid-node attach, unchanged.
+  A hit or projection within 0.05 m of an endpoint reuses that node instead of
+  creating a degenerate split. Splits add nodes and edges 1:1, so connectivity
+  and component counts are unchanged.
+- Attach source: the side's stub when that stub is valid, `dot(s·p, P − M) > 0`,
+  and `|P − M| > δ + 0.1 m`; otherwise `M` directly, because a junction nearer
+  than the stub makes that side's stub pointless.
 - Fallbacks: a side failing validation collapses to `M` (today's attach); if
   both sides fail, keep the current midpoint attach unchanged.
 
+Ordering requirement: doorway *planning* (passage direction, blob discovery,
+splits, the `synth_opening_no_walkway` warning, and the union-as-you-go over
+blob roots) runs BEFORE the skeleton emit, so split nodes are emitted with the
+skeleton and every `base + local` index stays valid. Chord eligibility is then
+rebuilt from the final skeleton edges (skeleton edges only — doorway unions
+excluded, accepted bridges still union in).
+
 Result: every route crosses a doorway collinear with the doorway's real
-passage direction over the last δ metres — straight in from the front on
-both digitization conventions.
+passage direction, from the centerline through the stem and out the far side.
+After this, 105 of 112 attach edges on that venue are in line (stub attaches
+median 0°, p90 5.3°; midpoint attaches median deviation 0.2°); the remaining 7
+are the blocked cases that legitimately fall back to nearest-node.
 
 **2b. Open-space shortcut chords.** After skeleton construction, doorway
 attachment, and near-blob bridging, per floor:
