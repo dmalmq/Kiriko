@@ -166,40 +166,9 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
     let origin_projected = [o.projected[0], o.projected[1], o.ordinal];
     let dest_projected = [d.projected[0], d.projected[1], d.ordinal];
 
-    // Same-edge shortcut: walk straight along the one edge between projections.
-    if o.edge_index == d.edge_index {
-        let e = &graph.edges[o.edge_index];
-        let poly = graph.edge_polyline(e);
-        let (lo, hi) = (o.along.min(d.along), o.along.max(d.along));
-        let mut coords = vec![[origin_projected[0], origin_projected[1]]];
-        // Interior polyline vertices whose arc-length falls strictly between.
-        let mut acc = 0.0;
-        for w in poly.windows(2) {
-            acc += haversine_m(w[0][0], w[0][1], w[1][0], w[1][1]);
-            if acc > lo && acc < hi {
-                coords.push(w[1]);
-            }
-        }
-        coords.push([dest_projected[0], dest_projected[1]]);
-        if o.along > d.along {
-            coords.reverse();
-        }
-        let weight = (e.weight as f64 * (hi - lo) / o.total.max(f64::EPSILON)) as f32;
-        return Some(Route {
-            segments: group_segments(
-                coords
-                    .into_iter()
-                    .map(|c| TaggedVertex {
-                        coord: c,
-                        ordinal: e.ordinal,
-                    })
-                    .collect(),
-            ),
-            total_weight: weight,
-            origin_projected,
-            dest_projected,
-        });
-    }
+    // The along-edge walk is only a candidate: leaving the edge and
+    // re-entering through the network can be shorter on long or loopy edges.
+    let same_edge = (o.edge_index == d.edge_index).then(|| same_edge_route(graph, &o, &d));
 
     let n = graph.nodes.len();
     let mut adj: Vec<Vec<(usize, usize, f32)>> = vec![Vec::new(); n]; // (next, edge_index, weight)
@@ -294,10 +263,14 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
     } else {
         None
     };
-    let (goal, total) = [cand_p, cand_q]
+    let Some((goal, total)) = [cand_p, cand_q]
         .into_iter()
         .flatten()
-        .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+    else {
+        // Disconnected projections: only the direct same-edge walk remains.
+        return same_edge;
+    };
 
     // Reconstruct the node path goal → origin endpoint.
     let mut node_path = vec![goal];
@@ -359,12 +332,51 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
         ordinal: de.ordinal,
     });
 
-    Some(Route {
+    let network = Route {
         segments: group_segments(verts),
         total_weight: total as f32,
         origin_projected,
         dest_projected,
-    })
+    };
+    match same_edge {
+        Some(direct) if direct.total_weight < network.total_weight => Some(direct),
+        _ => Some(network),
+    }
+}
+
+/// Direct walk along a single shared edge between two projections (no
+/// junctions). `o` and `d` must reference the same edge.
+fn same_edge_route(graph: &RouteGraph, o: &EdgeSnap, d: &EdgeSnap) -> Route {
+    let e = &graph.edges[o.edge_index];
+    let poly = graph.edge_polyline(e);
+    let (lo, hi) = (o.along.min(d.along), o.along.max(d.along));
+    let mut coords = vec![[o.projected[0], o.projected[1]]];
+    let mut acc = 0.0;
+    for w in poly.windows(2) {
+        acc += haversine_m(w[0][0], w[0][1], w[1][0], w[1][1]);
+        if acc > lo && acc < hi {
+            coords.push(w[1]);
+        }
+    }
+    coords.push([d.projected[0], d.projected[1]]);
+    if o.along > d.along {
+        coords.reverse();
+    }
+    let weight = (e.weight as f64 * (hi - lo) / o.total.max(f64::EPSILON)) as f32;
+    Route {
+        segments: group_segments(
+            coords
+                .into_iter()
+                .map(|c| TaggedVertex {
+                    coord: c,
+                    ordinal: e.ordinal,
+                })
+                .collect(),
+        ),
+        total_weight: weight,
+        origin_projected: [o.projected[0], o.projected[1], o.ordinal],
+        dest_projected: [d.projected[0], d.projected[1], d.ordinal],
+    }
 }
 
 /// Vertices of `edge`'s polyline from the projection (at arc-length `along`) to
@@ -733,5 +745,47 @@ mod tests {
             assert!(route(&graph, ok, Point3 { lat: bad, ..ok }).is_none());
             assert!(route(&graph, ok, Point3 { ordinal: bad, ..ok }).is_none());
         }
+    }
+
+    #[test]
+    fn network_detour_beats_same_edge_walk() {
+        // U-shaped edge 0→1 (weight 6000): bottom corners at (139,35) and
+        // (139.002,35), up 0.002 and across. Both clicks sit ON the U's arms
+        // near the bottom, so they snap to the U edge. The 0→2→1 shortcut
+        // (1000+1000) is far cheaper than walking the whole U.
+        let graph = RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.001, lat: 35.0005, ordinal: 0.0 },
+            ],
+            edges: vec![
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 6000.0,
+                    ordinal: 0.0,
+                    interior: vec![[139.0, 35.002], [139.002, 35.002]],
+                },
+                RouteEdge { from: 0, to: 2, weight: 1000.0, ordinal: 0.0, interior: vec![] },
+                RouteEdge { from: 2, to: 1, weight: 1000.0, ordinal: 0.0, interior: vec![] },
+            ],
+        };
+        let r = route(
+            &graph,
+            Point3 { lon: 139.0, lat: 35.0002, ordinal: 0.0 },
+            Point3 { lon: 139.002, lat: 35.0002, ordinal: 0.0 },
+        )
+        .expect("endpoints route");
+        assert!(
+            r.total_weight < 3000.0,
+            "network detour beats the same-edge U walk: {}",
+            r.total_weight
+        );
+        let coords: Vec<[f64; 2]> = r.segments.iter().flat_map(|s| s.coordinates.clone()).collect();
+        assert!(
+            coords.contains(&[139.001, 35.0005]),
+            "route passes through the shortcut junction"
+        );
     }
 }
