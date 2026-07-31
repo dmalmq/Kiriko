@@ -27,6 +27,7 @@ interface FakeMapEvent {
 const mapState = vi.hoisted(() => {
   const instances: unknown[] = [];
   let initialStyleLoaded = true;
+  let flipStyleLoadedOnIndoorWrite = false;
   class FakeMap {
     readonly container: HTMLElement;
     readonly handlers = new Map<string, Set<(event?: FakeMapEvent) => void>>();
@@ -134,6 +135,9 @@ const mapState = vi.hoisted(() => {
           bucket.push(data);
           if (id === INDOOR_SOURCE_ID) {
             this.indoorSourceData = data as GeoJSON.FeatureCollection;
+            if (flipStyleLoadedOnIndoorWrite) {
+              this.styleLoaded = false;
+            }
           }
         },
         updateData: (diff) => {
@@ -151,6 +155,9 @@ const mapState = vi.hoisted(() => {
             type: "FeatureCollection",
             features: [...retained, ...(diff.add ?? [])],
           };
+          if (flipStyleLoadedOnIndoorWrite) {
+            this.styleLoaded = false;
+          }
         },
       };
     }
@@ -247,6 +254,9 @@ const mapState = vi.hoisted(() => {
     FakeMap,
     setInitialStyleLoaded(value: boolean) {
       initialStyleLoaded = value;
+    },
+    setFlipStyleLoadedOnIndoorWrite(value: boolean) {
+      flipStyleLoadedOnIndoorWrite = value;
     },
   };
 });
@@ -351,6 +361,7 @@ const originalMatchMedia = window.matchMedia;
 beforeEach(() => {
   mapState.instances.length = 0;
   mapState.setInitialStyleLoaded(true);
+  mapState.setFlipStyleLoadedOnIndoorWrite(false);
 });
 
 afterEach(() => {
@@ -1034,6 +1045,59 @@ describe("IndoorMap directions", () => {
     expect(map.routeSourceData).toHaveLength(updatesBeforeDirectionsOff + 1);
     expect(lastRouteData(map)).toEqual({ type: "FeatureCollection", features: [] });
   });
+
+  it("defers the route overlay while the style is busy, applying it on styledata", () => {
+    mapState.setFlipStyleLoadedOnIndoorWrite(true);
+    const venue = baseVenue();
+    venue.renderFeaturesByLevel.set("level-1", {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: "floor-1",
+          properties: { __feature_id: "floor-1" },
+          geometry: { type: "Point", coordinates: [139.1, 35.6] },
+        },
+      ],
+    });
+    venue.renderFeaturesByLevel.set("level-2", {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: "floor-2",
+          properties: { __feature_id: "floor-2" },
+          geometry: { type: "Point", coordinates: [139.2, 35.6] },
+        },
+      ],
+    });
+    const { map, rerender } = renderMap(
+      baseProps({ venue, levelId: "level-1", directions: directions({ route: CROSS_FLOOR_ROUTE }) }),
+    );
+    const settle = (): void => {
+      act(() => {
+        map.styleLoaded = true;
+        map.emit("styledata");
+      });
+    };
+    settle();
+    expect(segmentsOf(lastRouteData(map)).map((f) => f.geometry)).toEqual([
+      { type: "LineString", coordinates: [[139.0, 35.0], [139.001, 35.0]] },
+    ]);
+
+    rerender(
+      baseProps({ venue, levelId: "level-2", directions: directions({ route: CROSS_FLOOR_ROUTE }) }),
+    );
+    // The indoor swap kept the style busy: the overlay still shows floor 1.
+    expect(segmentsOf(lastRouteData(map)).map((f) => f.geometry)).toEqual([
+      { type: "LineString", coordinates: [[139.0, 35.0], [139.001, 35.0]] },
+    ]);
+
+    settle();
+    expect(segmentsOf(lastRouteData(map)).map((f) => f.geometry)).toEqual([
+      { type: "LineString", coordinates: [[139.001, 35.001], [139.002, 35.002]] },
+    ]);
+  });
 });
 
 describe("IndoorMap network review", () => {
@@ -1105,6 +1169,92 @@ describe("IndoorMap network review", () => {
 
     expect(map.networkSourceData).toHaveLength(updatesBeforeReviewOff + 1);
     expect(lastNetworkData(map).features).toEqual([]);
+  });
+
+  it("defers the network overlay while the style is busy, applying it on styledata", () => {
+    mapState.setFlipStyleLoadedOnIndoorWrite(true);
+    const venue = baseVenue();
+    venue.renderFeaturesByLevel.set("level-1", {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: "floor-1",
+          properties: { __feature_id: "floor-1" },
+          geometry: { type: "Point", coordinates: [139.1, 35.6] },
+        },
+      ],
+    });
+    venue.renderFeaturesByLevel.set("level-2", {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: "floor-2",
+          properties: { __feature_id: "floor-2" },
+          geometry: { type: "Point", coordinates: [139.2, 35.6] },
+        },
+      ],
+    });
+    const ids = (map: FakeMap) =>
+      lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"]);
+    const { map, rerender } = renderMap(baseProps({ venue, network: NETWORK, levelId: "level-1" }));
+    const settle = (): void => {
+      act(() => {
+        map.styleLoaded = true;
+        map.emit("styledata");
+      });
+    };
+    settle();
+    expect(ids(map)).toEqual([1, 1]);
+
+    rerender(baseProps({ venue, network: NETWORK, levelId: "level-2" }));
+    expect(ids(map)).toEqual([1, 1]); // style busy: still floor 1
+
+    settle();
+    expect(ids(map)).toEqual([2, 2]);
+  });
+
+  it("applies only the newest floor once the style settles", () => {
+    mapState.setFlipStyleLoadedOnIndoorWrite(true);
+    const venue = baseVenue();
+    venue.renderFeaturesByLevel.set("level-1", {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: "floor-1",
+          properties: { __feature_id: "floor-1" },
+          geometry: { type: "Point", coordinates: [139.1, 35.6] },
+        },
+      ],
+    });
+    venue.renderFeaturesByLevel.set("level-2", {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: "floor-2",
+          properties: { __feature_id: "floor-2" },
+          geometry: { type: "Point", coordinates: [139.2, 35.6] },
+        },
+      ],
+    });
+    const ids = (map: FakeMap) =>
+      lastNetworkData(map).features.map((f) => f.properties?.["NODEID"] ?? f.properties?.["FNODEID"]);
+    const { map, rerender } = renderMap(baseProps({ venue, network: NETWORK, levelId: "level-1" }));
+    act(() => {
+      map.styleLoaded = true;
+      map.emit("styledata");
+    });
+
+    rerender(baseProps({ venue, network: NETWORK, levelId: "level-2" })); // busy; deferred
+    rerender(baseProps({ venue, network: NETWORK, levelId: "level-1" })); // back before settle
+    act(() => {
+      map.styleLoaded = true;
+      map.emit("styledata");
+    });
+    expect(ids(map)).toEqual([1, 1]);
   });
 });
 
@@ -1179,6 +1329,49 @@ describe("IndoorMap facilities", () => {
     });
 
     expect(onSelectFacility).toHaveBeenCalledWith(facilities[0]);
+  });
+
+  it("defers facility markers while the style is busy, applying them on styledata", () => {
+    mapState.setFlipStyleLoadedOnIndoorWrite(true);
+    const venue = baseVenue();
+    venue.renderFeaturesByLevel.set("level-1", {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: "floor-1",
+          properties: { __feature_id: "floor-1" },
+          geometry: { type: "Point", coordinates: [139.1, 35.6] },
+        },
+      ],
+    });
+    venue.renderFeaturesByLevel.set("level-2", {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: "floor-2",
+          properties: { __feature_id: "floor-2" },
+          geometry: { type: "Point", coordinates: [139.2, 35.6] },
+        },
+      ],
+    });
+    const last = (map: FakeMap) => map.facilitySourceData.at(-1) as GeoJSON.FeatureCollection;
+    const { map, rerender } = renderMap(baseProps({ venue, facilities, levelId: "level-1" }));
+    const settle = (): void => {
+      act(() => {
+        map.styleLoaded = true;
+        map.emit("styledata");
+      });
+    };
+    settle();
+    expect(last(map).features[0]?.properties?.["name"]).toBe("Gate");
+
+    rerender(baseProps({ venue, facilities, levelId: "level-2" }));
+    expect(last(map).features[0]?.properties?.["name"]).toBe("Gate"); // busy: stale
+
+    settle();
+    expect(last(map).features[0]?.properties?.["name"]).toBe("Upstairs shop");
   });
 });
 
