@@ -30,9 +30,12 @@ async function pastePng(page: Page, label: string): Promise<void> {
     const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
     const transfer = new DataTransfer();
     transfer.items.add(new File([bytes], "paste.png", { type: "image/png" }));
-    element.dispatchEvent(
-      new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }),
-    );
+    // Firefox ignores the non-standard `clipboardData` constructor option.
+    // Define it on a plain paste event so every engine exposes the same files
+    // to React's synthetic clipboard event.
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: transfer });
+    element.dispatchEvent(paste);
   }, TINY_PNG_BASE64);
 }
 
