@@ -22,6 +22,7 @@ use geo::algorithm::orient::{Direction, Orient};
 use geo::{Coord, LineString, MultiPolygon, Polygon};
 use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
 use std::collections::HashMap;
+use std::cmp::Ordering;
 
 use crate::codec::BundleDocument;
 use crate::synth::{haversine_m, linestring_midpoint, point_boundary_dist_m, polygon_centroid};
@@ -295,6 +296,12 @@ const SEGMENT_OUTSIDE_TOL_M: f64 = 0.3;
 /// straight in from the front — instead of entering at the angle of the
 /// nearest centerline node.
 const DOORWAY_STUB_M: f64 = 1.2;
+/// Maximum chord length (m) considered for an open-space shortcut.
+const CHORD_MAX_M: f64 = 40.0;
+/// A chord is a real shortcut only when it beats the existing graph path by
+/// at least this factor (chord length < ratio × graph distance).
+const CHORD_SAVINGS_RATIO: f64 = 0.7;
+
 
 
 /// Distance (m) from `p` to the nearest boundary ring of `area`
@@ -784,6 +791,121 @@ struct DoorwayNodes {
     axis: [f64; 2], // metre-frame unit vector
 }
 
+/// Min-heap entry for the bounded Dijkstra inside [`shortcut_chords`].
+#[derive(Clone, Copy, PartialEq)]
+struct Visit(f64, usize);
+
+impl Eq for Visit {}
+
+impl Ord for Visit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.0.total_cmp(&self.0).then(self.1.cmp(&other.1))
+    }
+}
+
+impl PartialOrd for Visit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Open-space shortcut chords between same-blob skeleton nodes: a straight,
+/// fully passable segment that beats the current graph path by
+/// [`CHORD_SAVINGS_RATIO`]. This is what lets a route cut diagonally across
+/// an open concourse instead of following the centerline's detour. Returns
+/// the added `(node_a, node_b)` pairs (skeleton-local), deterministic by
+/// construction (pairs processed in sorted order).
+pub(crate) fn shortcut_chords(
+    skeleton: &Skeleton,
+    blob: &[usize],
+    area: &MultiPolygon<f64>,
+) -> Vec<(usize, usize)> {
+    let n = skeleton.nodes.len();
+    // Metre-weighted adjacency: skeleton edges plus chords added so far.
+    let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for &(a, b) in &skeleton.edges {
+        let d = haversine_m(skeleton.nodes[a], skeleton.nodes[b]);
+        adj[a].push((b, d));
+        adj[b].push((a, d));
+    }
+    // Candidate pairs: same-blob nodes within CHORD_MAX_M, via grid buckets.
+    let cell_deg = CHORD_MAX_M / 111_320.0;
+    let cell =
+        |p: [f64; 2]| ((p[0] / cell_deg).floor() as i64, (p[1] / cell_deg).floor() as i64);
+    let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    for (i, np) in skeleton.nodes.iter().enumerate() {
+        buckets.entry(cell(*np)).or_default().push(i);
+    }
+    let mut pairs: Vec<(usize, usize, f64)> = Vec::new();
+    let mut uf = blob.to_vec();
+    for (i, p) in skeleton.nodes.iter().enumerate() {
+        let (cx, cy) = cell(*p);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let Some(cands) = buckets.get(&(cx + dx, cy + dy)) else {
+                    continue;
+                };
+                for &j in cands {
+                    if j <= i {
+                        continue;
+                    }
+                    let d = haversine_m(*p, skeleton.nodes[j]);
+                    if d > CHORD_MAX_M || uf_find(&mut uf, i) != uf_find(&mut uf, j) {
+                        continue;
+                    }
+                    pairs.push((i, j, d));
+                }
+            }
+        }
+    }
+    pairs.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+
+    // Bounded Dijkstra: true when `dst` is reachable from `src` within `cutoff`.
+    let reachable_within = |adj: &[Vec<(usize, f64)>], src: usize, dst: usize, cutoff: f64| {
+        let mut dist = vec![f64::INFINITY; adj.len()];
+        dist[src] = 0.0;
+        let mut heap = std::collections::BinaryHeap::new();
+        heap.push(Visit(0.0, src));
+        while let Some(Visit(g, u)) = heap.pop() {
+            if g > cutoff {
+                break;
+            }
+            if u == dst {
+                return true;
+            }
+            if g > dist[u] {
+                continue;
+            }
+            for &(v, w) in &adj[u] {
+                let ng = g + w;
+                if ng < dist[v] {
+                    dist[v] = ng;
+                    heap.push(Visit(ng, v));
+                }
+            }
+        }
+        false
+    };
+
+    let mut added: Vec<(usize, usize)> = Vec::new();
+    for (i, j, c) in pairs {
+        // Fully inside walkable space at passage width (rejects chords
+        // across kiosks, walls, and track strips).
+        if !centerline_chord_passable(skeleton.nodes[i], skeleton.nodes[j], area) {
+            continue;
+        }
+        // Only a real shortcut: the existing graph path (including chords
+        // already added) must be longer than c / CHORD_SAVINGS_RATIO.
+        if reachable_within(&adj, i, j, c / CHORD_SAVINGS_RATIO) {
+            continue;
+        }
+        adj[i].push((j, c));
+        adj[j].push((i, c));
+        added.push((i, j));
+    }
+    added
+}
+
 /// Synthesize a routing graph whose horizontal edges are true corridor
 /// centerlines (medial axis of the walkable area), with doorway `opening`s and
 /// transit units snapped on as junctions and transit stacked vertically across
@@ -1179,6 +1301,20 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 from: (base + li) as u32,
                 to: (base + lj) as u32,
                 weight: d as f32,
+                ordinal: ord,
+                interior: Vec::new(),
+            });
+        }
+
+        // Open-space shortcuts: straight, fully passable chords that beat the
+        // centerline path through open areas (concourse diagonals). Same-blob
+        // only, so they never merge components or duplicate doorway/bridge
+        // paths (the savings test rejects those).
+        for (a, b) in shortcut_chords(&skeleton, &blob, &area) {
+            edges.push(RouteEdge {
+                from: (base + a) as u32,
+                to: (base + b) as u32,
+                weight: haversine_m(skeleton.nodes[a], skeleton.nodes[b]) as f32,
                 ordinal: ord,
                 interior: Vec::new(),
             });
@@ -2675,5 +2811,126 @@ mod tests {
             axis[0] > 0.99 && axis[1].abs() < 0.01,
             "axis along the first part (+lon): {axis:?}"
         );
+    }
+
+    /// Metre-offset coordinate helper for chord tests (lat 35.6).
+    fn xy_at(cx: f64, cy: f64) -> impl Fn(f64, f64) -> [f64; 2] {
+        let mx = 111_320.0 * cy.to_radians().cos();
+        move |x_m: f64, y_m: f64| [cx + x_m / mx, cy + y_m / 111_320.0]
+    }
+
+    fn rect_poly(cx: f64, cy: f64, x0: f64, y0: f64, x1: f64, y1: f64) -> Polygon<f64> {
+        let xy = xy_at(cx, cy);
+        Polygon::new(
+            LineString::from(vec![
+                (xy(x0, y0)[0], xy(x0, y0)[1]),
+                (xy(x1, y0)[0], xy(x1, y0)[1]),
+                (xy(x1, y1)[0], xy(x1, y1)[1]),
+                (xy(x0, y1)[0], xy(x0, y1)[1]),
+                (xy(x0, y0)[0], xy(x0, y0)[1]),
+            ]),
+            vec![],
+        )
+    }
+
+    /// Union-find parent vec with `edges` unioned in (mirrors production,
+    /// where `blob` is already unioned by skeleton/doorway/bridge passes).
+    fn unioned_blob(n: usize, edges: &[(usize, usize)]) -> Vec<usize> {
+        let mut blob: Vec<usize> = (0..n).collect();
+        for &(a, b) in edges {
+            let (ra, rb) = (uf_find(&mut blob, a), uf_find(&mut blob, b));
+            if ra != rb {
+                blob[ra] = rb;
+            }
+        }
+        blob
+    }
+
+    #[test]
+    fn chords_cut_a_detour_but_not_a_straight_spine() {
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -45.0, 70.0, 5.0)]);
+        // V-detour skeleton: A(0,0) → B(20,-30) → C(40,0) → D(60,0). The A–C
+        // chord (40 m) beats the 72 m graph path; everything else is adjacent
+        // or out of range.
+        let detour = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(20.0, -30.0), xy(40.0, 0.0), xy(60.0, 0.0)],
+            edges: vec![(0, 1), (1, 2), (2, 3)],
+        };
+        let blob = unioned_blob(4, &detour.edges);
+        let chords = shortcut_chords(&detour, &blob, &area);
+        assert_eq!(chords, vec![(0, 2)], "A–C chord cuts the V detour");
+
+        let straight = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(20.0, 0.0), xy(40.0, 0.0)],
+            edges: vec![(0, 1), (1, 2)],
+        };
+        let blob = unioned_blob(3, &straight.edges);
+        assert!(
+            shortcut_chords(&straight, &blob, &area).is_empty(),
+            "straight spine gains no chords"
+        );
+    }
+
+    #[test]
+    fn chords_never_cross_a_hole() {
+        // Same V detour, but a non-walkable hole blocks the A–C chord.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let hole = LineString::from(vec![
+            (xy(10.0, -5.0)[0], xy(10.0, -5.0)[1]),
+            (xy(30.0, -5.0)[0], xy(30.0, -5.0)[1]),
+            (xy(30.0, 4.0)[0], xy(30.0, 4.0)[1]),
+            (xy(10.0, 4.0)[0], xy(10.0, 4.0)[1]),
+            (xy(10.0, -5.0)[0], xy(10.0, -5.0)[1]),
+        ]);
+        let mut poly = rect_poly(cx, cy, -10.0, -45.0, 70.0, 5.0);
+        poly.interiors_push(hole);
+        let area = MultiPolygon::new(vec![poly]);
+        let detour = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(20.0, -30.0), xy(40.0, 0.0)],
+            edges: vec![(0, 1), (1, 2)],
+        };
+        let blob = unioned_blob(3, &detour.edges);
+        assert!(
+            shortcut_chords(&detour, &blob, &area).is_empty(),
+            "the chord across the hole is rejected"
+        );
+    }
+
+    #[test]
+    fn zigzag_chain_gains_shortcut_chords_with_feedback() {
+        // Ten-node zigzag chain zi = (10·i, −15·(i mod 2)) (18 m hops) in an
+        // open area. Two-hop chords (20 m vs 36 m graph) all qualify; three-
+        // and four-hop candidates become reachable through the chords already
+        // added (the savings test sees them), so only the two-hop set lands.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -15.0, -25.0, 100.0, 5.0)]);
+        let nodes: Vec<[f64; 2]> = (0..10)
+            .map(|i| xy(10.0 * i as f64, -15.0 * (i % 2) as f64))
+            .collect();
+        let edges: Vec<(usize, usize)> = (0..9).map(|i| (i, i + 1)).collect();
+        let skeleton = Skeleton { nodes, edges };
+        let blob = unioned_blob(10, &skeleton.edges);
+        let chords = shortcut_chords(&skeleton, &blob, &area);
+        assert_eq!(
+            chords,
+            vec![
+                (0, 2),
+                (1, 3),
+                (2, 4),
+                (3, 5),
+                (4, 6),
+                (5, 7),
+                (6, 8),
+                (7, 9),
+            ],
+            "exact sorted chord set, feedback-aware"
+        );
+        // Determinism: same input, same chords.
+        let again = shortcut_chords(&skeleton, &unioned_blob(10, &skeleton.edges), &area);
+        assert_eq!(chords, again);
     }
 }
