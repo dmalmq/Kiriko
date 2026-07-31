@@ -28,11 +28,13 @@ async function openIssues(page: Page): Promise<void> {
 async function pastePng(page: Page, label: string): Promise<void> {
   await page.getByLabel(label).evaluate((element, base64) => {
     const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
-    const transfer = new DataTransfer();
-    transfer.items.add(new File([bytes], "paste.png", { type: "image/png" }));
-    element.dispatchEvent(
-      new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }),
-    );
+    const file = new File([bytes], "paste.png", { type: "image/png" });
+    // Firefox ignores clipboardData supplied to script-created
+    // ClipboardEvents. Define the shape consumed by the editor directly on a
+    // generic paste event so this fixture behaves consistently in all engines.
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: { files: [file] } });
+    element.dispatchEvent(event);
   }, TINY_PNG_BASE64);
 }
 
