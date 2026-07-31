@@ -347,6 +347,30 @@ Implemented human authentication uses server-side sessions stored by token hash.
 
 OIDC/SSO, tenant administration UI, API keys, and customer-facing capability scopes are planned rather than implemented.
 
+### 10.1 Approved partner-sharing policy (2026-07-31)
+
+The following access control policies are approved target behavior for Phase 1 implementation:
+
+**Venue publication and access:**
+- Published venues are **private by default**; publication to the system does not authorize public read access.
+- External partners use **expiring, revocable capability tokens** scoped to tenant/venue/version and explicit permissions.
+- Optional partner accounts may follow later; initial Phase 1 partner access is token-based.
+- Anonymous embeds are a **separate explicit per-venue opt-in**, never implied by venue publication.
+
+**Partner permissions:**
+- Partner access is **view-only by default** for map and issue viewing.
+- KVB bundle download requires a **separate explicit `download_bundle` grant**, scoped to the partner capability and venue/version.
+- Raw GDB/IMDF sources remain unavailable on all partner-accessible paths.
+
+**Issue attachments:**
+- Attachments inherit the same venue/version ACL as the issue and published map.
+- Revocation or token expiry removes media access along with the map read permission.
+
+**Current-state gap:**
+- Current shipped routes `GET /v/:tenant/:venue/bundle`, `GET /api/review/versions/:publicVersionId/issues`, and issue media (`GET /api/issue-attachments/*/content`) are effectively world-readable if the URL is known.
+- This is a documented gap until Workstream 1C (Venue lifecycle and sharing) design and implementation are complete.
+- Existing public-read behavior is not removed during Phase 1 implementation; it remains alongside the new private-by-default ACL model until a separate authorization task gates the transition.
+
 ## 11. Quality and verification
 
 - **Rust:** strict IMDF import, canonicalization, KVB integrity/determinism, graph/facility encoding, graph generation, route queries, graph export, N-API, and WASM adapters.
