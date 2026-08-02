@@ -348,6 +348,7 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
 
   return (
     <aside className="graph-inspector" aria-labelledby="graph-inspector-title">
+      <div className="graph-inspector__scroll">
       <header className="graph-inspector__header">
         <p>{selectionKind || t(copy.inspector, locale)}</p>
         <h2 id="graph-inspector-title">{selectionTitle}</h2>
@@ -398,12 +399,6 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
             <div className="graph-inspector__fact"><dt>{t(copy.floorInvariant, locale)}</dt><dd className="graph-inspector__machine">{placementFloor}</dd></div>
           </dl>
           {snapBand === "ambiguous" ? <p>{t(copy.ambiguousHelp, locale)}</p> : null}
-          <div className="graph-inspector__actions">
-            {snapBand === "auto" ? <button type="button" className="graph-inspector__primary" onClick={() => commitPlacement("snap")}>{t(copy.applySnap, locale)}</button> : null}
-            {snapBand === "review" ? <button type="button" className="graph-inspector__primary" onClick={() => commitPlacement("snap")}>{t(copy.acceptCandidate, locale)}</button> : null}
-            {snapBand === "review" || snapBand === "ambiguous" || snapBand === "none" ? <button type="button" onClick={() => commitPlacement("raw")}>{t(copy.keepRaw, locale)}</button> : null}
-            <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
-          </div>
         </section>
       ) : null}
 
@@ -423,23 +418,6 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
               <label><input type="radio" name="draft-association" checked={connectorDraft.associationId === null} onChange={() => actions.setDraftAssociation(null)} />{t(copy.leaveUnassociated, locale)}</label>
             </fieldset>
           ) : null}
-          <div className="graph-inspector__actions">
-            {connectorCrossFloor && connectorFrom !== null && connectorTo !== null ? (
-              <button
-                type="button"
-                disabled={connectorDraft.controlPoints.length > 0}
-                onClick={() => actions.addConnectorControlPoint({
-                  x: (connectorFrom.point.x + connectorTo.point.x) / 2,
-                  y: (connectorFrom.point.y + connectorTo.point.y) / 2,
-                  z: (connectorFrom.point.z + connectorTo.point.z) / 2,
-                })}
-              >
-                {t(copy.addLanding, locale)}
-              </button>
-            ) : null}
-            {connectorTo !== null ? <button type="button" className="graph-inspector__primary" onClick={actions.commitConnection}>{t(connectorCrossFloor ? copy.commitConnector : copy.commitConnection, locale)}</button> : null}
-            <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
-          </div>
         </section>
       ) : null}
 
@@ -514,10 +492,6 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
         <section className="graph-inspector__section graph-inspector__pending">
           <h3>{t(copy.deletePreview, locale)}</h3>
           <ul>{pending.consequences.map((item) => <li key={item}>{consequenceText(item, locale)}</li>)}</ul>
-          <div className="graph-inspector__actions">
-            <button type="button" className="graph-inspector__danger" onClick={actions.confirmDelete}>{t(copy.confirmDelete, locale)}</button>
-            <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
-          </div>
         </section>
       ) : null}
 
@@ -542,6 +516,42 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
           </div>
         ) : <p className="graph-inspector__saved" role="status">{t(copy.saved, locale)}</p>}
       </section>
+      </div>
+      {placement !== null || connectorDraft !== null || pending?.kind === "delete" ? (
+        <div className="graph-inspector__action-dock">
+          {placement !== null ? (
+            <>
+              {snapBand === "auto" ? <button type="button" className="graph-inspector__primary" onClick={() => commitPlacement("snap")}>{t(copy.applySnap, locale)}</button> : null}
+              {snapBand === "review" ? <button type="button" className="graph-inspector__primary" onClick={() => commitPlacement("snap")}>{t(copy.acceptCandidate, locale)}</button> : null}
+              {snapBand === "review" || snapBand === "ambiguous" || snapBand === "none" ? <button type="button" onClick={() => commitPlacement("raw")}>{t(copy.keepRaw, locale)}</button> : null}
+              <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
+            </>
+          ) : connectorDraft !== null ? (
+            <>
+              {connectorCrossFloor && connectorFrom !== null && connectorTo !== null ? (
+                <button
+                  type="button"
+                  disabled={connectorDraft.controlPoints.length > 0}
+                  onClick={() => actions.addConnectorControlPoint({
+                    x: (connectorFrom.point.x + connectorTo.point.x) / 2,
+                    y: (connectorFrom.point.y + connectorTo.point.y) / 2,
+                    z: (connectorFrom.point.z + connectorTo.point.z) / 2,
+                  })}
+                >
+                  {t(copy.addLanding, locale)}
+                </button>
+              ) : null}
+              {connectorTo !== null ? <button type="button" className="graph-inspector__primary" onClick={actions.commitConnection}>{t(connectorCrossFloor ? copy.commitConnector : copy.commitConnection, locale)}</button> : null}
+              <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
+            </>
+          ) : pending?.kind === "delete" ? (
+            <>
+              <button type="button" className="graph-inspector__danger" onClick={actions.confirmDelete}>{t(copy.confirmDelete, locale)}</button>
+              <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
     </aside>
   );
 }

@@ -235,10 +235,10 @@ const styles = {
   root: {
     fontFamily: "inherit",
     fontSize: 12,
-    color: "#0f172a",
+    color: "var(--color-text)",
     outline: "none",
     background: "#fff",
-    border: "1px solid #e2e8f0",
+    border: "1px solid var(--color-border)",
     borderRadius: 8,
     overflow: "hidden",
   } as CSSProperties,
@@ -248,11 +248,11 @@ const styles = {
     gap: 12,
     alignItems: "center",
     padding: "8px 10px",
-    borderBottom: "1px solid #e2e8f0",
+    borderBottom: "1px solid var(--color-border)",
   } as CSSProperties,
   group: { display: "flex", gap: 4, alignItems: "center" } as CSSProperties,
-  groupLabel: { fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4 } as CSSProperties,
-  hint: { fontSize: 10, color: "#94a3b8" } as CSSProperties,
+  groupLabel: { fontSize: 10, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: 0.4 } as CSSProperties,
+  hint: { fontSize: 10, color: "var(--color-muted)" } as CSSProperties,
   svg: {
     width: "100%",
     height: "auto",
@@ -269,7 +269,7 @@ const styles = {
     listStyle: "none",
     maxHeight: 168,
     overflow: "auto",
-    borderTop: "1px solid #e2e8f0",
+    borderTop: "1px solid var(--color-border)",
     background: "#f8fafc",
   } as CSSProperties,
   listBtn: {
@@ -278,7 +278,7 @@ const styles = {
     gap: 6,
     fontSize: 11,
     padding: "4px 6px",
-    border: "1px solid #e2e8f0",
+    border: "1px solid var(--color-border)",
     borderRadius: 6,
     background: "#fff",
     cursor: "pointer",
@@ -297,8 +297,8 @@ const styles = {
     gap: 8,
     alignItems: "center",
     padding: "8px 10px",
-    borderTop: "1px solid #e2e8f0",
-    background: "#fffbeb",
+    borderTop: "1px solid var(--color-border)",
+    background: "var(--color-warning-bg)",
   } as CSSProperties,
 } as const;
 
@@ -306,10 +306,10 @@ function btnStyle(active: boolean): CSSProperties {
   return {
     fontSize: 11,
     padding: "3px 8px",
-    border: `1px solid ${active ? COLOR.selected : "#cbd5e1"}`,
+    border: `1px solid ${active ? COLOR.selected : "var(--color-border)"}`,
     borderRadius: 6,
     background: active ? COLOR.selected : "#fff",
-    color: active ? "#fff" : "#0f172a",
+    color: active ? "#fff" : "var(--color-text)",
     cursor: "pointer",
   };
 }
@@ -618,13 +618,13 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
     if (pending === null) return null;
     if (pending.kind === "add") {
       const projected = project(pending.candidate, pending.floorId, preset);
-      return { x: projected[0], y: projected[1], band: pending.snap?.band ?? "none" };
+      return { kind: "add" as const, x: projected[0], y: projected[1], band: pending.snap?.band ?? "none" };
     }
     if (pending.kind === "move") {
       const node = nodesById.get(pending.nodeId);
       if (node === undefined) return null;
       const projected = project(pending.candidate, node.floorId, preset);
-      return { x: projected[0], y: projected[1], band: pending.snap?.band ?? "none" };
+      return { kind: "move" as const, x: projected[0], y: projected[1], band: pending.snap?.band ?? "none" };
     }
     return null;
   })();
@@ -957,21 +957,40 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
         {/* Pending draft marker for add/move. */}
         {pendingMarker !== null ? (
           <g pointerEvents="none">
-            <circle
-              cx={pendingMarker.x}
-              cy={pendingMarker.y}
-              r={8}
-              fill="none"
+            {pendingMarker.kind === "add" ? (
+              <circle
+                cx={pendingMarker.x}
+                cy={pendingMarker.y}
+                r={8}
+                fill="none"
+                stroke={SNAP_COLOR[pendingMarker.band]}
+                strokeWidth={2}
+                strokeDasharray="2 2"
+              />
+            ) : null}
+            <line
+              x1={pendingMarker.x + 8}
+              y1={pendingMarker.y - 8}
+              x2={pendingMarker.x + 18}
+              y2={pendingMarker.y - 20}
               stroke={SNAP_COLOR[pendingMarker.band]}
-              strokeWidth={2}
-              strokeDasharray="2 2"
+              strokeWidth={1.5}
+            />
+            <rect
+              x={pendingMarker.x + 16}
+              y={pendingMarker.y - 34}
+              width={60}
+              height={17}
+              rx={3}
+              fill={COLOR.floorFill}
+              stroke={SNAP_COLOR[pendingMarker.band]}
             />
             <text
-              x={pendingMarker.x}
-              y={pendingMarker.y - 12}
+              x={pendingMarker.x + 21}
+              y={pendingMarker.y - 22}
               fontSize={8.5}
               fill={SNAP_COLOR[pendingMarker.band]}
-              textAnchor="middle"
+              textAnchor="start"
             >
               {snapBandLabel(pendingMarker.band, locale)}
             </text>
@@ -1029,7 +1048,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
           );
         })}
         {objectList.length === 0 ? (
-          <li style={{ fontSize: 11, color: "#94a3b8", gridColumn: "1 / -1" }}>
+          <li style={{ fontSize: 11, color: "var(--color-muted)", gridColumn: "1 / -1" }}>
             {t(labels.empty, locale)}
           </li>
         ) : null}
