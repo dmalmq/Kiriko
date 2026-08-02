@@ -8,6 +8,7 @@ import type {
 } from "react";
 import type {
   FloorId,
+  GraphEdge,
   GraphEditorPrototypeState,
   GraphFinding,
   GraphSelection,
@@ -319,6 +320,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
   const stateRef = useRef(state);
   stateRef.current = state;
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
+  const movedRef = useRef(false);
 
   const nodesById = new Map(state.nodes.map((node) => [node.id, node]));
 
@@ -408,25 +410,34 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
     event.stopPropagation();
     (event.currentTarget as Element).setPointerCapture(event.pointerId);
     setDragNodeId(nodeId);
+    movedRef.current = false;
     applyMove(event, nodeId);
   }
 
   function onHandlePointerMove(event: ReactPointerEvent<SVGElement>): void {
     if (dragNodeId === null) return;
+    movedRef.current = true;
     applyMove(event, dragNodeId);
   }
 
+
   function endMove(event: ReactPointerEvent<SVGElement>): void {
     if (dragNodeId === null) return;
-    const pending = stateRef.current.pending;
-    if (pending?.kind === "move") {
-      const band = pending.snap?.band ?? "none";
-      if (band === "auto") {
-        actions.commitMove("snap");
-      } else if (band === "review") {
-        // Preserve the pending draft for the inspector to commit explicitly.
-      } else {
-        actions.commitMove("raw");
+    if (!movedRef.current) {
+      // No XY movement: discard the preview so clicking the handle never
+      // stages a change or creates a history entry.
+      actions.cancel();
+    } else {
+      const pending = stateRef.current.pending;
+      if (pending?.kind === "move") {
+        const band = pending.snap?.band ?? "none";
+        if (band === "auto") {
+          actions.commitMove("snap");
+        } else if (band === "review") {
+          // Preserve the pending draft for the inspector to commit explicitly.
+        } else {
+          actions.commitMove("raw");
+        }
       }
     }
     (event.currentTarget as Element).releasePointerCapture?.(event.pointerId);
@@ -516,15 +527,18 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
       ? (nodesById.get(state.selection.id) ?? null)
       : null;
 
-  const selectedControlPoint =
-    state.selection !== null && state.selection.kind === "control-point"
-      ? (() => {
-          const edge = state.edges.find((candidate) => candidate.id === state.selection!.edgeId);
-          if (edge === undefined) return null;
-          const point = edge.controlPoints.find((candidate) => candidate.id === state.selection!.id);
-          return point === undefined ? null : { edge, point };
-        })()
-      : null;
+  const selectedControlPoint: {
+    edge: GraphEditorPrototypeState["edges"][number];
+    point: GraphEditorPrototypeState["edges"][number]["controlPoints"][number];
+  } | null = (() => {
+    const selection = state.selection;
+    if (selection === null || selection.kind !== "control-point") return null;
+    const edge = state.edges.find((candidate) => candidate.id === selection.edgeId);
+    if (edge === undefined) return null;
+    const point = edge.controlPoints.find((candidate) => candidate.id === selection.id);
+    if (point === undefined) return null;
+    return { edge, point };
+  })();
 
   // Pending draft markers (move/add) visualize the uncommitted candidate so
   // Review-band drafts remain visible while they wait for the inspector.
@@ -1010,7 +1024,7 @@ type FindingTarget = FindingPointTarget | FindingAreaTarget | FindingSegmentTarg
 function resolveFindingTarget(
   finding: GraphFinding,
   nodesById: Map<string, GraphEditorPrototypeState["nodes"][number]>,
-  edges: readonly GraphEditorPrototypeState["edges"],
+  edges: readonly GraphEdge[],
   preset: CameraPreset,
 ): FindingTarget {
   const node = nodesById.get(finding.objectId);
