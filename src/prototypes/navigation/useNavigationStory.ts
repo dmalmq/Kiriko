@@ -5,6 +5,7 @@ import {
   type FloorId,
   type PlaybackState,
   type PrototypeLocale,
+  type StoryStep,
   type VariantId,
 } from "./navigationStory";
 
@@ -33,6 +34,7 @@ export interface NavigationStoryActions {
 
 interface NavigationStoryMachine extends NavigationStoryState {
   followingRoute: boolean;
+  playbackGeneration: number;
 }
 
 type NavigationStoryAction =
@@ -52,20 +54,25 @@ const FIRST_STEP_INDEX = 0;
 const FINAL_STEP_INDEX = STORY_STEPS.length - 1;
 const CONNECTOR_STEP_INDEX = STORY_STEPS.findIndex((step) => step.id === "connector");
 
+function storyStepAt(stepIndex: number): StoryStep {
+  return STORY_STEPS[stepIndex]!;
+}
+
+function routeFloor(stepIndex: number): FloorId {
+  return stepFloor(storyStepAt(stepIndex));
+}
+
 const INITIAL_STATE: NavigationStoryMachine = {
   variant: "guided",
   stepIndex: FIRST_STEP_INDEX,
   playback: "ready",
   overviewOpen: false,
-  viewFloor: stepFloor(STORY_STEPS[FIRST_STEP_INDEX]),
+  viewFloor: routeFloor(FIRST_STEP_INDEX),
   locale: "en",
   reducedMotion: false,
   followingRoute: true,
+  playbackGeneration: 0,
 };
-
-function routeFloor(stepIndex: number): FloorId {
-  return stepFloor(STORY_STEPS[stepIndex]);
-}
 
 function selectRouteStep(
   state: NavigationStoryMachine,
@@ -99,8 +106,13 @@ function navigationStoryReducer(
     case "restart":
       return selectRouteStep(state, FIRST_STEP_INDEX, "ready");
 
-    case "replay-connector":
-      return selectRouteStep(state, CONNECTOR_STEP_INDEX, "playing");
+    case "replay-connector": {
+      const connectorState = selectRouteStep(state, CONNECTOR_STEP_INDEX, "playing");
+      return {
+        ...connectorState,
+        playbackGeneration: state.playbackGeneration + 1,
+      };
+    }
 
     case "toggle-overview":
       return { ...state, overviewOpen: !state.overviewOpen };
@@ -126,6 +138,9 @@ function navigationStoryReducer(
       return { ...state, reducedMotion: action.reducedMotion };
 
     case "select-step": {
+      if (!Number.isFinite(action.stepIndex)) {
+        return state;
+      }
       const stepIndex = Math.min(
         Math.max(Math.trunc(action.stepIndex), FIRST_STEP_INDEX),
         FINAL_STEP_INDEX,
@@ -164,12 +179,12 @@ export function useNavigationStory(): {
 
     const timer = window.setTimeout(() => {
       dispatch({ type: "advance" });
-    }, STORY_STEPS[machine.stepIndex].durationMs);
+    }, storyStepAt(machine.stepIndex).durationMs);
 
     return () => {
       window.clearTimeout(timer);
     };
-  }, [machine.playback, machine.stepIndex]);
+  }, [machine.playback, machine.playbackGeneration, machine.stepIndex]);
 
   const state = useMemo<NavigationStoryState>(() => ({
     variant: machine.variant,
