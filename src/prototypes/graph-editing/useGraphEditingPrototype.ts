@@ -272,7 +272,9 @@ function recomputeFindings(
       (edge) => edge.kind === "connector" && edge.associationId === "lift-east",
     );
     if (associated) return findingWithEvaluation(finding, "resolved", null, null);
-    if (fullCheck) return findingWithEvaluation(finding, "open", null, null);
+    if (fullCheck || finding.state === "resolved") {
+      return findingWithEvaluation(finding, "open", null, null);
+    }
     return finding;
   });
 }
@@ -280,16 +282,16 @@ function recomputeFindings(
 function findingDelta(previous: GraphFinding[], next: GraphFinding[]): string {
   for (const finding of next) {
     const prior = previous.find((candidate) => candidate.id === finding.id);
-    if (prior === undefined) return `${finding.id}: newly exposed`;
+    if (prior === undefined) return `${finding.id}:newly-exposed`;
     if (prior.state === finding.state) continue;
-    if (finding.state === "resolved") return `${finding.id}: resolved`;
+    if (finding.state === "resolved") return `${finding.id}:resolved`;
     if (prior.state === "not-evaluated" && finding.state === "open") {
-      return `${finding.id}: newly exposed`;
+      return `${finding.id}:newly-exposed`;
     }
-    if (finding.state === "open") return `${finding.id}: reopened`;
-    if (finding.state === "accepted") return `${finding.id}: accepted`;
+    if (finding.state === "open") return `${finding.id}:reopened`;
+    if (finding.state === "accepted") return `${finding.id}:accepted`;
   }
-  return "unchanged";
+  return "finding:none:unchanged";
 }
 
 function selectionExists(selection: GraphSelection, snapshot: StagedSnapshot): GraphSelection {
@@ -369,22 +371,38 @@ function deletionConsequences(
       (edge) => edge.fromNodeId === selection.id || edge.toNodeId === selection.id,
     );
     const affectedFindings = state.findings.filter((finding) => finding.objectId === selection.id);
-    return [
-      `${incident.length} incident edge${incident.length === 1 ? "" : "s"}`,
-      `${affectedFindings.length} affected finding${affectedFindings.length === 1 ? "" : "s"}`,
-    ];
+    return [`incident-edges:${incident.length}`, `affected-findings:${affectedFindings.length}`];
   }
   if (selection.kind === "edge") {
     const edge = state.edges.find((candidate) => candidate.id === selection.id);
     return edge === undefined
       ? []
       : [
-          `Disconnect ${edge.fromNodeId} from ${edge.toNodeId}`,
-          ...(edge.associationId === null ? [] : [`Remove ${edge.associationId} association`]),
+          `disconnect:${edge.fromNodeId}:${edge.toNodeId}`,
+          ...(edge.associationId === null ? [] : [`remove-association:${edge.associationId}`]),
         ];
   }
-  if (selection.kind === "control-point") return ["Remove one connector control point"];
-  return ["Venue evidence is read-only"];
+  if (selection.kind === "control-point") {
+    return [`remove-control-point:${selection.edgeId}:${selection.id}`];
+  }
+  return [`venue-read-only:${selection.id}`];
+}
+
+function deletableSelectionExists(
+  state: GraphEditorPrototypeState,
+  selection: Exclude<GraphSelection, null>,
+): boolean {
+  if (selection.kind === "node") {
+    return state.nodes.some((node) => node.id === selection.id);
+  }
+  if (selection.kind === "edge") {
+    return state.edges.some((edge) => edge.id === selection.id);
+  }
+  if (selection.kind === "control-point") {
+    const edge = state.edges.find((candidate) => candidate.id === selection.edgeId);
+    return edge?.controlPoints.some((point) => point.id === selection.id) === true;
+  }
+  return false;
 }
 
 function applyScenarioPreset(
@@ -483,7 +501,7 @@ function graphEditorReducer(
       return commitSnapshot(
         state,
         { nodes: [...state.nodes, node], edges: state.edges, profile: state.profile },
-        `Added ${id} on ${node.floorId}${action.mode === "snap" ? " with snap" : " raw"}`,
+        `add:${id}:${node.floorId}:${action.mode}`,
         { kind: "node", id },
       );
     }
@@ -514,7 +532,7 @@ function graphEditorReducer(
       return commitSnapshot(
         state,
         { nodes, edges: state.edges, profile: state.profile },
-        `Moved ${nodeId}${action.mode === "snap" ? " with snap" : " raw"}`,
+        `move:${nodeId}:${action.mode}`,
         { kind: "node", id: nodeId },
       );
     }
@@ -594,7 +612,7 @@ function graphEditorReducer(
       return commitSnapshot(
         state,
         { nodes: state.nodes, edges, profile: state.profile },
-        `Nudged ${action.pointId} ${action.axis} by ${action.delta}`,
+        `nudge-control-point:${action.edgeId}:${action.pointId}:${action.axis}:${action.delta}`,
         { kind: "control-point", edgeId: action.edgeId, id: action.pointId },
       );
     }
@@ -621,7 +639,7 @@ function graphEditorReducer(
       return commitSnapshot(
         state,
         { nodes: state.nodes, edges: [...state.edges, edge], profile: state.profile },
-        `Connected ${from.id} to ${to.id}${edge.associationId === null ? "" : ` via ${edge.associationId}`}`,
+        `connect:${id}:${from.id}:${to.id}:${edge.associationId ?? "none"}`,
         { kind: "edge", id },
       );
     }
@@ -654,12 +672,14 @@ function graphEditorReducer(
       return commitSnapshot(
         state,
         { nodes, edges, profile: state.profile },
-        `Reassigned ${action.nodeId} from ${existing.floorId} to ${action.floorId}`,
+        `reassign-floor:${action.nodeId}:${existing.floorId}:${action.floorId}`,
         { kind: "node", id: action.nodeId },
       );
     }
     case "request-delete":
-      if (action.selection.kind === "venue") return state;
+      if (!deletableSelectionExists(state, action.selection)) {
+        return { ...state, notice: "invalid-geometry" };
+      }
       return {
         ...state,
         tool: "delete",
@@ -674,6 +694,9 @@ function graphEditorReducer(
     case "confirm-delete": {
       if (state.pending?.kind !== "delete") return state;
       const selection = state.pending.selection;
+      if (!deletableSelectionExists(state, selection)) {
+        return { ...state, notice: "invalid-geometry" };
+      }
       let nodes = state.nodes;
       let edges = state.edges;
       if (selection.kind === "node") {
@@ -699,7 +722,7 @@ function graphEditorReducer(
       return commitSnapshot(
         state,
         { nodes, edges, profile: state.profile },
-        `Deleted ${selection.kind} ${selection.id}`,
+        `delete:${selection.kind}:${selection.id}`,
         null,
       );
     }
@@ -728,7 +751,7 @@ function graphEditorReducer(
       return commitSnapshot(
         state,
         { nodes: state.nodes, edges: state.edges, findings, profile: state.profile },
-        `Accepted ${findingId} exception: ${reason}`,
+        `accept-exception:${findingId}`,
       );
     }
     case "update-profile-draft":
@@ -759,7 +782,7 @@ function graphEditorReducer(
       return commitSnapshot(
         state,
         { nodes: state.nodes, edges: state.edges, profile },
-        `Changed snap profile ${state.profile.autoSnapM}/${state.profile.reviewSnapM} m to ${autoSnapM}/${reviewSnapM} m: ${reason}`,
+        `override-profile:${autoSnapM}:${reviewSnapM}`,
       );
     }
     case "undo": {
