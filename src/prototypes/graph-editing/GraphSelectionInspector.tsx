@@ -57,7 +57,7 @@ const copy = {
   outside: { ja: "範囲外", en: "None" },
   applySnap: { ja: "スナップを適用", en: "Apply snap" },
   acceptCandidate: { ja: "候補を採用", en: "Accept candidate" },
-  keepRaw: { ja: "元の位置を保持", en: "Keep raw position" },
+  keepRaw: { ja: "未スナップ位置を確定", en: "Commit raw position" },
   ambiguousHelp: { ja: "候補を一意に決められないため、自動適用できません。", en: "Evidence is ambiguous, so only raw placement can commit." },
   cancel: { ja: "キャンセル", en: "Cancel" },
   connectorDraft: { ja: "接続ドラフト", en: "Connection draft" },
@@ -74,11 +74,13 @@ const copy = {
   reviewFloorChange: { ja: "フロア変更を確認", en: "Review floor change" },
   preserveAltitude: { ja: "ソース標高は保持されます", en: "Source altitude will be preserved" },
   confirmFloor: { ja: "フロア変更を確定", en: "Confirm floor change" },
+  finishPendingFirst: { ja: "先に保留中の操作を確定またはキャンセルしてください", en: "Commit or cancel the pending operation first" },
   exception: { ja: "例外", en: "Exception" },
   acceptException: { ja: "例外として承認", en: "Accept exception" },
   exceptionReason: { ja: "承認理由", en: "Acceptance reason" },
   reasonRequired: { ja: "理由を入力してください", en: "A reason is required" },
   acceptedReason: { ja: "承認済み理由", en: "Accepted reason" },
+  exceptionDraftElsewhere: { ja: "別の検出事項の例外ドラフトを編集中です", en: "An exception draft for another finding is active" },
   profile: { ja: "検証プロファイル", en: "Validation profile" },
   editProfile: { ja: "しきい値を上書き", en: "Override thresholds" },
   autoThreshold: { ja: "自動スナップ (m)", en: "Auto snap (m)" },
@@ -158,14 +160,24 @@ function stagedChangeText(token: string, locale: GraphEditorPrototypeState["loca
   switch (kind) {
     case "add":
       return locale === "ja" ? `${first} を ${second} に追加` : `Added ${first} on ${second}`;
-    case "move":
-      return locale === "ja" ? `${first} を移動 (${second})` : `Moved ${first} (${second})`;
+    case "move": {
+      const mode = second === "snap"
+        ? locale === "ja" ? "スナップ" : "snapped"
+        : locale === "ja" ? "未スナップ" : "raw";
+      return locale === "ja" ? `${first} を移動 (${mode})` : `Moved ${first} (${mode})`;
+    }
     case "connect":
       return locale === "ja" ? `${second} と ${third} を接続` : `Connected ${second} to ${third}`;
     case "reassign-floor":
       return locale === "ja" ? `${first}: ${second} から ${third} へ変更` : `${first}: reassigned ${second} to ${third}`;
-    case "delete":
-      return locale === "ja" ? `${second} ${third} を削除` : `Deleted ${second} ${third}`;
+    case "delete": {
+      const objectKind = first === "node"
+        ? locale === "ja" ? "ジャンクション" : "junction"
+        : first === "edge"
+          ? locale === "ja" ? "接続" : "connection"
+          : locale === "ja" ? "制御点" : "control point";
+      return locale === "ja" ? `${objectKind} ${second} を削除` : `Deleted ${objectKind} ${second}`;
+    }
     case "accept-exception":
       return locale === "ja" ? `${first} の例外を承認` : `Accepted exception for ${first}`;
     case "override-profile":
@@ -250,7 +262,7 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
       { label: copy.sceneZ, value: t(copy.notApplicable, locale) },
       { label: copy.sourceAltitude, value: t(copy.none, locale) },
       { label: copy.altitudeDelta, value: t(copy.notApplicable, locale) },
-      { label: copy.provenance, value: t(copy.source, locale) },
+      { label: copy.provenance, value: t(copy.notApplicable, locale) },
       { label: copy.endpoints, value: `${selectedEdge.fromNodeId} → ${selectedEdge.toNodeId}`, machine: true },
       { label: copy.association, value: selectedEdge.associationId ?? t(copy.none, locale), machine: true },
     );
@@ -293,6 +305,14 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
   const snapBand = placement?.snap?.band ?? "none";
   const snapBandLabel = snapBand === "none" ? copy.outside : copy[snapBand];
   const profileDraft = pending?.kind === "profile" ? pending : null;
+  const selectedExceptionDraft = pending?.kind === "exception"
+    && pending.findingId === selectedFinding?.id
+    ? pending
+    : null;
+  const otherExceptionDraft = pending?.kind === "exception"
+    && pending.findingId !== selectedFinding?.id
+    ? pending
+    : null;
   const profileValid = profileDraft !== null
     && Number.isFinite(profileDraft.autoSnapM)
     && Number.isFinite(profileDraft.reviewSnapM)
@@ -433,7 +453,8 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
               <div className="graph-inspector__fact"><dt>{t(copy.candidate, locale)}</dt><dd className="graph-inspector__machine">{otherFloor(selectedNode.floorId)} · Z {otherFloor(selectedNode.floorId) === "B1" ? "0.00" : "4.86"}</dd></div>
             </dl>
             <p>{t(copy.preserveAltitude, locale)}: <span className="graph-inspector__machine">{selectedNode.sourceAltitude?.toFixed(2) ?? "—"}</span></p>
-            <button type="button" onClick={() => actions.reassignNodeFloor(selectedNode.id, otherFloor(selectedNode.floorId))}>{t(copy.confirmFloor, locale)}</button>
+            {pending !== null ? <p>{t(copy.finishPendingFirst, locale)}</p> : null}
+            <button type="button" disabled={pending !== null} onClick={() => actions.reassignNodeFloor(selectedNode.id, otherFloor(selectedNode.floorId))}>{t(copy.confirmFloor, locale)}</button>
           </details>
         </section>
       ) : null}
@@ -441,22 +462,29 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
       {selectedFinding !== null ? (
         <section className="graph-inspector__section">
           <h3>{t(copy.exception, locale)}</h3>
-          {selectedFinding.state === "accepted" && selectedFinding.exceptionReason !== null ? (
-            <p><strong>{t(copy.acceptedReason, locale)}:</strong> {selectedFinding.exceptionReason}</p>
-          ) : pending?.kind === "exception" ? (
+          {selectedExceptionDraft !== null ? (
             <>
               <label className="graph-inspector__field">
                 <span>{t(copy.exceptionReason, locale)}</span>
-                <textarea value={pending.reason} onChange={(event) => actions.updateExceptionReason(event.currentTarget.value)} />
+                <textarea value={selectedExceptionDraft.reason} onChange={(event) => actions.updateExceptionReason(event.currentTarget.value)} />
               </label>
-              {pending.reason.trim() === "" ? <p>{t(copy.reasonRequired, locale)}</p> : null}
+              {selectedExceptionDraft.reason.trim() === "" ? <p>{t(copy.reasonRequired, locale)}</p> : null}
               <div className="graph-inspector__actions">
-                <button type="button" className="graph-inspector__primary" disabled={pending.reason.trim() === ""} onClick={actions.acceptException}>{t(copy.acceptException, locale)}</button>
+                <button type="button" className="graph-inspector__primary" disabled={selectedExceptionDraft.reason.trim() === ""} onClick={actions.acceptException}>{t(copy.acceptException, locale)}</button>
                 <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
               </div>
             </>
-          ) : (
+          ) : otherExceptionDraft !== null ? (
+            <>
+              <p>{t(copy.exceptionDraftElsewhere, locale)}: {t(findingTitles[otherExceptionDraft.findingId], locale)}</p>
+              <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
+            </>
+          ) : selectedFinding.state === "accepted" && selectedFinding.exceptionReason !== null ? (
+            <p><strong>{t(copy.acceptedReason, locale)}:</strong> {selectedFinding.exceptionReason}</p>
+          ) : selectedFinding.state === "open" || selectedFinding.state === "not-evaluated" ? (
             <button type="button" disabled={pending !== null} onClick={() => actions.beginException(selectedFinding.id)}>{t(copy.acceptException, locale)}</button>
+          ) : (
+            <p>{t(findingStateCopy[selectedFinding.state], locale)}</p>
           )}
         </section>
       ) : null}
@@ -497,7 +525,7 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
         <h3>{t(copy.checks, locale)}</h3>
         <dl className="graph-inspector__facts">
           <div className="graph-inspector__fact"><dt>{t(copy.structural, locale)}</dt><dd>{t(structuralValid ? copy.structuralValid : copy.structuralInvalid, locale)}</dd></div>
-          <div className="graph-inspector__fact"><dt>{t(copy.semantic, locale)}</dt><dd className="graph-inspector__machine">D {openCounts.defect} · R {openCounts.review} · A {openCounts.advisory}</dd></div>
+          <div className="graph-inspector__fact"><dt>{t(copy.semantic, locale)}</dt><dd className="graph-inspector__machine">{locale === "ja" ? `欠陥 ${openCounts.defect} · レビュー ${openCounts.review} · 助言 ${openCounts.advisory}` : `Defect ${openCounts.defect} · Review ${openCounts.review} · Advisory ${openCounts.advisory}`}</dd></div>
           <div className="graph-inspector__fact"><dt>{t(copy.broadRule, locale)}</dt><dd>{state.checkState === "checking" ? t(copy.checking, locale) : broadFinding === undefined ? t(copy.notEvaluated, locale) : t(findingStateCopy[broadFinding.state], locale)}</dd></div>
         </dl>
         <button type="button" disabled={state.checkState === "checking"} onClick={actions.runCheck}>{state.checkState === "checking" ? t(copy.checking, locale) : state.checkState === "complete" ? t(copy.checked, locale) : t(copy.runCheck, locale)}</button>

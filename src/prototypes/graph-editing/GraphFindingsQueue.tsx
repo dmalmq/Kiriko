@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import type { GraphEditorPrototypeState, GraphFinding } from "./graphEditingModel";
 import type { GraphEditorPrototypeActions } from "./useGraphEditingPrototype";
 
@@ -79,9 +79,12 @@ function measurement(finding: GraphFinding, locale: GraphEditorPrototypeState["l
 
 export function GraphFindingsQueue({ state, actions }: GraphFindingsQueueProps): ReactElement {
   const [filter, setFilter] = useState<FindingFilter>("open");
+  const didInitializeSelection = useRef(false);
   const { locale } = state;
 
   useEffect(() => {
+    if (didInitializeSelection.current) return;
+    didInitializeSelection.current = true;
     if (state.selectedFindingId === null) actions.selectFinding("endpoint-off-stair");
   }, [actions, state.selectedFindingId]);
 
@@ -129,7 +132,11 @@ export function GraphFindingsQueue({ state, actions }: GraphFindingsQueueProps):
               <ol className="graph-findings__list">
                 {findings.map((finding) => {
                   const baseline = state.baseline.findings.find((item) => item.id === finding.id);
-                  const staged = baseline?.state !== finding.state || baseline?.exceptionReason !== finding.exceptionReason;
+                  const staged = baseline === undefined
+                    || baseline.state !== finding.state
+                    || baseline.exceptionReason !== finding.exceptionReason
+                    || baseline.measuredM !== finding.measuredM
+                    || baseline.toleranceM !== finding.toleranceM;
                   const selected = state.selectedFindingId === finding.id;
                   return (
                     <li key={finding.id}>
