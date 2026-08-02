@@ -1,7 +1,6 @@
 import { useRef, useState } from "react";
 import type {
   CSSProperties,
-  KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   ReactElement,
@@ -56,8 +55,6 @@ const SNAP_COLOR: Record<SnapBand, string> = {
   none: COLOR.defect,
 };
 
-/** Floor base elevation (metres) used only for elevation badges. */
-const FLOOR_ELEVATION_M: Record<FloorId, number> = { B1: -4.86, "1F": 0 };
 /** Floor base scene Z used to project floor planes and invert pointer hits. */
 const FLOOR_Z: Record<FloorId, number> = { B1: 0, "1F": 4.86 };
 
@@ -117,10 +114,14 @@ const labels = {
   edge: { ja: "辺", en: "Edge" },
   connector: { ja: "コネクタ", en: "Connector" },
   controlPoint: { ja: "制御点", en: "Control point" },
+  connectorDraft: { ja: "接続ドラフト", en: "Connector draft" },
+  draftFrom: { ja: "開始", en: "From" },
+  draftTo: { ja: "終了", en: "To" },
+  landing: { ja: "踊り場", en: "Landing" },
   venue: { ja: "施設", en: "Venue" },
   stair: { ja: "階段", en: "Stair" },
   lift: { ja: "エレベーター", en: "Lift" },
-  elevation: { ja: "標高", en: "Elevation" },
+  sceneZ: { ja: "シーン Z", en: "Scene Z" },
   defect: { ja: "不具合", en: "Defect" },
   review: { ja: "確認", en: "Review" },
   advisory: { ja: "助言", en: "Advisory" },
@@ -339,41 +340,74 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
 
   const nodesById = new Map(state.nodes.map((node) => [node.id, node]));
 
-  // Evidence emphasis context (Task 2 Step 2): the active finding dims
-  // unrelated floors and graph objects while keeping everything rendered.
-  const activeFinding =
-    state.selectedFindingId !== null
-      ? (state.findings.find((finding) => finding.id === state.selectedFindingId) ?? null)
+  const findingTargets = state.findings.map((finding) => ({
+    finding,
+    target: resolveFindingTarget(finding, nodesById, state.edges, preset),
+  }));
+  // A finding drives fade only while its target still resolves in the current
+  // graph/venue scene. Closed or stale selections keep their reducer-owned
+  // selection state, but do not make every surviving object look inactive.
+  const selectedFindingTarget =
+    state.selectedFindingId === null
+      ? null
+      : (findingTargets.find(({ finding }) => finding.id === state.selectedFindingId) ?? null);
+  const focusedFinding =
+    selectedFindingTarget !== null &&
+    selectedFindingTarget.target !== null &&
+    (selectedFindingTarget.finding.state === "open" ||
+      selectedFindingTarget.finding.state === "not-evaluated")
+      ? selectedFindingTarget.finding
       : null;
-  let relatedFloorId: FloorId | null = null;
-  let relatedObjectId: string | null = null;
-  if (activeFinding !== null) {
-    relatedObjectId = activeFinding.objectId;
-    const relatedNode = state.nodes.find((node) => node.id === activeFinding.objectId);
-    if (relatedNode !== undefined) {
-      relatedFloorId = relatedNode.floorId;
-    } else {
-      const relatedEdge = state.edges.find((edge) => edge.id === activeFinding.objectId);
-      const endpoint =
-        relatedEdge !== undefined ? nodesById.get(relatedEdge.fromNodeId) : undefined;
-      relatedFloorId = endpoint !== undefined ? endpoint.floorId : null;
-      if (relatedFloorId === null) {
-        const venue = VENUES.find((candidate) => candidate.id === activeFinding.objectId);
-        relatedFloorId = venue !== undefined ? venue.floorId : null;
+  const findingFocus = (() => {
+    if (focusedFinding === null) return null;
+
+    const floorIds = new Set<FloorId>();
+    const objectIds = new Set<string>([focusedFinding.objectId]);
+    const addVenueEvidence = (venueId: string | null): void => {
+      if (venueId === null) return;
+      const venue = VENUES.find((candidate) => candidate.id === venueId);
+      if (venue === undefined) return;
+      objectIds.add(venue.id);
+      floorIds.add(venue.floorId);
+    };
+
+    const node = nodesById.get(focusedFinding.objectId);
+    if (node !== undefined) {
+      floorIds.add(node.floorId);
+      for (const edge of state.edges) {
+        if (edge.fromNodeId === node.id || edge.toNodeId === node.id) {
+          addVenueEvidence(edge.associationId);
+        }
       }
+      return { floorIds, objectIds };
     }
-  }
+
+    const edge = state.edges.find((candidate) => candidate.id === focusedFinding.objectId);
+    if (edge !== undefined) {
+      const from = nodesById.get(edge.fromNodeId);
+      const to = nodesById.get(edge.toNodeId);
+      if (from === undefined || to === undefined) return null;
+      floorIds.add(from.floorId);
+      floorIds.add(to.floorId);
+      addVenueEvidence(edge.associationId);
+      return { floorIds, objectIds };
+    }
+
+    const venue = VENUES.find((candidate) => candidate.id === focusedFinding.objectId);
+    if (venue === undefined) return null;
+    floorIds.add(venue.floorId);
+    return { floorIds, objectIds };
+  })();
 
   function floorOpacity(floorId: FloorId): number {
-    return activeFinding === null || floorId === relatedFloorId ? 1 : 0.35;
+    return findingFocus === null || findingFocus.floorIds.has(floorId) ? 1 : 0.35;
   }
   function objectOpacity(objectId: string): number {
-    return activeFinding === null || objectId === relatedObjectId ? 1 : 0.35;
+    return findingFocus === null || findingFocus.objectIds.has(objectId) ? 1 : 0.35;
   }
   function effectiveOpacity(floorId: FloorId, objectId: string): number {
-    if (activeFinding === null) return 1;
-    if (floorId !== relatedFloorId) return 0.35;
-    return objectId === relatedObjectId ? 1 : 0.35;
+    if (findingFocus === null) return 1;
+    return findingFocus.floorIds.has(floorId) && findingFocus.objectIds.has(objectId) ? 1 : 0.35;
   }
 
   function isSelected(selection: GraphSelection): boolean {
@@ -515,49 +549,6 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
     // the browser auto-released on cancel.
   }
 
-  function onKeyDown(event: ReactKeyboardEvent<HTMLElement>): void {
-    const target = event.target as HTMLElement | null;
-    if (target !== null) {
-      const tag = target.tagName.toLowerCase();
-      if (
-        tag === "input" ||
-        tag === "textarea" ||
-        tag === "select" ||
-        tag === "button" ||
-        target.isContentEditable
-      ) {
-        return;
-      }
-    }
-    if (event.key === "Escape") {
-      actions.cancel();
-      return;
-    }
-    const meta = event.metaKey || event.ctrlKey;
-    if (meta && (event.key === "z" || event.key === "Z")) {
-      event.preventDefault();
-      if (event.shiftKey) actions.redo();
-      else actions.undo();
-      return;
-    }
-    if (meta || event.altKey) return;
-    switch (event.key.toLowerCase()) {
-      case "s":
-        actions.setTool("select");
-        break;
-      case "p":
-        actions.setTool("add");
-        break;
-      case "c":
-        actions.setTool("connect");
-        break;
-      case "d":
-        actions.setTool("delete");
-        break;
-      default:
-        break;
-    }
-  }
 
   function floorPolygonPoints(floorId: FloorId): string {
     const z = FLOOR_Z[floorId];
@@ -629,18 +620,45 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
     return null;
   })();
 
+  const pendingConnector = (() => {
+    const pending = state.pending;
+    if (pending?.kind !== "connect" || pending.toNodeId === null) return null;
+    const from = nodesById.get(pending.fromNodeId);
+    const to = nodesById.get(pending.toNodeId);
+    if (from === undefined || to === undefined || from.id === to.id) return null;
+    const fromXY = project(from.point, from.floorId, preset);
+    const toXY = project(to.point, to.floorId, preset);
+    const controlProjected = pending.controlPoints.map((control) => ({
+      control,
+      xy: projectWithOffset(
+        control,
+        connectorControlOffset(control.z, from.floorId, to.floorId),
+        preset,
+      ),
+    }));
+    const segments = [`M ${round(fromXY[0], 2)} ${round(fromXY[1], 2)}`];
+    for (const entry of controlProjected) {
+      segments.push(`L ${round(entry.xy[0], 2)} ${round(entry.xy[1], 2)}`);
+    }
+    segments.push(`L ${round(toXY[0], 2)} ${round(toXY[1], 2)}`);
+    return {
+      from,
+      to,
+      fromXY,
+      toXY,
+      controlProjected,
+      path: segments.join(" "),
+      color: from.floorId === to.floorId ? COLOR.edge : COLOR.connector,
+    };
+  })();
 
-  const findingTargets = state.findings.map((finding) => ({
-    finding,
-    target: resolveFindingTarget(finding, nodesById, state.edges, preset),
-  }));
+
   const objectList = selectableObjectList(state, locale);
 
   return (
     <section
       className="graph-editing-scene"
       tabIndex={0}
-      onKeyDown={onKeyDown}
       aria-label={t(labels.sceneTitle, locale)}
       style={styles.root}
     >
@@ -728,7 +746,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
                 {floorId}
               </text>
               <text x={labelXY[0]} y={labelXY[1] + 14} fontSize={10} fill={COLOR.floorLabel} opacity={opacity}>
-                {t(labels.elevation, locale)}: {round(FLOOR_ELEVATION_M[floorId], 2)} m
+                {t(labels.sceneZ, locale)}: {FLOOR_Z[floorId].toFixed(2)} m
               </text>
 
               {/* Venue stair/lift footprints on this floor. */}
@@ -902,6 +920,62 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
               </g>
             );
           })}
+
+        {/* Provisional connector proof: same projection as committed connectors, no graph mutation. */}
+        {pendingConnector !== null ? (
+          <g
+            className="graph-editing-scene__connector-draft"
+            pointerEvents="none"
+            role="img"
+            aria-label={`${t(labels.connectorDraft, locale)} ${pendingConnector.from.id} → ${pendingConnector.to.id}`}
+          >
+            <path
+              d={pendingConnector.path}
+              fill="none"
+              stroke={COLOR.floorFill}
+              strokeWidth={7}
+              strokeLinecap="round"
+              opacity={0.92}
+            />
+            <path
+              d={pendingConnector.path}
+              fill="none"
+              stroke={pendingConnector.color}
+              strokeWidth={3}
+              strokeDasharray="7 3"
+              strokeLinecap="round"
+            />
+            {([
+              { kind: labels.draftFrom, node: pendingConnector.from, xy: pendingConnector.fromXY, yOffset: 17 },
+              { kind: labels.draftTo, node: pendingConnector.to, xy: pendingConnector.toXY, yOffset: -12 },
+            ] as const).map(({ kind, node, xy, yOffset }) => (
+              <g key={`draft-endpoint-${node.id}`}>
+                <circle cx={xy[0]} cy={xy[1]} r={8} fill={COLOR.floorFill} stroke={pendingConnector.color} strokeWidth={2.5} />
+                <circle cx={xy[0]} cy={xy[1]} r={2.5} fill={pendingConnector.color} />
+                <text x={xy[0] + 11} y={xy[1] + yOffset} fontSize={8.5} fontWeight={600} fill={pendingConnector.color}>
+                  {t(kind, locale)} · {node.id} · {node.floorId} · {t(labels.sceneZ, locale)} {round(node.point.z, 2)} · X{round(node.point.x, 2)} Y{round(node.point.y, 2)}
+                </text>
+              </g>
+            ))}
+            {pendingConnector.controlProjected.map(({ control, xy }, index) => (
+              <g key={`draft-control-${control.id}`}>
+                <polygon
+                  points={diamondPoints(xy[0], xy[1], 8)}
+                  fill={COLOR.floorFill}
+                  stroke={pendingConnector.color}
+                  strokeWidth={2.5}
+                />
+                <circle cx={xy[0]} cy={xy[1]} r={2} fill={pendingConnector.color} />
+                <text x={xy[0]} y={xy[1] - 13} fontSize={8.5} fontWeight={600} fill={pendingConnector.color} textAnchor="middle">
+                  {t(labels.landing, locale)} {index + 1} · X{round(control.x, 2)} Y{round(control.y, 2)} Z{round(control.z, 2)}
+                </text>
+                <text x={xy[0]} y={xy[1] + 17} fontSize={8} fill={COLOR.floorLabel} textAnchor="middle">
+                  {pendingConnector.from.floorId} ↔ {pendingConnector.to.floorId} · {t(labels.sceneZ, locale)} {round(control.z, 2)}
+                </text>
+              </g>
+            ))}
+          </g>
+        ) : null}
 
         {/* Evidence layer: point/segment/area finding overlays (pointer-transparent). */}
         <g pointerEvents="none">

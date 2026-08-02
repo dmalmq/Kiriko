@@ -722,6 +722,56 @@
   accent-color: var(--color-accent);
 }
 
+.graph-editing-prototype .graph-inspector__control-points {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+  list-style: none;
+}
+
+.graph-editing-prototype .graph-inspector__control-points li {
+  min-width: 0;
+  padding: var(--space-2);
+  display: grid;
+  gap: var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.graph-editing-prototype .graph-inspector__draft-evidence {
+  margin-top: var(--space-2);
+}
+
+.graph-editing-prototype .graph-inspector__limitation,
+.graph-editing-prototype .graph-inspector__readiness {
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel);
+  font-size: 11px;
+}
+
+.graph-editing-prototype .graph-inspector__limitation {
+  border-color: var(--color-warning);
+  background: var(--color-warning-bg);
+  color: var(--color-text);
+}
+
+.graph-editing-prototype .graph-inspector__readiness[data-ready="true"] {
+  border-color: var(--color-success);
+  color: var(--color-text);
+}
+
+.graph-editing-prototype .graph-inspector__readiness[data-ready="false"] {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
 .graph-editing-prototype .graph-inspector details {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -746,6 +796,53 @@
   margin-top: var(--space-3);
   display: grid;
   gap: var(--space-1);
+}
+
+.graph-editing-prototype .graph-inspector__snap-disclosure {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel);
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.graph-editing-prototype .graph-inspector__snap-disclosure a {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.graph-editing-prototype .graph-inspector__profile-comparison {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.graph-editing-prototype .graph-inspector__profile-comparison > div {
+  min-width: 0;
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel);
+}
+
+.graph-editing-prototype .graph-inspector__profile-comparison dt {
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.graph-editing-prototype .graph-inspector__profile-comparison dd {
+  min-width: 0;
+  margin: 0;
+  display: grid;
+  gap: var(--space-1);
+  overflow-wrap: anywhere;
+  font-size: 12px;
 }
 
 .graph-editing-prototype .graph-inspector__changes {

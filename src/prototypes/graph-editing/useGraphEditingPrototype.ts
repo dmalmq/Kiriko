@@ -16,6 +16,7 @@ import {
   type SnapPreview,
   type StagedSnapshot,
   type ValidationProfile,
+  type ValidationProfileScope,
 } from "./graphEditingModel";
 
 export interface GraphEditorPrototypeActions {
@@ -39,12 +40,18 @@ export interface GraphEditorPrototypeActions {
   ): void;
   commitConnection(): void;
   reassignNodeFloor(nodeId: string, floorId: FloorId): void;
+  confirmNodeFloorReassignment(): void;
   requestDelete(selection: Exclude<GraphSelection, null>): void;
   confirmDelete(): void;
   beginException(findingId: GraphFinding["id"]): void;
   updateExceptionReason(reason: string): void;
   acceptException(): void;
-  updateProfileDraft(autoSnapM: number, reviewSnapM: number, reason: string): void;
+  updateProfileDraft(
+    autoSnapM: number,
+    reviewSnapM: number,
+    scope: ValidationProfileScope | null,
+    reason: string,
+  ): void;
   commitProfileOverride(): void;
   undo(): void;
   redo(): void;
@@ -62,17 +69,18 @@ interface SnapAnchor {
   id: string;
   floorId: FloorId;
   point: ScenePoint;
+  confidence: number;
 }
 
 const FLOOR_SCENE_Z: Record<FloorId, number> = { B1: 0, "1F": 4.86 };
 
 const SNAP_ANCHORS: SnapAnchor[] = [
-  { id: "stair-main", floorId: "B1", point: { x: 300, y: 300, z: 0 } },
-  { id: "stair-main", floorId: "1F", point: { x: 300, y: 300, z: 4.86 } },
-  { id: "lift-east", floorId: "B1", point: { x: 452, y: 304, z: 0 } },
-  { id: "lift-east", floorId: "1F", point: { x: 452, y: 304, z: 4.86 } },
-  { id: "snap-anchor-b1-entry", floorId: "B1", point: { x: 126, y: 406, z: 0 } },
-  { id: "snap-anchor-f1-exit", floorId: "1F", point: { x: 516, y: 186, z: 4.86 } },
+  { id: "stair-main", floorId: "B1", point: { x: 300, y: 300, z: 0 }, confidence: 0.96 },
+  { id: "stair-main", floorId: "1F", point: { x: 300, y: 300, z: 4.86 }, confidence: 0.96 },
+  { id: "lift-east", floorId: "B1", point: { x: 452, y: 304, z: 0 }, confidence: 0.88 },
+  { id: "lift-east", floorId: "1F", point: { x: 452, y: 304, z: 4.86 }, confidence: 0.88 },
+  { id: "b1-entry", floorId: "B1", point: { x: 126, y: 406, z: 0 }, confidence: 1 },
+  { id: "f1-exit", floorId: "1F", point: { x: 516, y: 186, z: 4.86 }, confidence: 1 },
 ];
 
 const MAX_HISTORY = 50;
@@ -99,6 +107,7 @@ type GraphEditorAction =
     }
   | { type: "commit-connection" }
   | { type: "reassign-node-floor"; nodeId: string; floorId: FloorId }
+  | { type: "confirm-node-floor-reassignment" }
   | { type: "request-delete"; selection: Exclude<GraphSelection, null> }
   | { type: "confirm-delete" }
   | { type: "begin-exception"; findingId: GraphFinding["id"] }
@@ -109,6 +118,7 @@ type GraphEditorAction =
       autoSnapM: number;
       reviewSnapM: number;
       reason: string;
+      scope: ValidationProfileScope | null;
     }
   | { type: "commit-profile-override" }
   | { type: "undo" }
@@ -138,10 +148,22 @@ function distance2d(a: Pick<ScenePoint, "x" | "y">, b: Pick<ScenePoint, "x" | "y
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+function affectedAssociation(
+  nodeId: string,
+  edges: GraphEdge[],
+): string | null {
+  return edges.find(
+    (edge) =>
+      edge.associationId !== null &&
+      (edge.fromNodeId === nodeId || edge.toNodeId === nodeId),
+  )?.associationId ?? null;
+}
+
 function nearestAnchor(
   candidate: ScenePoint,
   floorId: FloorId,
   profile: ValidationProfile,
+  affectedAssociationId: string | null,
 ): SnapPreview | null {
   const sameFloorCandidates = SNAP_ANCHORS.filter(
     (anchor) =>
@@ -166,6 +188,9 @@ function nearestAnchor(
   const sameFloor = nearest.floorId === floorId;
   return {
     candidateId: nearest.id,
+    candidateFloorId: nearest.floorId,
+    confidence: nearest.confidence,
+    affectedAssociationId,
     distanceM: nearestDistance,
     band: snapBand(nearestDistance, sameFloorCandidates.length, sameFloor, profile),
     sameFloor,
@@ -369,47 +394,130 @@ function pointForCommit(pending: Extract<PendingOperation, { kind: "add" | "move
   return { ...pending.snap.point, z: pending.candidate.z };
 }
 
+function floorReassignmentPreview(
+  state: GraphEditorPrototypeState,
+  nodeId: string,
+  toFloorId: FloorId,
+): { nodes: GraphNode[]; edges: GraphEdge[]; consequences: string[] } | null {
+  const existing = state.nodes.find((node) => node.id === nodeId);
+  if (existing === undefined || existing.floorId === toFloorId) return null;
+
+  const nodes = state.nodes.map((node) =>
+    node.id === nodeId
+      ? {
+          ...node,
+          floorId: toFloorId,
+          point: { ...node.point, z: FLOOR_SCENE_Z[toFloorId] },
+        }
+      : node,
+  );
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const consequences = [
+    `reassign-node-floor:${nodeId}:${existing.floorId}:${toFloorId}`,
+  ];
+  const edges = state.edges.map((edge) => {
+    if (edge.fromNodeId !== nodeId && edge.toNodeId !== nodeId) return edge;
+    const from = nodesById.get(edge.fromNodeId);
+    const to = nodesById.get(edge.toNodeId);
+    if (from === undefined || to === undefined) return edge;
+
+    const kind: GraphEdge["kind"] = from.floorId === to.floorId ? "same-floor" : "connector";
+    const associationId = kind === "same-floor" ? null : edge.associationId;
+    const controlPoints = kind === "same-floor" ? [] : edge.controlPoints;
+    consequences.push(`edge-kind:${edge.id}:${edge.kind}:${kind}`);
+    if (edge.associationId !== associationId) {
+      consequences.push(
+        `edge-association:${edge.id}:${edge.associationId ?? "none"}:${associationId ?? "none"}`,
+      );
+    }
+    if (edge.controlPoints.length !== controlPoints.length) {
+      consequences.push(
+        `edge-control-points:${edge.id}:${edge.controlPoints.map((point) => point.id).join(",")}:none`,
+      );
+    }
+    return { ...edge, kind, associationId, controlPoints };
+  });
+
+  return { nodes, edges, consequences };
+}
+
+function graphAfterDeletion(
+  state: GraphEditorPrototypeState,
+  selection: Exclude<GraphSelection, null>,
+): { nodes: GraphNode[]; edges: GraphEdge[] } | null {
+  if (selection.kind === "node") {
+    if (!state.nodes.some((node) => node.id === selection.id)) return null;
+    return {
+      nodes: state.nodes.filter((node) => node.id !== selection.id),
+      edges: state.edges.filter(
+        (edge) => edge.fromNodeId !== selection.id && edge.toNodeId !== selection.id,
+      ),
+    };
+  }
+  if (selection.kind === "edge") {
+    if (!state.edges.some((edge) => edge.id === selection.id)) return null;
+    return {
+      nodes: state.nodes,
+      edges: state.edges.filter((edge) => edge.id !== selection.id),
+    };
+  }
+  if (selection.kind === "control-point") {
+    const edge = state.edges.find((candidate) => candidate.id === selection.edgeId);
+    if (edge?.controlPoints.some((point) => point.id === selection.id) !== true) return null;
+    return {
+      nodes: state.nodes,
+      edges: state.edges.map((candidate) =>
+        candidate.id === selection.edgeId
+          ? {
+              ...candidate,
+              controlPoints: candidate.controlPoints.filter((point) => point.id !== selection.id),
+            }
+          : candidate,
+      ),
+    };
+  }
+  return null;
+}
+
 function deletionConsequences(
   state: GraphEditorPrototypeState,
   selection: Exclude<GraphSelection, null>,
 ): string[] {
+  let consequences: string[];
   if (selection.kind === "node") {
     const incident = state.edges.filter(
       (edge) => edge.fromNodeId === selection.id || edge.toNodeId === selection.id,
     );
     const affectedFindings = state.findings.filter((finding) => finding.objectId === selection.id);
-    return [`incident-edges:${incident.length}`, `affected-findings:${affectedFindings.length}`];
-  }
-  if (selection.kind === "edge") {
+    consequences = [
+      `incident-edges:${incident.length}`,
+      `affected-findings:${affectedFindings.length}`,
+    ];
+  } else if (selection.kind === "edge") {
     const edge = state.edges.find((candidate) => candidate.id === selection.id);
-    return edge === undefined
+    consequences = edge === undefined
       ? []
       : [
           `disconnect:${edge.fromNodeId}:${edge.toNodeId}`,
           ...(edge.associationId === null ? [] : [`remove-association:${edge.associationId}`]),
         ];
+  } else if (selection.kind === "control-point") {
+    consequences = [`remove-control-point:${selection.edgeId}:${selection.id}`];
+  } else {
+    consequences = [`venue-read-only:${selection.id}`];
   }
-  if (selection.kind === "control-point") {
-    return [`remove-control-point:${selection.edgeId}:${selection.id}`];
-  }
-  return [`venue-read-only:${selection.id}`];
+
+  const draft = graphAfterDeletion(state, selection);
+  return draft?.edges.length === 0
+    ? [...consequences, "structural-unusable:no-edges"]
+    : consequences;
 }
 
 function deletableSelectionExists(
   state: GraphEditorPrototypeState,
   selection: Exclude<GraphSelection, null>,
 ): boolean {
-  if (selection.kind === "node") {
-    return state.nodes.some((node) => node.id === selection.id);
-  }
-  if (selection.kind === "edge") {
-    return state.edges.some((edge) => edge.id === selection.id);
-  }
-  if (selection.kind === "control-point") {
-    const edge = state.edges.find((candidate) => candidate.id === selection.edgeId);
-    return edge?.controlPoints.some((point) => point.id === selection.id) === true;
-  }
-  return false;
+  return graphAfterDeletion(state, selection) !== null;
 }
 
 function applyScenarioPreset(
@@ -485,7 +593,7 @@ function graphEditorReducer(
           kind: "add",
           floorId: state.activeFloor,
           candidate,
-          snap: nearestAnchor(candidate, state.activeFloor, state.profile),
+          snap: nearestAnchor(candidate, state.activeFloor, state.profile, null),
         },
         notice: null,
       };
@@ -524,7 +632,12 @@ function graphEditorReducer(
           kind: "move",
           nodeId: node.id,
           candidate,
-          snap: nearestAnchor(candidate, node.floorId, state.profile),
+          snap: nearestAnchor(
+            candidate,
+            node.floorId,
+            state.profile,
+            affectedAssociation(node.id, state.edges),
+          ),
         },
         notice: null,
       };
@@ -554,6 +667,7 @@ function graphEditorReducer(
           fromNodeId: action.nodeId,
           toNodeId: null,
           associationId: null,
+          associationConfirmed: false,
           controlPoints: [],
         },
         notice: null,
@@ -569,13 +683,27 @@ function graphEditorReducer(
       return {
         ...state,
         selection: { kind: "node", id: action.nodeId },
-        pending: { ...state.pending, toNodeId: action.nodeId },
+        pending: {
+          ...state.pending,
+          toNodeId: action.nodeId,
+          associationId: null,
+          associationConfirmed: false,
+          controlPoints: [],
+        },
         notice: null,
       };
     }
     case "set-draft-association":
       return state.pending?.kind === "connect"
-        ? { ...state, pending: { ...state.pending, associationId: action.associationId }, notice: null }
+        ? {
+            ...state,
+            pending: {
+              ...state.pending,
+              associationId: action.associationId,
+              associationConfirmed: true,
+            },
+            notice: null,
+          }
         : state;
     case "add-connector-control-point": {
       if (state.pending?.kind !== "connect") return state;
@@ -631,6 +759,7 @@ function graphEditorReducer(
       if (from === undefined || to === undefined || from.id === to.id) {
         return rejectMutation(state, "invalid-geometry");
       }
+      if (from.floorId !== to.floorId && !pending.associationConfirmed) return state;
       const id = nextNumericId(
         from.floorId === to.floorId ? "edge" : "connector",
         state.edges.map((edge) => edge.id),
@@ -651,36 +780,43 @@ function graphEditorReducer(
       );
     }
     case "reassign-node-floor": {
+      const preview = floorReassignmentPreview(state, action.nodeId, action.floorId);
+      if (preview === null) return state;
       const existing = state.nodes.find((node) => node.id === action.nodeId);
-      if (existing === undefined || existing.floorId === action.floorId) return state;
-      const nodes = state.nodes.map((node) =>
-        node.id === action.nodeId
-          ? {
-              ...node,
-              floorId: action.floorId,
-              point: { ...node.point, z: FLOOR_SCENE_Z[action.floorId] },
-            }
-          : node,
-      );
-      const nodesById = new Map(nodes.map((node) => [node.id, node]));
-      const edges: GraphEdge[] = state.edges.map((edge) => {
-        if (edge.fromNodeId !== action.nodeId && edge.toNodeId !== action.nodeId) return edge;
-        const from = nodesById.get(edge.fromNodeId);
-        const to = nodesById.get(edge.toNodeId);
-        if (from === undefined || to === undefined) return edge;
-        const sameFloor = from.floorId === to.floorId;
-        return {
-          ...edge,
-          kind: sameFloor ? "same-floor" : "connector",
-          associationId: sameFloor ? null : edge.associationId,
-          controlPoints: sameFloor ? [] : edge.controlPoints,
-        };
-      });
+      if (existing === undefined) return state;
+      return {
+        ...state,
+        selection: { kind: "node", id: action.nodeId },
+        pending: {
+          kind: "reassign-floor",
+          nodeId: action.nodeId,
+          fromFloorId: existing.floorId,
+          toFloorId: action.floorId,
+          consequences: preview.consequences,
+        },
+        notice: null,
+      };
+    }
+    case "confirm-node-floor-reassignment": {
+      if (state.pending?.kind !== "reassign-floor") return state;
+      const pending = state.pending;
+      const existing = state.nodes.find((node) => node.id === pending.nodeId);
+      const preview = floorReassignmentPreview(state, pending.nodeId, pending.toFloorId);
+      if (
+        existing?.floorId !== pending.fromFloorId ||
+        preview === null ||
+        preview.consequences.length !== pending.consequences.length ||
+        preview.consequences.some(
+          (consequence, index) => consequence !== pending.consequences[index],
+        )
+      ) {
+        return rejectMutation(state, "invalid-geometry");
+      }
       return commitSnapshot(
         state,
-        { nodes, edges, profile: state.profile },
-        `reassign-floor:${action.nodeId}:${existing.floorId}:${action.floorId}`,
-        { kind: "node", id: action.nodeId },
+        { nodes: preview.nodes, edges: preview.edges, profile: state.profile },
+        `reassign-floor:${pending.nodeId}:${pending.fromFloorId}:${pending.toFloorId}`,
+        { kind: "node", id: pending.nodeId },
       );
     }
     case "request-delete":
@@ -700,35 +836,23 @@ function graphEditorReducer(
       };
     case "confirm-delete": {
       if (state.pending?.kind !== "delete") return state;
-      const selection = state.pending.selection;
-      if (!deletableSelectionExists(state, selection)) {
+      const pending = state.pending;
+      const selection = pending.selection;
+      const draft = graphAfterDeletion(state, selection);
+      const consequences = deletionConsequences(state, selection);
+      if (
+        draft === null ||
+        consequences.length !== pending.consequences.length ||
+        consequences.some(
+          (consequence, index) => consequence !== pending.consequences[index],
+        )
+      ) {
         return rejectMutation(state, "invalid-geometry");
       }
-      let nodes = state.nodes;
-      let edges = state.edges;
-      if (selection.kind === "node") {
-        nodes = nodes.filter((node) => node.id !== selection.id);
-        edges = edges.filter(
-          (edge) => edge.fromNodeId !== selection.id && edge.toNodeId !== selection.id,
-        );
-      } else if (selection.kind === "edge") {
-        edges = edges.filter((edge) => edge.id !== selection.id);
-      } else if (selection.kind === "control-point") {
-        edges = edges.map((edge) =>
-          edge.id === selection.edgeId
-            ? {
-                ...edge,
-                controlPoints: edge.controlPoints.filter((point) => point.id !== selection.id),
-              }
-            : edge,
-        );
-      } else {
-        return state;
-      }
-      if (edges.length === 0) return rejectMutation(state, "unusable-graph");
+      if (draft.edges.length === 0) return rejectMutation(state, "unusable-graph");
       return commitSnapshot(
         state,
-        { nodes, edges, profile: state.profile },
+        { nodes: draft.nodes, edges: draft.edges, profile: state.profile },
         `delete:${selection.kind}:${selection.id}`,
         null,
       );
@@ -769,27 +893,34 @@ function graphEditorReducer(
           autoSnapM: action.autoSnapM,
           reviewSnapM: action.reviewSnapM,
           reason: action.reason,
+          scope: action.scope,
         },
         notice: null,
       };
     case "commit-profile-override": {
       if (state.pending?.kind !== "profile") return state;
-      const { autoSnapM, reviewSnapM } = state.pending;
+      const { autoSnapM, reviewSnapM, scope } = state.pending;
       const reason = state.pending.reason.trim();
       if (
         !Number.isFinite(autoSnapM) ||
         !Number.isFinite(reviewSnapM) ||
-        autoSnapM < 0 ||
-        reviewSnapM < autoSnapM ||
+        autoSnapM <= 0 ||
+        reviewSnapM <= autoSnapM ||
+        scope === null ||
         reason === ""
       ) {
         return state;
       }
-      const profile: ValidationProfile = { autoSnapM, reviewSnapM, overrideReason: reason };
+      const profile: ValidationProfile = {
+        autoSnapM,
+        reviewSnapM,
+        overrideReason: reason,
+        overrideScope: scope,
+      };
       return commitSnapshot(
         state,
         { nodes: state.nodes, edges: state.edges, profile },
-        `override-profile:${autoSnapM}:${reviewSnapM}`,
+        `override-profile:${autoSnapM}:${reviewSnapM}:${scope}`,
       );
     }
     case "undo": {
@@ -901,13 +1032,15 @@ export function useGraphEditingPrototype(): {
       commitConnection: () => dispatch({ type: "commit-connection" }),
       reassignNodeFloor: (nodeId, floorId) =>
         dispatch({ type: "reassign-node-floor", nodeId, floorId }),
+      confirmNodeFloorReassignment: () =>
+        dispatch({ type: "confirm-node-floor-reassignment" }),
       requestDelete: (selection) => dispatch({ type: "request-delete", selection }),
       confirmDelete: () => dispatch({ type: "confirm-delete" }),
       beginException: (findingId) => dispatch({ type: "begin-exception", findingId }),
       updateExceptionReason: (reason) => dispatch({ type: "update-exception-reason", reason }),
       acceptException: () => dispatch({ type: "accept-exception" }),
-      updateProfileDraft: (autoSnapM, reviewSnapM, reason) =>
-        dispatch({ type: "update-profile-draft", autoSnapM, reviewSnapM, reason }),
+      updateProfileDraft: (autoSnapM, reviewSnapM, scope, reason) =>
+        dispatch({ type: "update-profile-draft", autoSnapM, reviewSnapM, scope, reason }),
       commitProfileOverride: () => dispatch({ type: "commit-profile-override" }),
       undo: () => dispatch({ type: "undo" }),
       redo: () => dispatch({ type: "redo" }),

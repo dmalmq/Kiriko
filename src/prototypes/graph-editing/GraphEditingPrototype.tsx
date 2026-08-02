@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type ReactElement } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactElement,
+} from "react";
 import {
   IconAlertTriangle,
   IconConnect,
@@ -154,6 +160,7 @@ function pendingLabel(state: GraphEditorPrototypeState): string {
     add: { ja: "点の追加", en: "Add point" },
     move: { ja: "点の移動", en: "Move point" },
     connect: { ja: "接続ドラフト", en: "Connection draft" },
+    "reassign-floor": { ja: "フロア変更確認", en: "Floor change confirmation" },
     delete: { ja: "削除確認", en: "Delete confirmation" },
     exception: { ja: "例外理由", en: "Exception reason" },
     profile: { ja: "プロファイル上書き", en: "Profile override" },
@@ -176,6 +183,18 @@ function findingDeltaLabel(state: GraphEditorPrototypeState): string {
   return title === undefined || transitionLabel === undefined
     ? t(copy.none, locale)
     : `${t(title, locale)} · ${t(transitionLabel, locale)}`;
+}
+
+function isTextEntryOrControl(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  return (
+    tag === "input" ||
+    tag === "textarea" ||
+    tag === "select" ||
+    tag === "button" ||
+    target.isContentEditable
+  );
 }
 
 export function GraphEditingPrototype(): ReactElement {
@@ -207,6 +226,43 @@ export function GraphEditingPrototype(): ReactElement {
       actions.redo();
     },
   };
+
+  function onWorkspaceKeyDown(event: ReactKeyboardEvent<HTMLElement>): void {
+    if (event.key === "Escape") {
+      if (state.pending !== null) {
+        event.preventDefault();
+        prototypeActions.cancel();
+      }
+      return;
+    }
+    if (isTextEntryOrControl(event.target)) return;
+
+    const meta = event.metaKey || event.ctrlKey;
+    if (meta && (event.key === "z" || event.key === "Z")) {
+      event.preventDefault();
+      if (event.shiftKey) prototypeActions.redo();
+      else prototypeActions.undo();
+      return;
+    }
+    if (meta || event.altKey) return;
+
+    switch (event.key.toLowerCase()) {
+      case "s":
+        prototypeActions.setTool("select");
+        break;
+      case "p":
+        prototypeActions.setTool("add");
+        break;
+      case "c":
+        prototypeActions.setTool("connect");
+        break;
+      case "d":
+        prototypeActions.setTool("delete");
+        break;
+      default:
+        break;
+    }
+  }
 
 
   useEffect(() => {
@@ -293,6 +349,7 @@ export function GraphEditingPrototype(): ReactElement {
     <main
       className={`graph-editing-prototype${state.reducedMotion ? " graph-editing-prototype--reduced-motion" : ""}`}
       lang={locale}
+      onKeyDown={onWorkspaceKeyDown}
     >
       <header className="graph-editing-prototype__header">
         <div className="graph-editing-prototype__brand">

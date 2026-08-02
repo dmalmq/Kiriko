@@ -55,10 +55,13 @@ export interface GraphFinding {
   exceptionReason: string | null;
 }
 
+export type ValidationProfileScope = "graph";
+
 export interface ValidationProfile {
   autoSnapM: number;
   reviewSnapM: number;
   overrideReason: string | null;
+  overrideScope: ValidationProfileScope | null;
 }
 
 export interface StagedSnapshot {
@@ -73,6 +76,9 @@ export type SnapBand = "auto" | "review" | "ambiguous" | "none";
 
 export interface SnapPreview {
   candidateId: string;
+  candidateFloorId: FloorId;
+  confidence: number;
+  affectedAssociationId: string | null;
   distanceM: number;
   band: SnapBand;
   sameFloor: boolean;
@@ -87,11 +93,25 @@ export type PendingOperation =
       fromNodeId: string;
       toNodeId: string | null;
       associationId: string | null;
+      associationConfirmed: boolean;
       controlPoints: GraphControlPoint[];
+    }
+  | {
+      kind: "reassign-floor";
+      nodeId: string;
+      fromFloorId: FloorId;
+      toFloorId: FloorId;
+      consequences: string[];
     }
   | { kind: "delete"; selection: Exclude<GraphSelection, null>; consequences: string[] }
   | { kind: "exception"; findingId: GraphFinding["id"]; reason: string }
-  | { kind: "profile"; autoSnapM: number; reviewSnapM: number; reason: string }
+  | {
+      kind: "profile";
+      autoSnapM: number;
+      reviewSnapM: number;
+      scope: ValidationProfileScope | null;
+      reason: string;
+    }
   | null;
 
 export interface GraphEditorPrototypeState extends StagedSnapshot {
@@ -217,7 +237,12 @@ const FIXTURE: StagedSnapshot = {
       exceptionReason: null,
     },
   ],
-  profile: { autoSnapM: 0.5, reviewSnapM: 3, overrideReason: null },
+  profile: {
+    autoSnapM: 0.5,
+    reviewSnapM: 3,
+    overrideReason: null,
+    overrideScope: null,
+  },
   stagedChanges: [],
 };
 

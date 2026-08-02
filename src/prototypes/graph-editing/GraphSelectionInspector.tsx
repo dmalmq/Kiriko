@@ -47,7 +47,14 @@ const copy = {
   pendingFix: { ja: "保留中の修復", en: "Pending fix" },
   before: { ja: "変更前", en: "Before" },
   candidate: { ja: "候補", en: "Candidate" },
-  snapSource: { ja: "スナップ元", en: "Snap source" },
+  candidateIdentity: { ja: "候補 ID", en: "Candidate identity" },
+  candidateFloor: { ja: "候補フロア", en: "Candidate floor" },
+  confidence: { ja: "信頼度", en: "Confidence" },
+  affectedAssociation: { ja: "影響する関連付け", en: "Affected association" },
+  associationUnchanged: { ja: "XY スナップでは変更なし", en: "Unchanged by XY snap" },
+  candidateRelation: { ja: "フロア適格性", en: "Floor eligibility" },
+  sameFloorEvidence: { ja: "同一フロア候補", en: "Same-floor candidate" },
+  crossFloorEvidence: { ja: "異なるフロアのエビデンス · スナップ禁止", en: "Cross-floor evidence · snapping prohibited" },
   distance: { ja: "距離", en: "Distance" },
   snapBand: { ja: "判定帯", en: "Snap band" },
   floorInvariant: { ja: "フロアを維持", en: "Floor remains" },
@@ -55,6 +62,10 @@ const copy = {
   review: { ja: "要確認", en: "Review" },
   ambiguous: { ja: "候補が曖昧", en: "Ambiguous" },
   outside: { ja: "範囲外", en: "None" },
+  provisional: { ja: "暫定", en: "Provisional" },
+  provisionalDisclosure: { ja: "自動帯と要確認帯は暫定です。", en: "Auto and Review bands are provisional." },
+  provisionalThresholds: { ja: "現在の暫定値", en: "Current provisional values" },
+  issue33: { ja: "検証 Issue #33 · JR 付属データセットで 3D グラフスナップを検証", en: "Validation issue #33 · Validate 3D graph snapping against the companion JR datasets" },
   applySnap: { ja: "スナップを適用", en: "Apply snap" },
   acceptCandidate: { ja: "候補を採用", en: "Accept candidate" },
   keepRaw: { ja: "未スナップ位置を確定", en: "Commit raw position" },
@@ -70,10 +81,41 @@ const copy = {
   addLanding: { ja: "踊り場ハンドルを追加", en: "Add landing handle" },
   commitConnector: { ja: "垂直接続を確定", en: "Commit connector" },
   commitConnection: { ja: "接続を確定", en: "Commit connection" },
+  associationRequired: { ja: "関連付けを選択してください（未関連付けも明示選択）", en: "Choose an association, including explicitly unassociated" },
+  controlPoints: { ja: "内部制御点", en: "Interior control points" },
+  straightPath: { ja: "内部制御点なし · 直線端点パス", en: "No interior control points · straight endpoint path" },
+  landingSource: { ja: "「踊り場を追加」操作", en: "Add landing action" },
+  pathEvidence: { ja: "パス数値エビデンス", en: "Path numeric evidence" },
+  sceneZContext: { ja: "シーン Z", en: "Scene Z" },
+  rise: { ja: "高低差", en: "Rise" },
+  run: { ja: "水平ラン", en: "Horizontal run" },
+  monotonicZ: { ja: "Z 単調性", en: "Monotonic Z" },
+  monotonicUp: { ja: "単調増加", en: "Monotonic ascending" },
+  monotonicDown: { ja: "単調減少", en: "Monotonic descending" },
+  monotonicFlat: { ja: "一定", en: "Flat" },
+  nonMonotonic: { ja: "非単調", en: "Non-monotonic" },
+  footprintEvidence: { ja: "形状 / 関連付けエビデンス", en: "Footprint / association evidence" },
+  stairFootprint: { ja: "中央階段 · GDB / GeoJSON 候補形状 · 信頼度 96%", en: "Main stair · GDB / GeoJSON candidate footprint · 96% confidence" },
+  liftFootprint: { ja: "東エレベーター · GDB / GeoJSON 候補形状 · 信頼度 88%", en: "East lift · GDB / GeoJSON candidate footprint · 88% confidence" },
+  unassociatedEvidence: { ja: "明示的に未関連付け · 候補形状なし", en: "Explicitly unassociated · no candidate footprint" },
+  directionSemantics: { ja: "方向セマンティクス", en: "Direction semantics" },
+  directionUnresolved: { ja: "未解決 · ドラフトに方向フィールドなし", en: "Unresolved · no direction field in this draft" },
+  accessibilitySemantics: { ja: "アクセシビリティ", en: "Accessibility semantics" },
+  accessibilityUnresolved: { ja: "未解決 · 関連付け候補はエビデンスのみ", en: "Unresolved · candidate association is evidence only" },
+  draftStructure: { ja: "コミット準備", en: "Commit readiness" },
+  draftReady: { ja: "構造エビデンス確認可能", en: "Structural evidence inspectable" },
+  endpointEvidenceMissing: { ja: "異なる解決済み端点が必要です", en: "Two distinct resolved endpoints are required" },
+  associationEvidenceMissing: { ja: "関連付けの明示選択が必要です", en: "An explicit association choice is required" },
+  geometryEvidenceInvalid: { ja: "端点または制御点に有限でない座標があります", en: "An endpoint or control point has non-finite coordinates" },
+  duplicateDraft: { ja: "同じ端点の接続が既にあります", en: "A connection already exists between these endpoints" },
+  dataHonesty: { ja: "データ制約", en: "Data limitation" },
+  dataHonestyText: { ja: "このローカル合成ドラフトは候補形状との完全な 3D 包含、方向、アクセシビリティを計算・永続化しません。関連付けの選択でそれらを暗黙変更しません。", en: "This local synthetic draft does not calculate or persist full 3D footprint containment, direction, or accessibility. Choosing an association does not silently change those semantics." },
   floorAssignment: { ja: "フロア割り当て", en: "Floor assignment" },
   reviewFloorChange: { ja: "フロア変更を確認", en: "Review floor change" },
   preserveAltitude: { ja: "ソース標高は保持されます", en: "Source altitude will be preserved" },
   confirmFloor: { ja: "フロア変更を確定", en: "Confirm floor change" },
+  previewFloorConsequences: { ja: "接続への影響をプレビュー", en: "Preview connection consequences" },
+  floorChangeConsequences: { ja: "フロア変更の影響", en: "Floor-change consequences" },
   finishPendingFirst: { ja: "先に保留中の操作を確定またはキャンセルしてください", en: "Commit or cancel the pending operation first" },
   exception: { ja: "例外", en: "Exception" },
   acceptException: { ja: "例外として承認", en: "Accept exception" },
@@ -86,6 +128,12 @@ const copy = {
   autoThreshold: { ja: "自動スナップ (m)", en: "Auto snap (m)" },
   reviewThreshold: { ja: "レビュー上限 (m)", en: "Review limit (m)" },
   overrideReason: { ja: "上書き理由", en: "Override reason" },
+  newValues: { ja: "新しい値", en: "New values" },
+  overrideScope: { ja: "上書き範囲", en: "Override scope" },
+  chooseScope: { ja: "範囲を選択", en: "Choose scope" },
+  graphScope: { ja: "現在の合成グラフ全体", en: "Current synthetic graph" },
+  noOverride: { ja: "上書きなし", en: "No override" },
+  scopeRequired: { ja: "上書き範囲を選択してください", en: "An override scope is required" },
   invalidProfile: { ja: "0 < 自動スナップ < レビュー上限 が必要です", en: "Requires 0 < auto snap < review limit" },
   commitProfile: { ja: "プロファイルを確定", en: "Commit profile override" },
   deletePreview: { ja: "削除の影響", en: "Delete consequences" },
@@ -129,6 +177,34 @@ function pointText(point: ScenePoint): string {
   return `X ${point.x.toFixed(2)} · Y ${point.y.toFixed(2)} · Z ${point.z.toFixed(2)}`;
 }
 
+
+function horizontalRun(points: readonly ScenePoint[]): number {
+  let run = 0;
+  let previous: ScenePoint | null = null;
+  for (const point of points) {
+    if (previous !== null) run += Math.hypot(point.x - previous.x, point.y - previous.y);
+    previous = point;
+  }
+  return run;
+}
+
+function monotonicZLabel(points: readonly ScenePoint[]): LocalizedText {
+  const first = points[0];
+  if (first === undefined || points.length < 2 || points.every((point) => Math.abs(point.z - first.z) < 0.000001)) {
+    return copy.monotonicFlat;
+  }
+  const ascending = points.every((point, index) => {
+    const previous = points[index - 1];
+    return previous === undefined || point.z >= previous.z;
+  });
+  if (ascending) return copy.monotonicUp;
+  const descending = points.every((point, index) => {
+    const previous = points[index - 1];
+    return previous === undefined || point.z <= previous.z;
+  });
+  return descending ? copy.monotonicDown : copy.nonMonotonic;
+}
+
 function findingEvidence(finding: GraphFinding, locale: GraphEditorPrototypeState["locale"]): string {
   const state = t(findingStateCopy[finding.state], locale);
   if (finding.measuredM === null) return `${t(findingTitles[finding.id], locale)} · ${state}`;
@@ -136,8 +212,31 @@ function findingEvidence(finding: GraphFinding, locale: GraphEditorPrototypeStat
 }
 
 function consequenceText(token: string, locale: GraphEditorPrototypeState["locale"]): string {
-  const [kind, first, second] = token.split(":");
+  const [kind, first, second, third] = token.split(":");
   switch (kind) {
+    case "reassign-node-floor":
+      return locale === "ja"
+        ? `${first} のフロアを ${second} から ${third} に変更`
+        : `Reassign ${first} from ${second} to ${third}`;
+    case "edge-kind": {
+      const before = second === "same-floor"
+        ? locale === "ja" ? "同一フロア接続" : "same-floor edge"
+        : locale === "ja" ? "垂直接続" : "connector";
+      const after = third === "same-floor"
+        ? locale === "ja" ? "同一フロア接続" : "same-floor edge"
+        : locale === "ja" ? "未関連付けの垂直接続" : "unassociated connector";
+      return locale === "ja"
+        ? `${first}: ${before} から ${after} に変更`
+        : `${first}: change ${before} to ${after}`;
+    }
+    case "edge-association":
+      return locale === "ja"
+        ? `${first}: 関連付け ${second} を解除`
+        : `${first}: remove association ${second}`;
+    case "edge-control-points":
+      return locale === "ja"
+        ? `${first}: 制御点 ${second} を削除`
+        : `${first}: remove control point(s) ${second}`;
     case "incident-edges":
       return locale === "ja" ? `接続 ${first} 件を削除` : `Remove ${first} incident connection(s)`;
     case "affected-findings":
@@ -148,6 +247,10 @@ function consequenceText(token: string, locale: GraphEditorPrototypeState["local
       return locale === "ja" ? `関連付け ${first} を解除` : `Remove association ${first}`;
     case "remove-control-point":
       return locale === "ja" ? `制御点 ${second} を削除` : `Remove control point ${second}`;
+    case "structural-unusable":
+      return locale === "ja"
+        ? "構造違反: 利用可能な接続がなくなるため、削除を確定できません"
+        : "Structural violation: deletion would leave no usable connection, so commit is blocked";
     case "venue-read-only":
       return locale === "ja" ? `会場形状 ${first} は読み取り専用` : `Venue evidence ${first} is read-only`;
     default:
@@ -180,8 +283,14 @@ function stagedChangeText(token: string, locale: GraphEditorPrototypeState["loca
     }
     case "accept-exception":
       return locale === "ja" ? `${first} の例外を承認` : `Accepted exception for ${first}`;
-    case "override-profile":
-      return locale === "ja" ? `スナップしきい値を ${first} / ${second} m に変更` : `Changed snap thresholds to ${first} / ${second} m`;
+    case "override-profile": {
+      const scope = third === "graph"
+        ? locale === "ja" ? "現在の合成グラフ全体" : "current synthetic graph"
+        : locale === "ja" ? "未指定範囲" : "unspecified scope";
+      return locale === "ja"
+        ? `${scope} のスナップしきい値を ${first} / ${second} m に変更`
+        : `Changed snap thresholds to ${first} / ${second} m for the ${scope}`;
+    }
     case "nudge-control-point":
       return locale === "ja" ? `制御点 ${second} の ${third} 軸を調整` : `Adjusted ${third} axis of control point ${second}`;
     default:
@@ -301,9 +410,17 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
   const placementNode = placement?.kind === "move"
     ? state.nodes.find((node) => node.id === placement.nodeId) ?? null
     : null;
-  const placementFloor = placement?.kind === "add" ? placement.floorId : placementNode?.floorId ?? state.activeFloor;
+  const placementFloor = placement?.kind === "add" ? placement.floorId : placementNode?.floorId ?? null;
   const snapBand = placement?.snap?.band ?? "none";
   const snapBandLabel = snapBand === "none" ? copy.outside : copy[snapBand];
+  const displayedSnapBand = snapBand === "auto" || snapBand === "review"
+    ? `${t(copy.provisional, locale)} · ${t(snapBandLabel, locale)}`
+    : t(snapBandLabel, locale);
+  const snapCandidateRelation = placement?.snap === undefined || placement.snap === null
+    ? copy.none
+    : placement.snap.sameFloor
+      ? copy.sameFloorEvidence
+      : copy.crossFloorEvidence;
   const profileDraft = pending?.kind === "profile" ? pending : null;
   const selectedExceptionDraft = pending?.kind === "exception"
     && pending.findingId === selectedFinding?.id
@@ -313,18 +430,69 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
     && pending.findingId !== selectedFinding?.id
     ? pending
     : null;
-  const profileValid = profileDraft !== null
+  const profileThresholdsValid = profileDraft !== null
     && Number.isFinite(profileDraft.autoSnapM)
     && Number.isFinite(profileDraft.reviewSnapM)
     && profileDraft.autoSnapM > 0
-    && profileDraft.autoSnapM < profileDraft.reviewSnapM
-    && profileDraft.reason.trim() !== "";
+    && profileDraft.autoSnapM < profileDraft.reviewSnapM;
+  const profileScopeValid = profileDraft?.scope === "graph";
+  const profileReasonValid = profileDraft !== null && profileDraft.reason.trim() !== "";
+  const profileValid = profileThresholdsValid && profileScopeValid && profileReasonValid;
   const connectorDraft = pending?.kind === "connect" ? pending : null;
   const connectorFrom = connectorDraft === null ? null : state.nodes.find((node) => node.id === connectorDraft.fromNodeId) ?? null;
   const connectorTo = connectorDraft?.toNodeId === null || connectorDraft === null
     ? null
     : state.nodes.find((node) => node.id === connectorDraft.toNodeId) ?? null;
   const connectorCrossFloor = connectorFrom !== null && connectorTo !== null && connectorFrom.floorId !== connectorTo.floorId;
+  const connectorEndpointReady = connectorFrom !== null
+    && connectorTo !== null
+    && connectorFrom.id !== connectorTo.id;
+  const connectorPathPoints: ScenePoint[] = connectorFrom !== null
+    && connectorTo !== null
+    && connectorDraft !== null
+    && connectorFrom.id !== connectorTo.id
+    ? [connectorFrom.point, ...connectorDraft.controlPoints, connectorTo.point]
+    : [];
+  const connectorGeometryReady = connectorEndpointReady
+    && connectorPathPoints.every((point) =>
+      Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z));
+  const connectorAssociationReady = !connectorCrossFloor || connectorDraft?.associationConfirmed === true;
+  const connectorDuplicate = connectorFrom !== null
+    && connectorTo !== null
+    && connectorFrom.id !== connectorTo.id
+    && state.edges.some((edge) =>
+      (edge.fromNodeId === connectorFrom.id && edge.toNodeId === connectorTo.id)
+      || (edge.fromNodeId === connectorTo.id && edge.toNodeId === connectorFrom.id));
+  const connectorReady = connectorEndpointReady
+    && connectorGeometryReady
+    && connectorAssociationReady
+    && !connectorDuplicate;
+  const connectorReadiness = !connectorEndpointReady
+    ? copy.endpointEvidenceMissing
+    : !connectorGeometryReady
+      ? copy.geometryEvidenceInvalid
+      : connectorDuplicate
+        ? copy.duplicateDraft
+        : !connectorAssociationReady
+          ? copy.associationEvidenceMissing
+          : copy.draftReady;
+  const connectorFootprintEvidence = connectorDraft?.associationConfirmed !== true
+    ? copy.associationRequired
+    : connectorDraft.associationId === "stair-main"
+      ? copy.stairFootprint
+      : connectorDraft.associationId === "lift-east"
+        ? copy.liftFootprint
+        : copy.unassociatedEvidence;
+  const connectorRise = connectorFrom !== null
+    && connectorTo !== null
+    && connectorFrom.id !== connectorTo.id
+    ? Math.abs(connectorTo.point.z - connectorFrom.point.z)
+    : 0;
+  const connectorRun = connectorEndpointReady ? horizontalRun(connectorPathPoints) : 0;
+  const floorDraft = pending?.kind === "reassign-floor" ? pending : null;
+  const selectedFloorDraft = floorDraft?.nodeId === selectedNode?.id ? floorDraft : null;
+  const deleteBlocked = pending?.kind === "delete"
+    && pending.consequences.includes("structural-unusable:no-edges");
   const structuralValid = state.edges.length > 0 && state.nodes.length > 1 && state.notice !== "unusable-graph";
   const openCounts = {
     defect: state.findings.filter((finding) => finding.severity === "defect" && finding.state === "open").length,
@@ -393,11 +561,20 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
           <dl className="graph-inspector__facts">
             <div className="graph-inspector__fact"><dt>{t(copy.before, locale)}</dt><dd className="graph-inspector__machine">{placementNode === null ? t(copy.none, locale) : pointText(placementNode.point)}</dd></div>
             <div className="graph-inspector__fact"><dt>{t(copy.candidate, locale)}</dt><dd className="graph-inspector__machine">{pointText(placement.candidate)}</dd></div>
-            <div className="graph-inspector__fact"><dt>{t(copy.snapSource, locale)}</dt><dd className="graph-inspector__machine">{placement.snap?.candidateId ?? t(copy.none, locale)}</dd></div>
+            <div className="graph-inspector__fact"><dt>{t(copy.candidateIdentity, locale)}</dt><dd className="graph-inspector__machine">{placement.snap?.candidateId ?? t(copy.none, locale)}</dd></div>
+            <div className="graph-inspector__fact"><dt>{t(copy.candidateFloor, locale)}</dt><dd className="graph-inspector__machine">{placement.snap?.candidateFloorId ?? t(copy.none, locale)}</dd></div>
             <div className="graph-inspector__fact"><dt>{t(copy.distance, locale)}</dt><dd className="graph-inspector__machine">{placement.snap === null ? t(copy.none, locale) : `${placement.snap.distanceM.toFixed(2)} m`}</dd></div>
-            <div className="graph-inspector__fact"><dt>{t(copy.snapBand, locale)}</dt><dd>{t(snapBandLabel, locale)}</dd></div>
-            <div className="graph-inspector__fact"><dt>{t(copy.floorInvariant, locale)}</dt><dd className="graph-inspector__machine">{placementFloor}</dd></div>
+            <div className="graph-inspector__fact"><dt>{t(copy.confidence, locale)}</dt><dd className="graph-inspector__machine">{placement.snap === null ? t(copy.none, locale) : `${Math.round(placement.snap.confidence * 100)}%`}</dd></div>
+            <div className="graph-inspector__fact"><dt>{t(copy.affectedAssociation, locale)}</dt><dd>{placement.snap === null ? t(copy.none, locale) : `${placement.snap.affectedAssociationId ?? t(copy.none, locale)} · ${t(copy.associationUnchanged, locale)}`}</dd></div>
+            <div className="graph-inspector__fact"><dt>{t(copy.snapBand, locale)}</dt><dd>{displayedSnapBand}</dd></div>
+            <div className="graph-inspector__fact"><dt>{t(copy.candidateRelation, locale)}</dt><dd>{t(snapCandidateRelation, locale)}</dd></div>
+            <div className="graph-inspector__fact"><dt>{t(copy.floorInvariant, locale)}</dt><dd className="graph-inspector__machine">{placementFloor ?? t(copy.none, locale)}</dd></div>
           </dl>
+          <p className="graph-inspector__snap-disclosure">
+            <strong>{t(copy.provisionalDisclosure, locale)}</strong>{" "}
+            {t(copy.provisionalThresholds, locale)}: {t(copy.auto, locale)} ≤ {state.profile.autoSnapM.toFixed(2)} m / {t(copy.review, locale)} ≤ {state.profile.reviewSnapM.toFixed(2)} m.{" "}
+            <a href="https://github.com/dmalmq/imdf-map-application/issues/33" target="_blank" rel="noreferrer">{t(copy.issue33, locale)}</a>
+          </p>
           {snapBand === "ambiguous" ? <p>{t(copy.ambiguousHelp, locale)}</p> : null}
         </section>
       ) : null}
@@ -406,34 +583,107 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
         <section className="graph-inspector__section graph-inspector__pending">
           <h3>{t(copy.connectorDraft, locale)}</h3>
           <div className="graph-inspector__endpoint-pair">
-            <span><small>{t(copy.from, locale)}</small><strong className="graph-inspector__machine">{connectorFrom?.floorId ?? "—"}</strong><span className="graph-inspector__machine">{connectorDraft.fromNodeId}</span></span>
-            <span><small>{t(copy.to, locale)}</small><strong className="graph-inspector__machine">{connectorTo?.floorId ?? "—"}</strong><span className="graph-inspector__machine">{connectorDraft.toNodeId ?? "—"}</span></span>
+            <span>
+              <small>{t(copy.from, locale)}</small>
+              <strong className="graph-inspector__machine">{connectorFrom?.floorId ?? "—"} · {t(copy.sceneZContext, locale)} {connectorFrom?.point.z.toFixed(2) ?? "—"}</strong>
+              <span className="graph-inspector__machine">{connectorDraft.fromNodeId}</span>
+              {connectorFrom !== null ? <span className="graph-inspector__machine">{pointText(connectorFrom.point)}</span> : null}
+            </span>
+            <span>
+              <small>{t(copy.to, locale)}</small>
+              <strong className="graph-inspector__machine">{connectorTo?.floorId ?? "—"} · {t(copy.sceneZContext, locale)} {connectorTo?.point.z.toFixed(2) ?? "—"}</strong>
+              <span className="graph-inspector__machine">{connectorDraft.toNodeId ?? "—"}</span>
+              {connectorTo !== null ? <span className="graph-inspector__machine">{pointText(connectorTo.point)}</span> : null}
+            </span>
           </div>
           {connectorTo === null ? <p>{t(copy.chooseEndpoint, locale)}</p> : null}
-          {connectorCrossFloor ? (
-            <fieldset className="graph-inspector__associations">
-              <legend>{t(copy.association, locale)}</legend>
-              <label><input type="radio" name="draft-association" checked={connectorDraft.associationId === "stair-main"} onChange={() => actions.setDraftAssociation("stair-main")} />{t(copy.stairCandidate, locale)}</label>
-              <label><input type="radio" name="draft-association" checked={connectorDraft.associationId === "lift-east"} onChange={() => actions.setDraftAssociation("lift-east")} />{t(copy.liftCandidate, locale)}</label>
-              <label><input type="radio" name="draft-association" checked={connectorDraft.associationId === null} onChange={() => actions.setDraftAssociation(null)} />{t(copy.leaveUnassociated, locale)}</label>
-            </fieldset>
+
+          {connectorEndpointReady ? (
+            <>
+              <h4>{t(copy.pathEvidence, locale)}</h4>
+              <dl className="graph-inspector__facts">
+                <div className="graph-inspector__fact"><dt>{t(copy.rise, locale)}</dt><dd className="graph-inspector__machine">{connectorRise.toFixed(2)} m</dd></div>
+                <div className="graph-inspector__fact"><dt>{t(copy.run, locale)}</dt><dd className="graph-inspector__machine">{connectorRun.toFixed(2)} m</dd></div>
+                <div className="graph-inspector__fact"><dt>{t(copy.monotonicZ, locale)}</dt><dd>{t(monotonicZLabel(connectorPathPoints), locale)}</dd></div>
+              </dl>
+
+              <h4>{t(copy.controlPoints, locale)} · {connectorDraft.controlPoints.length}</h4>
+              {connectorDraft.controlPoints.length === 0 ? (
+                <p>{t(copy.straightPath, locale)}</p>
+              ) : (
+                <ol className="graph-inspector__control-points">
+                  {connectorDraft.controlPoints.map((point) => (
+                    <li key={point.id}>
+                      <strong className="graph-inspector__machine">{point.id}</strong>
+                      <span className="graph-inspector__machine">{pointText(point)}</span>
+                      <span>{t(copy.source, locale)}: {t(copy.landingSource, locale)}</span>
+                      <span>{t(copy.provenance, locale)}: {t(copy.manual, locale)}</span>
+                      <span className="graph-inspector__machine">{connectorFrom?.floorId} ↔ {connectorTo?.floorId} · {t(copy.sceneZContext, locale)} {point.z.toFixed(2)}</span>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </>
           ) : null}
+
+          {connectorCrossFloor ? (
+            <>
+              <fieldset className="graph-inspector__associations">
+                <legend>{t(copy.association, locale)}</legend>
+                <label><input type="radio" name="draft-association" checked={connectorDraft.associationConfirmed && connectorDraft.associationId === "stair-main"} onChange={() => actions.setDraftAssociation("stair-main")} />{t(copy.stairCandidate, locale)}</label>
+                <label><input type="radio" name="draft-association" checked={connectorDraft.associationConfirmed && connectorDraft.associationId === "lift-east"} onChange={() => actions.setDraftAssociation("lift-east")} />{t(copy.liftCandidate, locale)}</label>
+                <label><input type="radio" name="draft-association" checked={connectorDraft.associationConfirmed && connectorDraft.associationId === null} onChange={() => actions.setDraftAssociation(null)} />{t(copy.leaveUnassociated, locale)}</label>
+              </fieldset>
+              {!connectorDraft.associationConfirmed ? <p>{t(copy.associationRequired, locale)}</p> : null}
+              <dl className="graph-inspector__facts graph-inspector__draft-evidence">
+                <div className="graph-inspector__fact"><dt>{t(copy.footprintEvidence, locale)}</dt><dd>{t(connectorFootprintEvidence, locale)}</dd></div>
+                <div className="graph-inspector__fact"><dt>{t(copy.directionSemantics, locale)}</dt><dd>{t(copy.directionUnresolved, locale)}</dd></div>
+                <div className="graph-inspector__fact"><dt>{t(copy.accessibilitySemantics, locale)}</dt><dd>{t(copy.accessibilityUnresolved, locale)}</dd></div>
+              </dl>
+              <p className="graph-inspector__limitation"><strong>{t(copy.dataHonesty, locale)}:</strong> {t(copy.dataHonestyText, locale)}</p>
+            </>
+          ) : null}
+
+          <p
+            id="connector-readiness"
+            className="graph-inspector__readiness"
+            data-ready={connectorReady}
+            role="status"
+          >
+            <strong>{t(copy.draftStructure, locale)}:</strong> {t(connectorReadiness, locale)}
+          </p>
         </section>
       ) : null}
 
       {selectedNode !== null ? (
         <section className="graph-inspector__section">
           <h3>{t(copy.floorAssignment, locale)}</h3>
-          <details>
-            <summary>{t(copy.reviewFloorChange, locale)} · <span className="graph-inspector__machine">{selectedNode.floorId} → {otherFloor(selectedNode.floorId)}</span></summary>
-            <dl className="graph-inspector__facts">
-              <div className="graph-inspector__fact"><dt>{t(copy.before, locale)}</dt><dd className="graph-inspector__machine">{selectedNode.floorId} · Z {selectedNode.point.z.toFixed(2)}</dd></div>
-              <div className="graph-inspector__fact"><dt>{t(copy.candidate, locale)}</dt><dd className="graph-inspector__machine">{otherFloor(selectedNode.floorId)} · Z {otherFloor(selectedNode.floorId) === "B1" ? "0.00" : "4.86"}</dd></div>
-            </dl>
-            <p>{t(copy.preserveAltitude, locale)}: <span className="graph-inspector__machine">{selectedNode.sourceAltitude?.toFixed(2) ?? "—"}</span></p>
-            {pending !== null ? <p>{t(copy.finishPendingFirst, locale)}</p> : null}
-            <button type="button" disabled={pending !== null} onClick={() => actions.reassignNodeFloor(selectedNode.id, otherFloor(selectedNode.floorId))}>{t(copy.confirmFloor, locale)}</button>
-          </details>
+          {selectedFloorDraft !== null ? (
+            <div className="graph-inspector__pending">
+              <dl className="graph-inspector__facts">
+                <div className="graph-inspector__fact"><dt>{t(copy.before, locale)}</dt><dd className="graph-inspector__machine">{selectedFloorDraft.fromFloorId} · Z {selectedNode.point.z.toFixed(2)}</dd></div>
+                <div className="graph-inspector__fact"><dt>{t(copy.candidate, locale)}</dt><dd className="graph-inspector__machine">{selectedFloorDraft.toFloorId} · Z {selectedFloorDraft.toFloorId === "B1" ? "0.00" : "4.86"}</dd></div>
+              </dl>
+              <p>{t(copy.preserveAltitude, locale)}: <span className="graph-inspector__machine">{selectedNode.sourceAltitude?.toFixed(2) ?? "—"}</span></p>
+              <h4>{t(copy.floorChangeConsequences, locale)}</h4>
+              <ul>{selectedFloorDraft.consequences.map((item) => <li key={item}>{consequenceText(item, locale)}</li>)}</ul>
+              <div className="graph-inspector__actions">
+                <button type="button" className="graph-inspector__primary" onClick={actions.confirmNodeFloorReassignment}>{t(copy.confirmFloor, locale)}</button>
+                <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
+              </div>
+            </div>
+          ) : (
+            <details>
+              <summary>{t(copy.reviewFloorChange, locale)} · <span className="graph-inspector__machine">{selectedNode.floorId} → {otherFloor(selectedNode.floorId)}</span></summary>
+              <dl className="graph-inspector__facts">
+                <div className="graph-inspector__fact"><dt>{t(copy.before, locale)}</dt><dd className="graph-inspector__machine">{selectedNode.floorId} · Z {selectedNode.point.z.toFixed(2)}</dd></div>
+                <div className="graph-inspector__fact"><dt>{t(copy.candidate, locale)}</dt><dd className="graph-inspector__machine">{otherFloor(selectedNode.floorId)} · Z {otherFloor(selectedNode.floorId) === "B1" ? "0.00" : "4.86"}</dd></div>
+              </dl>
+              <p>{t(copy.preserveAltitude, locale)}: <span className="graph-inspector__machine">{selectedNode.sourceAltitude?.toFixed(2) ?? "—"}</span></p>
+              {pending !== null ? <p>{t(copy.finishPendingFirst, locale)}</p> : null}
+              <button type="button" disabled={pending !== null} onClick={() => actions.reassignNodeFloor(selectedNode.id, otherFloor(selectedNode.floorId))}>{t(copy.previewFloorConsequences, locale)}</button>
+            </details>
+          )}
         </section>
       ) : null}
 
@@ -471,15 +721,45 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
         <h3>{t(copy.profile, locale)}</h3>
         {profileDraft === null ? (
           <>
-            <p className="graph-inspector__machine">{state.profile.autoSnapM.toFixed(2)} m / {state.profile.reviewSnapM.toFixed(2)} m</p>
-            <button type="button" disabled={pending !== null} onClick={() => actions.updateProfileDraft(state.profile.autoSnapM, state.profile.reviewSnapM, "")}>{t(copy.editProfile, locale)}</button>
+            <dl className="graph-inspector__facts">
+              <div className="graph-inspector__fact"><dt>{t(copy.autoThreshold, locale)}</dt><dd className="graph-inspector__machine">{state.profile.autoSnapM.toFixed(2)} m</dd></div>
+              <div className="graph-inspector__fact"><dt>{t(copy.reviewThreshold, locale)}</dt><dd className="graph-inspector__machine">{state.profile.reviewSnapM.toFixed(2)} m</dd></div>
+              <div className="graph-inspector__fact"><dt>{t(copy.overrideScope, locale)}</dt><dd>{t(state.profile.overrideScope === "graph" ? copy.graphScope : copy.noOverride, locale)}</dd></div>
+              <div className="graph-inspector__fact"><dt>{t(copy.overrideReason, locale)}</dt><dd>{state.profile.overrideReason ?? t(copy.none, locale)}</dd></div>
+            </dl>
+            <button type="button" disabled={pending !== null} onClick={() => actions.updateProfileDraft(state.profile.autoSnapM, state.profile.reviewSnapM, state.profile.overrideScope, "")}>{t(copy.editProfile, locale)}</button>
           </>
         ) : (
           <>
-            <label className="graph-inspector__field"><span>{t(copy.autoThreshold, locale)}</span><input type="number" min="0.01" step="0.01" value={profileDraft.autoSnapM} onChange={(event) => actions.updateProfileDraft(Number(event.currentTarget.value), profileDraft.reviewSnapM, profileDraft.reason)} /></label>
-            <label className="graph-inspector__field"><span>{t(copy.reviewThreshold, locale)}</span><input type="number" min="0.02" step="0.01" value={profileDraft.reviewSnapM} onChange={(event) => actions.updateProfileDraft(profileDraft.autoSnapM, Number(event.currentTarget.value), profileDraft.reason)} /></label>
-            <label className="graph-inspector__field"><span>{t(copy.overrideReason, locale)}</span><textarea value={profileDraft.reason} onChange={(event) => actions.updateProfileDraft(profileDraft.autoSnapM, profileDraft.reviewSnapM, event.currentTarget.value)} /></label>
-            {!profileValid ? <p>{t(copy.invalidProfile, locale)}</p> : null}
+            <dl className="graph-inspector__profile-comparison">
+              <div>
+                <dt>{t(copy.before, locale)}</dt>
+                <dd className="graph-inspector__machine">
+                  <span>{t(copy.autoThreshold, locale)}: {state.profile.autoSnapM.toFixed(2)} m</span>
+                  <span>{t(copy.reviewThreshold, locale)}: {state.profile.reviewSnapM.toFixed(2)} m</span>
+                </dd>
+              </div>
+              <div>
+                <dt>{t(copy.newValues, locale)}</dt>
+                <dd className="graph-inspector__machine">
+                  <span>{t(copy.autoThreshold, locale)}: {Number.isFinite(profileDraft.autoSnapM) ? profileDraft.autoSnapM.toFixed(2) : "—"} m</span>
+                  <span>{t(copy.reviewThreshold, locale)}: {Number.isFinite(profileDraft.reviewSnapM) ? profileDraft.reviewSnapM.toFixed(2) : "—"} m</span>
+                </dd>
+              </div>
+            </dl>
+            <label className="graph-inspector__field"><span>{t(copy.autoThreshold, locale)}</span><input type="number" min="0.01" step="0.01" value={profileDraft.autoSnapM} onChange={(event) => actions.updateProfileDraft(Number(event.currentTarget.value), profileDraft.reviewSnapM, profileDraft.scope, profileDraft.reason)} /></label>
+            <label className="graph-inspector__field"><span>{t(copy.reviewThreshold, locale)}</span><input type="number" min="0.02" step="0.01" value={profileDraft.reviewSnapM} onChange={(event) => actions.updateProfileDraft(profileDraft.autoSnapM, Number(event.currentTarget.value), profileDraft.scope, profileDraft.reason)} /></label>
+            <label className="graph-inspector__field">
+              <span>{t(copy.overrideScope, locale)}</span>
+              <select value={profileDraft.scope ?? ""} required aria-invalid={!profileScopeValid} onChange={(event) => actions.updateProfileDraft(profileDraft.autoSnapM, profileDraft.reviewSnapM, event.currentTarget.value === "graph" ? "graph" : null, profileDraft.reason)}>
+                <option value="" disabled>{t(copy.chooseScope, locale)}</option>
+                <option value="graph">{t(copy.graphScope, locale)}</option>
+              </select>
+            </label>
+            <label className="graph-inspector__field"><span>{t(copy.overrideReason, locale)}</span><textarea required aria-invalid={!profileReasonValid} value={profileDraft.reason} onChange={(event) => actions.updateProfileDraft(profileDraft.autoSnapM, profileDraft.reviewSnapM, profileDraft.scope, event.currentTarget.value)} /></label>
+            {!profileThresholdsValid ? <p>{t(copy.invalidProfile, locale)}</p> : null}
+            {!profileScopeValid ? <p>{t(copy.scopeRequired, locale)}</p> : null}
+            {!profileReasonValid ? <p>{t(copy.reasonRequired, locale)}</p> : null}
             <div className="graph-inspector__actions">
               <button type="button" className="graph-inspector__primary" disabled={!profileValid} onClick={actions.commitProfileOverride}>{t(copy.commitProfile, locale)}</button>
               <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
@@ -541,12 +821,12 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
                   {t(copy.addLanding, locale)}
                 </button>
               ) : null}
-              {connectorTo !== null ? <button type="button" className="graph-inspector__primary" onClick={actions.commitConnection}>{t(connectorCrossFloor ? copy.commitConnector : copy.commitConnection, locale)}</button> : null}
+              <button type="button" className="graph-inspector__primary" disabled={!connectorReady} aria-describedby="connector-readiness" onClick={actions.commitConnection}>{t(connectorCrossFloor ? copy.commitConnector : copy.commitConnection, locale)}</button>
               <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
             </>
           ) : pending?.kind === "delete" ? (
             <>
-              <button type="button" className="graph-inspector__danger" onClick={actions.confirmDelete}>{t(copy.confirmDelete, locale)}</button>
+              <button type="button" className="graph-inspector__danger" disabled={deleteBlocked} onClick={actions.confirmDelete}>{t(copy.confirmDelete, locale)}</button>
               <button type="button" onClick={actions.cancel}>{t(copy.cancel, locale)}</button>
             </>
           ) : null}
