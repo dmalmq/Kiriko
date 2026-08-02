@@ -619,6 +619,33 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
                       <span>{t(copy.source, locale)}: {t(copy.landingSource, locale)}</span>
                       <span>{t(copy.provenance, locale)}: {t(copy.manual, locale)}</span>
                       <span className="graph-inspector__machine">{connectorFrom?.floorId} ↔ {connectorTo?.floorId} · {t(copy.sceneZContext, locale)} {point.z.toFixed(2)}</span>
+                      <div className="graph-inspector__axis-grid">
+                        {(["x", "y", "z"] as const).map((axis) => (
+                          <div key={`${point.id}-${axis}`}>
+                            <span className="graph-inspector__machine">{axis.toUpperCase()}</span>
+                            <button
+                              type="button"
+                              aria-label={`${t(copy.decrease, locale)} ${point.id} ${axis.toUpperCase()}`}
+                              onClick={() => actions.updateDraftControlPoint(point.id, {
+                                ...point,
+                                [axis]: point[axis] - 0.25,
+                              })}
+                            >
+                              −
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`${t(copy.increase, locale)} ${point.id} ${axis.toUpperCase()}`}
+                              onClick={() => actions.updateDraftControlPoint(point.id, {
+                                ...point,
+                                [axis]: point[axis] + 0.25,
+                              })}
+                            >
+                              +
+                            </button>
+                          </div>
+                        ))}
+                      </div>
                     </li>
                   ))}
                 </ol>
@@ -811,12 +838,15 @@ export function GraphSelectionInspector({ state, actions }: GraphSelectionInspec
               {connectorCrossFloor && connectorFrom !== null && connectorTo !== null ? (
                 <button
                   type="button"
-                  disabled={connectorDraft.controlPoints.length > 0}
-                  onClick={() => actions.addConnectorControlPoint({
-                    x: (connectorFrom.point.x + connectorTo.point.x) / 2,
-                    y: (connectorFrom.point.y + connectorTo.point.y) / 2,
-                    z: (connectorFrom.point.z + connectorTo.point.z) / 2,
-                  })}
+                  onClick={() => {
+                    const fraction = (connectorDraft.controlPoints.length + 1)
+                      / (connectorDraft.controlPoints.length + 2);
+                    actions.addConnectorControlPoint({
+                      x: connectorFrom.point.x + (connectorTo.point.x - connectorFrom.point.x) * fraction,
+                      y: connectorFrom.point.y + (connectorTo.point.y - connectorFrom.point.y) * fraction,
+                      z: connectorFrom.point.z + (connectorTo.point.z - connectorFrom.point.z) * fraction,
+                    });
+                  }}
                 >
                   {t(copy.addLanding, locale)}
                 </button>

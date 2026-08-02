@@ -32,6 +32,7 @@ export interface GraphEditorPrototypeActions {
   chooseConnectionEndpoint(nodeId: string): void;
   setDraftAssociation(associationId: string | null): void;
   addConnectorControlPoint(point: ScenePoint): void;
+  updateDraftControlPoint(pointId: string, point: ScenePoint): void;
   nudgeControlPoint(
     edgeId: string,
     pointId: string,
@@ -98,6 +99,7 @@ type GraphEditorAction =
   | { type: "choose-connection-endpoint"; nodeId: string }
   | { type: "set-draft-association"; associationId: string | null }
   | { type: "add-connector-control-point"; point: ScenePoint }
+  | { type: "update-draft-control-point"; pointId: string; point: ScenePoint }
   | {
       type: "nudge-control-point";
       edgeId: string;
@@ -727,6 +729,24 @@ function graphEditorReducer(
         notice: null,
       };
     }
+    case "update-draft-control-point": {
+      if (
+        state.pending?.kind !== "connect"
+        || !isFinitePoint(action.point)
+        || !state.pending.controlPoints.some((point) => point.id === action.pointId)
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        pending: {
+          ...state.pending,
+          controlPoints: state.pending.controlPoints.map((point) =>
+            point.id === action.pointId ? { ...point, ...action.point } : point),
+        },
+        notice: null,
+      };
+    }
     case "nudge-control-point": {
       const edge = state.edges.find((candidate) => candidate.id === action.edgeId);
       if (edge === undefined || !edge.controlPoints.some((point) => point.id === action.pointId)) {
@@ -1027,6 +1047,8 @@ export function useGraphEditingPrototype(): {
         dispatch({ type: "set-draft-association", associationId }),
       addConnectorControlPoint: (point) =>
         dispatch({ type: "add-connector-control-point", point }),
+      updateDraftControlPoint: (pointId, point) =>
+        dispatch({ type: "update-draft-control-point", pointId, point }),
       nudgeControlPoint: (edgeId, pointId, axis, delta) =>
         dispatch({ type: "nudge-control-point", edgeId, pointId, axis, delta }),
       commitConnection: () => dispatch({ type: "commit-connection" }),

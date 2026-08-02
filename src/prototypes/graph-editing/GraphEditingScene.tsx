@@ -182,14 +182,13 @@ function project(point: ScenePoint, floorId: FloorId, preset: CameraPreset): [nu
   return projectWithOffset(point, floorOffsetFor(floorId), preset);
 }
 
-/** Inverse of `project` for a fixed floor, used to convert pointer hits to bounded floor XY. */
-function invertProject(
+/** Inverse of `projectWithOffset` for a fixed Z, shared by floor and connector controls. */
+function invertProjectWithOffset(
   local: { x: number; y: number },
-  floorId: FloorId,
+  offset: number,
   preset: CameraPreset,
   z: number,
 ): { x: number; y: number } {
-  const offset = floorOffsetFor(floorId);
   let x: number;
   let y: number;
   if (preset === "top") {
@@ -200,6 +199,16 @@ function invertProject(
     x = local.x - y * 0.34;
   }
   return { x: clamp(x, 0, 760), y: clamp(y, 0, 620) };
+}
+
+/** Inverse of `project` for a fixed floor, used to convert pointer hits to bounded floor XY. */
+function invertProject(
+  local: { x: number; y: number },
+  floorId: FloorId,
+  preset: CameraPreset,
+  z: number,
+): { x: number; y: number } {
+  return invertProjectWithOffset(local, floorOffsetFor(floorId), preset, z);
 }
 
 /** Pointer → SVG user-space coordinates via the inverse screen CTM (Task 2 Step 3). */
@@ -447,6 +456,30 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
     if (current.tool === "select" || current.tool === "move") {
       actions.selectObject(null);
     }
+  }
+
+  function moveDraftControlPoint(
+    event: ReactPointerEvent<SVGElement>,
+    pointId: string,
+  ): void {
+    event.stopPropagation();
+    const target = event.currentTarget as Element;
+    if (!target.hasPointerCapture(event.pointerId)) return;
+    const svg = svgRef.current;
+    const pending = stateRef.current.pending;
+    if (svg === null || pending?.kind !== "connect" || pending.toNodeId === null) return;
+    const point = pending.controlPoints.find((candidate) => candidate.id === pointId);
+    const from = stateRef.current.nodes.find((candidate) => candidate.id === pending.fromNodeId);
+    const to = stateRef.current.nodes.find((candidate) => candidate.id === pending.toNodeId);
+    if (point === undefined || from === undefined || to === undefined) return;
+    const local = localPointer(svg, event);
+    const next = invertProjectWithOffset(
+      local,
+      connectorControlOffset(point.z, from.floorId, to.floorId),
+      stateRef.current.cameraPreset,
+      point.z,
+    );
+    actions.updateDraftControlPoint(point.id, { ...point, ...next });
   }
 
   // --- Floor-constrained node movement (Task 2 Step 3) ---
@@ -925,7 +958,6 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
         {pendingConnector !== null ? (
           <g
             className="graph-editing-scene__connector-draft"
-            pointerEvents="none"
             role="img"
             aria-label={`${t(labels.connectorDraft, locale)} ${pendingConnector.from.id} → ${pendingConnector.to.id}`}
           >
@@ -964,12 +996,48 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
                   fill={COLOR.floorFill}
                   stroke={pendingConnector.color}
                   strokeWidth={2.5}
+                  role="slider"
+                  tabIndex={0}
+                  aria-label={`${t(labels.landing, locale)} ${index + 1} · ${control.id}`}
+                  aria-valuenow={control.z}
+                  aria-valuetext={`X ${round(control.x, 2)} · Y ${round(control.y, 2)} · Z ${round(control.z, 2)}`}
+                  style={{ cursor: "move" }}
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    (event.currentTarget as Element).setPointerCapture(event.pointerId);
+                  }}
+                  onPointerMove={(event) => moveDraftControlPoint(event, control.id)}
+                  onPointerUp={(event) => {
+                    event.stopPropagation();
+                    const target = event.currentTarget as Element;
+                    if (target.hasPointerCapture(event.pointerId)) {
+                      target.releasePointerCapture(event.pointerId);
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    const step = 0.25;
+                    const adjustment =
+                      event.key === "ArrowLeft" ? { axis: "x" as const, delta: -step }
+                      : event.key === "ArrowRight" ? { axis: "x" as const, delta: step }
+                      : event.key === "ArrowUp" ? { axis: "y" as const, delta: -step }
+                      : event.key === "ArrowDown" ? { axis: "y" as const, delta: step }
+                      : event.key === "PageUp" ? { axis: "z" as const, delta: step }
+                      : event.key === "PageDown" ? { axis: "z" as const, delta: -step }
+                      : null;
+                    if (adjustment === null) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    actions.updateDraftControlPoint(control.id, {
+                      ...control,
+                      [adjustment.axis]: control[adjustment.axis] + adjustment.delta,
+                    });
+                  }}
                 />
-                <circle cx={xy[0]} cy={xy[1]} r={2} fill={pendingConnector.color} />
-                <text x={xy[0]} y={xy[1] - 13} fontSize={8.5} fontWeight={600} fill={pendingConnector.color} textAnchor="middle">
+                <circle cx={xy[0]} cy={xy[1]} r={2} fill={pendingConnector.color} pointerEvents="none" />
+                <text x={xy[0]} y={xy[1] - 13} fontSize={8.5} fontWeight={600} fill={pendingConnector.color} textAnchor="middle" pointerEvents="none">
                   {t(labels.landing, locale)} {index + 1} · X{round(control.x, 2)} Y{round(control.y, 2)} Z{round(control.z, 2)}
                 </text>
-                <text x={xy[0]} y={xy[1] + 17} fontSize={8} fill={COLOR.floorLabel} textAnchor="middle">
+                <text x={xy[0]} y={xy[1] + 17} fontSize={8} fill={COLOR.floorLabel} textAnchor="middle" pointerEvents="none">
                   {pendingConnector.from.floorId} ↔ {pendingConnector.to.floorId} · {t(labels.sceneZ, locale)} {round(control.z, 2)}
                 </text>
               </g>
