@@ -22,16 +22,15 @@
 
 ---
 
-### Task 1: Shared playback controller and prototype route
+### Task 1: Shared playback state
 
 **Files:**
 - Create: `src/prototypes/navigation/navigationStory.ts`
-- Create: `src/prototypes/navigation/NavigationStoryPrototype.tsx`
-- Modify: `src/main.tsx:1-20`
+- Create: `src/prototypes/navigation/useNavigationStory.ts`
 
 **Interfaces:**
-- Produces `StoryStepId`, `StoryStep`, `VariantId`, `Locale`, `STORY_STEPS`, `stepFloor(step)`, and `NavigationStoryPrototype`.
-- `NavigationStoryPrototype` owns `variant`, `stepIndex`, `playback`, `overviewOpen`, `viewFloor`, `locale`, and `reducedMotion`.
+- Produces `StoryStepId`, `StoryStep`, `VariantId`, `PrototypeLocale`, `STORY_STEPS`, `stepFloor(step)`, `NavigationStoryState`, `NavigationStoryActions`, and `useNavigationStory()`.
+- `useNavigationStory()` owns `variant`, `stepIndex`, `playback`, `overviewOpen`, `viewFloor`, `locale`, and `reducedMotion`.
 - Playback advances one deterministic step at a time with a single timeout; pause clears it; replay returns to the connector-announcement step; completion stops playback.
 
 - [ ] **Step 1: Define the route story contract**
@@ -65,29 +64,24 @@ export interface StoryStep {
 
 Populate `STORY_STEPS` for B1 walking, escalator announcement, pull-back, floor change, settle, 1F walking, and arrival. Export `stepFloor` and localized variant labels.
 
-- [ ] **Step 2: Build the shared controller**
+- [ ] **Step 2: Build the shared state hook**
 
-Create `NavigationStoryPrototype.tsx`. Use one `useEffect` timer when `playback === "playing"`; advance to the next step after `durationMs`; at the final step set `playback` to `"complete"`. Expose actions for play/pause, restart, replay connector, overview toggle, manual floor view, return to route, locale, reduced motion, and variant switch.
+Create `useNavigationStory.ts`. Use one `useEffect` timer when `playback === "playing"`; advance to the next step after `durationMs`; at the final step set `playback` to `"complete"`. Return typed state plus actions for play/pause, restart, replay connector, overview toggle, manual floor view, return to route, locale, reduced motion, direct step selection, and variant switch.
 
-- [ ] **Step 3: Route the query parameter**
-
-In `src/main.tsx`, read `new URLSearchParams(window.location.search).get("prototype")`. Mount `<NavigationStoryPrototype />` when it equals `"navigation-story"`; otherwise preserve the existing viewer/gallery condition unchanged.
-
-- [ ] **Step 4: Verify TypeScript structure**
+- [ ] **Step 3: Verify TypeScript structure**
 
 Run: `pnpm exec tsc --noEmit`
 
 Expected: zero diagnostics.
 
-- [ ] **Step 5: Commit controller slice**
+- [ ] **Step 4: Commit playback slice**
 
 ```bash
-git add src/main.tsx src/prototypes/navigation/navigationStory.ts src/prototypes/navigation/NavigationStoryPrototype.tsx
-git commit -m "prototype: add navigation story controller"
+git add src/prototypes/navigation/navigationStory.ts src/prototypes/navigation/useNavigationStory.ts
+git commit -m "prototype: add navigation story state"
 ```
 
 ---
-
 ### Task 2: Shared scene and three independent variants
 
 **Files:**
@@ -95,11 +89,13 @@ git commit -m "prototype: add navigation story controller"
 - Create: `src/prototypes/navigation/GuidedLegCard.tsx`
 - Create: `src/prototypes/navigation/VerticalJourneyRail.tsx`
 - Create: `src/prototypes/navigation/RouteScrubber.tsx`
-- Modify: `src/prototypes/navigation/NavigationStoryPrototype.tsx`
+- Create: `src/prototypes/navigation/NavigationStoryPrototype.tsx`
+- Modify: `src/main.tsx:1-20`
 
 **Interfaces:**
 - `NavigationScene` consumes `step`, `viewFloor`, `overviewOpen`, `reducedMotion`, and `locale`.
 - Each variant consumes the same `NavigationVariantProps`: current step/index, playback state, locale, route overview state, and controller callbacks.
+- `NavigationStoryPrototype` consumes `useNavigationStory()` and owns shell composition, state inspector, locale/reduced-motion controls, and variant switching.
 - Variants own their layout markup; only scene state, data, and compact primitives are shared.
 
 - [ ] **Step 1: Build the schematic active-floor scene**
@@ -118,25 +114,28 @@ Render a right-side floor/leg ladder with B1, escalator, and 1F stages, complete
 
 Render a bottom timeline with every story step, a moving current marker, scrub buttons, play/pause, replay, and overview. Do not reuse either other variant's layout.
 
-- [ ] **Step 5: Surface complete prototype state**
+- [ ] **Step 5: Compose the prototype shell and full state**
 
-Add a compact inspector showing variant, playback, step, route floor, viewed floor, camera phase, overview, locale, and reduced-motion values. Add a polite live region with the current instruction and floor.
+Create `NavigationStoryPrototype.tsx`, connect `useNavigationStory()` to the active independent variant and the shared scene, and add a compact inspector showing variant, playback, step, route floor, viewed floor, camera phase, overview, locale, and reduced-motion values. Add a polite live region with the current instruction and floor.
 
-- [ ] **Step 6: Verify TypeScript structure**
+- [ ] **Step 6: Route the query parameter**
+
+In `src/main.tsx`, read `new URLSearchParams(window.location.search).get("prototype")`. Mount `<NavigationStoryPrototype />` when it equals `"navigation-story"`; otherwise preserve the existing viewer/gallery condition unchanged.
+
+- [ ] **Step 7: Verify TypeScript structure**
 
 Run: `pnpm exec tsc --noEmit`
 
 Expected: zero diagnostics.
 
-- [ ] **Step 7: Commit scene and variants**
+- [ ] **Step 8: Commit scene and variants**
 
 ```bash
-git add src/prototypes/navigation
+git add src/main.tsx src/prototypes/navigation
 git commit -m "prototype: compare route storytelling models"
 ```
 
 ---
-
 ### Task 3: Kiriko styling, responsive behavior, and browser proof
 
 **Files:**
