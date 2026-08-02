@@ -3,7 +3,6 @@ import { useEffect, useMemo, useReducer, useRef } from "react";
 import {
   createGraphEditingPrototypeState,
   type FloorId,
-  type GraphControlPoint,
   type GraphEdge,
   type GraphEditorPrototypeState,
   type GraphEditorTool,
@@ -639,7 +638,7 @@ function graphEditorReducer(
           : node,
       );
       const nodesById = new Map(nodes.map((node) => [node.id, node]));
-      const edges = state.edges.map((edge) => {
+      const edges: GraphEdge[] = state.edges.map((edge) => {
         if (edge.fromNodeId !== action.nodeId && edge.toNodeId !== action.nodeId) return edge;
         const from = nodesById.get(edge.fromNodeId);
         const to = nodesById.get(edge.toNodeId);
