@@ -122,7 +122,7 @@ const toolButtons = [
 interface TransitionSnapshot {
   scenario: ScenarioId;
   activeFloor: GraphEditorPrototypeState["activeFloor"];
-  notice: GraphEditorPrototypeState["notice"];
+  noticeRevision: number;
   pastDepth: number;
   futureDepth: number;
   stagedCount: number;
@@ -181,11 +181,14 @@ function findingDeltaLabel(state: GraphEditorPrototypeState): string {
 export function GraphEditingPrototype(): ReactElement {
   const { state, actions } = useGraphEditingPrototype();
   const { locale } = state;
-  const [announcement, setAnnouncement] = useState(`${t(copy.floorAnnounce, locale)} ${state.activeFloor}`);
+  const [announcement, setAnnouncement] = useState({
+    revision: 0,
+    text: `${t(copy.floorAnnounce, locale)} ${state.activeFloor}`,
+  });
   const previous = useRef<TransitionSnapshot>({
     scenario: state.scenario,
     activeFloor: state.activeFloor,
-    notice: state.notice,
+    noticeRevision: state.noticeRevision,
     pastDepth: state.past.length,
     futureDepth: state.future.length,
     stagedCount: state.stagedChanges.length,
@@ -210,24 +213,33 @@ export function GraphEditingPrototype(): ReactElement {
     const before = previous.current;
     const messages: string[] = [];
     if (state.scenario !== before.scenario) messages.push(t(copy.resetAnnounce, locale));
-    if (state.notice !== null && state.notice !== before.notice) messages.push(t(copy.rejectAnnounce, locale));
+    if (state.notice !== null && state.noticeRevision !== before.noticeRevision) messages.push(t(copy.rejectAnnounce, locale));
     if (historyAction.current === "undo") messages.push(t(copy.undoAnnounce, locale));
     else if (historyAction.current === "redo") messages.push(t(copy.redoAnnounce, locale));
     else if (state.stagedChanges.length > before.stagedCount) messages.push(t(copy.commitAnnounce, locale));
     historyAction.current = null;
-    if (state.checkState !== before.checkState) messages.push(t(state.checkState === "checking" ? copy.checkingAnnounce : copy.checkedAnnounce, locale));
-    if (state.saveState !== before.saveState) messages.push(t(state.saveState === "confirming" ? copy.saveReviewAnnounce : copy.savedAnnounce, locale));
+    if (state.checkState !== before.checkState) {
+      if (state.checkState === "checking") messages.push(t(copy.checkingAnnounce, locale));
+      else if (state.checkState === "complete") messages.push(t(copy.checkedAnnounce, locale));
+    }
+    if (state.saveState !== before.saveState) {
+      if (state.saveState === "confirming") messages.push(t(copy.saveReviewAnnounce, locale));
+      else if (state.saveState === "saved") messages.push(t(copy.savedAnnounce, locale));
+    }
     if (state.activeFloor !== before.activeFloor) messages.push(`${t(copy.floorAnnounce, locale)} ${state.activeFloor}`);
     if (messages.length > 0) {
       const floorContext = state.activeFloor === before.activeFloor
         ? `. ${t(copy.floorAnnounce, locale)} ${state.activeFloor}`
         : "";
-      setAnnouncement(`${messages.join(". ")}${floorContext}.`);
+      setAnnouncement((current) => ({
+        revision: current.revision + 1,
+        text: `${messages.join(". ")}${floorContext}.`,
+      }));
     }
     previous.current = {
       scenario: state.scenario,
       activeFloor: state.activeFloor,
-      notice: state.notice,
+      noticeRevision: state.noticeRevision,
       pastDepth: state.past.length,
       futureDepth: state.future.length,
       stagedCount: state.stagedChanges.length,
@@ -240,6 +252,7 @@ export function GraphEditingPrototype(): ReactElement {
     state.checkState,
     state.future.length,
     state.notice,
+    state.noticeRevision,
     state.past.length,
     state.saveState,
     state.scenario,
@@ -354,7 +367,7 @@ export function GraphEditingPrototype(): ReactElement {
         </dl>
       </aside>
 
-      <div className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</div>
+      <div className="sr-only" aria-live="polite" aria-atomic="true"><span key={announcement.revision}>{announcement.text}</span></div>
     </main>
   );
 }

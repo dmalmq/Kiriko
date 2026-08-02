@@ -104,6 +104,7 @@ export interface GraphEditorPrototypeState extends StagedSnapshot {
   selectedFindingId: GraphFinding["id"] | null;
   pending: PendingOperation;
   notice: "duplicate-connection" | "unusable-graph" | "invalid-geometry" | null;
+  noticeRevision: number;
   findingDelta: string | null;
   scenario: ScenarioId;
   checkState: "idle" | "checking" | "complete";
@@ -233,6 +234,7 @@ export function createGraphEditingPrototypeState(): GraphEditorPrototypeState {
     selectedFindingId: null,
     pending: null,
     notice: null,
+    noticeRevision: 0,
     findingDelta: null,
     scenario: "repair-endpoint",
     checkState: "idle",

@@ -222,6 +222,13 @@ function structuralNotice(
   return null;
 }
 
+function rejectMutation(
+  state: GraphEditorPrototypeState,
+  notice: Exclude<GraphEditorPrototypeState["notice"], null>,
+): GraphEditorPrototypeState {
+  return { ...state, notice, noticeRevision: state.noticeRevision + 1 };
+}
+
 function findingWithEvaluation(
   previous: GraphFinding,
   state: GraphFinding["state"],
@@ -322,7 +329,7 @@ function commitSnapshot(
     stagedChanges: [...state.stagedChanges, change],
   };
   const notice = structuralNotice(nextSnapshot.nodes, nextSnapshot.edges);
-  if (notice !== null) return { ...state, notice };
+  if (notice !== null) return rejectMutation(state, notice);
 
   return {
     ...state,
@@ -486,7 +493,7 @@ function graphEditorReducer(
     case "commit-add": {
       if (state.pending?.kind !== "add") return state;
       const point = pointForCommit(state.pending, action.mode);
-      if (point === null || !isFinitePoint(point)) return { ...state, notice: "invalid-geometry" };
+      if (point === null || !isFinitePoint(point)) return rejectMutation(state, "invalid-geometry");
       const id = nextNumericId(
         "manual-node",
         state.nodes.map((node) => node.id),
@@ -525,7 +532,7 @@ function graphEditorReducer(
     case "commit-move": {
       if (state.pending?.kind !== "move") return state;
       const point = pointForCommit(state.pending, action.mode);
-      if (point === null || !isFinitePoint(point)) return { ...state, notice: "invalid-geometry" };
+      if (point === null || !isFinitePoint(point)) return rejectMutation(state, "invalid-geometry");
       const nodeId = state.pending.nodeId;
       if (!state.nodes.some((node) => node.id === nodeId)) return state;
       const nodes = state.nodes.map((node) => (node.id === nodeId ? { ...node, point } : node));
@@ -622,7 +629,7 @@ function graphEditorReducer(
       const from = state.nodes.find((node) => node.id === pending.fromNodeId);
       const to = state.nodes.find((node) => node.id === pending.toNodeId);
       if (from === undefined || to === undefined || from.id === to.id) {
-        return { ...state, notice: "invalid-geometry" };
+        return rejectMutation(state, "invalid-geometry");
       }
       const id = nextNumericId(
         from.floorId === to.floorId ? "edge" : "connector",
@@ -678,7 +685,7 @@ function graphEditorReducer(
     }
     case "request-delete":
       if (!deletableSelectionExists(state, action.selection)) {
-        return { ...state, notice: "invalid-geometry" };
+        return rejectMutation(state, "invalid-geometry");
       }
       return {
         ...state,
@@ -695,7 +702,7 @@ function graphEditorReducer(
       if (state.pending?.kind !== "delete") return state;
       const selection = state.pending.selection;
       if (!deletableSelectionExists(state, selection)) {
-        return { ...state, notice: "invalid-geometry" };
+        return rejectMutation(state, "invalid-geometry");
       }
       let nodes = state.nodes;
       let edges = state.edges;
@@ -718,7 +725,7 @@ function graphEditorReducer(
       } else {
         return state;
       }
-      if (edges.length === 0) return { ...state, notice: "unusable-graph" };
+      if (edges.length === 0) return rejectMutation(state, "unusable-graph");
       return commitSnapshot(
         state,
         { nodes, edges, profile: state.profile },
