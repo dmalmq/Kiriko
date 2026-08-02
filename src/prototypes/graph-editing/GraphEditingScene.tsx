@@ -92,10 +92,10 @@ const VENUES: readonly VenueFootprint[] = [
     kind: "lift",
     floorId: "1F",
     polygon: [
-      [540, 340],
-      [582, 340],
-      [582, 382],
-      [540, 382],
+      [434, 286],
+      [470, 286],
+      [470, 322],
+      [434, 322],
     ],
     label: { ja: "エレベーター（東）", en: "Lift (east)" },
   },
@@ -130,12 +130,27 @@ const labels = {
   nudgeTitle: { ja: "制御点を軸移動", en: "Nudge control point" },
   nudgeHint: { ja: "軸ボタンで 1 ステップ移動", en: "Axis buttons move one step" },
   empty: { ja: "選択可能なオブジェクトがありません", en: "No selectable objects" },
+  snapAuto: { ja: "自動スナップ", en: "Auto snap" },
+  snapReview: { ja: "確認スナップ", en: "Review snap" },
+  snapAmbiguous: { ja: "曖昧", en: "Ambiguous" },
+  snapNone: { ja: "スナップなし", en: "No snap" },
 } as const;
 
 type Locale = GraphEditorPrototypeState["locale"];
 
 function t(entry: { ja: string; en: string }, locale: Locale): string {
   return entry[locale];
+}
+
+const SNAP_BAND_LABEL: Record<SnapBand, { ja: string; en: string }> = {
+  auto: labels.snapAuto,
+  review: labels.snapReview,
+  ambiguous: labels.snapAmbiguous,
+  none: labels.snapNone,
+};
+
+function snapBandLabel(band: SnapBand, locale: Locale): string {
+  return t(SNAP_BAND_LABEL[band], locale);
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -155,17 +170,15 @@ function floorOffsetFor(floorId: FloorId): number {
   return floorId === "1F" ? -150 : 90;
 }
 
-/** Stable projection shared by all scene geometry (Task 2 Step 1). */
-function project(point: ScenePoint, floorId: FloorId, preset: CameraPreset): [number, number] {
-  const floorOffset = floorOffsetFor(floorId);
-  if (preset === "top") return [point.x, point.y + floorOffset];
-  return [point.x + point.y * 0.34, point.y * 0.62 + floorOffset - point.z * 4];
-}
-
-/** Projection with an explicit floor offset, for cross-floor connector points. */
-function projectAt(point: ScenePoint, offset: number, preset: CameraPreset): [number, number] {
+/** Core projection: maps a scene point to SVG user-space using an explicit floor offset. */
+function projectWithOffset(point: ScenePoint, offset: number, preset: CameraPreset): [number, number] {
   if (preset === "top") return [point.x, point.y + offset];
   return [point.x + point.y * 0.34, point.y * 0.62 + offset - point.z * 4];
+}
+
+/** Stable projection shared by all scene geometry (Task 2 Step 1). */
+function project(point: ScenePoint, floorId: FloorId, preset: CameraPreset): [number, number] {
+  return projectWithOffset(point, floorOffsetFor(floorId), preset);
 }
 
 /** Inverse of `project` for a fixed floor, used to convert pointer hits to bounded floor XY. */
@@ -321,6 +334,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
   stateRef.current = state;
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const movedRef = useRef(false);
+  const dragStartLocal = useRef<{ x: number; y: number } | null>(null);
 
   const nodesById = new Map(state.nodes.map((node) => [node.id, node]));
 
@@ -355,6 +369,11 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
   function objectOpacity(objectId: string): number {
     return activeFinding === null || objectId === relatedObjectId ? 1 : 0.35;
   }
+  function effectiveOpacity(floorId: FloorId, objectId: string): number {
+    if (activeFinding === null) return 1;
+    if (floorId !== relatedFloorId) return 0.35;
+    return objectId === relatedObjectId ? 1 : 0.35;
+  }
 
   function isSelected(selection: GraphSelection): boolean {
     return sameSelection(state.selection, selection);
@@ -379,7 +398,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
     actions.selectObject(selection);
   }
 
-  function onBackgroundClick(event: ReactMouseEvent<SVGRectElement>): void {
+  function onBackgroundClick(event: ReactMouseEvent<SVGElement>): void {
     const current = stateRef.current;
     const svg = svgRef.current;
     if (current.tool === "add") {
@@ -411,37 +430,70 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
     (event.currentTarget as Element).setPointerCapture(event.pointerId);
     setDragNodeId(nodeId);
     movedRef.current = false;
-    applyMove(event, nodeId);
+    const svg = svgRef.current;
+    // Record the pointer origin; do NOT preview until real XY displacement so
+    // a click on the handle preserves any existing pending draft.
+    dragStartLocal.current = svg === null ? null : localPointer(svg, event);
   }
 
   function onHandlePointerMove(event: ReactPointerEvent<SVGElement>): void {
     if (dragNodeId === null) return;
+    const svg = svgRef.current;
+    if (svg === null || dragStartLocal.current === null) return;
+    const current = localPointer(svg, event);
+    const dx = current.x - dragStartLocal.current.x;
+    const dy = current.y - dragStartLocal.current.y;
+    // Compare coordinates, not event count: only preview after real displacement.
+    if (Math.hypot(dx, dy) <= 0.5) return;
     movedRef.current = true;
     applyMove(event, dragNodeId);
   }
 
+  function commitOrCancelMove(): void {
+    const pending = stateRef.current.pending;
+    if (pending?.kind !== "move") return;
+    const node = stateRef.current.nodes.find((candidate) => candidate.id === pending.nodeId);
+    // Same-coordinate gesture (returned to origin): no net change, no history entry.
+    const sameCoords =
+      node !== undefined &&
+      Math.abs(pending.candidate.x - node.point.x) < 0.01 &&
+      Math.abs(pending.candidate.y - node.point.y) < 0.01;
+    if (sameCoords) {
+      actions.cancel();
+      return;
+    }
+    const band = pending.snap?.band ?? "none";
+    if (band === "auto") {
+      actions.commitMove("snap");
+    } else if (band === "review") {
+      // Preserve the pending draft for the inspector to commit explicitly.
+    } else {
+      actions.commitMove("raw");
+    }
+  }
+
+  function releaseDrag(event: ReactPointerEvent<SVGElement>): void {
+    (event.currentTarget as Element).releasePointerCapture?.(event.pointerId);
+    setDragNodeId(null);
+    dragStartLocal.current = null;
+  }
 
   function endMove(event: ReactPointerEvent<SVGElement>): void {
     if (dragNodeId === null) return;
-    if (!movedRef.current) {
-      // No XY movement: discard the preview so clicking the handle never
-      // stages a change or creates a history entry.
-      actions.cancel();
-    } else {
-      const pending = stateRef.current.pending;
-      if (pending?.kind === "move") {
-        const band = pending.snap?.band ?? "none";
-        if (band === "auto") {
-          actions.commitMove("snap");
-        } else if (band === "review") {
-          // Preserve the pending draft for the inspector to commit explicitly.
-        } else {
-          actions.commitMove("raw");
-        }
-      }
+    if (movedRef.current) {
+      commitOrCancelMove();
     }
-    (event.currentTarget as Element).releasePointerCapture?.(event.pointerId);
-    setDragNodeId(null);
+    // When movedRef is false (no real displacement) we leave any existing
+    // Review draft untouched — no preview was issued, nothing to commit.
+    releaseDrag(event);
+  }
+
+  function cancelDrag(event: ReactPointerEvent<SVGElement>): void {
+    // pointer-cancel / lost pointer-capture: discard the drag without committing.
+    if (dragNodeId !== null && movedRef.current) {
+      actions.cancel();
+    }
+    releaseDrag(event);
   }
 
   function onKeyDown(event: ReactKeyboardEvent<HTMLElement>): void {
@@ -643,18 +695,20 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
             preset,
           );
           return (
-            <g key={`floor-${floorId}`} opacity={opacity}>
+            <g key={`floor-${floorId}`}>
               <polygon
                 points={floorPolygonPoints(floorId)}
                 fill={COLOR.floorFill}
                 fillOpacity={0.5}
                 stroke={COLOR.floorStroke}
                 strokeWidth={1}
+                opacity={opacity}
+                onClick={onBackgroundClick}
               />
-              <text x={labelXY[0]} y={labelXY[1]} fontSize={13} fontWeight={700} fill={COLOR.floorLabel}>
+              <text x={labelXY[0]} y={labelXY[1]} fontSize={13} fontWeight={700} fill={COLOR.floorLabel} opacity={opacity}>
                 {floorId}
               </text>
-              <text x={labelXY[0]} y={labelXY[1] + 14} fontSize={10} fill={COLOR.floorLabel}>
+              <text x={labelXY[0]} y={labelXY[1] + 14} fontSize={10} fill={COLOR.floorLabel} opacity={opacity}>
                 {t(labels.elevation, locale)}: {round(FLOOR_ELEVATION_M[floorId], 2)} m
               </text>
 
@@ -664,7 +718,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
                 const selected = isSelected(venueSel);
                 const venueColor = venue.kind === "stair" ? COLOR.venueStair : COLOR.venueLift;
                 return (
-                  <g key={`venue-${venue.id}`}>
+                  <g key={`venue-${venue.id}`} opacity={effectiveOpacity(floorId, venue.id)}>
                     <polygon
                       points={venuePolygonPoints(venue)}
                       fill={selected ? COLOR.selected : venueColor}
@@ -702,6 +756,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
                   return (
                     <line
                       key={`edge-${edge.id}`}
+                      opacity={effectiveOpacity(floorId, edge.id)}
                       x1={a[0]}
                       y1={a[1]}
                       x2={b[0]}
@@ -730,7 +785,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
                   const selected = isSelected(nodeSel);
                   const elevation = node.sourceAltitude ?? node.point.z;
                   return (
-                    <g key={`node-${node.id}`}>
+                    <g key={`node-${node.id}`} opacity={effectiveOpacity(floorId, node.id)}>
                       <circle
                         cx={projected[0]}
                         cy={projected[1]}
@@ -768,7 +823,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
             const toXY = project(to.point, to.floorId, preset);
             const controlProjected = edge.controlPoints.map((control) => ({
               control,
-              xy: projectAt(
+              xy: projectWithOffset(
                 control,
                 connectorControlOffset(control.z, from.floorId, to.floorId),
                 preset,
@@ -829,7 +884,8 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
             );
           })}
 
-        {/* Evidence layer: point/segment/area finding overlays. */}
+        {/* Evidence layer: point/segment/area finding overlays (pointer-transparent). */}
+        <g pointerEvents="none">
         {findingTargets
           .filter((entry) => entry.target !== null)
           .map(({ finding, target }) => {
@@ -877,10 +933,11 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
               </g>
             );
           })}
+        </g>
 
         {/* Pending draft marker for add/move. */}
         {pendingMarker !== null ? (
-          <g>
+          <g pointerEvents="none">
             <circle
               cx={pendingMarker.x}
               cy={pendingMarker.y}
@@ -897,7 +954,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
               fill={SNAP_COLOR[pendingMarker.band]}
               textAnchor="middle"
             >
-              {pendingMarker.band}
+              {snapBandLabel(pendingMarker.band, locale)}
             </text>
           </g>
         ) : null}
@@ -928,6 +985,8 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
             onPointerDown={(event) => startMove(event, selectedNode.id)}
             onPointerMove={onHandlePointerMove}
             onPointerUp={endMove}
+            onPointerCancel={cancelDrag}
+            onLostPointerCapture={cancelDrag}
           />
         ) : null}
       </svg>
