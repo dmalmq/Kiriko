@@ -18,6 +18,7 @@ import {
 } from "./navigationStory";
 import { useNavigationStory } from "./useNavigationStory";
 import { VerticalJourneyRail } from "./VerticalJourneyRail";
+import "./navigationStoryPrototype.css";
 
 const SHELL_COPY = {
   title: {
@@ -199,6 +200,7 @@ export function NavigationStoryPrototype(): ReactElement {
   return (
     <main
       className={`navigation-prototype navigation-prototype--${state.variant}${state.reducedMotion ? " navigation-prototype--reduced-motion" : ""}`}
+      lang={state.locale}
       data-playback={state.playback}
       data-camera-phase={cameraPhase}
     >
