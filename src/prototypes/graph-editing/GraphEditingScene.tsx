@@ -335,6 +335,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const movedRef = useRef(false);
   const dragStartLocal = useRef<{ x: number; y: number } | null>(null);
+  const releasingRef = useRef(false);
 
   const nodesById = new Map(state.nodes.map((node) => [node.id, node]));
 
@@ -435,17 +436,22 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
     // a click on the handle preserves any existing pending draft.
     dragStartLocal.current = svg === null ? null : localPointer(svg, event);
   }
-
   function onHandlePointerMove(event: ReactPointerEvent<SVGElement>): void {
     if (dragNodeId === null) return;
     const svg = svgRef.current;
     if (svg === null || dragStartLocal.current === null) return;
-    const current = localPointer(svg, event);
-    const dx = current.x - dragStartLocal.current.x;
-    const dy = current.y - dragStartLocal.current.y;
-    // Compare coordinates, not event count: only preview after real displacement.
-    if (Math.hypot(dx, dy) <= 0.5) return;
-    movedRef.current = true;
+    // The displacement threshold gates only the FIRST preview, preserving any
+    // existing pending draft on a click. Once movement has begun, every
+    // subsequent coordinate is forwarded so the candidate stays current —
+    // including a return-to-origin, which commitOrCancelMove recognizes as
+    // a no-op.
+    if (!movedRef.current) {
+      const current = localPointer(svg, event);
+      const dx = current.x - dragStartLocal.current.x;
+      const dy = current.y - dragStartLocal.current.y;
+      if (Math.hypot(dx, dy) <= 0.5) return;
+      movedRef.current = true;
+    }
     applyMove(event, dragNodeId);
   }
 
@@ -472,9 +478,9 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
     }
   }
 
-  function releaseDrag(event: ReactPointerEvent<SVGElement>): void {
-    (event.currentTarget as Element).releasePointerCapture?.(event.pointerId);
+  function resetDragState(): void {
     setDragNodeId(null);
+    movedRef.current = false;
     dragStartLocal.current = null;
   }
 
@@ -485,15 +491,28 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
     }
     // When movedRef is false (no real displacement) we leave any existing
     // Review draft untouched — no preview was issued, nothing to commit.
-    releaseDrag(event);
+    // Mark this as an expected release so the synchronous lostpointercapture
+    // callback (fired by releasePointerCapture) does not cancel the result.
+    releasingRef.current = true;
+    const el = event.currentTarget as Element;
+    if (el.hasPointerCapture(event.pointerId)) {
+      el.releasePointerCapture(event.pointerId);
+    }
+    releasingRef.current = false;
+    resetDragState();
   }
 
   function cancelDrag(event: ReactPointerEvent<SVGElement>): void {
-    // pointer-cancel / lost pointer-capture: discard the drag without committing.
-    if (dragNodeId !== null && movedRef.current) {
+    // Expected release (endMove already handled commit + state reset).
+    if (releasingRef.current) return;
+    if (dragNodeId === null) return;
+    // Unexpected capture loss / pointer cancel: discard any pending preview.
+    if (movedRef.current) {
       actions.cancel();
     }
-    releaseDrag(event);
+    resetDragState();
+    // Do not call releasePointerCapture — the capture was already lost or
+    // the browser auto-released on cancel.
   }
 
   function onKeyDown(event: ReactKeyboardEvent<HTMLElement>): void {
