@@ -173,7 +173,13 @@ export function NavigationStoryPrototype(): ReactElement {
     onReplayConnector: actions.replayConnector,
     onToggleOverview: actions.toggleOverview,
     onSelectStep: actions.selectStep,
-    onSelectViewedFloor: actions.selectViewedFloor,
+    onSelectViewedFloor: (floor) => {
+      if (floor === routeFloor) {
+        actions.returnToRoute();
+        return;
+      }
+      actions.selectViewedFloor(floor);
+    },
     onReturnToRoute: actions.returnToRoute,
   };
   let activeVariant: ReactElement | null = null;
