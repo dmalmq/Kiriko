@@ -502,7 +502,7 @@ export function GraphEditingScene({ state, actions }: GraphEditingSceneProps): R
     resetDragState();
   }
 
-  function cancelDrag(event: ReactPointerEvent<SVGElement>): void {
+  function cancelDrag(): void {
     // Expected release (endMove already handled commit + state reset).
     if (releasingRef.current) return;
     if (dragNodeId === null) return;
