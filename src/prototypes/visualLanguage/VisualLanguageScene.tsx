@@ -318,9 +318,10 @@ export function VisualLanguageScene(props: VisualLanguageSceneProps) {
       selected:
         label.id === "selected-escalator" && selectedId === "escalator-b1-1f",
     }));
-  const projectedFindings: readonly ProjectedDiagnosticFinding[] = fixture.diagnostics
-    .filter((finding) => isFloorVisible(finding.floor, visibilityState))
-    .map((finding) => ({
+  // Findings are QA overlays carrying their own floor identity (design spec §12):
+  // they are filtered by severity, never by the navigation floor rule for geometry.
+  const projectedFindings: readonly ProjectedDiagnosticFinding[] = fixture.diagnostics.map(
+    (finding) => ({
       id: finding.id,
       severity: finding.severity,
       geometry: finding.geometry,
@@ -335,9 +336,10 @@ export function VisualLanguageScene(props: VisualLanguageSceneProps) {
       primitive.role === "stairs" ||
       primitive.role === "ramp",
   );
-  const selectedPrimitive = source.primitives.find(
-    (primitive) => primitive.id === selectedId || primitive.canonicalId === selectedId,
-  );
+  const matchesSelection = (primitive: ScenePrimitive): boolean =>
+    selectedId !== null &&
+    (primitive.id === selectedId || primitive.canonicalId === selectedId);
+  const selectedPrimitive = source.primitives.find(matchesSelection);
   const selectedFinding = fixture.diagnostics.find(({ id }) => id === selectedId);
   const selectedLabel =
     selectedPrimitive !== undefined
@@ -379,8 +381,7 @@ export function VisualLanguageScene(props: VisualLanguageSceneProps) {
         <rect className="vl-scene__canvas-field" width={VIEW_WIDTH} height={VIEW_HEIGHT} />
         <g className="vl-scene__geometry" data-source={sourceKind}>
           {visiblePrimitives.map((primitive) => {
-            const selected =
-              primitive.id === selectedId || primitive.canonicalId === selectedId;
+            const selected = matchesSelection(primitive);
             const semanticClasses = [
               "vl-semantic-face",
               roleClass(primitive.role),
@@ -497,9 +498,7 @@ export function VisualLanguageScene(props: VisualLanguageSceneProps) {
               key={`${primitive.id}-badge`}
               category={primitive.role}
               label={sceneObjectLabel(primitive, locale)}
-              selected={
-                primitive.id === selectedId || primitive.canonicalId === selectedId
-              }
+              selected={matchesSelection(primitive)}
               screenPosition={projectPoint(primitiveAnchor(primitive), twoDimensional)}
             />
           ))}

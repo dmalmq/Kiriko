@@ -73,21 +73,93 @@ function prioritizedLabels(
   });
 }
 
+interface LabelBox {
+  readonly left: number;
+  readonly right: number;
+  readonly top: number;
+  readonly bottom: number;
+}
+
+interface PlacedSceneLabel extends ProjectedSceneLabel {
+  readonly x: number;
+  readonly y: number;
+  readonly displacement: number;
+}
+
+const LABEL_HEIGHT = 18;
+const LABEL_PADDING = 12;
+const LABEL_GUTTER = 2;
+const WIDE_GLYPH = /[\u3000-\u30ff\u3400-\u9fff\uff00-\uffef]/;
+const DISPLACEMENT_STEPS = [0, -20, 20, -40, 40, -60, 60];
+
+function labelBox(x: number, y: number, text: string): LabelBox {
+  const width =
+    [...text].reduce((sum, glyph) => sum + (WIDE_GLYPH.test(glyph) ? 13 : 6.6), 0) +
+    LABEL_PADDING;
+  return {
+    left: x - width / 2,
+    right: x + width / 2,
+    top: y - LABEL_HEIGHT + 5,
+    bottom: y + 5,
+  };
+}
+
+function overlaps(left: LabelBox, right: LabelBox): boolean {
+  return (
+    left.left < right.right + LABEL_GUTTER &&
+    right.left < left.right + LABEL_GUTTER &&
+    left.top < right.bottom + LABEL_GUTTER &&
+    right.top < left.bottom + LABEL_GUTTER
+  );
+}
+
+/**
+ * Places labels in priority order, displacing lower-priority labels vertically
+ * until they clear already-placed boxes. Protected labels always survive; an
+ * unplaceable unprotected label is trimmed instead of drawn over its neighbour.
+ */
+function placeLabels(labels: readonly ProjectedSceneLabel[]): readonly PlacedSceneLabel[] {
+  const placed: PlacedSceneLabel[] = [];
+  const boxes: LabelBox[] = [];
+
+  for (const label of labels) {
+    const [offsetX, offsetY] = LABEL_OFFSETS[label.id] ?? [0, -20];
+    const x = label.anchor.x + offsetX;
+    const baseY = label.anchor.y + offsetY;
+    const step = DISPLACEMENT_STEPS.find(
+      (candidate) =>
+        !boxes.some((box) => overlaps(box, labelBox(x, baseY + candidate, label.label))),
+    );
+
+    if (step === undefined && !label.protected) {
+      continue;
+    }
+
+    const y = baseY + (step ?? 0);
+    boxes.push(labelBox(x, y, label.label));
+    placed.push({
+      ...label,
+      x,
+      y,
+      displacement: Math.hypot(x - label.anchor.x, y - label.anchor.y),
+    });
+  }
+
+  return placed;
+}
+
 export function SceneLabels({ labels, scenario }: SceneLabelsProps) {
   const limit = scenario === "overview" || scenario === "diagnostics" ? 6 : 4;
-  const visibleLabels = prioritizedLabels(labels, limit);
+  const visibleLabels = placeLabels(prioritizedLabels(labels, limit));
 
   return (
     <g className="vl-scene-labels">
       {visibleLabels.map((label) => {
-        const [offsetX, offsetY] = LABEL_OFFSETS[label.id] ?? [0, -20];
-        const x = label.anchor.x + offsetX;
-        const y = label.anchor.y + offsetY;
-        const distance = Math.hypot(offsetX, offsetY);
-        const leaderInset = Math.min(8, distance);
-        const leaderScale = distance === 0 ? 0 : leaderInset / distance;
-        const leaderX = x - offsetX * leaderScale;
-        const leaderY = y - offsetY * leaderScale;
+        const { x, y, displacement } = label;
+        const leaderInset = Math.min(8, displacement);
+        const leaderScale = displacement === 0 ? 0 : leaderInset / displacement;
+        const leaderX = (label.anchor.x - x) * leaderScale;
+        const leaderY = (label.anchor.y - y) * leaderScale;
         const className = [
           "vl-scene-label",
           `vl-label-${label.category}`,
@@ -104,13 +176,13 @@ export function SceneLabels({ labels, scenario }: SceneLabelsProps) {
             data-label-id={label.id}
             transform={`translate(${x} ${y})`}
           >
-            {distance > 18 ? (
+            {displacement > 18 ? (
               <line
                 className="vl-scene-label__leader"
                 x1={label.anchor.x - x}
                 y1={label.anchor.y - y}
-                x2={leaderX - x}
-                y2={leaderY - y}
+                x2={leaderX}
+                y2={leaderY}
                 aria-hidden="true"
               />
             ) : null}

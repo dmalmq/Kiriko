@@ -170,6 +170,28 @@ export function VisualLanguagePrototype() {
       ) : null}
 
       <section className="vl-prototype__scenes vl-scenes" aria-label={SHELL_COPY.scenes[locale]}>
+        {showGuidanceCard ? (
+          <aside className="vl-guidance-card" aria-label={SHELL_COPY.guidedTransition[locale]}>
+            <p className="vl-guidance-card__eyebrow">{SHELL_COPY.guidedTransition[locale]}</p>
+            <h2>{COPY.nextAction[locale]}</h2>
+            <dl className="vl-guidance-card__floors">
+              <div>
+                <dt>{COPY.currentFloor[locale]}</dt>
+                <dd>{state.activeFloor}</dd>
+              </div>
+              <div>
+                <dt>{COPY.destinationFloor[locale]}</dt>
+                <dd>1F</dd>
+              </div>
+            </dl>
+            <p className="vl-guidance-card__destination">
+              <span>{SHELL_COPY.destination[locale]}</span>
+              <strong>{COPY.destination[locale]}</strong>
+            </p>
+            <p className="vl-guidance-card__distance">{COPY.remainingDistance[locale]}</p>
+          </aside>
+        ) : null}
+
         <div className={sceneLayoutClass(visibleSources.length)}>
           {visibleSources.map((sourceKind) => (
             <div className="vl-prototype__viewport" key={sourceKind}>
@@ -198,29 +220,6 @@ export function VisualLanguagePrototype() {
             </div>
           ))}
 
-          {showGuidanceCard ? (
-            <aside className="vl-guidance-card" aria-label={SHELL_COPY.guidedTransition[locale]}>
-              <p className="vl-guidance-card__eyebrow">
-                {SHELL_COPY.guidedTransition[locale]}
-              </p>
-              <h2>{COPY.nextAction[locale]}</h2>
-              <dl className="vl-guidance-card__floors">
-                <div>
-                  <dt>{COPY.currentFloor[locale]}</dt>
-                  <dd>{state.activeFloor}</dd>
-                </div>
-                <div>
-                  <dt>{COPY.destinationFloor[locale]}</dt>
-                  <dd>1F</dd>
-                </div>
-              </dl>
-              <p className="vl-guidance-card__destination">
-                <span>{SHELL_COPY.destination[locale]}</span>
-                <strong>{COPY.destination[locale]}</strong>
-              </p>
-              <p className="vl-guidance-card__distance">{COPY.remainingDistance[locale]}</p>
-            </aside>
-          ) : null}
         </div>
 
         {state.sourceLayout === "compare" ? (

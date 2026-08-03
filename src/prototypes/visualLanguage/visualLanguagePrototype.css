@@ -13,7 +13,8 @@
   --vl-edge: #c8ceda;
   --vl-opening: #9aa3b2;
   --vl-defect: #dc2626;
-  --vl-review: #d97706;
+  /* Amber-700: the spec's #D97706 misses WCAG AA as 12px severity text. */
+  --vl-review: #b45309;
   --vl-advisory: #78716c;
   --vl-chip: #f5f5f4;
   --vl-shadow-floating: 0 4px 24px rgba(0, 0, 0, 0.08);
@@ -224,15 +225,37 @@
   grid-column: 2;
   grid-row: 2;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100%;
   min-width: 0;
   min-height: 0;
+  /* Keeps scene captions clear of the collapsed inspector floating bottom-right. */
+  padding-bottom: 70px;
   overflow: hidden;
   background: var(--vl-canvas);
 }
 
+/*
+ * Selection and Diagnostics float a 152px equivalent-controls panel bottom-left;
+ * reserve its band so captions and the fidelity line stay readable underneath.
+ */
+.visual-language-prototype:has(.vl-equivalent-controls) .vl-prototype__scenes {
+  padding-bottom: 184px;
+}
+
+/* Explicit rows: the card is conditional, and auto-placement would otherwise
+   drop the viewports into the auto row and push the fidelity line out of view. */
+.visual-language-prototype .vl-guidance-card {
+  grid-row: 1;
+}
+
+.visual-language-prototype .vl-prototype__fidelity {
+  grid-row: 3;
+}
+
 .visual-language-prototype .vl-prototype__viewports {
   position: relative;
+  grid-row: 2;
   display: grid;
   min-width: 0;
   min-height: 0;
@@ -257,11 +280,12 @@
   border-right: 0;
 }
 
+/* The 280px floor belongs to the mobile band, where the scenes region scrolls;
+   applying it everywhere pushed the caption out of its viewport. */
 .visual-language-prototype .vl-scene {
   position: relative;
   width: 100%;
   height: 100%;
-  min-height: 280px;
   overflow: hidden;
   background: var(--vl-canvas);
 }
@@ -270,7 +294,6 @@
   display: block;
   width: 100%;
   height: 100%;
-  min-height: 280px;
   background: var(--vl-canvas);
 }
 
@@ -502,6 +525,13 @@
   opacity: 0.6;
 }
 
+/* Spec §11: in Route overview, other-floor legs sit at 40-50%, not the 55-65%
+   used for a future leg on the active floor. */
+.visual-language-prototype .vl-scene[data-scenario="overview"] .vl-route-casing.is-future,
+.visual-language-prototype .vl-scene[data-scenario="overview"] .vl-route-core.is-future {
+  opacity: 0.45;
+}
+
 .visual-language-prototype .vl-route-casing.is-completed,
 .visual-language-prototype .vl-route-core.is-completed {
   opacity: 0.32;
@@ -687,13 +717,17 @@
   stroke-linejoin: round;
 }
 
+/*
+ * The next-action card sits in flow above the viewports: as an overlay it buried
+ * priority labels whenever a single source scaled the model up.
+ */
 .visual-language-prototype .vl-guidance-card {
-  position: absolute;
-  z-index: 3;
-  top: 56px;
-  right: 16px;
-  width: min(248px, calc(100% - 32px));
-  padding: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+  margin: 12px 16px 0;
+  padding: 10px 14px;
   border: 1px solid var(--vl-hairline);
   border-radius: 12px;
   background: var(--vl-panel);
@@ -707,18 +741,17 @@
 }
 
 .visual-language-prototype .vl-guidance-card h2 {
-  margin-top: 4px;
-  font-size: 18px;
+  margin-right: auto;
+  font-size: 16px;
   font-weight: 600;
-  line-height: 26px;
-  text-wrap: balance;
+  line-height: 22px;
 }
 
 .visual-language-prototype .vl-guidance-card__floors {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1px;
-  margin-top: 12px;
+  flex: 0 0 auto;
   overflow: hidden;
   border: 1px solid var(--vl-hairline);
   border-radius: 8px;
@@ -745,8 +778,9 @@
 }
 
 .visual-language-prototype .vl-guidance-card__destination {
-  display: grid;
-  margin-top: 12px;
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
 }
 
 .visual-language-prototype .vl-guidance-card__destination strong {
@@ -756,7 +790,6 @@
 }
 
 .visual-language-prototype .vl-guidance-card__distance {
-  margin-top: 8px;
   color: var(--vl-muted);
   font-family: "IBM Plex Mono", monospace;
   font-size: 12px;
@@ -780,7 +813,8 @@
   grid-row: 2;
   align-self: end;
   justify-self: start;
-  width: min(560px, calc(100% - 32px));
+  /* 384px keeps the bottom-right inspector clear at every desktop width. */
+  width: min(560px, calc(100% - 384px));
   max-height: 152px;
   margin: 16px;
   padding: 12px;
@@ -988,6 +1022,13 @@
     overflow: visible;
   }
 
+  /* The region scrolls here, so every row is content-sized instead of fitting
+     the viewport; a fixed 1fr row would let the scenes paint over the note. */
+  .visual-language-prototype .vl-prototype__scenes,
+  .visual-language-prototype .vl-scenes {
+    grid-template-rows: auto auto auto;
+  }
+
   .visual-language-prototype .vl-prototype__viewports--compare {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: repeat(2, minmax(280px, 1fr));
@@ -1009,9 +1050,33 @@
     height: 100%;
   }
 
+  /* Small screens stack the card's fields instead of running them in one bar. */
   .visual-language-prototype .vl-guidance-card {
-    top: 56px;
-    right: 12px;
+    display: block;
+    margin: 12px;
+    padding: 10px 12px;
+  }
+
+  .visual-language-prototype .vl-guidance-card h2 {
+    margin-top: 2px;
+    font-size: 15px;
+    line-height: 20px;
+  }
+
+  .visual-language-prototype .vl-guidance-card__floors {
+    margin-top: 8px;
+  }
+
+  .visual-language-prototype .vl-guidance-card__floors div {
+    padding: 4px 8px;
+  }
+
+  .visual-language-prototype .vl-guidance-card__destination {
+    margin-top: 8px;
+  }
+
+  .visual-language-prototype .vl-guidance-card__distance {
+    margin-top: 4px;
   }
 
   .visual-language-prototype .vl-equivalent-controls,
@@ -1031,6 +1096,11 @@
     width: min(320px, calc(100% - 24px));
     max-height: calc(100% - 24px);
     margin: 12px;
+  }
+
+  /* Both panels dock bottom-left here, so lift the inspector above the list. */
+  .visual-language-prototype:has(.vl-equivalent-controls) .vl-inspector {
+    margin-bottom: 156px;
   }
 
   .visual-language-prototype .vl-fallback-notice {
@@ -1093,9 +1163,7 @@
   }
 
   .visual-language-prototype .vl-guidance-card {
-    top: 48px;
-    right: 8px;
-    width: calc(100% - 16px);
+    margin: 8px;
   }
 
   .visual-language-prototype .vl-equivalent-controls__list {
