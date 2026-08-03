@@ -116,6 +116,16 @@ and re-derivation when the format changes.
 `renderingMode: "3d"`, which supplies projection matrices and shares MapLibre's
 depth buffer.
 
+> **Correction from the spike (2026-08-03).** The renderer must consume
+> `options.defaultProjectionData.mainMatrix`, which takes mercator `[0, 1]`
+> coordinates. `options.modelViewProjectionMatrix` — whose doc comment reads
+> "world space to clip space" — takes mercator **× worldSize** (pixel)
+> coordinates instead. Measured on the Tokyo asset: feeding the frame origin to
+> `mainMatrix` yields NDC x = 0 with the camera centred on it, while
+> `modelViewProjectionMatrix` yields NDC x = −4.88, placing the venue about 1.1
+> mercator units off-screen. See
+> `docs/superpowers/reports/2026-08-03-3d-rendering-spike-report.md`.
+
 Decision D2 removed most of the reason to take a rendering library. What the
 layer actually draws:
 
