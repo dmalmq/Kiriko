@@ -20,3 +20,9 @@ core/crates/kiriko-wasm/pkg/
 # so these must stay out of the project root's tracked surface.
 /graphify-out/
 /penpot design/
+
+# Derived spike scenes (reproducible via kiriko-scene example derive_tiles)
+public/spike/
+
+# Gate 7 registration scratch (analysis script, intermediate GeoJSON)
+.diag/

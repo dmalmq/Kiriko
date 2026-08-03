@@ -1,0 +1,219 @@
+/* Renderer spike shell (3D rendering spike Task 7). Disposable spike CSS:
+ * producer diagnostics, English-only, never ships. */
+
+.spike-shell {
+  position: fixed;
+  inset: 0;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  color: #d7dde7;
+  background: #0b0e13;
+}
+
+.spike-map {
+  position: absolute;
+  inset: 0;
+}
+
+/* ------------------------------------------------------------------ HUD -- */
+.spike-hud {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  width: 340px;
+  max-width: calc(100vw - 24px);
+  box-sizing: border-box;
+  padding: 12px 14px;
+  background: rgba(10, 14, 20, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.spike-hud h1 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #9fd0ff;
+}
+
+.spike-hud dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 16px;
+}
+
+.spike-hud dt {
+  color: #8b95a5;
+  white-space: nowrap;
+}
+
+.spike-hud dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.spike-hud__center {
+  grid-column: 1 / -1;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 4px;
+  margin-top: 2px;
+}
+
+.spike-hud__status {
+  margin: 8px 0 0;
+  color: #8b95a5;
+}
+
+.spike-hud__status--error {
+  color: #ff9b9b;
+}
+
+/* ------------------------------------------------------------ controls --- */
+.spike-controls {
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  background: rgba(10, 14, 20, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  font-size: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.spike-controls__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #8b95a5;
+}
+
+.spike-controls select {
+  max-width: 300px;
+  color: #d7dde7;
+  background: #161c26;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font: inherit;
+}
+
+.spike-controls select:disabled,
+.spike-controls button:disabled {
+  opacity: 0.45;
+}
+
+.spike-controls__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #d7dde7;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.spike-controls button {
+  color: #d7dde7;
+  background: #1c2431;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.spike-controls button:not(:disabled):hover {
+  background: #26303f;
+}
+
+/* ---------------------------------------------------------------- pick --- */
+.spike-pick {
+  position: fixed;
+  bottom: 12px;
+  right: 12px;
+  z-index: 10;
+  box-sizing: border-box;
+  min-width: 240px;
+  max-width: 360px;
+  padding: 10px 12px;
+  background: rgba(10, 14, 20, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.spike-pick h2 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #9fd0ff;
+}
+
+.spike-pick dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+}
+
+.spike-pick dt {
+  color: #8b95a5;
+}
+
+.spike-pick dd {
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.spike-pick__empty {
+  margin: 0;
+  color: #6d7685;
+}
+
+.spike-pick__selected {
+  margin: 8px 0 0;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  color: #9fe8b3;
+  overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------- reduced motion */
+.spike-shell.is-reduced-motion *,
+.spike-shell.is-reduced-motion *::before,
+.spike-shell.is-reduced-motion *::after {
+  transition-duration: 0.001ms !important;
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spike-shell *,
+  .spike-shell *::before,
+  .spike-shell *::after {
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

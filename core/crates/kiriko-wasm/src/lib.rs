@@ -690,3 +690,108 @@ mod tests {
         assert!(!has_routable_graph(&document));
     }
 }
+
+// -- Scene decode (3D rendering spike Task 4) ------------------------------
+
+/// Decoded scene split into a JSON description plus one packed payload.
+/// The payload concatenates, per batch in order: positions (u16 x3), normals
+/// (i16 x2), feature indices (u32). The JSON carries byte offsets so the
+/// client can build typed-array views without re-parsing geometry.
+#[wasm_bindgen]
+pub struct DecodedScene {
+    meta: String,
+    payload: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl DecodedScene {
+    #[wasm_bindgen(getter)]
+    pub fn meta(&self) -> String {
+        self.meta.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn payload(&self) -> Vec<u8> {
+        self.payload.clone()
+    }
+}
+
+#[wasm_bindgen(js_name = "decodeScene")]
+pub fn decode_scene_js(bytes: &[u8]) -> Result<DecodedScene, JsError> {
+    let document = kiriko_scene::decode_scene(bytes)
+        .map_err(|error| JsError::new(&format!("{error}")))?;
+
+    let mut payload: Vec<u8> = Vec::new();
+    let mut batch_meta: Vec<serde_json::Value> = Vec::with_capacity(document.batches.len());
+    for batch in &document.batches {
+        let positions_offset = payload.len();
+        for position in &batch.positions {
+            for component in position {
+                payload.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        // Pad each section to a 4-byte boundary so the client can build
+        // u32-typed views from the meta offsets without re-laying the payload.
+        while payload.len() % 4 != 0 {
+            payload.push(0);
+        }
+        let normals_offset = payload.len();
+        for normal in &batch.normals {
+            for component in normal {
+                payload.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        while payload.len() % 4 != 0 {
+            payload.push(0);
+        }
+        let features_offset = payload.len();
+        for index in &batch.feature_indices {
+            payload.extend_from_slice(&index.to_le_bytes());
+        }
+        batch_meta.push(serde_json::json!({
+            "levelIndex": batch.level_index,
+            "role": format!("{:?}", batch.role),
+            "quantizationOrigin": batch.quantization_origin,
+            "quantizationScale": batch.quantization_scale,
+            "vertexCount": batch.vertex_count,
+            "positionsOffset": positions_offset,
+            "normalsOffset": normals_offset,
+            "featureIndicesOffset": features_offset,
+        }));
+    }
+
+    let meta = serde_json::json!({
+        "header": {
+            "formatVersion": document.header.format_version,
+            "deriverVersion": document.header.deriver_version,
+            "sourceHash": document.header.source_hash,
+            "frameOriginEcef": document.header.frame_origin_ecef,
+            "worldTransform": document.header.world_transform,
+            "boundsMin": document.header.bounds_min,
+            "boundsMax": document.header.bounds_max,
+        },
+        "levels": document.levels.iter().map(|level| serde_json::json!({
+            "canonicalId": level.canonical_id,
+            "sourceLevelKey": level.source_level_key,
+            "sourceLevelName": level.source_level_name,
+            "sourceElevationMeters": level.source_elevation_meters,
+            "resolvedPlaneZ": level.resolved_plane_z,
+            "quantizedElevationDm": level.quantized_elevation_dm,
+        })).collect::<Vec<_>>(),
+        "features": document.features.iter().map(|feature| serde_json::json!({
+            "sourceObjectId": feature.source_object_id,
+            "canonicalId": feature.canonical_id,
+            "levelIndex": feature.level_index,
+            "role": format!("{:?}", feature.role),
+            "occlusion": format!("{:?}", feature.occlusion),
+            "minZ": feature.min_z,
+            "maxZ": feature.max_z,
+        })).collect::<Vec<_>>(),
+        "batches": batch_meta,
+    });
+
+    Ok(DecodedScene {
+        meta: serde_json::to_string(&meta).map_err(|error| JsError::new(&format!("{error}")))?,
+        payload,
+    })
+}

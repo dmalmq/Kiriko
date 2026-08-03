@@ -810,6 +810,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiriko-scene"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "zstd",
+]
+
+[[package]]
 name = "kiriko-wasm"
 version = "0.1.0"
 dependencies = [
@@ -817,6 +829,7 @@ dependencies = [
  "kiriko-facilities",
  "kiriko-model",
  "kiriko-route",
+ "kiriko-scene",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

@@ -20,6 +20,7 @@ kiriko-model = { path = "../kiriko-model" }
 kiriko-bundle = { path = "../kiriko-bundle" }
 kiriko-route = { path = "../kiriko-route" }
 kiriko-facilities = { path = "../kiriko-facilities" }
+kiriko-scene = { path = "../kiriko-scene" }
 wasm-bindgen = { workspace = true }
 serde-wasm-bindgen = { workspace = true }
 serde = { workspace = true }

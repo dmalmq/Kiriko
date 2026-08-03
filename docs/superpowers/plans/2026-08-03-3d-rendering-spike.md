@@ -308,8 +308,10 @@ pub struct SceneFeature {
     pub max_z: f32,
 }
 
-/// Merged geometry for one `(level, role)` pair. Vertices are triangle-list
-/// order; no index buffer, because the source indexes 1:1 with vertices.
+/// Merged geometry for one `(level, role)` pair. Vertices are stored in
+/// triangle-list order with no index buffer: the deriver resolves each source
+/// primitive's indices into that order (see Task 2), so an exporter that emits
+/// a real permutation stays correct.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneBatch {
     pub level_index: u32,
@@ -631,6 +633,33 @@ fn rejects_non_glb_input() {
 }
 ```
 
+Then add one more test covering the index path. Extend `synthetic_glb()` with a
+parameter `indices: Option<&[u32]>`; when present append the indices to the BIN
+chunk, add a `bufferView` and an `accessor` (`componentType` `5125`,
+`type` `"SCALAR"`), and set `"indices"` on the first primitive. Keep the existing
+call sites working by adding `fn synthetic_glb() -> Vec<u8>` as a thin wrapper
+over `synthetic_glb_with(None)`.
+
+```rust
+#[test]
+fn resolves_non_identity_indices_into_triangle_order() {
+    // Reversed index buffer over the first primitive's three vertices.
+    let scene = read_glb(&synthetic_glb_with(Some(&[2, 1, 0]))).expect("read glb");
+    let first = &scene.primitives[0];
+    assert!(!first.indices_were_identity);
+    // Source vertex 2 is (0,1,0); after the gather it must come first.
+    assert_eq!(first.positions[0], [0.0, 1.0, 0.0]);
+    assert_eq!(first.positions[2], [0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn identity_indices_take_the_fast_path() {
+    let scene = read_glb(&synthetic_glb_with(Some(&[0, 1, 2]))).expect("read glb");
+    assert!(scene.primitives[0].indices_were_identity);
+    assert_eq!(scene.primitives[0].positions[0], [0.0, 0.0, 0.0]);
+}
+```
+
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test --manifest-path core/Cargo.toml -p kiriko-scene --test derive`
@@ -644,6 +673,7 @@ Required behaviors, each load-bearing:
 
 - Container: reject when magic is not `glTF`, version is not `2`, or a chunk length exceeds the remaining buffer. Error text must contain `glb`.
 - Accessor reads: support `componentType` `5126` (f32) for `VEC3`, and `5125` (u32) / `5123` (u16) / `5121` (u8) for `SCALAR` feature ids. Honor `bufferView.byteOffset`, `accessor.byteOffset`, and `bufferView.byteStride` when present (default to tightly packed).
+- Indices: when a primitive has `indices`, read them (`5125` u32 / `5123` u16 / `5121` u8). **Verified against the real Tokyo asset:** all sampled primitives carry identity indices (`0..n-1`) with `count == POSITION count`, so the fast path is a direct copy. Detect that case and skip the gather; otherwise gather `positions[indices[i]]` and `normals[indices[i]]` into triangle-list order. Never ignore a non-identity index buffer — silently dropping it scrambles triangles. Expose the outcome as `GlbPrimitive::indices_were_identity: bool` so the deriver can report how many primitives needed a gather.
 - Per-primitive feature id: read the first element of `_FEATURE_ID_0`. The measured asset holds one constant id per primitive; assert that by checking the accessor's `min`/`max` when both are present and returning `SceneError::Glb` if they differ, so a future non-constant asset fails loudly instead of rendering wrong picks.
 - Property table: for `STRING` properties read `values` plus `stringOffsets` (u32 offsets, `count + 1` entries) and slice UTF-8; for `SCALAR`/`FLOAT32` read f32; treat a missing property as an empty string or `0.0`.
 - Read exactly these property names when present: `revitUniqueId`, `category`, `levelKey`, `levelName`, `levelElevationMeters`, `minZMeters`, `maxZMeters`, `sourceDocument`, `sourceLinkName`.
@@ -686,7 +716,7 @@ In `core/crates/kiriko-scene/src/lib.rs` add `mod glb;` and
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cargo test --manifest-path core/Cargo.toml -p kiriko-scene`
-Expected: PASS — 7 tests.
+Expected: PASS — 9 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -851,7 +881,7 @@ Create `core/crates/kiriko-scene/src/derive.rs`. Behavior, in order:
 1. `read_glb(glb)`.
 2. Parse `levels_json` into level records (`levelKey`, `levelName`, `levelElevationMeters`, `minZMeters`, `maxZMeters`). Build a `HashMap<String, usize>` from `levelKey` to level index. `quantized_elevation_dm = (level_elevation_meters * 10.0).round() as i32`. `resolved_plane_z` = `minZMeters` from the level record, because tile surfaces are placement authority and `levelElevationMeters` is provenance (issue #31).
 3. Build `SceneFeature` rows from `GlbFeatureRow` in property-table order: `role = role_for_category(&row.category)`, `occlusion = occlusion_for_role(role)`, `level_index` from the `levelKey` map (features whose key is absent get a synthesized level appended with `canonical_id = format!("level-unmapped-{key}")` so nothing is silently dropped), `canonical_id = None` — canonical association is issue #30's ingestion concern, not the deriver's, `confidence = 255` for source-authored geometry.
-4. Group primitives by `(level_index, role)` of their feature. For each group concatenate positions and normals in triangle-list order, recording each vertex's feature index.
+4. Group primitives by `(level_index, role)` of their feature. For each group concatenate the primitives' already-de-indexed positions and normals (Task 2 resolved index buffers into triangle-list order), recording each vertex's feature index. Count how many primitives reported `indices_were_identity == false` and surface that count so the CLI can report it.
 5. Per group call `quantize_positions`, `encode_normal_oct` per normal, and emit one `SceneBatch`.
 6. `bounds_min`/`bounds_max` from all positions before quantization. `frame_origin_ecef` = the last column of `world_transform` (`[world_transform[12], world_transform[13], world_transform[14]]`).
 7. Return the `SceneDocument`.
@@ -864,7 +894,7 @@ In `core/crates/kiriko-scene/src/lib.rs` add `mod derive;` and `mod roles;` plus
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cargo test --manifest-path core/Cargo.toml -p kiriko-scene`
-Expected: PASS — 10 tests.
+Expected: PASS — 12 tests.
 
 - [ ] **Step 7: Write the measurement CLI**
 
@@ -1195,7 +1225,20 @@ Create `src/spikes/renderer/sceneLayer.ts`. Required behavior:
 - `id`, `type: "custom"`, `renderingMode: "3d"`.
 - `onAdd(map, gl)`: compile the surface program, upload one VBO per batch (interleave is unnecessary — three separate buffers per batch is fine for the spike), create one VAO per batch, create the feature-state texture, create the pick framebuffer with two color attachments (`RGBA8` for feature ID, `RGBA32F` for view-space position) plus a depth attachment, sized to the drawing buffer.
 - `render(gl, args)`: save GL state, then for each batch whose level is visible under the current active-level policy, bind its VAO and draw `TRIANGLES`. Restore GL state before returning.
-- **Precision (gate 5):** never upload absolute ECEF or mercator coordinates. Per frame compute `modelMatrix = mercatorMatrix(frameOrigin) * scale(quantizationScale) * translate(quantizationOrigin)` in double precision on the CPU, then downcast the final matrix to `Float32Array` for the uniform. Positions stay `u16` in the vertex buffer and are expanded in the shader as `origin + float(position) * scale`.
+- **Precision (gate 5):** never upload absolute ECEF or mercator coordinates, and never let a `Float32Array` hold a value derived from an un-offset ECEF component. Verified API for MapLibre 5.24: `render(gl, options)` receives `options.modelViewProjectionMatrix` (world → clip), and `MercatorCoordinate.meterInMercatorCoordinateUnits()` supplies the metre scale. Compose in this exact order:
+
+  **Once on load, in `f64`:**
+  1. Convert `header.frameOriginEcef` to geodetic `(lon0, lat0, alt0)` (WGS84, `f = 1/298.257223563`). Expected values — assert against them in the HUD: Tokyo `139.764457, 35.678519, 123.36 m`; Shinjuku `139.697031, 35.690503, 84.20 m`; LumineEst `139.701206, 35.691432, 85.53 m`.
+  2. Build the ECEF → ENU rotation at that origin:
+     `R = [[-sin λ, cos λ, 0], [-sin φ cos λ, -sin φ sin λ, cos φ], [cos φ cos λ, cos φ sin λ, sin φ]]` with `λ = lon0`, `φ = lat0`.
+  3. Fold the tileset transform in: `header.worldTransform` is column-major model → ECEF. `M_model_to_enu` has rotation `R * rotation(worldTransform)` and translation `R * (translation(worldTransform) − frameOriginEcef)`, which is `[0,0,0]` when the origin is the transform's own translation. Keep every element in `f64` until step 5.
+
+  **Per frame, in `f32`:**
+  4. `origin = MercatorCoordinate.fromLngLat({ lng: lon0, lat: lat0 }, alt0)`; `s = origin.meterInMercatorCoordinateUnits()`.
+  5. `modelMatrix = translate(origin.x, origin.y, origin.z) · scale(s, −s, s) · M_model_to_enu` — the negative Y scale is required because mercator Y increases southward while ENU north increases northward. Downcast only this final product to `Float32Array`.
+  6. `u_matrix = options.modelViewProjectionMatrix · modelMatrix · translate(quantizationOrigin) · scale(quantizationScale)`, uploaded per batch.
+
+  Positions stay `u16` in the vertex buffer and expand in the shader as `origin + float(position) * scale`; the batch-local quantization terms fold into `u_matrix` above so the shader never sees a large magnitude.
 - **Floor filtering (gate 6):** visibility is per feature via the state texture, not per batch — the active level renders opaque, other levels render at context opacity only when the policy asks for it, and features whose `occlusion` is `ProtectedCorridor` fade to `0.15` when the active level is below them. Batches are still skipped wholesale when no feature in them is visible, to keep the draw-call count honest.
 - Vertex shader outline:
 
@@ -1364,7 +1407,7 @@ Create `src/spikes/renderer/measure.ts`. `createFrameMeter` keeps a ring buffer 
 
 Create `src/spikes/renderer/RendererSpike.tsx`. It must:
 
-- Create one MapLibre map with `maxPitch: 60`, a plain raster basemap style, centered on the scene's frame origin converted to lng/lat.
+- Create one MapLibre map with `maxPitch: 60`, a plain raster basemap style, centered on the scene's frame origin converted to lng/lat by the same routine Task 5 step 1 uses. Expected centers: Tokyo `139.764457, 35.678519`; Shinjuku `139.697031, 35.690503`; LumineEst `139.701206, 35.691432`. Note the origin is the model's corner, not a ground point — Tokyo's origin sits at `123.36 m` altitude with geometry extending well below it — so do not treat the origin altitude as terrain.
 - Load a `.kscene` via `fetch` from a URL supplied by `?scene=` (default `/spike/tokyo.kscene`), timing decode and GPU upload with `measureOnce`.
 - Add the custom layer, and expose native controls (plain HTML, no bilingual requirement): active-level select built from `scene.levels`, a "show all levels" toggle, a reduced-motion checkbox, a pick-mode readout, and a "simulate context loss" button that calls `WEBGL_lose_context.loseContext()`.
 - Drive a `FrameMeter` from `map.on("render")` deltas, and display `p50`/`p95`, draw calls, visible batches, decode ms, upload ms, feature count, and level count in a fixed HUD.
