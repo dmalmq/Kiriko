@@ -119,6 +119,20 @@ pub fn derive_scene_with_report(
                 index
             }
         };
+
+        // `levels.json` carries no document provenance, but issue #30's composite
+        // level identity is `asset version + sourceDocument + sourceLinkName +
+        // levelKey + quantized elevation`. Backfill those two fields from the
+        // first feature that maps to the level, so mapped levels carry the same
+        // identity the synthesized ones already do.
+        if let Some(level) = levels.get_mut(level_index) {
+            if level.source_document.is_empty() {
+                level.source_document = row.source_document.clone();
+            }
+            if level.source_link_name.is_empty() {
+                level.source_link_name = row.source_link_name.clone();
+            }
+        }
         features.push(SceneFeature {
             source_object_id: row.revit_unique_id.clone(),
             // Canonical association is issue #30's ingestion concern.
