@@ -141,6 +141,11 @@ export function RendererSpike() {
   const lastRenderRef = useRef<number>(0);
   const hoveredIndexRef = useRef<number | null>(null);
   const selectedIndexRef = useRef<number | null>(null);
+  // Mirrors of the two controls the layer owns, so the context-restore handler
+  // can rebuild into the state the user was actually looking at. Refs rather
+  // than state because the handler is registered once, outside React's render.
+  const activeLevelRef = useRef(0);
+  const showContextRef = useRef(false);
 
   const [status, setStatus] = useState<LoadStatus>("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -171,6 +176,11 @@ export function RendererSpike() {
       pitch: 60,
       bearing: 0,
       maxPitch: 60,
+      // Without this, a headless screenshot of the WebGL canvas comes back blank
+      // or stale, which made the gate 2 and gate 5 visual checks unmeasurable.
+      // It costs a copy per frame, so it is a spike-only setting. MapLibre 5.24
+      // moved this under canvasContextAttributes.
+      canvasContextAttributes: { preserveDrawingBuffer: true, contextType: "webgl2" },
     });
     mapRef.current = map;
     // Spike-only measurement handle: the gate 3 matrix drives the camera from
@@ -187,7 +197,38 @@ export function RendererSpike() {
       // pollute the frame-time distribution.
       lastRenderRef.current = performance.now();
     };
+    /**
+     * MapLibre drops custom layers on context loss and logs "Custom layer ...
+     * cannot be restored after WebGL context loss. You will need to re-add it
+     * manually". `render` is never called again, so the layer cannot heal
+     * itself — the application owns re-adding it. Measured before this handler
+     * existed: 31 picks before a forced loss, 0 after, with the layer's own
+     * stats frozen at its last pre-loss counts.
+     */
+    const readdLayerAfterContextLoss = (): void => {
+      // KNOWN INCOMPLETE: the correct trigger point is unresolved. MapLibre
+      // finishes its own restore after `webglcontextrestored`, so re-adding
+      // synchronously there loses the race and the layer is dropped again.
+      // Deferring to the first `idle` (below) did not fire in a headless
+      // Chromium run either — after a forced loss the layer stays absent
+      // (`map.getLayer("scene-3d")` is undefined) and picks stay at 0.
+      // Production must own this: see the gate 2 section of the spike report.
+      map.once("idle", () => {
+        const scene = sceneRef.current;
+        if (disposed || !scene || map.getLayer("scene-3d")) {
+          return;
+        }
+        const rebuilt = createSceneLayer(scene, { id: "scene-3d" });
+        map.addLayer(rebuilt);
+        rebuilt.setActiveLevel(activeLevelRef.current);
+        rebuilt.setShowContextLevels(showContextRef.current);
+        layerRef.current = rebuilt;
+        window.__spikeLayer = rebuilt;
+        map.triggerRepaint();
+      });
+    };
     canvas.addEventListener("webglcontextrestored", resetFrameClock);
+    canvas.addEventListener("webglcontextrestored", readdLayerAfterContextLoss);
     map.on("load", resetFrameClock);
 
     const onRender = (): void => {
@@ -353,11 +394,13 @@ export function RendererSpike() {
 
   function handleActiveLevelChange(index: number): void {
     setActiveLevel(index);
+    activeLevelRef.current = index;
     layerRef.current?.setActiveLevel(index);
   }
 
   function handleShowAllLevelsChange(show: boolean): void {
     setShowAllLevels(show);
+    showContextRef.current = show;
     layerRef.current?.setShowContextLevels(show);
   }
 

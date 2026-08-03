@@ -685,7 +685,19 @@ class SceneLayerImpl implements SceneLayer {
 
   render(gl: WebGLRenderingContext | WebGL2RenderingContext, options: CustomRenderMethodInput): void {
     const gl2 = assertWebGL2(gl);
-    if (this._contextLost || !this._program || !this._stateTex) {
+    // After a lost/restored cycle MapLibre may hand the layer a different context
+    // than the one captured in onAdd. Rebuilding against the retained (dead)
+    // context silently no-ops: draw calls are still counted, but nothing renders
+    // and every pick misses. Measured on Tokyo: 31 picks before a forced loss,
+    // 0 after, with stats() still reporting 5 draw calls. Detect the swap here,
+    // where the live context is authoritative, rather than trusting the event.
+    if (gl2 !== this._gl || this._contextLost) {
+      this._gl = gl2;
+      this._buildResources(gl2);
+      this._uploadStateTexture();
+      this._contextLost = false;
+    }
+    if (!this._program || !this._stateTex) {
       return;
     }
     const state = saveGlState(gl2);
@@ -930,13 +942,11 @@ class SceneLayerImpl implements SceneLayer {
   };
 
   private _onContextRestored = (): void => {
-    const gl = this._gl;
-    if (!gl) {
-      return;
-    }
-    this._buildResources(gl); // rebuild every GL object from the retained scene
-    this._uploadStateTexture();
-    this._contextLost = false;
+    // Deliberately does not rebuild here: at this point the live context is not
+    // yet known, and rebuilding against the retained one is exactly the bug this
+    // avoids. `render` rebuilds when MapLibre hands over the live context, which
+    // is the only authoritative source.
+    this._map?.triggerRepaint();
   };
 
   private _onResize = (): void => {
