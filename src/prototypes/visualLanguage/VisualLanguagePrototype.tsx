@@ -23,6 +23,22 @@ const SELECTABLE_OBJECTS = [
   ["opening-b1-west", "opening"],
 ] as const satisfies readonly (readonly [string, keyof typeof COPY])[];
 
+const ADDITIONAL_SELECTABLE_OBJECTS = [
+  ["b1-walkable", { en: "Walkable area · B1", ja: "歩行可能エリア・B1" }],
+  ["b1-service", { en: "Service area · B1", ja: "サービスエリア・B1" }],
+  ["b1-public", { en: "Public area · B1", ja: "公共エリア・B1" }],
+  ["fixture-ticket-a", { en: "Ticket fixture A", ja: "券売設備 A" }],
+  ["fixture-ticket-b", { en: "Ticket fixture B", ja: "券売設備 B" }],
+  ["fixture-kiosk", { en: "Kiosk", ja: "キオスク" }],
+] as const satisfies readonly (readonly [string, LocalizedText])[];
+
+const SELECTABLE_OBJECT_OPTIONS: readonly (readonly [string, LocalizedText])[] = [
+  ...SELECTABLE_OBJECTS.map(
+    ([id, copyKey]) => [id, COPY[copyKey]] as const,
+  ),
+  ...ADDITIONAL_SELECTABLE_OBJECTS,
+];
+
 const FIDELITY_DISCLOSURE = {
   en: "Same semantic style. Different source geometry and provenance.",
   ja: "同じセマンティックスタイルで、ソース形状と来歴のみが異なります。",
@@ -101,12 +117,6 @@ function inspectorValue(
   }
 }
 
-function canonicalSelectionId(sourceKind: SceneSourceKind, id: string): string {
-  const primitive = VISUAL_LANGUAGE_FIXTURE.sources[sourceKind].primitives.find(
-    (candidate) => candidate.id === id,
-  );
-  return primitive?.canonicalId ?? id;
-}
 
 function sceneLayoutClass(sourceCount: number): string {
   return sourceCount === 2
@@ -167,7 +177,7 @@ export function VisualLanguagePrototype() {
                 sourceMaterialInspection={state.sourceMaterialInspection}
                 reducedMotion={state.reducedMotion}
                 onSelectObject={(id) => {
-                  actions.selectObject(canonicalSelectionId(sourceKind, id));
+                  actions.selectObject(id);
                 }}
               />
               {state.fallbackPhase === "veil" ? (
@@ -217,7 +227,7 @@ export function VisualLanguagePrototype() {
         >
           <h2 id="vl-selectable-objects-heading">{SHELL_COPY.selectableObjects[locale]}</h2>
           <ul className="vl-equivalent-controls__list">
-            {SELECTABLE_OBJECTS.map(([id, copyKey]) => {
+            {SELECTABLE_OBJECT_OPTIONS.map(([id, label]) => {
               const selected = state.selectedId === id;
               return (
                 <li key={id}>
@@ -229,12 +239,12 @@ export function VisualLanguagePrototype() {
                         : "vl-equivalent-controls__button"
                     }
                     aria-pressed={selected}
-                    aria-label={`${SHELL_COPY.selectObject[locale]}: ${COPY[copyKey][locale]}`}
+                    aria-label={`${SHELL_COPY.selectObject[locale]}: ${label[locale]}`}
                     onClick={() => {
                       actions.selectObject(id);
                     }}
                   >
-                    {COPY[copyKey][locale]}
+                    {label[locale]}
                   </button>
                 </li>
               );
