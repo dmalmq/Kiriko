@@ -802,27 +802,39 @@ class SceneLayerImpl implements SceneLayer {
       this._bindSharedUniforms(gl, 1, frame.near, frame.far);
       this._drawVisibleBatches(gl);
 
+      // With MRT, `readPixels` always samples the buffer named by `readBuffer`.
+      // Without these two calls the second read re-samples attachment 0 and the
+      // "position" is really the packed feature-id colour.
+      gl.readBuffer(gl.COLOR_ATTACHMENT0);
       const idPixel = new Uint8Array(4);
       gl.readPixels(px, readY, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, idPixel);
       const featureIndex = decodeFeatureId(idPixel);
       if (featureIndex >= 0) {
-        let viewPos: [number, number, number];
+        gl.readBuffer(gl.COLOR_ATTACHMENT1);
         if (this._pickPath === "rgba32f") {
-          const floatPixel = new Float32Array(4);
-          gl.readPixels(px, readY, 1, 1, gl.RGBA, gl.FLOAT, floatPixel);
-          viewPos = [floatPixel[0] ?? 0, floatPixel[1] ?? 0, floatPixel[2] ?? 0];
+          // Float path: attachment 1 already holds venue-local metres, so no
+          // view-space inverse is involved.
+          const localPixel = new Float32Array(4);
+          gl.readPixels(px, readY, 1, 1, gl.RGBA, gl.FLOAT, localPixel);
+          result = {
+            featureIndex,
+            world: [localPixel[0] ?? 0, localPixel[1] ?? 0, localPixel[2] ?? 0],
+          };
         } else {
+          // Degraded path: only depth survives RGBA8, so the position is
+          // reconstructed through view space and then back into local metres.
           const depthPixel = new Uint8Array(4);
           gl.readPixels(px, readY, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, depthPixel);
           const t = decodeFloat01(depthPixel);
           const viewZ = -(frame.near + t * (frame.far - frame.near));
-          viewPos = unprojectPixel(px, readY, width, height, viewZ, frame.projection);
+          const viewPos = unprojectPixel(px, readY, width, height, viewZ, frame.projection);
+          const inv = frame.modelViewInverse;
+          const mx = inv[0]! * viewPos[0] + inv[4]! * viewPos[1] + inv[8]! * viewPos[2] + inv[12]!;
+          const my = inv[1]! * viewPos[0] + inv[5]! * viewPos[1] + inv[9]! * viewPos[2] + inv[13]!;
+          const mz = inv[2]! * viewPos[0] + inv[6]! * viewPos[1] + inv[10]! * viewPos[2] + inv[14]!;
+          const local = this._mercatorToLocal([mx, my, mz]);
+          result = { featureIndex, world: local };
         }
-        const inv = frame.modelViewInverse;
-        const wx = inv[0]! * viewPos[0] + inv[4]! * viewPos[1] + inv[8]! * viewPos[2] + inv[12]!;
-        const wy = inv[1]! * viewPos[0] + inv[5]! * viewPos[1] + inv[9]! * viewPos[2] + inv[13]!;
-        const wz = inv[2]! * viewPos[0] + inv[6]! * viewPos[1] + inv[10]! * viewPos[2] + inv[14]!;
-        result = { featureIndex, world: [wx, wy, wz] };
       }
     } finally {
       gl.drawBuffers([gl.BACK]);
@@ -831,6 +843,23 @@ class SceneLayerImpl implements SceneLayer {
     return result;
   }
 
+
+  /**
+   * Degraded-path helper: mercator world → venue-local metres, via the inverse
+   * of the composed model matrix. Only the RGBA8 fallback needs this; the float
+   * path reads local metres straight out of attachment 1.
+   */
+  private _mercatorToLocal(
+    mercator: readonly [number, number, number],
+  ): [number, number, number] {
+    const inv = mat4Inverse(this._modelMatrix);
+    const [x, y, z] = mercator;
+    return [
+      (inv[0] ?? 0) * x + (inv[4] ?? 0) * y + (inv[8] ?? 0) * z + (inv[12] ?? 0),
+      (inv[1] ?? 0) * x + (inv[5] ?? 0) * y + (inv[9] ?? 0) * z + (inv[13] ?? 0),
+      (inv[2] ?? 0) * x + (inv[6] ?? 0) * y + (inv[10] ?? 0) * z + (inv[14] ?? 0),
+    ];
+  }
   /**
    * Spike-only diagnostic: project a local scene point through the exact
    * matrices the draw path uses and report the result in clip and NDC space,
