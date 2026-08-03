@@ -13,7 +13,7 @@ import {
   type PrototypeLocale,
   type SceneSourceKind,
 } from "./visualLanguage";
-import "./visualLanguage.css";
+import "./visualLanguagePrototype.css";
 
 const SELECTABLE_OBJECTS = [
   ["escalator-b1-1f", "selectedEscalator"],
@@ -140,7 +140,15 @@ export function VisualLanguagePrototype() {
   );
 
   return (
-    <main className="vl-prototype" lang={locale}>
+    <main
+      className={
+        state.reducedMotion
+          ? "visual-language-prototype vl-prototype is-reduced-motion"
+          : "visual-language-prototype vl-prototype"
+      }
+      data-handoff-phase={currentPhase.id}
+      lang={locale}
+    >
       <div className="sr-only" aria-live="polite" aria-atomic="true">
         {liveMessage}
       </div>
@@ -161,7 +169,7 @@ export function VisualLanguagePrototype() {
         </section>
       ) : null}
 
-      <section className="vl-prototype__scenes" aria-label={SHELL_COPY.scenes[locale]}>
+      <section className="vl-prototype__scenes vl-scenes" aria-label={SHELL_COPY.scenes[locale]}>
         <div className={sceneLayoutClass(visibleSources.length)}>
           {visibleSources.map((sourceKind) => (
             <div className="vl-prototype__viewport" key={sourceKind}>
@@ -235,8 +243,8 @@ export function VisualLanguagePrototype() {
                     type="button"
                     className={
                       selected
-                        ? "vl-equivalent-controls__button vl-equivalent-controls__button--selected"
-                        : "vl-equivalent-controls__button"
+                        ? "vl-object-button vl-equivalent-controls__button vl-equivalent-controls__button--selected"
+                        : "vl-object-button vl-equivalent-controls__button"
                     }
                     aria-pressed={selected}
                     aria-label={`${SHELL_COPY.selectObject[locale]}: ${label[locale]}`}
@@ -268,8 +276,8 @@ export function VisualLanguagePrototype() {
                     type="button"
                     className={
                       selected
-                        ? "vl-equivalent-controls__button vl-equivalent-controls__button--selected"
-                        : "vl-equivalent-controls__button"
+                        ? "vl-object-button vl-equivalent-controls__button vl-equivalent-controls__button--selected"
+                        : "vl-object-button vl-equivalent-controls__button"
                     }
                     aria-pressed={selected}
                     aria-label={`${SHELL_COPY.selectFinding[locale]}: ${COPY[finding.severity][locale]} — ${finding.summary[locale]}`}
