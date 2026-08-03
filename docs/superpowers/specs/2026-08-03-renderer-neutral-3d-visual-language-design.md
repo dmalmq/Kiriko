@@ -99,8 +99,14 @@ default; opacity is a state treatment, not a source-fidelity signal.
 | `state.selectedSoft` | `#EEF2FF` | Hover/selection fill reinforcement |
 | `state.indigo` | `#4F46E5` | Route, interaction, focus, and selection only |
 | `diagnostic.defect` | `#DC2626` | Deterministic contradiction, paired with diamond/solid pattern |
-| `diagnostic.review` | `#D97706` | Inferred/contextual review, paired with triangle/dashed pattern |
+| `diagnostic.review` | `#B45309` | Inferred/contextual review, paired with triangle/dashed pattern |
 | `diagnostic.advisory` | `#78716C` | Uncertainty/coverage, paired with circle/dotted pattern |
+
+The review amber is `#B45309` (amber-700), not the lighter `#D97706`: prototype
+verification measured `#D97706` at 3.19:1 as 12 px severity text on panel white
+and ~2.6:1 as a scene marker, failing the WCAG AA and 1.4.11 floors this design
+commits to in section 14. Hue, meaning, and the triangle/dashed pattern pairing
+are unchanged.
 
 Original Tiles materials remain provenance and may be inspected in a dedicated
 producer source-material view. They do not appear in normal navigation because
@@ -314,7 +320,7 @@ Cutaway scene:
 | State | Color | Non-color cue | Line/area cue |
 |---|---|---|---|
 | Defect | `#DC2626` | Diamond | Solid |
-| Review | `#D97706` | Triangle | Dashed |
+| Review | `#B45309` | Triangle | Dashed |
 | Advisory | `#78716C` | Circle | Dotted |
 | Accepted exception | Stone neutral | Check/outlined badge | Muted source pattern |
 | Selected finding | Existing severity plus Ai Indigo outer halo | Focus ring and synchronized panel row | Severity pattern retained |
