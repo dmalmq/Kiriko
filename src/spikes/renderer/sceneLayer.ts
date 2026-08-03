@@ -118,6 +118,14 @@ export interface SceneLayer extends CustomLayerInterface {
   pickAt(x: number, y: number): SurfacePick | null;
   /** Last-render draw statistics plus the active pick-encoding path. */
   stats(): SceneLayerStats;
+  /** Spike-only diagnostic used by the gate matrix; see implementation. */
+  debugProject(local: readonly [number, number, number]): {
+    clip: [number, number, number, number];
+    ndc: [number, number, number] | null;
+    inFrustum: boolean;
+    hasFrame: boolean;
+    translation: [number, number, number];
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +356,10 @@ in uint a_featureIndex;
 out vec3 v_normal;
 out vec4 v_state;
 out vec3 v_viewPos;
+// Venue-local metres. Issue #27's "place at this point" wants local scene
+// coordinates, not the mercator-scaled view space u_modelViewMatrix yields, so
+// the pick pass writes this straight out on the float path.
+out vec3 v_localPos;
 out float v_featureIndex;
 void main() {
   vec3 local = u_quantOrigin + a_position * u_quantScale;
@@ -357,6 +369,7 @@ void main() {
   v_normal = vec3(a_normal, 1.0 - abs(a_normal.x) - abs(a_normal.y));
   v_featureIndex = index;
   vec4 localPos = vec4(local, 1.0);
+  v_localPos = local;
   v_viewPos = (u_modelViewMatrix * localPos).xyz;
   gl_Position = u_matrix * localPos;
 }
@@ -374,12 +387,16 @@ uniform vec2 u_pickZRange;
 uniform float u_diagnosticThreshold;
 
 in vec3 v_normal;
-in vec4 v_state;
 in vec3 v_viewPos;
+in vec3 v_localPos;
+in vec4 v_state;
 in float v_featureIndex;
 
-out vec4 outColor0;
-out vec4 outColor1;
+// GLSL ES 3.0 requires explicit locations once a shader declares more than one
+// fragment output, unless EXT_blend_func_extended is enabled. Without these the
+// program fails to link on Chromium/ANGLE.
+layout(location = 0) out vec4 outColor0;
+layout(location = 1) out vec4 outColor1;
 
 // Pack a [0, 1] float into RGBA8 with ~24-bit precision (EncodeFloatRGBA).
 vec4 packFloat01(float t) {
@@ -404,11 +421,14 @@ void main() {
       255.0
     ) / 255.0;
     if (u_pickDepthEncode > 0.5) {
-      // EXT_color_buffer_float unavailable: pack view-space depth into RGBA8.
+      // EXT_color_buffer_float unavailable: pack view-space depth into RGBA8 and
+      // reconstruct an approximate position on the CPU.
       float t = (-v_viewPos.z - u_pickZRange.x) / (u_pickZRange.y - u_pickZRange.x);
       outColor1 = packFloat01(t);
     } else {
-      outColor1 = vec4(v_viewPos, 1.0);
+      // Float path: venue-local metres straight out, which is what issue #27's
+      // "place at this point" consumes.
+      outColor1 = vec4(v_localPos, 1.0);
     }
     return;
   }
@@ -656,7 +676,13 @@ class SceneLayerImpl implements SceneLayer {
     }
     const state = saveGlState(gl2);
     try {
-      const mvp = Float64Array.from(options.modelViewProjectionMatrix);
+      // `defaultProjectionData.mainMatrix` consumes mercator [0, 1] coordinates,
+      // which is the space the model matrix produces. `modelViewProjectionMatrix`
+      // consumes mercator x worldSize (pixel) coordinates instead, so using it
+      // here placed the whole scene ~1.1 mercator units off-screen. Measured:
+      // feeding the frame origin to mainMatrix yields NDC x = 0 with the camera
+      // centred on it, while modelViewProjectionMatrix yields NDC x = -4.88.
+      const mvp = Float64Array.from(options.defaultProjectionData.mainMatrix);
       const projection = Float64Array.from(options.projectionMatrix);
       const projectionInverse = mat4Inverse(projection);
       const modelView = mat4Multiply(projectionInverse, mvp); // world → view
@@ -803,6 +829,44 @@ class SceneLayerImpl implements SceneLayer {
       restoreGlState(gl, state);
     }
     return result;
+  }
+
+  /**
+   * Spike-only diagnostic: project a local scene point through the exact
+   * matrices the draw path uses and report the result in clip and NDC space,
+   * plus the composed model translation. Used by the gate matrix to tell
+   * "geometry mis-placed" apart from "geometry discarded".
+   */
+  debugProject(local: readonly [number, number, number]): {
+    clip: [number, number, number, number];
+    ndc: [number, number, number] | null;
+    inFrustum: boolean;
+    hasFrame: boolean;
+    translation: [number, number, number];
+  } {
+    const frame = this._frame;
+    const translation: [number, number, number] = [
+      this._modelMatrix[12] ?? 0,
+      this._modelMatrix[13] ?? 0,
+      this._modelMatrix[14] ?? 0,
+    ];
+    if (!frame) {
+      return { clip: [0, 0, 0, 0], ndc: null, inFrustum: false, hasFrame: false, translation };
+    }
+    const m = mat4Multiply(frame.mvp, this._modelMatrix);
+    const [x, y, z] = local;
+    const clip: [number, number, number, number] = [
+      (m[0] ?? 0) * x + (m[4] ?? 0) * y + (m[8] ?? 0) * z + (m[12] ?? 0),
+      (m[1] ?? 0) * x + (m[5] ?? 0) * y + (m[9] ?? 0) * z + (m[13] ?? 0),
+      (m[2] ?? 0) * x + (m[6] ?? 0) * y + (m[10] ?? 0) * z + (m[14] ?? 0),
+      (m[3] ?? 0) * x + (m[7] ?? 0) * y + (m[11] ?? 0) * z + (m[15] ?? 0),
+    ];
+    const w = clip[3];
+    const ndc: [number, number, number] | null =
+      Math.abs(w) > 1e-12 ? [clip[0] / w, clip[1] / w, clip[2] / w] : null;
+    const inFrustum =
+      ndc !== null && Math.abs(ndc[0]) <= 1 && Math.abs(ndc[1]) <= 1 && ndc[2] >= -1 && ndc[2] <= 1;
+    return { clip, ndc, inFrustum, hasFrame: true, translation };
   }
 
   stats(): SceneLayerStats {

@@ -13,6 +13,18 @@ import { createSceneLayer, type SceneLayer } from "./sceneLayer";
 import { createFrameMeter, measureOnce, measureOnceAsync, type FrameMeter } from "./measure";
 import "./spike.css";
 
+declare global {
+  interface Window {
+    /**
+     * Spike-only measurement handles used by the gate matrix. Declared rather
+     * than cast so every assignment stays type-checked.
+     */
+    __spikeMap?: MapLibreMap;
+    __spikeLayer?: SceneLayer;
+    __spikeScene?: SceneView;
+  }
+}
+
 /** Scene URL supplied by `?scene=`. */
 const DEFAULT_SCENE_URL = "/spike/tokyo.kscene";
 /** Provisional centre used before the scene's frame origin is known. */
@@ -161,6 +173,10 @@ export function RendererSpike() {
       maxPitch: 60,
     });
     mapRef.current = map;
+    // Spike-only measurement handle: the gate 3 matrix drives the camera from
+    // the browser console, and a scripted sweep is more repeatable than
+    // synthetic drag events. Never referenced by production code.
+    window.__spikeMap = map;
     lastRenderRef.current = performance.now();
 
     let disposed = false;
@@ -284,6 +300,10 @@ export function RendererSpike() {
           return created;
         });
         layerRef.current = layer;
+        // Spike-only: gate 4 probes `pickAt` and `stats()` directly from the
+        // console, which is more precise than inferring picks from the HUD.
+        window.__spikeLayer = layer;
+        window.__spikeScene = scene;
 
         // Centre on the frame origin (model corner, not ground — altitude is
         // deliberately not treated as terrain).
