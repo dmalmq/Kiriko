@@ -159,6 +159,7 @@ function reducer(
       return {
         ...state,
         scenario: "handoff",
+        sourceMaterialInspection: false,
         playback: state.playback === "complete" ? "complete" : "playing",
       };
     case "pause-handoff":
@@ -167,6 +168,7 @@ function reducer(
       return {
         ...state,
         scenario: "handoff",
+        sourceMaterialInspection: false,
         activeFloor: "B1",
         handoffIndex: 0,
         playback: "ready",
