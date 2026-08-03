@@ -1,7 +1,7 @@
 # Renderer-neutral 3D visual language — design
 
 Date: 2026-08-03  
-Status: approved (design), pending implementation plan
+Status: approved (design); prototype implementation planned
 Issue: [#32 — Choose the renderer-neutral 3D visual language](https://github.com/dmalmq/imdf-map-application/issues/32)
 
 ## 1. Decision
