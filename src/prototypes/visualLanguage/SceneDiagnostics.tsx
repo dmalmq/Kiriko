@@ -39,9 +39,11 @@ const outlineClassFor = (severity: DiagnosticSeverity): string => {
 function SeverityMarker({
   severity,
   position,
+  acceptedPatternId,
 }: {
   readonly severity: DiagnosticSeverity;
   readonly position: ProjectedDiagnosticPoint;
+  readonly acceptedPatternId: string;
 }): ReactElement {
   const { x, y } = position;
   switch (severity) {
@@ -63,8 +65,8 @@ function SeverityMarker({
       return <circle className="vl-diagnostic-marker vl-diagnostic-marker--circle" cx={x} cy={y} r={6} />;
     case "accepted":
       return (
-        <g className="vl-diagnostic-marker vl-diagnostic-marker--accepted">
-          <circle cx={x} cy={y} r={7} />
+        <g className="vl-diagnostic-marker vl-diagnostic-marker--accepted is-muted-pattern">
+          <circle className="is-muted-pattern" cx={x} cy={y} r={7} fill={`url(#${acceptedPatternId})`} />
           <path d={`M ${x - 3.5} ${y} L ${x - 0.5} ${y + 3} L ${x + 4.5} ${y - 3}`} />
         </g>
       );
@@ -141,7 +143,11 @@ export function SceneDiagnostics({
                 fill={finding.severity === "accepted" ? `url(#${patternId})` : undefined}
               />
             ) : null}
-            <SeverityMarker severity={finding.severity} position={marker} />
+            <SeverityMarker
+              severity={finding.severity}
+              position={marker}
+              acceptedPatternId={patternId}
+            />
           </g>
         );
       })}

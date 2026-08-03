@@ -499,7 +499,7 @@ export function VisualLanguageScene(props: VisualLanguageSceneProps) {
         ) : (
           <g className="vl-scene-diagnostics" />
         )}
-        <g className="vl-scene__conveyances">
+        <g className="vl-scene__conveyances" pointerEvents="none">
           {conveyances.map((primitive) => (
             <ConveyanceBadge
               key={`${primitive.id}-badge`}
