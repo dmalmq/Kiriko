@@ -8,12 +8,16 @@ Issue: [#23 — Choose the 3D rendering architecture](https://github.com/dmalmq/
 
 ## Verdict
 
-The architecture holds. **Gates 1, 3, 4, and 6 pass on measured numbers, gate 7
-now has measured numbers (issue #31's trusted bands do not hold venue-wide), and
-no documented flip condition triggered** — the D3 raw WebGL2 path stayed viable,
-so three.js was not needed. Gate 2 is partially verified, and gate 5 is verified
-numerically but not visually. The spike found and fixed **seven** real defects,
-four of them in the plan's own pinned recipe, which is what a spike is for.
+The architecture holds. **Gates 1, 3, 4, 5, and 6 pass on measured numbers,
+gate 7 now has measured numbers (issue #31's trusted bands do not hold
+venue-wide), and no documented flip condition triggered** — the D3 raw WebGL2
+path stayed viable, so three.js was not needed. Gate 5 is now confirmed visually
+as well as numerically. **Gate 2 is the one failure**, and its cause is no longer
+a mystery: MapLibre removes custom layers on context loss and requires the
+application to re-add them, so recovery is an application-level contract rather
+than anything the renderer can own. The spike found and fixed **eight** real
+defects, four of them in the plan's own pinned recipe, which is what a spike is
+for.
 
 **Action that follows: issue #31's conclusion is reopened.** Its falsifier was
 named in advance — a p90 above 0.50 m, or any spatially separated coherent
@@ -50,19 +54,43 @@ Notes for issue #26:
 - `gatheredPrimitives = 0` on all three assets: every primitive carried identity
   indices, so the de-index gather path is unit-tested only.
 
-## Gate 2 — Custom-layer interop: **PARTIAL**
+## Gate 2 — Custom-layer interop: **FAIL, with the cause identified**
 
 Verified:
 - MapLibre's own layers render correctly with the custom layer present; GL state
   is saved and restored around every draw and every pick pass.
 - `webglcontextlost` **and** `webglcontextrestored` both fire and are observed
-  when the loss is forced through `WEBGL_lose_context`, and `stats()` reports the
-  same draw-call count before and after.
+  when the loss is forced through `WEBGL_lose_context`.
 
-Not verified:
-- That picking works again after a forced context loss. The post-loss pick probe
-  returned no hit, and the harness could not distinguish "rebuild incomplete"
-  from "camera not aimed at geometry" before this session ended.
+**A custom layer cannot survive context loss on its own.** MapLibre logs the
+contract explicitly:
+
+> Custom layer with id 'scene-3d' cannot be restored after WebGL context loss.
+> You will need to re-add it manually after context restoration.
+
+MapLibre **removes** the layer, so `render` is never called again and the layer
+can never heal itself. Measured on Tokyo with a forced loss/restore cycle:
+
+| | picks in a 8×11 grid | `map.getLayer("scene-3d")` |
+|---|---|---|
+| before loss | 31 | present |
+| after restore | **0** | **absent** |
+
+`stats()` kept reporting 5 draw calls and 5 visible batches throughout, because
+those are last-render values and no render ever happened — a reporting trap for
+anyone verifying recovery by stats alone. Use `map.getLayer(id)` or a pick.
+
+Two remedies were tried and **both failed**: rebuilding inside the layer's own
+`webglcontextrestored` handler (the layer is already gone), and re-adding from
+the application on `webglcontextrestored` (loses a race with MapLibre's own
+restore) or on the first `idle` after it (never fired in headless Chromium).
+The scaffolding is committed with a `KNOWN INCOMPLETE` marker in
+`RendererSpike.tsx`.
+
+**Consequence for issue #23:** recovery is an *application-level* contract, not
+a renderer-internal one — whichever rendering boundary is chosen, some owner
+above the layer must detect restoration and re-add. The correct trigger point is
+the one open question and it is unresolved.
 
 ## Gate 3 — Frame time: **PASS (with a stated ceiling)**
 
@@ -115,7 +143,7 @@ Still not exercised:
    `pick.test.ts`) but was never exercised against rendered graph geometry,
    because the spike renders no routing graph.
 
-## Gate 5 — Precision: **PARTIAL**
+## Gate 5 — Precision: **PASS** (numerically and visually)
 
 The composition was wrong and is now right; this is the spike's headline finding
 (defect 2). After the fix, a known level-0 vertex projects to NDC
@@ -124,10 +152,18 @@ and the composed model translation matches an independently computed mercator
 origin to 7 significant figures: layer `(0.8882346, 0.3937873, 3.7936e-6)` vs
 expected `(0.888234603, 0.393787299, 3.7895e-6)`.
 
-Not verified: sustained visual inspection for jitter or z-fighting at maximum
-zoom. Headless screenshots of the MapLibre canvas came back byte-identical
-regardless of scene content — WebGL canvases without `preserveDrawingBuffer` do
-not reliably survive headless capture — so visual gates need a headed browser.
+Visually confirmed after fixing the capture path. Headless screenshots were
+byte-identical regardless of scene content until `preserveDrawingBuffer: true`
+was set — it belongs under `canvasContextAttributes` in MapLibre 5.24, not at
+the top level of `MapOptions`. With it, captures became content-dependent
+(2.18 MB distinct images vs a byte-identical 42 KB before), which is what made
+every visual check in this report measurable:
+
+- `assets/visual-active-level.png` — the derived slabs sit exactly over the
+  station's platform layout in the basemap. Independent confirmation that gate
+  5's placement is correct, from a source the renderer does not control.
+- `assets/visual-max-zoom.png` — zoom 21, pitch 55: clean stable edges, no
+  z-fighting stripes, no vertex jitter.
 
 ## Gate 6 — Floor filtering and occlusion: **PASS**
 
@@ -322,6 +358,15 @@ two coherent 1.3–1.6 m pockets.
    `local` value carries raw `0..65535` units — visible as a returned "position"
    of `(13580, 49373, 65535)`. Fixed with dedicated `u_localOrigin`/`u_localScale`
    uniforms used only for the pick output, leaving the matrix fold intact.
+8. **Every visual gate was silently unmeasurable** (`RendererSpike.tsx`).
+   Headless screenshots of the MapLibre canvas came back byte-identical
+   regardless of scene content, which reads as "the renderer draws nothing" and
+   cost real diagnosis time before the cause was clear. A WebGL canvas needs
+   `preserveDrawingBuffer: true` to survive capture, and in MapLibre 5.24 it
+   belongs under `canvasContextAttributes`, not at the top level of `MapOptions`
+   — where it type-errors. With it set, captures became content-dependent
+   (2.18 MB of distinct images vs a byte-identical 42 KB), unblocking gate 5's
+   visual check and making gate 2's failure observable at all.
 
 Plan bugs also caught before they shipped: a payload alignment assumption that
 made `Uint32Array` views throw (`featureIndicesOffset` landed at byte 30); a
@@ -342,6 +387,33 @@ canonical GDB/graph association that issue #30 already makes the source of
 canonical identity. This strengthens the design's insistence that the tiles
 scene keeps GDB/IMDF data as an invisible semantic layer.
 
+## Finding for issue #33: the routing network *is* registered with the venue
+
+A first pass at #33 reported that `net_junction` / `net_path` store decimal
+degrees while declaring EPSG:3857, placing the routing graph ~670 m west of the
+venue. **That is wrong, and it is recorded here so nobody chases it.** Two
+independent checks (`.diag/net-srs-truth.mjs`, `.diag/net-coverage.mjs`):
+
+1. Dumped without `RFC7946=YES`, `net_junction` coordinates come out as
+   `15557679.9, 4256064.0` — genuine 3857 metres, matching the declared
+   `PROJCRS["WGS 84 / Pseudo-Mercator"]`. The earlier probe used `RFC7946=YES`,
+   which **always** reprojects to WGS84, so its "raw" degrees were an artifact
+   of the dump options, not the data.
+2. The offset came from sampling the **first 3 of 10,118** junctions in file
+   order, which happen to sit at the western extent edge (`139.757017` is
+   exactly the layer's `minLng`). Measured across all of them:
+
+| Measure | Value |
+|---|---|
+| Extent | 1,758 m × 2,513 m |
+| Nearest junction to the venue frame origin | **22.2 m** |
+| Junctions within 100 m / 300 m / 1 km | 278 / 1,589 / 7,624 |
+
+The network covers the station complex and registers with the venue, so #33's
+premise holds and its snapping measurement can proceed. Method note for whoever
+takes it: never characterise a 10k-feature layer from its first few features,
+and never read coordinates out of an RFC7946 dump.
+
 ## Validation
 
 - `cargo test --manifest-path core/Cargo.toml -p kiriko-scene` — 13 tests pass.
@@ -351,11 +423,25 @@ scene keeps GDB/IMDF data as an invisible semantic layer.
 
 ## Recommended next steps
 
-1. Resolve gate 4's feature-attribution question before anything else.
-2. Correct the design spec's matrix instruction (defect 2).
-3. Re-run gates 2, 5, and 6's visual checks in a headed browser.
-4. Hand gate 7's numbers to issue #31: the venue is not inside the trusted bands
-   (combined p90 0.63 m; B1F Yaesu has two coherent 1.3–1.6 m pockets), and decide
-   whether the bands need tightening, a per-floor scope, or an explicit
-   coverage-difference carve-out for tile-model overhangs.
-5. Hand gate 3 to issue #26 with the vsync caveat stated.
+1. **Settle the context-loss re-add trigger (gate 2).** It is the only gate that
+   fails, the cause is known, and the fix is an application-level contract that
+   issue #23's chosen boundary has to name an owner for. Needs a headed browser:
+   `idle` never fired in headless Chromium after restore.
+2. Hand gate 7's numbers to issue #31 (reopened): the venue is not inside the
+   trusted bands (combined p90 0.63 m; B1F Yaesu has two coherent 1.3–1.6 m
+   pockets), and decide whether the bands need tightening, a per-floor scope, or
+   an explicit coverage-difference carve-out for tile-model overhangs.
+3. Hand gate 3 to issue #26 with the vsync caveat stated, and gate 1's 8.1 MB
+   derived-scene figure as the size input.
+4. Resume issue #33's snapping measurement. Its premise is now verified sound
+   (see the registration finding above); the `--roles` exporter selector it
+   needs is committed.
+5. Diagnose the two B1F Yaesu coherent clusters (1.57 m / 1.33 m). Median offset
+   there is only 0.083 m, so a global transform error is ruled out — it is
+   localised geometry, a stale GDB revision, or a genuine model defect, and that
+   distinction decides whether #31 re-certifies with a per-floor band or the
+   asset needs revision.
+
+Done during the spike: gate 4's attribution question is resolved (defect 6), the
+design spec's matrix instruction is corrected (`3b6d057` on `main`), and gates 2
+and 5's visual checks are no longer blocked on capture tooling.
