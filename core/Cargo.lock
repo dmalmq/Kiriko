@@ -829,6 +829,7 @@ dependencies = [
  "kiriko-facilities",
  "kiriko-model",
  "kiriko-route",
+ "kiriko-scene",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
