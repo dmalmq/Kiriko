@@ -411,6 +411,18 @@ fn read_property_tables(root: &Value, bin: Option<&[u8]>) -> Result<Vec<GlbFeatu
     };
     let schema = extension.get("schema");
 
+    // Feature ids are table-local, and `GlbPrimitive` records no table index, so
+    // concatenating several tables would silently misattribute every row past
+    // the first. Refuse instead: wrong picks are worse than an unsupported
+    // asset. The measured Tokyo, Shinjuku, and LumineEst assets each ship one
+    // table, so this costs nothing today.
+    if tables.len() > 1 {
+        return Err(SceneError::Glb(format!(
+            "glb declares {} property tables; only one is supported because feature ids are table-local",
+            tables.len()
+        )));
+    }
+
     let mut rows = Vec::new();
     for table in tables {
         let class_name = table
