@@ -23,3 +23,6 @@ core/crates/kiriko-wasm/pkg/
 
 # Derived spike scenes (reproducible via kiriko-scene example derive_tiles)
 public/spike/
+
+# Gate 7 registration scratch (analysis script, intermediate GeoJSON)
+.diag/
