@@ -15,7 +15,11 @@
 //! lng/lat.
 //!
 //! Run: cargo run --release --manifest-path core/Cargo.toml -p kiriko-scene \
-//!        --example export_level_outline -- <scene.kscene> <level-selector> <out.geojson> [--structure]
+//!        --example export_level_outline -- <scene.kscene> <level-selector> <out.geojson> [--structure] [--roles Walkable,Stairs]
+//!
+//! Role selection: without flags, only `Walkable` batches are exported;
+//! `--structure` adds `Structure`; `--roles A,B,C` (comma-separated, case-
+//! insensitive) selects an explicit list and overrides both defaults.
 //!
 //! `level-selector` is resolved in order: exact `source_level_key` match, then
 //! a 0-based level index, then a substring against the level's source key /
@@ -24,6 +28,29 @@
 use std::{env, fs, path::PathBuf};
 
 use kiriko_scene::{decode_scene, SemanticRole};
+
+/// All twelve semantic roles, in declaration order (used for `--roles`).
+const ALL_ROLES: [SemanticRole; 12] = [
+    SemanticRole::Walkable,
+    SemanticRole::Public,
+    SemanticRole::Service,
+    SemanticRole::Restricted,
+    SemanticRole::Structure,
+    SemanticRole::Ceiling,
+    SemanticRole::Opening,
+    SemanticRole::Elevator,
+    SemanticRole::Escalator,
+    SemanticRole::Stairs,
+    SemanticRole::Ramp,
+    SemanticRole::Context,
+];
+
+const ROLE_LIST: &str = "Walkable, Public, Service, Restricted, Structure, Ceiling, Opening, Elevator, Escalator, Stairs, Ramp, Context";
+
+/// Stable role names (the `Debug` spelling), independent of any display layer.
+fn role_name(role: SemanticRole) -> String {
+    format!("{role:?}")
+}
 
 /// WGS84 ellipsoid (used only to turn the header's ECEF origin into geodetic
 /// coordinates; the flat-earth projection below is independent of this).
@@ -48,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.len() < 3 {
         eprintln!(
-            "usage: export_level_outline <scene.kscene> <level-selector> <out.geojson> [--structure]"
+            "usage: export_level_outline <scene.kscene> <level-selector> <out.geojson> [--structure] [--roles Walkable,Stairs,...]"
         );
         std::process::exit(2);
     }
@@ -56,6 +83,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let selector = &args[1];
     let out_path = PathBuf::from(&args[2]);
     let include_structure = args.iter().any(|arg| arg == "--structure");
+
+    // `--roles A,B,C` overrides the default role selection; `--structure` is
+    // kept for backward compatibility and is subsumed by an explicit list.
+    let roles_flag = args.iter().position(|arg| arg == "--roles");
+    let mut roles: Vec<SemanticRole> = match roles_flag {
+        Some(idx) => {
+            let list = args.get(idx + 1).map(|s| s.as_str()).unwrap_or("");
+            let mut parsed = Vec::new();
+            for name in list.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let role = ALL_ROLES.iter().find(|role| {
+                    role_name(**role).eq_ignore_ascii_case(name)
+                });
+                match role {
+                    Some(role) => parsed.push(*role),
+                    None => {
+                        eprintln!("unknown role {:?} in --roles (valid: {})", name, ROLE_LIST);
+                        std::process::exit(2);
+                    }
+                }
+            }
+            if parsed.is_empty() {
+                eprintln!("--roles requires at least one role name");
+                std::process::exit(2);
+            }
+            parsed
+        }
+        None => {
+            if include_structure {
+                vec![SemanticRole::Walkable, SemanticRole::Structure]
+            } else {
+                vec![SemanticRole::Walkable]
+            }
+        }
+    };
+    roles.dedup();
 
     let bytes = fs::read(&scene_path)?;
     let doc = decode_scene(&bytes)?;
@@ -108,11 +170,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let m_per_deg_lng = 111_320.0 * lat0_rad.cos();
 
     // Collect the level's batches for the requested roles.
-    let roles: &[SemanticRole] = if include_structure {
-        &[SemanticRole::Walkable, SemanticRole::Structure]
-    } else {
-        &[SemanticRole::Walkable]
-    };
     let batches: Vec<&kiriko_scene::SceneBatch> = doc
         .batches
         .iter()
@@ -165,6 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "level_key": level.source_level_key,
                     "level_name": level.source_level_name,
                     "elevation_m": level.source_elevation_meters,
+                    "resolved_plane_z": level.resolved_plane_z,
                     "z_m": z_sum / 3.0,
                     // Native venue-local ENU metres (frame origin = header's
                     // frame_origin_ecef). These are the exact coordinates the
@@ -188,7 +246,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "level_key": level.source_level_key,
             "level_name": level.source_level_name,
             "frame_origin": { "lng": lng0, "lat": lat0, "altitude_m": altitude },
-            "roles": roles.iter().map(|role| format!("{:?}", role)).collect::<Vec<_>>(),
+            "resolved_plane_z": level.resolved_plane_z,
+            "roles": roles.iter().map(|r| role_name(*r)).collect::<Vec<_>>(),
         },
         "features": features,
     });
@@ -205,7 +264,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "frame_origin_lng": lng0,
         "frame_origin_lat": lat0,
         "frame_origin_altitude_m": altitude,
-        "roles": roles.iter().map(|role| format!("{:?}", role)).collect::<Vec<_>>(),
+        "resolved_plane_z": level.resolved_plane_z,
+        "roles": roles.iter().map(|r| role_name(*r)).collect::<Vec<_>>(),
         "vertices": vertices,
         "triangles": triangles,
         "bbox_local_en_m": [min_e, min_n, max_e, max_n],
