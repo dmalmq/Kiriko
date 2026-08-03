@@ -1,0 +1,14 @@
+[package]
+name = "kiriko-scene"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+postcard.workspace = true
+zstd.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

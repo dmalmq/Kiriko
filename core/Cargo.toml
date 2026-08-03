@@ -5,6 +5,7 @@ members = [
   "crates/kiriko-bundle",
   "crates/kiriko-route",
   "crates/kiriko-facilities",
+  "crates/kiriko-scene",
   "crates/kiriko-node",
   "crates/kiriko-wasm",
 ]
