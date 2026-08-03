@@ -7,6 +7,7 @@ import { App } from "./app/App";
 import { parseViewerParams } from "./app/viewerParams";
 import { GalleryPage } from "./gallery/GalleryPage";
 import { VisualLanguagePrototype } from "./prototypes/visualLanguage/VisualLanguagePrototype";
+import { RendererSpike } from "./spikes/renderer/RendererSpike";
 import "./app/app.css";
 
 const root = document.getElementById("root");
@@ -15,11 +16,14 @@ if (!root) {
 }
 
 const prototype = new URLSearchParams(window.location.search).get("prototype");
+const spike = new URLSearchParams(window.location.search).get("spike");
 const params = parseViewerParams(window.location.search);
 const showViewer =
   params.src !== null || params.dataset !== null || params.embed || params.forceViewer;
 const app =
-  prototype === "visual-language" ? (
+  spike === "renderer" ? (
+    <RendererSpike />
+  ) : prototype === "visual-language" ? (
     <VisualLanguagePrototype />
   ) : showViewer ? (
     <App />
