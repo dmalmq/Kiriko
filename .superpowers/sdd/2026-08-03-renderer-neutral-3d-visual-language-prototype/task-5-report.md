@@ -32,6 +32,8 @@ DONE
 
 Per the parent task contract, formatter, lint, build, tests, typecheck, and browser validation were intentionally not run. Parent validation is expected after this commit.
 
+Parent validation after commit: `pnpm exec tsc --noEmit` exited 0 with zero diagnostics; `pnpm exec vite build` completed successfully (311 modules transformed).
+
 ## Concerns
 
 None.
