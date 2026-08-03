@@ -33,6 +33,7 @@ const SHELL_COPY = {
   guidedTransition: { en: "Guided transition", ja: "案内中の移動" },
   destination: { en: "Destination", ja: "目的地" },
   selectableObjects: { en: "Selectable objects", ja: "選択できるオブジェクト" },
+  diagnosticFindings: { en: "Diagnostic findings", ja: "診断の指摘" },
   selectObject: { en: "Select object", ja: "オブジェクトを選択" },
   selectFinding: { en: "Select finding", ja: "指摘を選択" },
   noSelection: { en: "none", ja: "なし" },
