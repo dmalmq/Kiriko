@@ -348,28 +348,37 @@ uniform mat4 u_matrix;
 uniform mat4 u_modelViewMatrix;
 uniform vec3 u_quantOrigin;
 uniform vec3 u_quantScale;
+uniform vec3 u_localOrigin;
+uniform vec3 u_localScale;
 uniform sampler2D u_featureState;
 uniform vec2 u_featureTexSize;
 in vec3 a_position;   // u16, expanded by the attribute pointer
 in vec2 a_normal;     // i16 oct-encoded, normalized
 in uint a_featureIndex;
 out vec3 v_normal;
-out vec4 v_state;
+// flat: both of these are per-feature constants, and a triangle whose three
+// vertices share feature 747 can interpolate to 746.9999, which int() truncates
+// to 746 - an off-by-one pick that silently attributes a surface to the wrong
+// feature (and the wrong floor). Measured on Tokyo before this qualifier.
+flat out vec4 v_state;
 out vec3 v_viewPos;
 // Venue-local metres. Issue #27's "place at this point" wants local scene
 // coordinates, not the mercator-scaled view space u_modelViewMatrix yields, so
 // the pick pass writes this straight out on the float path.
 out vec3 v_localPos;
-out float v_featureIndex;
+flat out float v_featureIndex;
 void main() {
   vec3 local = u_quantOrigin + a_position * u_quantScale;
+  // The draw path folds quantization into u_matrix, so the local value above
+  // carries raw u16 units. The pick path needs true venue-local metres, so
+  // dequantize separately from the batch's real terms.
+  v_localPos = u_localOrigin + a_position * u_localScale;
   float index = float(a_featureIndex);
   vec2 texel = vec2(mod(index, u_featureTexSize.x), floor(index / u_featureTexSize.x));
   v_state = texture(u_featureState, (texel + 0.5) / u_featureTexSize);
   v_normal = vec3(a_normal, 1.0 - abs(a_normal.x) - abs(a_normal.y));
   v_featureIndex = index;
   vec4 localPos = vec4(local, 1.0);
-  v_localPos = local;
   v_viewPos = (u_modelViewMatrix * localPos).xyz;
   gl_Position = u_matrix * localPos;
 }
@@ -389,8 +398,8 @@ uniform float u_diagnosticThreshold;
 in vec3 v_normal;
 in vec3 v_viewPos;
 in vec3 v_localPos;
-in vec4 v_state;
-in float v_featureIndex;
+flat in vec4 v_state;
+flat in float v_featureIndex;
 
 // GLSL ES 3.0 requires explicit locations once a shader declares more than one
 // fragment output, unless EXT_blend_func_extended is enabled. Without these the
@@ -526,6 +535,9 @@ interface BatchResources {
   role: SemanticRoleName;
   /** `T(quantizationOrigin)·S(quantizationScale)`, precomputed in f64. */
   quantTransform: Float64Array;
+  /** The batch's real quantization terms, for the pick pass's local metres. */
+  quantOrigin: readonly [number, number, number];
+  quantScale: readonly [number, number, number];
   /** Unique global feature indices referenced by this batch. */
   featureIndexSet: Set<number>;
 }
@@ -546,6 +558,8 @@ interface FrameState {
 interface UniformLocations {
   matrix: WebGLUniformLocation | null;
   modelView: WebGLUniformLocation | null;
+  localOrigin: WebGLUniformLocation | null;
+  localScale: WebGLUniformLocation | null;
   quantOrigin: WebGLUniformLocation | null;
   quantScale: WebGLUniformLocation | null;
   featureState: WebGLUniformLocation | null;
@@ -1013,6 +1027,8 @@ class SceneLayerImpl implements SceneLayer {
       matrix: gl.getUniformLocation(program, "u_matrix"),
       modelView: gl.getUniformLocation(program, "u_modelViewMatrix"),
       quantOrigin: gl.getUniformLocation(program, "u_quantOrigin"),
+      localOrigin: gl.getUniformLocation(program, "u_localOrigin"),
+      localScale: gl.getUniformLocation(program, "u_localScale"),
       quantScale: gl.getUniformLocation(program, "u_quantScale"),
       featureState: gl.getUniformLocation(program, "u_featureState"),
       featureTexSize: gl.getUniformLocation(program, "u_featureTexSize"),
@@ -1100,6 +1116,8 @@ class SceneLayerImpl implements SceneLayer {
       vertexCount: batch.vertexCount,
       role: batch.role,
       quantTransform: mat4Multiply(mat4Translate(qx, qy, qz), mat4Scale(sx, sy, sz)),
+      quantOrigin: [qx, qy, qz],
+      quantScale: [sx, sy, sz],
       featureIndexSet: new Set(batch.featureIndices),
     };
   }
@@ -1262,6 +1280,10 @@ class SceneLayerImpl implements SceneLayer {
       // recipe step 6), so these stay identity by construction.
       gl.uniform3f(uLoc.quantOrigin, 0, 0, 0);
       gl.uniform3f(uLoc.quantScale, 1, 1, 1);
+      // The pick pass needs true venue-local metres, which the folded matrix
+      // above has already consumed, so hand the shader the real terms too.
+      gl.uniform3f(uLoc.localOrigin, batch.quantOrigin[0], batch.quantOrigin[1], batch.quantOrigin[2]);
+      gl.uniform3f(uLoc.localScale, batch.quantScale[0], batch.quantScale[1], batch.quantScale[2]);
       const color = this._roleColors[batch.role]!; // the record covers all 12 roles
       gl.uniform4f(uLoc.baseColor, color[0], color[1], color[2], 1);
       gl.bindVertexArray(batch.vao);
