@@ -147,7 +147,11 @@ The dated plans under `docs/superpowers/plans/` remain execution history for the
 
 ### Workstream 1C — Venue lifecycle and sharing
 
-**Required design:** version history, latest-version selection/rollback semantics, share-link policy, deletion/retention, and embed configuration.
+**Required design:** version history, latest-version selection/rollback semantics, share-link policy, deletion/retention, embed configuration, authorization-aware bundle caching partitioned by access context with freshness bounded by capability expiry and revocation, and active SSE subscription closure on capability expiry or revocation.
+
+**Approved sharing policy (2026-07-31):** The authoritative partner-access
+policy and current implementation gap are recorded in the current-state
+platform architecture specification, §10.1.
 
 **Target outcomes:**
 
@@ -156,9 +160,10 @@ The dated plans under `docs/superpowers/plans/` remain execution history for the
 - users can copy an explicit latest or pinned share link and understand the difference;
 - deletion behavior states what happens to source blobs, bundles, issues, and existing public links;
 - embed configuration has a stable documented parameter contract;
-- failed/draft versions are visible to producers but never become public accidentally.
+- failed/draft versions are visible to producers but never become public accidentally;
+- partner invitation and capability-token lifetime and revocation are explicit and enforced.
 
-**Release gate:** publish two versions, share latest and pinned links, switch the latest pointer, verify pinned identity/content stays unchanged, then exercise the approved deletion/retention behavior.
+**Release gate:** publish two versions, share latest and pinned links, switch the latest pointer, verify pinned identity/content stays unchanged, then exercise the approved deletion/retention behavior. Validate that a revoked or expired partner capability returns 401/403 for all scoped reads, that an already-open issue SSE stream closes on expiry or revocation, and that protected bundle responses cannot be reused from browser or shared caches after authorization expires or is revoked.
 
 ### Workstream 1D — Release acceptance and supportability
 
@@ -420,6 +425,7 @@ Optimize from measured customer/fixture behavior. Maintain current viewer budget
 | Routing | On-device over KVB §5 | Standing offline-navigation requirement |
 | Positioning | Exploratory | Representative data and approved evaluation protocol exist |
 | Billing | Unspecified | Commercial model and first paid integration are defined |
+| Partner sharing (approved 2026-07-31) | See current-state platform architecture specification §10.1 | Partner token format, optional account tier, or consent/audit requirements change |
 
 ---
 

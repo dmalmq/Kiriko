@@ -66,8 +66,8 @@ after a safety age. It never bumps the issue revision (no SSE traffic).
 ## Security model
 
 - Uploads/cancels require a session; binding follows body authorship, not
-  moderation roles. Attached media inherits the issue's **public read**
-  visibility — the composer warns authors not to paste secrets.
+  moderation roles. **Current behavior:** Attached media inherits the issue's
+  **public read** visibility — the composer warns authors not to paste secrets.
 - Media is served only while the owning comment is live on a currently
   published version; staged, detached, deleted, unpublished, and unknown IDs
   are one indistinguishable 404. Deletion revokes media immediately.
@@ -76,6 +76,16 @@ after a safety age. It never bumps the issue revision (no SSE traffic).
   inline`, and `Cache-Control: no-store`.
 - Markdown accepts only `attachment:<id>` image tokens (canonical lowercase
   IDs); remote/data:/SVG images and raw HTML never render.
+
+### Future policy (approved 2026-07-31)
+
+**Approved target behavior:** Attachments will inherit the same venue/version
+ACL as the issue and map. Revocation or token expiry will remove media access
+along with map read permission. Media retains its current public-read behavior
+until Workstream 1C gates the private-by-default transition. The authoritative
+partner-access policy and cross-route enforcement requirements are in
+`docs/superpowers/specs/2026-07-17-kiriko-platform-architecture-design.md`
+§10.1.
 
 ## Rollback
 
