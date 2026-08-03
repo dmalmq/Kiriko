@@ -191,3 +191,79 @@ fn identity_indices_take_the_fast_path() {
     assert!(scene.primitives[0].indices_were_identity);
     assert_eq!(scene.primitives[0].positions[0], [0.0, 0.0, 0.0]);
 }
+
+use kiriko_scene::{derive_scene, role_for_category, SemanticRole};
+
+#[test]
+fn maps_revit_categories_onto_semantic_roles() {
+    assert_eq!(role_for_category("Floors"), SemanticRole::Walkable);
+    assert_eq!(role_for_category("Ceilings"), SemanticRole::Ceiling);
+    assert_eq!(role_for_category("Walls"), SemanticRole::Structure);
+    assert_eq!(role_for_category("Doors"), SemanticRole::Opening);
+    assert_eq!(role_for_category("Stairs"), SemanticRole::Stairs);
+    assert_eq!(role_for_category("Escalators"), SemanticRole::Escalator);
+    assert_eq!(role_for_category("Elevators"), SemanticRole::Elevator);
+    assert_eq!(role_for_category("Ramps"), SemanticRole::Ramp);
+    assert_eq!(role_for_category("Columns"), SemanticRole::Structure);
+    // Unknown categories become contextual mass, never navigable surface.
+    assert_eq!(role_for_category("Generic Models"), SemanticRole::Context);
+    assert_eq!(role_for_category(""), SemanticRole::Context);
+}
+
+#[test]
+fn maps_revit_stair_components_and_supports() {
+    assert_eq!(role_for_category("Runs"), SemanticRole::Stairs);
+    assert_eq!(role_for_category("Landings"), SemanticRole::Stairs);
+    assert_eq!(role_for_category("Supports"), SemanticRole::Structure);
+    assert_eq!(role_for_category("Wall Sweeps"), SemanticRole::Structure);
+    assert_eq!(role_for_category("Structural Framing"), SemanticRole::Structure);
+    assert_eq!(role_for_category("Mechanical Equipment"), SemanticRole::Service);
+    // Genuinely ambiguous mass stays contextual rather than guessing.
+    assert_eq!(role_for_category("Specialty Equipment"), SemanticRole::Context);
+    assert_eq!(role_for_category("Curtain Panels"), SemanticRole::Context);
+}
+
+#[test]
+fn derive_merges_primitives_into_one_batch_per_level_and_role() {
+    let levels = br#"{"version":1,"levels":[
+        {"levelKey":"elem-a","levelName":"B1","levelElevationMeters":-6.5,"elementCount":1,"minZMeters":-6.5,"maxZMeters":-3.0},
+        {"levelKey":"elem-b","levelName":"1F","levelElevationMeters":3.5,"elementCount":1,"minZMeters":3.5,"maxZMeters":7.0}
+    ]}"#;
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    let document = derive_scene(&synthetic_glb(), levels, "sha256:test", identity).expect("derive");
+
+    assert_eq!(document.levels.len(), 2);
+    assert_eq!(document.features.len(), 2);
+    // Two features on different levels, same role -> two batches, not one.
+    assert_eq!(document.batches.len(), 2);
+    for batch in &document.batches {
+        assert_eq!(batch.vertex_count, 3);
+        assert_eq!(batch.positions.len(), 3);
+        assert_eq!(batch.normals.len(), 3);
+        assert_eq!(batch.feature_indices.len(), 3);
+    }
+    // Feature indices must address the document's feature table.
+    for batch in &document.batches {
+        for index in &batch.feature_indices {
+            assert!((*index as usize) < document.features.len());
+        }
+    }
+}
+
+#[test]
+fn derive_assigns_features_to_levels_by_level_key() {
+    let levels = br#"{"version":1,"levels":[
+        {"levelKey":"elem-b","levelName":"1F","levelElevationMeters":3.5,"elementCount":1,"minZMeters":3.5,"maxZMeters":7.0},
+        {"levelKey":"elem-a","levelName":"B1","levelElevationMeters":-6.5,"elementCount":1,"minZMeters":-6.5,"maxZMeters":-3.0}
+    ]}"#;
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    let document = derive_scene(&synthetic_glb(), levels, "sha256:test", identity).expect("derive");
+    let first = &document.features[0];
+    let level = &document.levels[first.level_index as usize];
+    assert_eq!(level.source_level_key, "elem-a");
+    assert_eq!(level.quantized_elevation_dm, -65);
+}
