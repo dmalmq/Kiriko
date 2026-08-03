@@ -1,0 +1,1203 @@
+.visual-language-prototype {
+  --vl-canvas: #ededeb;
+  --vl-panel: #ffffff;
+  --vl-ink: #1c1917;
+  --vl-muted: #78716c;
+  --vl-hairline: #e7e5e4;
+  --vl-indigo: #4f46e5;
+  --vl-indigo-soft: #eef2ff;
+  --vl-walkable: #fafaf9;
+  --vl-public: #e9edf4;
+  --vl-service: #f0ebe0;
+  --vl-structure: #d5dae3;
+  --vl-edge: #c8ceda;
+  --vl-opening: #9aa3b2;
+  --vl-defect: #dc2626;
+  /* Amber-700: the spec's #D97706 misses WCAG AA as 12px severity text. */
+  --vl-review: #b45309;
+  --vl-advisory: #78716c;
+  --vl-chip: #f5f5f4;
+  --vl-shadow-floating: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --vl-shadow-raised: 0 8px 32px rgba(0, 0, 0, 0.12);
+  --vl-camera-x: 0px;
+  --vl-camera-y: 0px;
+  --vl-camera-scale: 1;
+  min-height: 100dvh;
+  overflow: hidden;
+  background: var(--vl-canvas);
+  color: var(--vl-ink);
+  font-family: "Inter Variable", "Noto Sans JP Variable", sans-serif;
+}
+
+.visual-language-prototype,
+.visual-language-prototype *,
+.visual-language-prototype *::before,
+.visual-language-prototype *::after {
+  box-sizing: border-box;
+}
+
+.visual-language-prototype.vl-prototype {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-rows: 64px minmax(0, 1fr);
+  width: 100%;
+  height: 100dvh;
+  margin: 0;
+  overflow: hidden;
+}
+
+.visual-language-prototype button,
+.visual-language-prototype input {
+  font: inherit;
+}
+
+.visual-language-prototype button {
+  color: inherit;
+}
+
+.visual-language-prototype h1,
+.visual-language-prototype h2,
+.visual-language-prototype p,
+.visual-language-prototype dl,
+.visual-language-prototype dd,
+.visual-language-prototype ul,
+.visual-language-prototype figure,
+.visual-language-prototype fieldset {
+  margin: 0;
+}
+
+.visual-language-prototype ul {
+  padding: 0;
+  list-style: none;
+}
+
+.visual-language-prototype .vl-prototype__header {
+  z-index: 4;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+  min-height: 64px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--vl-hairline);
+  background: var(--vl-panel);
+}
+
+.visual-language-prototype .vl-prototype__header h1 {
+  overflow: hidden;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 26px;
+  text-overflow: ellipsis;
+  text-wrap: balance;
+  white-space: nowrap;
+}
+
+.visual-language-prototype .vl-prototype__eyebrow {
+  flex: 0 0 auto;
+  color: var(--vl-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.visual-language-prototype .vl-toolbar {
+  z-index: 3;
+  grid-column: 1;
+  grid-row: 2;
+  width: 320px;
+  min-width: 0;
+  min-height: 0;
+  padding: 4px 16px 20px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-right: 1px solid var(--vl-hairline);
+  background: var(--vl-panel);
+  box-shadow: var(--vl-shadow-floating);
+}
+
+.visual-language-prototype .vl-toolbar__group {
+  min-width: 0;
+  padding: 16px 0;
+  border: 0;
+  border-bottom: 1px solid var(--vl-hairline);
+}
+
+.visual-language-prototype .vl-toolbar__group--contextual {
+  background: var(--vl-panel);
+}
+
+.visual-language-prototype .vl-toolbar__group legend {
+  width: 100%;
+  padding: 0 0 8px;
+  color: var(--vl-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+}
+
+.visual-language-prototype .vl-toolbar__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.visual-language-prototype .vl-toolbar__button,
+.visual-language-prototype .vl-object-button,
+.visual-language-prototype .vl-inspector__toggle,
+.visual-language-prototype .vl-fallback-notice button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--vl-hairline);
+  border-radius: 8px;
+  background: var(--vl-panel);
+  color: var(--vl-ink);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+  text-align: center;
+  text-wrap: pretty;
+}
+
+.visual-language-prototype .vl-toolbar__button:hover,
+.visual-language-prototype .vl-object-button:hover,
+.visual-language-prototype .vl-inspector__toggle:hover,
+.visual-language-prototype .vl-fallback-notice button:hover {
+  background: var(--vl-chip);
+}
+
+.visual-language-prototype .vl-toolbar__button[aria-pressed="true"],
+.visual-language-prototype .vl-object-button[aria-pressed="true"],
+.visual-language-prototype .vl-equivalent-controls__button--selected {
+  border-color: var(--vl-indigo);
+  background: var(--vl-indigo-soft);
+  color: var(--vl-indigo);
+}
+
+.visual-language-prototype .vl-toolbar__button:focus-visible,
+.visual-language-prototype .vl-object-button:focus-visible,
+.visual-language-prototype .vl-inspector__toggle:focus-visible,
+.visual-language-prototype .vl-fallback-notice button:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 0;
+  box-shadow: 0 0 0 4px var(--vl-indigo);
+}
+
+.visual-language-prototype .vl-toolbar__button:disabled,
+.visual-language-prototype .vl-object-button:disabled,
+.visual-language-prototype .vl-inspector__toggle:disabled,
+.visual-language-prototype .vl-fallback-notice button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.visual-language-prototype .vl-toolbar__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  margin-top: 12px;
+  color: var(--vl-ink);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.visual-language-prototype .vl-toolbar__check input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--vl-indigo);
+}
+
+.visual-language-prototype .vl-toolbar__check input:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 4px var(--vl-indigo);
+}
+
+.visual-language-prototype .vl-prototype__scenes,
+.visual-language-prototype .vl-scenes {
+  grid-column: 2;
+  grid-row: 2;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  /* Keeps scene captions clear of the collapsed inspector floating bottom-right. */
+  padding-bottom: 70px;
+  overflow: hidden;
+  background: var(--vl-canvas);
+}
+
+/*
+ * Selection and Diagnostics float a 152px equivalent-controls panel bottom-left;
+ * reserve its band so captions and the fidelity line stay readable underneath.
+ */
+.visual-language-prototype:has(.vl-equivalent-controls) .vl-prototype__scenes {
+  padding-bottom: 184px;
+}
+
+/* Explicit rows: the card is conditional, and auto-placement would otherwise
+   drop the viewports into the auto row and push the fidelity line out of view. */
+.visual-language-prototype .vl-guidance-card {
+  grid-row: 1;
+}
+
+.visual-language-prototype .vl-prototype__fidelity {
+  grid-row: 3;
+}
+
+.visual-language-prototype .vl-prototype__viewports {
+  position: relative;
+  grid-row: 2;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.visual-language-prototype .vl-prototype__viewports--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.visual-language-prototype .vl-prototype__viewport {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--vl-hairline);
+  border-bottom: 1px solid var(--vl-hairline);
+  background: var(--vl-canvas);
+}
+
+.visual-language-prototype .vl-prototype__viewport:last-of-type {
+  border-right: 0;
+}
+
+/* The 280px floor belongs to the mobile band, where the scenes region scrolls;
+   applying it everywhere pushed the caption out of its viewport. */
+.visual-language-prototype .vl-scene {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--vl-canvas);
+}
+
+.visual-language-prototype .vl-scene__canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--vl-canvas);
+}
+
+.visual-language-prototype .vl-scene__canvas-field {
+  fill: var(--vl-canvas);
+}
+
+.visual-language-prototype .vl-scene__geometry {
+  filter: drop-shadow(0 3px 3px rgba(28, 25, 23, 0.12));
+}
+
+.visual-language-prototype .vl-scene__geometry,
+.visual-language-prototype .vl-scene__route,
+.visual-language-prototype .vl-scene-diagnostics,
+.visual-language-prototype .vl-scene__conveyances,
+.visual-language-prototype .vl-scene-labels {
+  transform: translate(var(--vl-camera-x), var(--vl-camera-y)) scale(var(--vl-camera-scale));
+  transform-origin: 320px 215px;
+  transition: transform 180ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.visual-language-prototype[data-handoff-phase="walk-b1"] {
+  --vl-camera-x: 0px;
+  --vl-camera-y: 0px;
+  --vl-camera-scale: 1;
+}
+
+.visual-language-prototype[data-handoff-phase="announce-escalator"] {
+  --vl-camera-x: -8px;
+  --vl-camera-y: -4px;
+  --vl-camera-scale: 1.02;
+}
+
+.visual-language-prototype[data-handoff-phase="pull-back"] {
+  --vl-camera-x: 0px;
+  --vl-camera-y: -4px;
+  --vl-camera-scale: 0.94;
+}
+
+.visual-language-prototype[data-handoff-phase="show-destination-floor"] {
+  --vl-camera-x: 0px;
+  --vl-camera-y: 8px;
+  --vl-camera-scale: 0.9;
+}
+
+.visual-language-prototype[data-handoff-phase="switch-floor"] {
+  --vl-camera-x: 0px;
+  --vl-camera-y: 2px;
+  --vl-camera-scale: 0.96;
+}
+
+.visual-language-prototype[data-handoff-phase="settle-1f"] {
+  --vl-camera-x: 0px;
+  --vl-camera-y: 0px;
+  --vl-camera-scale: 1;
+}
+
+.visual-language-prototype .vl-role-walkable {
+  fill: var(--vl-walkable);
+}
+
+.visual-language-prototype .vl-role-public {
+  fill: var(--vl-public);
+}
+
+.visual-language-prototype .vl-role-service {
+  fill: var(--vl-service);
+}
+
+.visual-language-prototype .vl-role-restricted,
+.visual-language-prototype .vl-role-structure,
+.visual-language-prototype .vl-role-ceiling,
+.visual-language-prototype .vl-role-elevator,
+.visual-language-prototype .vl-role-escalator,
+.visual-language-prototype .vl-role-stairs,
+.visual-language-prototype .vl-role-ramp {
+  fill: var(--vl-structure);
+}
+
+.visual-language-prototype .vl-role-context {
+  fill: var(--vl-structure);
+}
+
+.visual-language-prototype .vl-role-opening {
+  fill: none;
+  stroke: var(--vl-opening);
+}
+
+.visual-language-prototype .vl-semantic-face {
+  stroke: var(--vl-edge);
+  stroke-width: 1;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.visual-language-prototype .vl-context {
+  opacity: 0.24;
+}
+
+.visual-language-prototype .vl-inactive-route-floor {
+  opacity: 0.28;
+}
+
+.visual-language-prototype .vl-occluder-faded {
+  opacity: 0.15;
+  transition: opacity 160ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.visual-language-prototype .vl-source-material {
+  fill-opacity: 0.78;
+  stroke: var(--vl-advisory);
+  stroke-dasharray: 2 3;
+}
+
+.visual-language-prototype .vl-selected {
+  fill: var(--vl-indigo-soft);
+  stroke: var(--vl-indigo);
+  stroke-width: 2.5;
+}
+
+.visual-language-prototype .vl-pickable {
+  cursor: pointer;
+}
+
+.visual-language-prototype .vl-pickable:hover .vl-semantic-face {
+  stroke: var(--vl-indigo);
+  stroke-width: 1.5;
+}
+
+.visual-language-prototype .vl-scene__source {
+  position: absolute;
+  z-index: 3;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  max-width: calc(100% - 24px);
+  min-height: 32px;
+  overflow: hidden;
+  border: 1px solid var(--vl-hairline);
+  border-radius: 999px;
+  background: var(--vl-panel);
+  box-shadow: var(--vl-shadow-floating);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.visual-language-prototype .vl-scene__source-label {
+  padding: 7px 0 7px 10px;
+  color: var(--vl-muted);
+  white-space: nowrap;
+}
+
+.visual-language-prototype .vl-scene__source-badge {
+  padding: 7px 10px 7px 6px;
+  color: var(--vl-ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.visual-language-prototype .vl-scene__provenance {
+  display: none;
+  min-width: 0;
+  overflow: hidden;
+  padding: 7px 10px;
+  border-left: 1px solid var(--vl-hairline);
+  color: var(--vl-muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visual-language-prototype .vl-scene[data-scenario="diagnostics"]:has(.vl-source-material) .vl-scene__provenance {
+  display: block;
+}
+
+.visual-language-prototype .vl-scene__caption {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  max-width: calc(100% - 24px);
+  padding: 4px 8px;
+  border: 1px solid var(--vl-hairline);
+  border-radius: 8px;
+  background: var(--vl-panel);
+  color: var(--vl-muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.visual-language-prototype .vl-route-casing,
+.visual-language-prototype .vl-route-core,
+.visual-language-prototype .vl-route-chevron,
+.visual-language-prototype .vl-route-origin__ring,
+.visual-language-prototype .vl-route-origin__centre,
+.visual-language-prototype .vl-route-destination__ring,
+.visual-language-prototype .vl-route-destination__centre {
+  vector-effect: non-scaling-stroke;
+}
+
+.visual-language-prototype .vl-route-casing,
+.visual-language-prototype .vl-route-core {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: opacity 160ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.visual-language-prototype .vl-route-casing {
+  stroke: var(--vl-panel);
+  stroke-width: 8;
+}
+
+.visual-language-prototype .vl-route-core {
+  stroke: var(--vl-indigo);
+  stroke-width: 4;
+}
+
+.visual-language-prototype .vl-route-casing.is-current,
+.visual-language-prototype .vl-route-core.is-current {
+  opacity: 1;
+}
+
+.visual-language-prototype .vl-route-casing.is-future,
+.visual-language-prototype .vl-route-core.is-future {
+  opacity: 0.6;
+}
+
+/* Spec §11: in Route overview, other-floor legs sit at 40-50%, not the 55-65%
+   used for a future leg on the active floor. */
+.visual-language-prototype .vl-scene[data-scenario="overview"] .vl-route-casing.is-future,
+.visual-language-prototype .vl-scene[data-scenario="overview"] .vl-route-core.is-future {
+  opacity: 0.45;
+}
+
+.visual-language-prototype .vl-route-casing.is-completed,
+.visual-language-prototype .vl-route-core.is-completed {
+  opacity: 0.32;
+}
+
+.visual-language-prototype .vl-route-casing.is-connector,
+.visual-language-prototype .vl-route-core.is-connector {
+  stroke-dasharray: 7 5;
+}
+
+.visual-language-prototype .vl-route-chevron {
+  fill: none;
+  stroke: var(--vl-panel);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.visual-language-prototype .vl-route-origin__ring,
+.visual-language-prototype .vl-route-destination__ring {
+  fill: var(--vl-panel);
+  stroke: var(--vl-indigo);
+  stroke-width: 2;
+}
+
+.visual-language-prototype .vl-route-origin__centre {
+  fill: var(--vl-indigo);
+}
+
+.visual-language-prototype .vl-route-destination__centre {
+  fill: var(--vl-panel);
+  stroke: var(--vl-indigo);
+  stroke-width: 2;
+}
+
+.visual-language-prototype .vl-scene-label {
+  pointer-events: none;
+}
+
+.visual-language-prototype .vl-scene-label__text {
+  fill: var(--vl-ink);
+  stroke: var(--vl-panel);
+  stroke-width: 4;
+  stroke-linejoin: round;
+  paint-order: stroke fill;
+  font-family: "Inter Variable", "Noto Sans JP Variable", sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.visual-language-prototype .vl-scene-label__leader {
+  stroke: var(--vl-muted);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.visual-language-prototype .vl-scene-label.is-selected .vl-scene-label__text {
+  fill: var(--vl-indigo);
+}
+
+.visual-language-prototype .vl-scene-label.is-protected .vl-scene-label__text {
+  font-weight: 600;
+}
+
+.visual-language-prototype .vl-conveyance-badge__backplate {
+  fill: var(--vl-panel);
+  stroke: var(--vl-hairline);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.visual-language-prototype .vl-conveyance-badge__foreign-object,
+.visual-language-prototype .vl-conveyance-badge__icon {
+  width: 24px;
+  height: 24px;
+  color: var(--vl-ink);
+}
+
+.visual-language-prototype .vl-conveyance-badge__icon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.visual-language-prototype .vl-conveyance-badge__ramp-plane {
+  fill: var(--vl-structure);
+  stroke: var(--vl-ink);
+  stroke-width: 1.25;
+  vector-effect: non-scaling-stroke;
+}
+
+.visual-language-prototype .vl-conveyance-badge__ramp-chevron {
+  fill: none;
+  stroke: var(--vl-ink);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.visual-language-prototype .vl-conveyance-badge.is-selected .vl-conveyance-badge__backplate {
+  fill: var(--vl-indigo-soft);
+  stroke: var(--vl-indigo);
+  stroke-width: 2;
+}
+
+.visual-language-prototype .vl-diagnostic {
+  cursor: pointer;
+}
+
+.visual-language-prototype .vl-diagnostic-outline,
+.visual-language-prototype .vl-diagnostic-marker,
+.visual-language-prototype .vl-diagnostic-selection-halo,
+.visual-language-prototype .vl-diagnostic-pattern,
+.visual-language-prototype .vl-diagnostic-marker--accepted path {
+  vector-effect: non-scaling-stroke;
+}
+
+.visual-language-prototype .vl-diagnostic-outline {
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* `:not(.is-muted-pattern)`: accepted geometry fills with the hatch pattern it
+   references in markup, which a CSS `fill` would outrank. */
+.visual-language-prototype .vl-diagnostic-outline:not(.is-muted-pattern) {
+  fill: none;
+}
+
+.visual-language-prototype .vl-diagnostic-defect .vl-diagnostic-outline {
+  stroke: var(--vl-defect);
+  stroke-dasharray: none;
+}
+
+.visual-language-prototype .vl-diagnostic-defect .vl-diagnostic-marker {
+  fill: var(--vl-defect);
+  stroke: var(--vl-defect);
+}
+
+.visual-language-prototype .vl-diagnostic-review .vl-diagnostic-outline {
+  stroke: var(--vl-review);
+  stroke-dasharray: 7 5;
+}
+
+.visual-language-prototype .vl-diagnostic-review .vl-diagnostic-marker {
+  fill: var(--vl-review);
+  stroke: var(--vl-review);
+}
+
+.visual-language-prototype .vl-diagnostic-advisory .vl-diagnostic-outline {
+  stroke: var(--vl-advisory);
+  stroke-dasharray: 2 5;
+  stroke-linecap: round;
+}
+
+.visual-language-prototype .vl-diagnostic-advisory .vl-diagnostic-marker {
+  fill: var(--vl-advisory);
+  stroke: var(--vl-advisory);
+}
+
+/* `fill` stays with the markup here: accepted geometry carries the muted hatch
+   via a pattern reference, and a CSS fill would outrank that attribute. */
+.visual-language-prototype .vl-diagnostic-accepted .vl-diagnostic-outline,
+.visual-language-prototype .vl-diagnostic-accepted .vl-diagnostic-marker--accepted circle {
+  stroke: var(--vl-advisory);
+  stroke-width: 2;
+}
+
+.visual-language-prototype .vl-diagnostic-accepted .vl-diagnostic-marker--accepted path {
+  fill: none;
+  stroke: var(--vl-advisory);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.visual-language-prototype .vl-diagnostic-pattern {
+  fill: none;
+  stroke: var(--vl-advisory);
+  stroke-width: 1;
+}
+
+.visual-language-prototype .vl-diagnostic-selection-halo {
+  fill: none;
+  stroke: var(--vl-indigo);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/*
+ * The next-action card sits in flow above the viewports: as an overlay it buried
+ * priority labels whenever a single source scaled the model up.
+ */
+.visual-language-prototype .vl-guidance-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+  margin: 12px 16px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--vl-hairline);
+  border-radius: 12px;
+  background: var(--vl-panel);
+  box-shadow: var(--vl-shadow-floating);
+}
+
+.visual-language-prototype .vl-guidance-card__eyebrow {
+  color: var(--vl-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.visual-language-prototype .vl-guidance-card h2 {
+  margin-right: auto;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 22px;
+}
+
+.visual-language-prototype .vl-guidance-card__floors {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--vl-hairline);
+  border-radius: 8px;
+  background: var(--vl-hairline);
+}
+
+.visual-language-prototype .vl-guidance-card__floors div {
+  padding: 8px;
+  background: var(--vl-panel);
+}
+
+.visual-language-prototype .vl-guidance-card__floors dt,
+.visual-language-prototype .vl-guidance-card__destination span {
+  color: var(--vl-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.visual-language-prototype .vl-guidance-card__floors dd {
+  color: var(--vl-ink);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.visual-language-prototype .vl-guidance-card__destination {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.visual-language-prototype .vl-guidance-card__destination strong {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.visual-language-prototype .vl-guidance-card__distance {
+  color: var(--vl-muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.visual-language-prototype .vl-prototype__fidelity {
+  min-width: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--vl-hairline);
+  background: var(--vl-panel);
+  color: var(--vl-muted);
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.visual-language-prototype .vl-equivalent-controls {
+  z-index: 4;
+  grid-column: 2;
+  grid-row: 2;
+  align-self: end;
+  justify-self: start;
+  /* 384px keeps the bottom-right inspector clear at every desktop width. */
+  width: min(560px, calc(100% - 384px));
+  max-height: 152px;
+  margin: 16px;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--vl-hairline);
+  border-radius: 12px;
+  background: var(--vl-panel);
+  box-shadow: var(--vl-shadow-floating);
+}
+
+.visual-language-prototype .vl-equivalent-controls h2 {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.visual-language-prototype .vl-equivalent-controls__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.visual-language-prototype .vl-equivalent-controls__button {
+  max-width: 100%;
+}
+
+.visual-language-prototype .vl-equivalent-controls--diagnostics .vl-equivalent-controls__button {
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.visual-language-prototype .vl-finding-severity {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.visual-language-prototype .vl-finding-severity--defect {
+  color: var(--vl-defect);
+}
+
+.visual-language-prototype .vl-finding-severity--review {
+  color: var(--vl-review);
+}
+
+.visual-language-prototype .vl-finding-severity--advisory,
+.visual-language-prototype .vl-finding-severity--accepted {
+  color: var(--vl-advisory);
+}
+
+.visual-language-prototype .vl-inspector {
+  z-index: 5;
+  grid-column: 2;
+  grid-row: 2;
+  align-self: end;
+  justify-self: end;
+  width: min(320px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  margin: 16px;
+  overflow: auto;
+  border: 1px solid var(--vl-hairline);
+  border-radius: 12px;
+  background: var(--vl-panel);
+  box-shadow: var(--vl-shadow-floating);
+}
+
+.visual-language-prototype .vl-inspector__toggle {
+  width: 100%;
+  border: 0;
+  border-radius: 11px;
+}
+
+.visual-language-prototype .vl-inspector section {
+  padding: 0 12px 12px;
+  border-top: 1px solid var(--vl-hairline);
+}
+
+.visual-language-prototype .vl-inspector h2 {
+  padding: 12px 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.visual-language-prototype .vl-inspector__values {
+  border-top: 1px solid var(--vl-hairline);
+}
+
+.visual-language-prototype .vl-inspector__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(96px, auto);
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--vl-hairline);
+}
+
+.visual-language-prototype .vl-inspector__row dt {
+  color: var(--vl-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.visual-language-prototype .vl-inspector__value {
+  overflow-wrap: anywhere;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: right;
+}
+
+.visual-language-prototype .vl-fallback-notice {
+  z-index: 6;
+  grid-column: 2;
+  grid-row: 2;
+  align-self: start;
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100% - 32px);
+  margin: 16px;
+  padding: 12px;
+  border: 1px solid var(--vl-hairline);
+  border-radius: 12px;
+  background: var(--vl-panel);
+  box-shadow: var(--vl-shadow-floating);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.visual-language-prototype .vl-fallback-veil {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  background: rgba(237, 237, 235, 0.92);
+  opacity: 1;
+  pointer-events: none;
+  transition: opacity 160ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+@media (min-width: 1240px) {
+  .visual-language-prototype .vl-prototype__viewports--compare {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 900px) and (max-width: 1239px) {
+  .visual-language-prototype .vl-prototype__viewports--compare {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+  }
+
+  .visual-language-prototype .vl-prototype__viewport {
+    border-right: 0;
+  }
+}
+
+@media (max-width: 899px) {
+  .visual-language-prototype.vl-prototype {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 64px minmax(0, 1fr) auto;
+  }
+
+  .visual-language-prototype .vl-prototype__header {
+    grid-column: 1;
+  }
+
+  .visual-language-prototype .vl-toolbar {
+    z-index: 7;
+    grid-column: 1;
+    grid-row: 3;
+    width: 100%;
+    max-height: 248px;
+    padding: 4px 16px max(16px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--vl-hairline);
+    border-right: 0;
+    border-radius: 12px 12px 0 0;
+    box-shadow: var(--vl-shadow-raised);
+  }
+
+  .visual-language-prototype .vl-toolbar__button,
+  .visual-language-prototype .vl-object-button,
+  .visual-language-prototype .vl-inspector__toggle,
+  .visual-language-prototype .vl-fallback-notice button,
+  .visual-language-prototype .vl-toolbar__check {
+    min-height: 44px;
+  }
+
+  .visual-language-prototype .vl-toolbar__check input {
+    width: 20px;
+    height: 20px;
+  }
+
+  .visual-language-prototype .vl-prototype__scenes,
+  .visual-language-prototype .vl-scenes {
+    grid-column: 1;
+    grid-row: 2;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .visual-language-prototype .vl-prototype__viewports {
+    overflow: visible;
+  }
+
+  /* The region scrolls here, so every row is content-sized instead of fitting
+     the viewport; a fixed 1fr row would let the scenes paint over the note. */
+  .visual-language-prototype .vl-prototype__scenes,
+  .visual-language-prototype .vl-scenes {
+    grid-template-rows: auto auto auto;
+  }
+
+  .visual-language-prototype .vl-prototype__viewports--compare {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(2, minmax(280px, 1fr));
+    min-height: 560px;
+  }
+
+  .visual-language-prototype .vl-prototype__viewports--single {
+    min-height: 100%;
+  }
+
+  .visual-language-prototype .vl-prototype__viewport {
+    min-height: 280px;
+    border-right: 0;
+  }
+
+  .visual-language-prototype .vl-prototype__viewports--single .vl-prototype__viewport,
+  .visual-language-prototype .vl-prototype__viewports--single .vl-scene,
+  .visual-language-prototype .vl-prototype__viewports--single .vl-scene__canvas {
+    height: 100%;
+  }
+
+  /* Small screens stack the card's fields instead of running them in one bar. */
+  .visual-language-prototype .vl-guidance-card {
+    display: block;
+    margin: 12px;
+    padding: 10px 12px;
+  }
+
+  .visual-language-prototype .vl-guidance-card h2 {
+    margin-top: 2px;
+    font-size: 15px;
+    line-height: 20px;
+  }
+
+  .visual-language-prototype .vl-guidance-card__floors {
+    margin-top: 8px;
+  }
+
+  .visual-language-prototype .vl-guidance-card__floors div {
+    padding: 4px 8px;
+  }
+
+  .visual-language-prototype .vl-guidance-card__destination {
+    margin-top: 8px;
+  }
+
+  .visual-language-prototype .vl-guidance-card__distance {
+    margin-top: 4px;
+  }
+
+  .visual-language-prototype .vl-equivalent-controls,
+  .visual-language-prototype .vl-inspector,
+  .visual-language-prototype .vl-fallback-notice {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .visual-language-prototype .vl-equivalent-controls {
+    width: calc(100% - 24px);
+    max-height: 132px;
+    margin: 12px;
+  }
+
+  .visual-language-prototype .vl-inspector {
+    width: min(320px, calc(100% - 24px));
+    max-height: calc(100% - 24px);
+    margin: 12px;
+  }
+
+  /* Both panels dock bottom-left here, so lift the inspector above the list. */
+  .visual-language-prototype:has(.vl-equivalent-controls) .vl-inspector {
+    margin-bottom: 156px;
+  }
+
+  .visual-language-prototype .vl-fallback-notice {
+    margin: 12px;
+  }
+
+  .visual-language-prototype .vl-route-casing {
+    stroke-width: 9;
+  }
+
+  .visual-language-prototype .vl-route-core {
+    stroke-width: 5;
+  }
+}
+
+@media (max-width: 390px) {
+  .visual-language-prototype .vl-prototype__header {
+    gap: 8px;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .visual-language-prototype .vl-prototype__header h1 {
+    font-size: 16px;
+    line-height: 24px;
+  }
+
+  .visual-language-prototype .vl-prototype__eyebrow {
+    max-width: 32%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .visual-language-prototype .vl-toolbar {
+    max-height: 240px;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .visual-language-prototype .vl-toolbar__buttons {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .visual-language-prototype .vl-toolbar__button {
+    width: 100%;
+  }
+
+  .visual-language-prototype .vl-scene__source {
+    top: 8px;
+    left: 8px;
+    max-width: calc(100% - 16px);
+  }
+
+  .visual-language-prototype .vl-scene__caption {
+    right: 8px;
+    bottom: 8px;
+    max-width: calc(100% - 16px);
+  }
+
+  .visual-language-prototype .vl-guidance-card {
+    margin: 8px;
+  }
+
+  .visual-language-prototype .vl-equivalent-controls__list {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .visual-language-prototype .vl-equivalent-controls__button {
+    width: 100%;
+  }
+}
+
+.visual-language-prototype.is-reduced-motion *,
+.visual-language-prototype.is-reduced-motion *::before,
+.visual-language-prototype.is-reduced-motion *::after {
+  transition-duration: 0.001ms !important;
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .visual-language-prototype *,
+  .visual-language-prototype *::before,
+  .visual-language-prototype *::after {
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

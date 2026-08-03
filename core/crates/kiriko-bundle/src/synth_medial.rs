@@ -292,15 +292,39 @@ const WEAVE_DETOUR_RATIO: f64 = 1.15;
 /// (track strips, walls) are an order of magnitude wider.
 const SEGMENT_OUTSIDE_TOL_M: f64 = 0.3;
 /// Doorway stub length (m) each side of an opening's midpoint, along the
-/// opening's axis: routes cross the doorway collinear with the opening line —
-/// straight in from the front — instead of entering at the angle of the
-/// nearest centerline node.
+/// detected passage direction: routes cross the doorway straight through the
+/// opening instead of entering at the angle of the nearest centerline node.
 const DOORWAY_STUB_M: f64 = 1.2;
+/// Degeneracy epsilon (m): a ray/projection hit within this of an existing
+/// skeleton endpoint reuses that endpoint instead of creating a zero-length split.
+const DOORWAY_SPLIT_EPS_M: f64 = 0.05;
+/// Minimum extra distance (m) beyond [`DOORWAY_STUB_M`] that a planned attach
+/// target must sit past the stub for the stub to remain useful; closer junctions
+/// attach from the midpoint directly.
+const DOORWAY_STUB_JUNCTION_MARGIN_M: f64 = 0.1;
+
+/// Minimum interior clearance (m) for a stub-offset sample to count as "deep"
+/// inside walkable space when scoring passage direction. Stricter than
+/// [`SEGMENT_OUTSIDE_TOL_M`] so along-the-wall threshold stubs, which only
+/// graze the boundary, do not look like real crossings.
+const STUB_DEEP_M: f64 = 0.5;
 /// Maximum chord length (m) considered for an open-space shortcut.
 const CHORD_MAX_M: f64 = 40.0;
 /// A chord is a real shortcut only when it beats the existing graph path by
 /// at least this factor (chord length < ratio × graph distance).
 const CHORD_SAVINGS_RATIO: f64 = 0.7;
+/// Shorter chords are medial-axis noise between nearby spur tips, not real
+/// open-space shortcuts (JR Takanawa F1 median chord was 2.66 m).
+const CHORD_MIN_M: f64 = 10.0;
+/// Absolute walking metres a chord must save. The ratio rule alone is
+/// scale-free and fires on ~3 m chords whose graph path is ~10 m.
+const CHORD_MIN_SAVINGS_M: f64 = 15.0;
+/// Minimum boundary clearance (m) along a chord — half-width of a genuinely
+/// open hall. Corridor-only venues top out near 4.7 m and must yield zero chords.
+const CHORD_MIN_CLEARANCE_M: f64 = 5.0;
+/// Cap on chords incident to any single node; dense skeletons otherwise grow
+/// degree-7 hubs of crossing shortcuts.
+const CHORD_MAX_PER_NODE: usize = 2;
 
 
 
@@ -403,6 +427,106 @@ fn segment_within_area(a: [f64; 2], b: [f64; 2], area: &MultiPolygon<f64>, tol_m
     })
 }
 
+/// Ray–segment intersection in the local metre frame at `origin`'s latitude.
+/// Ray: `origin + t·dir` for `t ≥ 0` (`dir` unit metre vector). Segment: `a`–`b`.
+/// Returns `(hit_lonlat, t_along_ray_m, s_along_segment)` when they meet with
+/// `t > 0` and `s ∈ (0, 1)`; `None` if parallel/miss/endpoint-only.
+fn ray_segment_hit(
+    origin: [f64; 2],
+    dir: [f64; 2],
+    a: [f64; 2],
+    b: [f64; 2],
+) -> Option<([f64; 2], f64, f64)> {
+    let mx = 111_320.0 * origin[1].to_radians().cos();
+    let my = 111_320.0;
+    // Segment endpoints in metres relative to origin.
+    let ax = (a[0] - origin[0]) * mx;
+    let ay = (a[1] - origin[1]) * my;
+    let bx = (b[0] - origin[0]) * mx;
+    let by = (b[1] - origin[1]) * my;
+    let sx = bx - ax;
+    let sy = by - ay;
+    // Solve origin + t·dir = a + s·(b−a)  ⇒  t·dir − s·seg = a_rel.
+    // 2×2: | dx  -sx | |t| = |ax|
+    //      | dy  -sy | |s|   |ay|
+    let det = dir[0] * (-sy) - (-sx) * dir[1];
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let t = (ax * (-sy) - (-sx) * ay) / det;
+    let s = (dir[0] * ay - dir[1] * ax) / det;
+    if t <= 0.0 || s <= 0.0 || s >= 1.0 {
+        return None;
+    }
+    let hit = [
+        origin[0] + dir[0] * t / mx,
+        origin[1] + dir[1] * t / my,
+    ];
+    Some((hit, t, s))
+}
+
+/// Closest point of `p` on segment `a`–`b` in the local metre frame at `p`'s
+/// latitude. Returns `(proj_lonlat, dist_m, s_along_segment)` with `s ∈ [0, 1]`.
+fn project_point_to_segment(
+    p: [f64; 2],
+    a: [f64; 2],
+    b: [f64; 2],
+) -> ([f64; 2], f64, f64) {
+    let mx = 111_320.0 * p[1].to_radians().cos();
+    let my = 111_320.0;
+    let ax = (a[0] - p[0]) * mx;
+    let ay = (a[1] - p[1]) * my;
+    let bx = (b[0] - p[0]) * mx;
+    let by = (b[1] - p[1]) * my;
+    let sx = bx - ax;
+    let sy = by - ay;
+    let denom = sx * sx + sy * sy;
+    let s = if denom <= 1e-18 {
+        0.0
+    } else {
+        // proj of (0,0)−a onto seg = −a·seg / |seg|²
+        ((-ax) * sx + (-ay) * sy) / denom
+    };
+    let s = s.clamp(0.0, 1.0);
+    let qx = ax + s * sx;
+    let qy = ay + s * sy;
+    let dist = (qx * qx + qy * qy).sqrt();
+    let hit = [p[0] + qx / mx, p[1] + qy / my];
+    (hit, dist, s)
+}
+
+/// Split skeleton edge `edge_idx` at `point`, pushing a new node (or reusing an
+/// endpoint within [`DOORWAY_SPLIT_EPS_M`]). Operates on the live edge list so
+/// an edge already split earlier in the same pass is handled correctly. The
+/// new node inherits `blob` root from endpoint `u`. Returns the (possibly
+/// pre-existing) node index of the split point.
+fn split_skeleton_at(
+    skeleton: &mut Skeleton,
+    blob: &mut Vec<usize>,
+    edge_idx: usize,
+    point: [f64; 2],
+) -> usize {
+    let (u, v) = skeleton.edges[edge_idx];
+    let pu = skeleton.nodes[u];
+    let pv = skeleton.nodes[v];
+    if haversine_m(point, pu) <= DOORWAY_SPLIT_EPS_M {
+        return u;
+    }
+    if haversine_m(point, pv) <= DOORWAY_SPLIT_EPS_M {
+        return v;
+    }
+    let p_idx = skeleton.nodes.len();
+    skeleton.nodes.push(point);
+    // Inherit u's component root.
+    let root = uf_find(blob, u);
+    blob.push(root);
+    // Replace edge with (u, P); push (P, v).
+    skeleton.edges[edge_idx] = (u, p_idx);
+    skeleton.edges.push((p_idx, v));
+    p_idx
+}
+
+
 /// True when every interior sample of segment `a`–`b` lies within at least
 /// ONE of `areas` (e.g. the walkable union or the transit unit itself).
 fn segment_within_any(a: [f64; 2], b: [f64; 2], areas: &[&MultiPolygon<f64>], tol_m: f64) -> bool {
@@ -434,6 +558,20 @@ fn centerline_chord_passable(a: [f64; 2], b: [f64; 2], area: &MultiPolygon<f64>)
         let t = k as f64 / steps as f64;
         let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
         area.contains(&Point::new(p[0], p[1])) && boundary_clearance_m(p, area) >= min_clear
+    })
+}
+
+/// True when endpoints and ~1 m samples along `a`–`b` all lie in open space:
+/// inside `area` with clearance ≥ [`CHORD_MIN_CLEARANCE_M`]. Rejects corridor
+/// chords whose graph-path savings look real but whose half-width is only a
+/// few metres (JR Takanawa F1 max clearance 4.69 m).
+fn chord_in_open_space(a: [f64; 2], b: [f64; 2], area: &MultiPolygon<f64>) -> bool {
+    let steps = (haversine_m(a, b) / 1.0).ceil().max(1.0) as usize;
+    (0..=steps).all(|k| {
+        let t = k as f64 / steps as f64;
+        let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+        area.contains(&Point::new(p[0], p[1]))
+            && boundary_clearance_m(p, area) >= CHORD_MIN_CLEARANCE_M
     })
 }
 
@@ -743,10 +881,10 @@ fn line_verts(coords: &Value) -> Vec<[f64; 2]> {
         .unwrap_or_default()
 }
 
-/// An opening's midpoint plus unit axis (metre frame at the midpoint's
-/// latitude) from its first→last vertex of the longest part. The axis is the
-/// walking direction through the doorway: openings are digitized as connector
-/// lines spanning the gap between spaces. `None` for degenerate geometry.
+/// An opening's midpoint plus unit LINE direction (metre frame at the
+/// midpoint's latitude) from its first→last vertex of the longest part.
+/// The doorway loop scores this against its normal to pick the passage
+/// axis. `None` for degenerate geometry.
 fn opening_axis(geom: &Value) -> Option<([f64; 2], [f64; 2])> {
     let obj = geom.as_object()?;
     let coords = obj.get("coordinates")?;
@@ -790,6 +928,16 @@ struct DoorwayNodes {
     mid_pt: [f64; 2],
     axis: [f64; 2], // metre-frame unit vector
 }
+
+/// Per-opening plan produced before skeleton emit: passage axis and the
+/// skeleton-local attach target chosen for each attaching blob root.
+struct DoorwayPlan {
+    mid: [f64; 2],
+    axis: [f64; 2],
+    /// `(blob_root, skeleton_local_target)` sorted by root for determinism.
+    attaches: Vec<(usize, usize)>,
+}
+
 
 /// Min-heap entry for the bounded Dijkstra inside [`shortcut_chords`].
 #[derive(Clone, Copy, PartialEq)]
@@ -881,7 +1029,10 @@ pub(crate) fn shortcut_chords(
                         continue;
                     }
                     let d = haversine_m(*p, skeleton.nodes[j]);
-                    if d > CHORD_MAX_M || uf_find(&mut uf, i) != uf_find(&mut uf, j) {
+                    if d < CHORD_MIN_M
+                        || d > CHORD_MAX_M
+                        || uf_find(&mut uf, i) != uf_find(&mut uf, j)
+                    {
                         continue;
                     }
                     pairs.push((i, j, d));
@@ -919,19 +1070,30 @@ pub(crate) fn shortcut_chords(
     };
 
     let mut added: Vec<(usize, usize)> = Vec::new();
+    let mut chord_count = vec![0usize; n];
     for (i, j, c) in pairs {
+        if chord_count[i] >= CHORD_MAX_PER_NODE || chord_count[j] >= CHORD_MAX_PER_NODE {
+            continue;
+        }
+        // Open hall only: corridor half-widths fail CHORD_MIN_CLEARANCE_M.
+        if !chord_in_open_space(skeleton.nodes[i], skeleton.nodes[j], area) {
+            continue;
+        }
         // Fully inside walkable space at passage width (rejects chords
         // across kiosks, walls, and track strips).
         if !centerline_chord_passable(skeleton.nodes[i], skeleton.nodes[j], area) {
             continue;
         }
-        // Only a real shortcut: the existing graph path (including bridges
-        // and chords already added) must be longer than c / CHORD_SAVINGS_RATIO.
-        if reachable_within(&adj, i, j, c / CHORD_SAVINGS_RATIO) {
+        // Real shortcut: existing graph path must exceed BOTH the ratio and
+        // absolute savings bounds (one Dijkstra with the tighter cutoff).
+        let cutoff = (c / CHORD_SAVINGS_RATIO).max(c + CHORD_MIN_SAVINGS_M);
+        if reachable_within(&adj, i, j, cutoff) {
             continue;
         }
         adj[i].push((j, c));
         adj[j].push((i, c));
+        chord_count[i] += 1;
+        chord_count[j] += 1;
         added.push((i, j));
     }
     added
@@ -1108,54 +1270,20 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 protected[local] = true;
             }
         }
-        let skeleton =
+        let mut skeleton =
             straighten_degree_two_chains(skeleton, &area, &protected, WEAVE_DETOUR_RATIO);
-        let base = nodes.len();
-        for n in &skeleton.nodes {
-            nodes.push(RouteNode {
-                lon: n[0],
-                lat: n[1],
-                ordinal: ord,
-            });
-        }
-        for &(a, b) in &skeleton.edges {
-            let (i, j) = (base + a, base + b);
-            edges.push(RouteEdge {
-                from: i as u32,
-                to: j as u32,
-                weight: haversine_m([nodes[i].lon, nodes[i].lat], [nodes[j].lon, nodes[j].lat])
-                    as f32,
-                ordinal: ord,
-                interior: Vec::new(),
-            });
-        }
-        let skeleton_range = base..nodes.len();
 
-        // Chord eligibility tracks skeleton + near-blob bridge connectivity
-        // only. Doorway attachments union production `blob` so downstream
-        // passes see one component, but those stub paths are NOT in the chord
-        // adjacency — keep opposite-side doorway components ineligible for
-        // open-space chords that would bypass the stub-mid-stub approach.
-        let mut chord_blob = blob.clone();
-
-        // Doorways: bridge each opening to the nearest centerline node of every
-        // distinct blob within range, merging areas that share the doorway.
-        // Blobs connected here are UNIONED as they are processed, so a second
-        // doorway into the same area attaches as a leaf instead of fanning out
-        // a parallel bridge, and the near-blob pass below never duplicates a
-        // doorway path with a direct skeleton-skeleton edge.
-        //
-        // Each doorway is a midpoint node flanked by two axis stubs (when
-        // walkable): attaching blobs and transit units connect through the
-        // stub on their side, so routes cross the doorway straight in from
-        // the front. A side whose stub fails validation falls back to the
-        // midpoint (the previous single-node behavior).
-        let mut doorway_nodes: Vec<DoorwayNodes> = Vec::new();
-        for &(mid, axis) in &openings {
+        // Doorway PLANNING (before skeleton emit): detect passage direction,
+        // discover attaching blobs, upgrade each blob's target via axis-ray →
+        // projection → nearest-node, and split centerline edges so the emit
+        // below naturally includes T-junction nodes. Union blob roots as we
+        // go so a later opening's grouping sees prior doorway merges.
+        let mut doorway_plans: Vec<DoorwayPlan> = Vec::new();
+        for &(mid, line_dir) in &openings {
             // Nearest VALID node per blob: candidates in distance order, the
             // first whose segment from the opening stays within walkable
-            // space. Rejecting blocked snaps is what stops doorways from
-            // teleporting across track strips and walls.
+            // space. This remains the source of truth for WHICH blobs attach
+            // and for the no-walkway warning; targets are upgraded below.
             let mut cands: Vec<(usize, usize, f64)> = Vec::new();
             for (local, n) in skeleton.nodes.iter().enumerate() {
                 let d = haversine_m(*n, mid);
@@ -1187,8 +1315,214 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 continue;
             }
 
-            // Axis stubs: midpoint ± axis·δ, kept only when they and their
-            // link to the midpoint stay in walkable space.
+            // Passage direction: openings are either gap-spanning connectors
+            // (axis = line) or IMDF threshold lines along a wall (axis = normal).
+            // Score both candidates from deep interior samples + blob roots.
+            let mx = 111_320.0 * mid[1].to_radians().cos();
+            let offset_pt = |d: [f64; 2], sign: f64| {
+                [
+                    mid[0] + sign * d[0] * DOORWAY_STUB_M / mx,
+                    mid[1] + sign * d[1] * DOORWAY_STUB_M / 111_320.0,
+                ]
+            };
+            let mut deep_blob = |pt: [f64; 2]| -> Option<usize> {
+                if !area.contains(&Point::new(pt[0], pt[1])) {
+                    return None;
+                }
+                if boundary_clearance_m(pt, &area) < STUB_DEEP_M {
+                    return None;
+                }
+                let mut best: Option<(f64, usize)> = None;
+                for (local, n) in skeleton.nodes.iter().enumerate() {
+                    let d = haversine_m(*n, pt);
+                    if d > SNAP_MAX_M {
+                        continue;
+                    }
+                    if best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                        best = Some((d, local));
+                    }
+                }
+                best.map(|(_, local)| uf_find(&mut blob, local))
+            };
+            let mut score_dir = |d: [f64; 2]| -> u8 {
+                let a = deep_blob(offset_pt(d, 1.0));
+                let b = deep_blob(offset_pt(d, -1.0));
+                match (a, b) {
+                    (Some(ra), Some(rb)) if ra != rb => 2,
+                    (Some(_), None) | (None, Some(_)) => 1,
+                    _ => 0,
+                }
+            };
+            let normal = [-line_dir[1], line_dir[0]];
+            let s_line = score_dir(line_dir);
+            let s_norm = score_dir(normal);
+            // Tie → prefer the normal (IMDF threshold semantics: cross the line).
+            let axis = if s_line > s_norm {
+                line_dir
+            } else {
+                normal
+            };
+
+            // Upgrade each blob's attach target: axis ray → projection →
+            // nearest node. Sorted by root for determinism.
+            let mut attach_roots: Vec<usize> = per_blob.keys().copied().collect();
+            attach_roots.sort_unstable();
+            let mut attaches: Vec<(usize, usize)> = Vec::with_capacity(attach_roots.len());
+            for root in attach_roots {
+                let (nearest_local, _) = per_blob[&root];
+                let target = {
+                    // 1. Axis ray along s·p toward this blob's side.
+                    let c = skeleton.nodes[nearest_local];
+                    let side_dot =
+                        axis[0] * (c[0] - mid[0]) * mx + axis[1] * (c[1] - mid[1]) * 111_320.0;
+                    let sign = if side_dot >= 0.0 { 1.0 } else { -1.0 };
+                    let dir = [sign * axis[0], sign * axis[1]];
+
+                    // Collect edge indices belonging to this blob (live list).
+                    let mut edge_idxs: Vec<usize> = (0..skeleton.edges.len())
+                        .filter(|&ei| {
+                            let (u, v) = skeleton.edges[ei];
+                            uf_find(&mut blob, u) == root || uf_find(&mut blob, v) == root
+                        })
+                        .collect();
+                    // Deterministic edge order.
+                    edge_idxs.sort_unstable();
+
+                    let mut best_ray: Option<(f64, usize, [f64; 2])> = None; // (t, ei, hit)
+                    for &ei in &edge_idxs {
+                        let (u, v) = skeleton.edges[ei];
+                        // Prefer edges whose BOTH ends are in this blob; a
+                        // cross-blob edge is rare after UF but skip if neither
+                        // endpoint matches (defensive).
+                        let ru = uf_find(&mut blob, u);
+                        let rv = uf_find(&mut blob, v);
+                        if ru != root && rv != root {
+                            continue;
+                        }
+                        let Some((hit, t, _s)) =
+                            ray_segment_hit(mid, dir, skeleton.nodes[u], skeleton.nodes[v])
+                        else {
+                            continue;
+                        };
+                        if t <= DOORWAY_SPLIT_EPS_M || t > SNAP_MAX_M {
+                            continue;
+                        }
+                        if !segment_within_area(mid, hit, &area, SEGMENT_OUTSIDE_TOL_M) {
+                            continue;
+                        }
+                        let better = match best_ray {
+                            None => true,
+                            Some((bt, bei, _)) => {
+                                t < bt - 1e-12 || ((t - bt).abs() <= 1e-12 && ei < bei)
+                            }
+                        };
+                        if better {
+                            best_ray = Some((t, ei, hit));
+                        }
+                    }
+                    if let Some((_, ei, hit)) = best_ray {
+                        split_skeleton_at(&mut skeleton, &mut blob, ei, hit)
+                    } else {
+                        // 2. Perpendicular projection onto blob edges.
+                        let mut best_proj: Option<(f64, usize, [f64; 2])> = None; // (dist, ei, hit)
+                        for &ei in &edge_idxs {
+                            let (u, v) = skeleton.edges[ei];
+                            let ru = uf_find(&mut blob, u);
+                            let rv = uf_find(&mut blob, v);
+                            if ru != root && rv != root {
+                                continue;
+                            }
+                            let (hit, dist, s) =
+                                project_point_to_segment(mid, skeleton.nodes[u], skeleton.nodes[v]);
+                            // Strictly interior projection (endpoints handled
+                            // by nearest-node / degeneracy reuse).
+                            if s <= 0.0 || s >= 1.0 {
+                                continue;
+                            }
+                            if dist > SNAP_MAX_M {
+                                continue;
+                            }
+                            if !segment_within_area(mid, hit, &area, SEGMENT_OUTSIDE_TOL_M) {
+                                continue;
+                            }
+                            let better = match best_proj {
+                                None => true,
+                                Some((bd, bei, _)) => {
+                                    dist < bd - 1e-12
+                                        || ((dist - bd).abs() <= 1e-12 && ei < bei)
+                                }
+                            };
+                            if better {
+                                best_proj = Some((dist, ei, hit));
+                            }
+                        }
+                        if let Some((_, ei, hit)) = best_proj {
+                            split_skeleton_at(&mut skeleton, &mut blob, ei, hit)
+                        } else {
+                            // 3. Nearest valid node (today's behavior).
+                            nearest_local
+                        }
+                    }
+                };
+                attaches.push((root, target));
+            }
+
+            // Union attaching blob roots so a later opening sees one component.
+            if attaches.len() > 1 {
+                let r0 = attaches[0].0;
+                for &(r, _) in &attaches[1..] {
+                    let (ra, rb) = (uf_find(&mut blob, r0), uf_find(&mut blob, r));
+                    if ra != rb {
+                        blob[ra] = rb;
+                    }
+                }
+            }
+
+            doorway_plans.push(DoorwayPlan {
+                mid,
+                axis,
+                attaches,
+            });
+        }
+
+        // Emit skeleton (now including any doorway T-junction splits).
+        let base = nodes.len();
+        for n in &skeleton.nodes {
+            nodes.push(RouteNode {
+                lon: n[0],
+                lat: n[1],
+                ordinal: ord,
+            });
+        }
+        for &(a, b) in &skeleton.edges {
+            let (i, j) = (base + a, base + b);
+            edges.push(RouteEdge {
+                from: i as u32,
+                to: j as u32,
+                weight: haversine_m([nodes[i].lon, nodes[i].lat], [nodes[j].lon, nodes[j].lat])
+                    as f32,
+                ordinal: ord,
+                interior: Vec::new(),
+            });
+        }
+        let skeleton_range = base..nodes.len();
+
+        // Chord eligibility: rebuild from the FINAL skeleton edges (post-split)
+        // so split nodes participate. Doorway-only unions stay out — opposite
+        // sides must not become chord-eligible via the stub path.
+        let mut chord_blob: Vec<usize> = (0..skeleton.nodes.len()).collect();
+        for &(a, b) in &skeleton.edges {
+            let (ra, rb) = (uf_find(&mut chord_blob, a), uf_find(&mut chord_blob, b));
+            if ra != rb {
+                chord_blob[ra] = rb;
+            }
+        }
+
+        // Doorway EMIT: midpoint, axis stubs, M↔stub edges, planned attaches.
+        let mut doorway_nodes: Vec<DoorwayNodes> = Vec::new();
+        for plan in &doorway_plans {
+            let mid = plan.mid;
+            let axis = plan.axis;
             let mx = 111_320.0 * mid[1].to_radians().cos();
             let stub_pt = |sign: f64| {
                 [
@@ -1213,6 +1547,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 mid_pt: mid,
                 axis,
             };
+            // Fixed stub order: +axis (fwd) then −axis (bwd).
             for (sign, is_fwd) in [(1.0_f64, true), (-1.0_f64, false)] {
                 let pt = stub_pt(sign);
                 if !stub_valid(pt) {
@@ -1238,24 +1573,37 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 }
             }
 
-            let roots: Vec<usize> = per_blob.keys().copied().collect();
-            for &r in &roots[1..] {
-                let (ra, rb) = (uf_find(&mut blob, roots[0]), uf_find(&mut blob, r));
-                if ra != rb {
-                    blob[ra] = rb;
-                }
-            }
-            // Attach each blob through the stub on ITS side of the doorway
-            // (deterministic order); the midpoint stays the fallback target.
-            let mut attach: Vec<(usize, usize)> =
-                per_blob.into_iter().map(|(r, (local, _))| (r, local)).collect();
-            attach.sort_unstable();
-            for (_, local) in attach {
+            // Attach each planned blob target through the stub on ITS side,
+            // falling back to M when the stub is missing, the target sits
+            // nearer than the stub (junction steals the stub), or the
+            // stub→target segment leaves walkable space.
+            for &(_root, local) in &plan.attaches {
                 let c = skeleton.nodes[local];
-                let dot = axis[0] * (c[0] - mid[0]) * mx + axis[1] * (c[1] - mid[1]) * 111_320.0;
-                let stub = if dot >= 0.0 { doorway.fwd } else { doorway.bwd };
+                let side_dot =
+                    axis[0] * (c[0] - mid[0]) * mx + axis[1] * (c[1] - mid[1]) * 111_320.0;
+                let stub = if side_dot >= 0.0 {
+                    doorway.fwd
+                } else {
+                    doorway.bwd
+                };
                 let (t_idx, t_pt) = match stub {
-                    Some(i) => (i, [nodes[i].lon, nodes[i].lat]),
+                    Some(i) => {
+                        let sp = [nodes[i].lon, nodes[i].lat];
+                        // Stub is useful only when the attach target lies past
+                        // it along the passage direction and far enough that
+                        // the stub is not swallowed by a nearer junction.
+                        let along = axis[0] * (c[0] - mid[0]) * mx
+                            + axis[1] * (c[1] - mid[1]) * 111_320.0;
+                        let sign = if side_dot >= 0.0 { 1.0 } else { -1.0 };
+                        let forward = along * sign > 0.0;
+                        let far_enough = haversine_m(c, mid)
+                            > DOORWAY_STUB_M + DOORWAY_STUB_JUNCTION_MARGIN_M;
+                        if forward && far_enough {
+                            (i, sp)
+                        } else {
+                            (mid_idx, mid)
+                        }
+                    }
                     None => (mid_idx, mid),
                 };
                 let (t_idx, t_pt) = if t_idx != mid_idx
@@ -1275,6 +1623,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             }
             doorway_nodes.push(doorway);
         }
+
 
         // Near-blob bridging: fuse distinct blobs that abut without a doorway.
         // Bucket skeleton nodes on an ~ADJACENCY_BRIDGE_M grid, then keep the
@@ -2471,12 +2820,17 @@ mod tests {
             !cross_spine,
             "no direct bridge edge duplicating the doorway path"
         );
-        assert_eq!(
-            same_floor_degree(g, onode),
-            2,
-            "midpoint touches only its two stubs"
+        // Midpoint degree: two stub edges, plus direct attaches when the
+        // centerline T-junction sits nearer than the stub (thin walkways
+        // ~1.1 m half-width < DOORWAY_STUB_M + margin). Stubs remain for
+        // geometry/transit; attach lands on M so the stub is not a detour.
+        let mid_deg = same_floor_degree(g, onode);
+        assert!(
+            mid_deg >= 2 && mid_deg <= 4,
+            "midpoint keeps stub edges and at most two direct attaches, degree={mid_deg}"
         );
     }
+
 
     #[test]
     fn nearby_openings_share_one_doorway_bridge() {
@@ -2688,12 +3042,13 @@ mod tests {
         assert_eq!(choose_spacing(&small, so), Some(BASE_SPACING_DEG));
     }
 
-    /// Node indices at the doorway midpoint and (when present) its two axis
-    /// stubs, located by exact geometry.
+    /// Node indices at the doorway midpoint and (when present) its two passage
+    /// stubs. Stubs may lie along the opening line or its normal — the synth
+    /// picks per opening — so both candidate axes are probed.
     fn doorway_group(g: &kiriko_route::RouteGraph, door: &Value) -> Vec<usize> {
         let mid = linestring_midpoint(door).unwrap();
         let mx = 111_320.0 * mid[1].to_radians().cos();
-        // Door axis from the line's first→last vertex (test doors are 2-vertex).
+        // Door line direction from the line's first→last vertex (test doors are 2-vertex).
         let coords = door
             .as_object()
             .and_then(|o| o.get("coordinates"))
@@ -2706,28 +3061,40 @@ mod tests {
         let (a, b) = (pt(0), pt(coords.len() - 1));
         let (dx, dy) = ((b[0] - a[0]) * mx, (b[1] - a[1]) * 111_320.0);
         let len = (dx * dx + dy * dy).sqrt();
-        let (ux, uy) = (dx / len, dy / len);
-        let stub = |sign: f64| {
+        let line_dir = [dx / len, dy / len];
+        let normal = [-line_dir[1], line_dir[0]];
+        let stub = |dir: [f64; 2], sign: f64| {
             [
-                mid[0] + sign * ux * DOORWAY_STUB_M / mx,
-                mid[1] + sign * uy * DOORWAY_STUB_M / 111_320.0,
+                mid[0] + sign * dir[0] * DOORWAY_STUB_M / mx,
+                mid[1] + sign * dir[1] * DOORWAY_STUB_M / 111_320.0,
             ]
         };
-        let want = [mid, stub(1.0), stub(-1.0)];
+        let want = [
+            mid,
+            stub(line_dir, 1.0),
+            stub(line_dir, -1.0),
+            stub(normal, 1.0),
+            stub(normal, -1.0),
+        ];
         g.nodes
             .iter()
             .enumerate()
-            .filter(|(_, n)| want.iter().any(|w| (n.lon - w[0]).abs() < 1e-9 && (n.lat - w[1]).abs() < 1e-9))
+            .filter(|(_, n)| {
+                want.iter()
+                    .any(|w| (n.lon - w[0]).abs() < 1e-9 && (n.lat - w[1]).abs() < 1e-9)
+            })
             .map(|(i, _)| i)
             .collect()
     }
 
     #[test]
-    fn doorway_stubs_align_with_the_opening_axis() {
-        // One 36 m × 11 m walkway with a doorway across its middle (axis in
-        // latitude): the doorway midpoint must be flanked by two stub nodes on
-        // the opening axis, and the centerline must attach through a stub —
-        // never directly to the midpoint.
+    fn doorway_stubs_cross_the_passage_direction() {
+        // One 36 m × 11 m walkway with a doorway drawn across its middle (line
+        // along latitude). Passage is through the gate — perpendicular to the
+        // opening line (score tie → prefer the normal). Stubs flank the
+        // midpoint on that passage axis. The centerline attaches through a
+        // stub, or directly to the midpoint when the on-axis junction sits
+        // nearer than the stub (DOORWAY_STUB_M + margin).
         let walk = rect(139.70000, 35.600002, 0.00040, 0.00010);
         let door = line(139.70000, 35.599995, 139.70000, 35.600005);
         let doc = document(
@@ -2746,37 +3113,74 @@ mod tests {
             .position(|n| [n.lon, n.lat] == dm)
             .expect("opening midpoint node exists");
         let group = doorway_group(g, &door);
-        assert_eq!(group.len(), 3, "midpoint plus both axis stubs");
-        // Midpoint degree is exactly 2: edges to the two stubs, nothing else.
-        assert_eq!(same_floor_degree(g, onode), 2, "midpoint touches only its stubs");
-        // Both stubs lie on the door axis: same lon as the midpoint, ±δ lat.
+        assert_eq!(group.len(), 3, "midpoint plus both passage stubs");
+        // Midpoint degree is at least 2 (the two stubs). When the on-axis
+        // split lands nearer than the stub, attach goes to M directly
+        // (degree 3); otherwise attach goes through a stub (degree 2).
+        let mid_deg = same_floor_degree(g, onode);
+        assert!(
+            mid_deg == 2 || mid_deg == 3,
+            "midpoint touches stubs and at most one direct attach, degree={mid_deg}"
+        );
+        // Stubs are perpendicular to the N–S opening line: same lat as mid, ±δ lon.
         for &s in &group {
             if s == onode {
                 continue;
             }
-            assert!((g.nodes[s].lon - dm[0]).abs() < 1e-9, "stub on the opening axis");
+            assert!(
+                (g.nodes[s].lat - dm[1]).abs() < 1e-9,
+                "stub perpendicular to the opening line (same lat), got lon={} lat={}",
+                g.nodes[s].lon,
+                g.nodes[s].lat
+            );
+            assert!(
+                (g.nodes[s].lon - dm[0]).abs() > 1e-9,
+                "stub must leave the opening line, not sit on it"
+            );
         }
-        // The centerline attaches through a stub: some stub has a non-midpoint edge.
-        let attached = group.iter().any(|&s| {
+        // The centerline attaches through a stub OR directly to M when the
+        // T-junction is nearer than the stub (wide room, short approach).
+        let attached_via_stub = group.iter().any(|&s| {
             s != onode
                 && g.edges.iter().any(|e| {
                     let (a, b) = (e.from as usize, e.to as usize);
                     (a == s && b != onode) || (b == s && a != onode)
                 })
         });
-        assert!(attached, "centerline attaches through a stub");
+        let attached_via_mid = mid_deg == 3;
+        assert!(
+            attached_via_stub || attached_via_mid,
+            "centerline attaches through a stub or directly to M"
+        );
     }
 
     #[test]
     fn stub_attach_is_side_aware() {
-        // Two parallel walkways joined by a doorway (axis in latitude): each
-        // blob's centerline attaches to the stub on ITS side of the doorway.
-        let door = line(139.70000, 35.600004, 139.70000, 35.600010);
+        // Two parallel walkways joined by a doorway spanning the gap (line
+        // along latitude): each blob's centerline attaches to the stub on ITS
+        // side. Gap-connector geometry: line direction scores 2 (different
+        // blobs deep on each side) and must keep winning over the normal.
+        // ~4.8 m tall walkways with a ~0.55 m gap: ±1.2 m stubs land deep
+        // (≥0.5 m clearance) inside each walkway; the midpoint sits in the
+        // gap within SEGMENT_OUTSIDE_TOL_M of both sides.
+        let door = line(139.70000, 35.600045, 139.70000, 35.600055);
         let doc = document(
             &[("l0", 0.0)],
             vec![
-                feature("wa", FeatureType::Unit, "l0", Some("walkway"), rect(139.70000, 35.600000, 0.00040, 0.00001)),
-                feature("wb", FeatureType::Unit, "l0", Some("walkway"), rect(139.70000, 35.600014, 0.00040, 0.00001)),
+                feature(
+                    "wa",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600025, 0.00040, 0.000045),
+                ),
+                feature(
+                    "wb",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600075, 0.00040, 0.000045),
+                ),
                 feature("door", FeatureType::Opening, "l0", None, door.clone()),
             ],
         );
@@ -2808,10 +3212,12 @@ mod tests {
 
     #[test]
     fn outside_stub_side_is_dropped() {
-        // A doorway on the walkway's outer wall: the stub pointing outside
-        // the walkable area is dropped; the midpoint and inside stub remain.
+        // A threshold opening drawn along the walkway's outer (south) wall:
+        // passage is the wall normal. The stub pointing outside the walkable
+        // area is dropped; the midpoint and inside stub remain.
         let walk = rect(139.70000, 35.60000, 0.00040, 0.00002);
-        let door = line(139.70000, 35.599990, 139.70000, 35.600000);
+        // E–W threshold on the south edge (along the wall).
+        let door = line(139.69998, 35.599990, 139.70002, 35.599990);
         let doc = document(
             &[("l0", 0.0)],
             vec![
@@ -2825,8 +3231,546 @@ mod tests {
         assert!(g.nodes.iter().any(|n| [n.lon, n.lat] == dm), "midpoint node exists");
         let group = doorway_group(g, &door);
         assert_eq!(group.len(), 2, "only the inside stub survives");
+        // Surviving stub is on the normal (N), not along the wall.
+        let stub = group.into_iter().find(|&i| {
+            let n = &g.nodes[i];
+            (n.lon - dm[0]).abs() > 1e-12 || (n.lat - dm[1]).abs() > 1e-12
+        });
+        let stub = stub.expect("inside stub present");
+        assert!(
+            (g.nodes[stub].lon - dm[0]).abs() < 1e-9,
+            "inside stub is on the wall normal (same lon)"
+        );
+        assert!(
+            g.nodes[stub].lat > dm[1],
+            "inside stub is north of the south-wall threshold"
+        );
         assert_eq!(component_count(g), 1);
     }
+
+    #[test]
+    fn doorway_axis_crosses_a_threshold_opening() {
+        // Walkway abutting a non-walkable room on a shared east–west wall; the
+        // opening is drawn along that wall (IMDF threshold). The surviving stub
+        // must sit on the walkable side, offset perpendicular to the line —
+        // never along the wall into either unit.
+        let walk = rect(139.70000, 35.60000, 0.00040, 0.00002);
+        // Room immediately south of the walkway (non-walkable category); north
+        // edge shares the walkway's south wall at lat 35.59999.
+        let room = rect(139.70000, 35.59998, 0.00040, 0.00002);
+        let door = line(139.69998, 35.599990, 139.70002, 35.599990);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("r", FeatureType::Unit, "l0", Some("room"), room),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        let dm = linestring_midpoint(&door).unwrap();
+        let onode = g
+            .nodes
+            .iter()
+            .position(|n| [n.lon, n.lat] == dm)
+            .expect("opening midpoint node exists");
+        let group = doorway_group(g, &door);
+        // Midpoint + one walkable-side stub (room side is not walkable).
+        assert_eq!(group.len(), 2, "only the walkable-side stub survives: {group:?}");
+        let stub_idx = group.into_iter().find(|&i| i != onode).expect("stub");
+        let sn = &g.nodes[stub_idx];
+        // Perpendicular to the E–W threshold → same lon, different lat.
+        assert!(
+            (sn.lon - dm[0]).abs() < 1e-9,
+            "stub is on the wall normal, not along the wall: lon={} mid={}",
+            sn.lon,
+            dm[0]
+        );
+        assert!(
+            sn.lat > dm[1],
+            "stub is on the walkable (north) side, lat={} mid={}",
+            sn.lat,
+            dm[1]
+        );
+        // No stub sits along the wall (would share the midpoint's lat and differ in lon).
+        let along_wall = g.nodes.iter().any(|n| {
+            (n.lat - dm[1]).abs() < 1e-9
+                && (n.lon - dm[0]).abs() > 1e-9
+                && haversine_m([n.lon, n.lat], dm) < DOORWAY_STUB_M + 0.1
+        });
+        assert!(!along_wall, "no stub is placed along the wall");
+    }
+
+    /// Lateral offset (m) of `p` from the ray through `origin` along unit
+    /// metre-frame direction `dir`. Zero when collinear with the door axis.
+    fn lateral_offset_m(origin: [f64; 2], dir: [f64; 2], p: [f64; 2]) -> f64 {
+        let mx = 111_320.0 * origin[1].to_radians().cos();
+        let vx = (p[0] - origin[0]) * mx;
+        let vy = (p[1] - origin[1]) * 111_320.0;
+        // |v × dir| in 2d = |vx*dy - vy*dx|
+        (vx * dir[1] - vy * dir[0]).abs()
+    }
+
+    /// Angle (degrees) between two undirected graph edges sharing `mid`.
+    /// 0° = collinear straight-through; 180° = fold-back.
+    fn approach_bend_deg(
+        g: &kiriko_route::RouteGraph,
+        a: usize,
+        mid: usize,
+        b: usize,
+    ) -> f64 {
+        let mx = 111_320.0 * g.nodes[mid].lat.to_radians().cos();
+        let v = |from: usize, to: usize| {
+            let (f, t) = (&g.nodes[from], &g.nodes[to]);
+            let dx = (t.lon - f.lon) * mx;
+            let dy = (t.lat - f.lat) * 111_320.0;
+            let len = (dx * dx + dy * dy).sqrt();
+            [dx / len, dy / len]
+        };
+        // Incoming attach→stub and outgoing stub→mid should be parallel.
+        let u = v(a, mid);
+        let w = v(mid, b);
+        let dot = (u[0] * w[0] + u[1] * w[1]).clamp(-1.0, 1.0);
+        dot.acos().to_degrees()
+    }
+
+    /// Skeleton attach target(s) from a doorway group (stub or mid edges that
+    /// leave the group). Empty if the door has no attach.
+    fn doorway_attach_targets(
+        g: &kiriko_route::RouteGraph,
+        group: &[usize],
+    ) -> Vec<usize> {
+        let mut out = Vec::new();
+        for e in &g.edges {
+            let (a, b) = (e.from as usize, e.to as usize);
+            let (ga, gb) = (group.contains(&a), group.contains(&b));
+            if ga == gb {
+                continue;
+            }
+            out.push(if ga { b } else { a });
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn doorway_attach_splits_the_centerline_in_front_of_the_door() {
+        // Wide E–W corridor; doorway on the south wall OFFSET from center so
+        // the densified medial spine has no pre-existing node on the door
+        // axis. Nearest-node attach would enter diagonally from a side node;
+        // axis-ray split must insert a T-junction on the centerline directly
+        // in front of the door. Approach attach→(stub?)→M is collinear.
+        let walk = rect(139.70000, 35.60000, 0.00080, 0.00008); // ~72 m × 9 m
+        // Door between densification samples on the south wall so the nearest
+        // spine node sits ~0.15 m off-axis (half the ~0.36 m sample pitch).
+        let door = line(139.7000665, 35.599960, 139.7001065, 35.599960);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        let dm = linestring_midpoint(&door).unwrap();
+        let onode = g
+            .nodes
+            .iter()
+            .position(|n| [n.lon, n.lat] == dm)
+            .expect("opening midpoint");
+        let group = doorway_group(g, &door);
+        assert!(group.len() >= 2, "mid + inside stub");
+
+        // Passage axis is the wall normal (north): unit metre vector [0, 1].
+        let axis = [0.0_f64, 1.0];
+
+        let targets = doorway_attach_targets(g, &group);
+        assert_eq!(targets.len(), 1, "one attach target: {targets:?}");
+        let front_i = targets[0];
+        let front_n = &g.nodes[front_i];
+        let lat_off = lateral_offset_m(dm, axis, [front_n.lon, front_n.lat]);
+        assert!(
+            lat_off < 0.05,
+            "split sits on the door axis, lateral offset {lat_off:.3} m (target lon={} lat={})",
+            front_n.lon,
+            front_n.lat
+        );
+        assert!(
+            front_n.lat > dm[1],
+            "split is north of the south-wall door"
+        );
+        // T-junction: original spine edge became two, plus the attach.
+        assert!(
+            same_floor_degree(g, front_i) >= 3,
+            "split node is a T-junction, degree={}",
+            same_floor_degree(g, front_i)
+        );
+        // The two spine neighbors of the split (excluding the doorway attach)
+        // must straddle the split lon — proves an edge was split.
+        let spine_nbrs: Vec<usize> = g
+            .edges
+            .iter()
+            .filter_map(|e| {
+                let (a, b) = (e.from as usize, e.to as usize);
+                if a == front_i && !group.contains(&b) {
+                    Some(b)
+                } else if b == front_i && !group.contains(&a) {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            spine_nbrs.len() >= 2,
+            "split has ≥2 spine neighbors: {spine_nbrs:?}"
+        );
+        let lons: Vec<f64> = spine_nbrs.iter().map(|&i| g.nodes[i].lon).collect();
+        let min_lon = lons.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_lon = lons.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            min_lon < front_n.lon && max_lon > front_n.lon,
+            "spine neighbors straddle the split (edge was split): lons={lons:?} split={}",
+            front_n.lon
+        );
+        // Approach is collinear with the door axis: either attach→stub→M or
+        // attach→M (when the junction is nearer than the stub).
+        let approach_from = {
+            // Find which group node the attach edge lands on.
+            let mut from = None;
+            for e in &g.edges {
+                let (a, b) = (e.from as usize, e.to as usize);
+                if a == front_i && group.contains(&b) {
+                    from = Some(b);
+                    break;
+                }
+                if b == front_i && group.contains(&a) {
+                    from = Some(a);
+                    break;
+                }
+            }
+            from.expect("attach edge from group")
+        };
+        if approach_from == onode {
+            // Direct mid attach: attach→M direction must align with axis.
+            let bend = {
+                let mx = 111_320.0 * dm[1].to_radians().cos();
+                let dx = (front_n.lon - dm[0]) * mx;
+                let dy = (front_n.lat - dm[1]) * 111_320.0;
+                let len = (dx * dx + dy * dy).sqrt();
+                let u = [dx / len, dy / len];
+                let dot = (u[0] * axis[0] + u[1] * axis[1]).clamp(-1.0, 1.0);
+                dot.acos().to_degrees()
+            };
+            assert!(bend < 5.0, "attach→M along door axis, bend={bend:.2}°");
+        } else {
+            let bend = approach_bend_deg(g, front_i, approach_from, onode);
+            assert!(
+                bend < 5.0,
+                "attach→stub→M collinear, bend={bend:.2}°"
+            );
+        }
+    }
+
+    #[test]
+    fn doorway_attach_prefers_the_axis_ray_over_a_nearer_node() {
+        // Same offset-door corridor. Nearest skeleton node is off to the side;
+        // attach must terminate at the on-axis split, not that nearer node.
+        let walk = rect(139.70000, 35.60000, 0.00080, 0.00008);
+        let door = line(139.7000665, 35.599960, 139.7001065, 35.599960);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        let dm = linestring_midpoint(&door).unwrap();
+        let group = doorway_group(g, &door);
+        let targets = doorway_attach_targets(g, &group);
+        assert_eq!(targets.len(), 1, "one attach target: {targets:?}");
+        let target = targets[0];
+        let tn = &g.nodes[target];
+        let off = lateral_offset_m(dm, [0.0, 1.0], [tn.lon, tn.lat]);
+        assert!(
+            off < 0.05,
+            "attach target must be the on-axis split (offset {off:.3} m), got lon={} lat={}",
+            tn.lon,
+            tn.lat
+        );
+        assert!(
+            same_floor_degree(g, target) >= 3,
+            "split node is a T-junction, degree={}",
+            same_floor_degree(g, target)
+        );
+        // Among OTHER non-group nodes, the nearest to M is off-axis — proves
+        // the fixture would have preferred a wrong node under nearest-only.
+        let mut nearest_other: Option<(f64, f64)> = None; // (dist, lat_off)
+        for (i, n) in g.nodes.iter().enumerate() {
+            if i == target || group.contains(&i) {
+                continue;
+            }
+            let d = haversine_m(dm, [n.lon, n.lat]);
+            if d > SNAP_MAX_M {
+                continue;
+            }
+            let lo = lateral_offset_m(dm, [0.0, 1.0], [n.lon, n.lat]);
+            if nearest_other.map(|(bd, _)| d < bd).unwrap_or(true) {
+                nearest_other = Some((d, lo));
+            }
+        }
+        let (nd, nlo) = nearest_other.expect("some other skeleton node in range");
+        assert!(
+            nlo > 0.10,
+            "precondition: nearest non-split node is off-axis (dist={nd:.2} off={nlo:.3})"
+        );
+    }
+
+
+    #[test]
+    fn doorway_attach_falls_back_to_projection_when_the_ray_misses() {
+        // Mid-corridor N–S gate across an E–W walkway. Passage axis is E–W —
+        // collinear with the medial spine — so the axis ray is parallel to every
+        // spine edge (determinant ≈ 0) and records no hit. Projection of M onto
+        // the spine must still split at the exact perpendicular foot.
+        //
+        // Door lon is placed mid-way between densification samples (~0.36 m
+        // pitch), so under nearest-node attach the target would be a sample
+        // ~0.18 m off the foot; with the projection split it lands within 1 cm.
+        let walk = rect(139.70000, 35.600002, 0.00040, 0.00010); // ~36 m × 11 m
+        // Mid-sample lon: spine samples include 139.7 exactly; next is
+        // ~139.70000408. Foot at 139.7000018 is ~0.16 m from 139.7.
+        let door_lon = 139.7000018;
+        let door = line(door_lon, 35.599995, door_lon, 35.600005);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        let dm = linestring_midpoint(&door).unwrap();
+        let group = doorway_group(g, &door);
+        assert_eq!(group.len(), 3, "mid + both stubs");
+        let targets = doorway_attach_targets(g, &group);
+        assert_eq!(targets.len(), 1, "one attach target: {targets:?}");
+        let target = targets[0];
+        let tn = &g.nodes[target];
+        // Exact perpendicular foot of M on the E–W spine (corridor center lat).
+        let foot = [door_lon, 35.600002];
+        let d_foot = haversine_m(foot, [tn.lon, tn.lat]);
+        assert!(
+            d_foot < 0.01,
+            "attach target must be the projection foot within 1 cm (got {d_foot:.3} m at lon={} lat={}); \
+             nearest-node attach lands ~0.16 m off on a densification sample",
+            tn.lon,
+            tn.lat
+        );
+        assert!(
+            same_floor_degree(g, target) >= 3,
+            "projection foot is a T-junction, degree={}",
+            same_floor_degree(g, target)
+        );
+        // Spine neighbors straddle the foot along the corridor.
+        let spine_nbrs: Vec<usize> = g
+            .edges
+            .iter()
+            .filter_map(|e| {
+                let (a, b) = (e.from as usize, e.to as usize);
+                if a == target && !group.contains(&b) {
+                    Some(b)
+                } else if b == target && !group.contains(&a) {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            spine_nbrs.len() >= 2,
+            "projection split has ≥2 spine neighbors: {spine_nbrs:?}"
+        );
+        let lons: Vec<f64> = spine_nbrs.iter().map(|&i| g.nodes[i].lon).collect();
+        let min_lon = lons.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_lon = lons.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            min_lon < tn.lon && max_lon > tn.lon,
+            "spine neighbors straddle the projection foot: lons={lons:?} foot={}",
+            tn.lon
+        );
+        let _ = dm;
+    }
+
+
+
+
+
+
+
+
+    #[test]
+    fn doorway_attach_falls_back_to_the_nearest_node_when_blocked() {
+        // Two platforms separated by a track strip. Door on platform B facing
+        // A: ray/projection toward A would cross non-walkable track, so attach
+        // must stay on B via nearest-node fallback. No edge crosses the gap.
+        let features = vec![
+            feature(
+                "pa",
+                FeatureType::Unit,
+                "l0",
+                Some("platform"),
+                rect(139.70000, 35.60000, 0.00040, 0.00002),
+            ),
+            feature(
+                "pb",
+                FeatureType::Unit,
+                "l0",
+                Some("platform"),
+                rect(139.70000, 35.60010, 0.00040, 0.00002),
+            ),
+            feature(
+                "door",
+                FeatureType::Opening,
+                "l0",
+                None,
+                line(139.69998, 35.60009, 139.70002, 35.60009),
+            ),
+        ];
+        let door = line(139.69998, 35.60009, 139.70002, 35.60009);
+        let doc = document(&[("l0", 0.0)], features);
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        let cross_gap = g.edges.iter().any(|e| {
+            let (a, b) = (&g.nodes[e.from as usize], &g.nodes[e.to as usize]);
+            (a.lat - 35.60005) * (b.lat - 35.60005) < 0.0
+        });
+        assert!(!cross_gap, "no edge crosses the track strip");
+        assert_eq!(component_count(g), 2, "platforms stay disconnected");
+        // Door attaches on platform B only.
+        let group = doorway_group(g, &door);
+        assert!(!group.is_empty(), "doorway nodes exist on platform B");
+        for &i in &group {
+            assert!(
+                g.nodes[i].lat > 35.60005,
+                "doorway node stays on platform B"
+            );
+        }
+        // Attach target(s) also stay on B — nearest-node fallback, no split
+        // across the gap.
+        for e in &g.edges {
+            let (a, b) = (e.from as usize, e.to as usize);
+            let (ga, gb) = (group.contains(&a), group.contains(&b));
+            if ga == gb {
+                continue;
+            }
+            let outside = if ga { b } else { a };
+            assert!(
+                g.nodes[outside].lat > 35.60005,
+                "attach target stays on platform B"
+            );
+        }
+    }
+
+    #[test]
+    fn centerline_split_keeps_components_and_creates_t_junction() {
+        // A single walkway with one wall doorway: splitting the centerline
+        // must (a) leave the floor as one component and (b) actually create a
+        // genuine T-junction on the spine in front of the door — degree ≥ 3,
+        // both spine arms longer than 0.1 m, lateral offset under 0.05 m.
+        let walk = rect(139.70000, 35.60000, 0.00080, 0.00008);
+        let door = line(139.7000665, 35.599960, 139.7001065, 35.599960);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        assert_eq!(
+            component_count(g),
+            1,
+            "splits add nodes, never connectivity"
+        );
+        let dm = linestring_midpoint(&door).unwrap();
+        let group = doorway_group(g, &door);
+        let axis = [0.0_f64, 1.0]; // south-wall threshold → north passage
+        let mut found_split = false;
+        for (i, n) in g.nodes.iter().enumerate() {
+            if group.contains(&i) {
+                continue;
+            }
+            if same_floor_degree(g, i) < 3 {
+                continue;
+            }
+            let off = lateral_offset_m(dm, axis, [n.lon, n.lat]);
+            if off >= 0.05 || n.lat <= dm[1] {
+                continue;
+            }
+            // Two non-group neighbors at >0.1 m (spine arms, not a stub nibble).
+            let mut arm_lens: Vec<f64> = Vec::new();
+            for e in &g.edges {
+                let (a, b) = (e.from as usize, e.to as usize);
+                let other = if a == i {
+                    b
+                } else if b == i {
+                    a
+                } else {
+                    continue;
+                };
+                if group.contains(&other) {
+                    continue;
+                }
+                arm_lens.push(haversine_m([n.lon, n.lat], [g.nodes[other].lon, g.nodes[other].lat]));
+            }
+            let long_arms = arm_lens.iter().filter(|&&d| d > 0.1).count();
+            if long_arms >= 2 {
+                found_split = true;
+                break;
+            }
+        }
+        assert!(
+            found_split,
+            "expected an on-axis spine T-junction (deg≥3, two arms >0.1 m, lateral offset <0.05 m)"
+        );
+
+        // Two-blob doorway still yields exactly one component after splits.
+        let door2 = line(139.70000, 35.600045, 139.70000, 35.600055);
+        let doc2 = document(
+            &[("l0", 0.0)],
+            vec![
+                feature(
+                    "wa",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600025, 0.00040, 0.000045),
+                ),
+                feature(
+                    "wb",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600075, 0.00040, 0.000045),
+                ),
+                feature("door", FeatureType::Opening, "l0", None, door2),
+            ],
+        );
+        assert_eq!(
+            component_count(&synthesize_network_medial(&doc2).graph),
+            1,
+            "two-blob doorway still one component after splits"
+        );
+    }
+
 
     #[test]
     fn multilinestring_axis_matches_the_midpoints_part() {
@@ -2898,10 +3842,11 @@ mod tests {
     fn chords_cut_a_detour_but_not_a_straight_spine() {
         let (cx, cy): (f64, f64) = (139.70000, 35.60000);
         let xy = xy_at(cx, cy);
-        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -45.0, 70.0, 5.0)]);
+        // Wide open hall: clearance at the y=0 chord is ~15 m (>> 5 m gate).
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -50.0, 70.0, 15.0)]);
         // V-detour skeleton: A(0,0) → B(20,-30) → C(40,0) → D(60,0). The A–C
-        // chord (40 m) beats the 72 m graph path; everything else is adjacent
-        // or out of range.
+        // chord (40 m) beats the 72 m graph path by >15 m absolute and the
+        // 0.7 ratio; everything else is adjacent or out of range.
         let detour = Skeleton {
             nodes: vec![xy(0.0, 0.0), xy(20.0, -30.0), xy(40.0, 0.0), xy(60.0, 0.0)],
             edges: vec![(0, 1), (1, 2), (2, 3)],
@@ -2923,7 +3868,9 @@ mod tests {
 
     #[test]
     fn chords_never_cross_a_hole() {
-        // Same V detour, but a non-walkable hole blocks the A–C chord.
+        // Same V detour in a wide-open hall (clearance and length would
+        // otherwise qualify), but a non-walkable hole blocks the A–C chord —
+        // rejected by passability, not by the open-space/length gates.
         let (cx, cy): (f64, f64) = (139.70000, 35.60000);
         let xy = xy_at(cx, cy);
         let hole = LineString::from(vec![
@@ -2933,7 +3880,7 @@ mod tests {
             (xy(10.0, 4.0)[0], xy(10.0, 4.0)[1]),
             (xy(10.0, -5.0)[0], xy(10.0, -5.0)[1]),
         ]);
-        let mut poly = rect_poly(cx, cy, -10.0, -45.0, 70.0, 5.0);
+        let mut poly = rect_poly(cx, cy, -10.0, -50.0, 70.0, 15.0);
         poly.interiors_push(hole);
         let area = MultiPolygon::new(vec![poly]);
         let detour = Skeleton {
@@ -2949,13 +3896,16 @@ mod tests {
 
     #[test]
     fn zigzag_chain_gains_shortcut_chords_with_feedback() {
-        // Ten-node zigzag chain zi = (10·i, −15·(i mod 2)) (18 m hops) in an
-        // open area. Two-hop chords (20 m vs 36 m graph) all qualify; three-
-        // and four-hop candidates become reachable through the chords already
-        // added (the savings test sees them), so only the two-hop set lands.
+        // Ten-node zigzag chain zi = (10·i, −15·(i mod 2)) (≈18 m hops) in an
+        // open hall (clearance ≫ 5 m). Two-hop chords (20 m vs 36 m graph,
+        // absolute savings 16 m ≥ 15 m) all qualify; three- and four-hop
+        // candidates become reachable through the chords already added (the
+        // savings test sees them), so only the two-hop set lands. Per-node
+        // cap 2 still admits every two-hop (each internal node is an endpoint
+        // of exactly two such chords).
         let (cx, cy): (f64, f64) = (139.70000, 35.60000);
         let xy = xy_at(cx, cy);
-        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -15.0, -25.0, 100.0, 5.0)]);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -15.0, -30.0, 100.0, 15.0)]);
         let nodes: Vec<[f64; 2]> = (0..10)
             .map(|i| xy(10.0 * i as f64, -15.0 * (i % 2) as f64))
             .collect();
@@ -2990,15 +3940,16 @@ mod tests {
         // adjacency and exclude the pair rather than re-emit it.
         let (cx, cy): (f64, f64) = (139.70000, 35.60000);
         let xy = xy_at(cx, cy);
-        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -10.0, 30.0, 10.0)]);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -15.0, 40.0, 15.0)]);
+        // 12 m gap (> CHORD_MIN_M) so the bare pair clears the length gate.
         let skeleton = Skeleton {
-            nodes: vec![xy(0.0, 0.0), xy(1.5, 0.0)],
+            nodes: vec![xy(0.0, 0.0), xy(12.0, 0.0)],
             edges: vec![],
         };
         // Blob already unified as if the bridge was accepted.
         let blob = unioned_blob(2, &[(0, 1)]);
         let bridge_d = haversine_m(skeleton.nodes[0], skeleton.nodes[1]);
-        assert!(bridge_d < CHORD_MAX_M);
+        assert!(bridge_d < CHORD_MAX_M && bridge_d >= 10.0);
         // Without the existing edge the pair would qualify (no graph path).
         let without = shortcut_chords(&skeleton, &blob, &area, &[]);
         assert_eq!(without, vec![(0, 1)], "precondition: bare pair is a chord");
@@ -3029,7 +3980,8 @@ mod tests {
         let b = [b_lon, cy - 30.0 / 111_320.0];
         let c = [c_lon, cy];
         // Wide open walkable rect covering the V (metre offsets around A).
-        let area = MultiPolygon::new(vec![rect_poly(a_lon, cy, -10.0, -45.0, 50.0, 5.0)]);
+        // Clearance at the y=0 chord is ~15 m.
+        let area = MultiPolygon::new(vec![rect_poly(a_lon, cy, -10.0, -50.0, 50.0, 15.0)]);
         let detour = Skeleton {
             nodes: vec![a, b, c],
             edges: vec![(0, 1), (1, 2)],
@@ -3042,12 +3994,14 @@ mod tests {
         );
         let d_ac = haversine_m(a, c);
         assert!(d_ac < CHORD_MAX_M, "precondition: A–C within chord range ({d_ac})");
-        // Graph path A–B–C is a deep V (~60 m+), so the chord qualifies.
+        // Graph path A–B–C is a deep V (~60 m+), so the chord qualifies under
+        // both the ratio and absolute-savings gates.
         let d_ab = haversine_m(a, b);
         let d_bc = haversine_m(b, c);
         assert!(
-            d_ab + d_bc > d_ac / CHORD_SAVINGS_RATIO,
-            "precondition: detour beats savings cutoff"
+            d_ab + d_bc > d_ac / CHORD_SAVINGS_RATIO
+                && d_ab + d_bc > d_ac + 15.0,
+            "precondition: detour beats both savings cutoffs"
         );
 
         let blob = unioned_blob(3, &detour.edges);
@@ -3069,7 +4023,7 @@ mod tests {
         // chord (that would bypass the stub-mid-stub doorway approach).
         let (cx, cy): (f64, f64) = (139.70000, 35.60000);
         let xy = xy_at(cx, cy);
-        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -10.0, 40.0, 10.0)]);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -15.0, 40.0, 15.0)]);
         let skeleton = Skeleton {
             nodes: vec![xy(0.0, 0.0), xy(20.0, 0.0)],
             edges: vec![],
@@ -3097,5 +4051,120 @@ mod tests {
             shortcut_chords(&skeleton, &chord_eligible, &area, &[]).is_empty(),
             "doorway-only unions must not make opposite-side nodes chord-eligible"
         );
+    }
+
+    #[test]
+    fn chord_needs_open_space() {
+        // Long zigzag inside a ~6 m wide corridor (half-width ~3 m < 5 m gate).
+        // Ratio and absolute savings both pass on the A–Z chord; open-space
+        // clearance must still reject it.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        // Corridor: y ∈ [-3, 3] → clearance at y=0 is 3 m.
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -5.0, -3.0, 45.0, 3.0)]);
+        // Zigzag every 4 m between y=±2.5 so the spine stays inside the
+        // corridor while the graph path A(0,0)→…→Z(40,0) is ~64 m against a
+        // 40 m chord (beats both 0.7× and +15 m savings).
+        let mut nodes = vec![xy(0.0, 0.0)];
+        let mut edges = Vec::new();
+        let mut x = 4.0;
+        let mut sign = 1.0_f64;
+        while x < 40.0 {
+            let i = nodes.len();
+            nodes.push(xy(x, sign * 2.5));
+            edges.push((i - 1, i));
+            x += 4.0;
+            sign = -sign;
+        }
+        let z = nodes.len();
+        nodes.push(xy(40.0, 0.0));
+        edges.push((z - 1, z));
+        let detour = Skeleton { nodes, edges };
+        let d_ac = haversine_m(detour.nodes[0], detour.nodes[z]);
+        let mut d_path = 0.0;
+        for &(a, b) in &detour.edges {
+            d_path += haversine_m(detour.nodes[a], detour.nodes[b]);
+        }
+        assert!(d_ac >= 10.0, "precondition: chord length {d_ac}");
+        assert!(
+            d_path > d_ac / CHORD_SAVINGS_RATIO && d_path > d_ac + 15.0,
+            "precondition: savings would pass without clearance gate (path={d_path}, c={d_ac})"
+        );
+        let blob = unioned_blob(detour.nodes.len(), &detour.edges);
+        assert!(
+            shortcut_chords(&detour, &blob, &area, &[]).is_empty(),
+            "corridor clearance ~3 m must yield no chord"
+        );
+    }
+
+    #[test]
+    fn chord_needs_absolute_savings() {
+        // Open hall: chord c ≈ 12 m, graph path ≈ 20 m. Ratio 12/20 = 0.6 < 0.7
+        // would pass the old rule, but absolute savings 8 m < 15 m must reject.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -10.0, -20.0, 40.0, 20.0)]);
+        // A(0,0) → B(6,-8) → C(12,0): hops 10 m each, path 20 m, chord 12 m.
+        let detour = Skeleton {
+            nodes: vec![xy(0.0, 0.0), xy(6.0, -8.0), xy(12.0, 0.0)],
+            edges: vec![(0, 1), (1, 2)],
+        };
+        let c = haversine_m(detour.nodes[0], detour.nodes[2]);
+        let path = haversine_m(detour.nodes[0], detour.nodes[1])
+            + haversine_m(detour.nodes[1], detour.nodes[2]);
+        assert!((c - 12.0).abs() < 0.1, "chord ≈12 m, got {c}");
+        assert!((path - 20.0).abs() < 0.1, "path ≈20 m, got {path}");
+        assert!(
+            c < path * CHORD_SAVINGS_RATIO,
+            "precondition: ratio rule alone would accept (c={c}, path={path})"
+        );
+        assert!(
+            path - c < 15.0,
+            "precondition: absolute savings below 15 m"
+        );
+        let blob = unioned_blob(3, &detour.edges);
+        assert!(
+            shortcut_chords(&detour, &blob, &area, &[]).is_empty(),
+            "absolute-savings gate must reject a 8 m gain"
+        );
+    }
+
+    #[test]
+    fn chord_respects_per_node_cap() {
+        // Hub H at the origin with three partners A,B,C. Each H–partner chord
+        // qualifies on length, clearance, and savings via a deep south
+        // junction J; only two chords may attach to H.
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let xy = xy_at(cx, cy);
+        let area = MultiPolygon::new(vec![rect_poly(cx, cy, -40.0, -40.0, 40.0, 40.0)]);
+        // Nodes: H(0,0), A(25,0), B(0,25), C(-25,0), J(0,-30)
+        // Edges: H–J, J–A, J–B, J–C. Chords H–A/B/C beat H–J–partner (~55 m
+        // vs ~25 m).
+        let skeleton = Skeleton {
+            nodes: vec![
+                xy(0.0, 0.0),   // H = 0
+                xy(25.0, 0.0),  // A = 1
+                xy(0.0, 25.0),  // B = 2
+                xy(-25.0, 0.0), // C = 3
+                xy(0.0, -30.0), // J = 4
+            ],
+            edges: vec![(0, 4), (4, 1), (4, 2), (4, 3)],
+        };
+        let blob = unioned_blob(5, &skeleton.edges);
+        // Precondition: without a cap, all three H–partner chords qualify.
+        // (Implementation will cap at 2; this test asserts the cap.)
+        let chords = shortcut_chords(&skeleton, &blob, &area, &[]);
+        let hub_chords: Vec<_> = chords
+            .iter()
+            .filter(|&&(a, b)| a == 0 || b == 0)
+            .copied()
+            .collect();
+        assert_eq!(
+            hub_chords.len(),
+            2,
+            "hub gains exactly 2 chords, got {chords:?}"
+        );
+        // Deterministic: lowest partner indices win under sorted pair order.
+        assert_eq!(hub_chords, vec![(0, 1), (0, 2)]);
     }
 }
