@@ -427,16 +427,8 @@ export function VisualLanguageScene(props: VisualLanguageSceneProps) {
             );
             return (
               <g key={segment.id} className="vl-route-segment" data-route-id={segment.id}>
-                <polyline
-                  className={`vl-route-casing ${stateClasses}`}
-                  points={points}
-                  strokeDasharray={connector ? "8 6" : undefined}
-                />
-                <polyline
-                  className={`vl-route-core ${stateClasses}`}
-                  points={points}
-                  strokeDasharray={connector ? "8 6" : undefined}
-                />
+                <polyline className={`vl-route-casing ${stateClasses}`} points={points} />
+                <polyline className={`vl-route-core ${stateClasses}`} points={points} />
                 {progress === "current" && !connector
                   ? segment.points.slice(0, -1).map((point, index) => {
                       const nextPoint = segment.points[index + 1]!;
