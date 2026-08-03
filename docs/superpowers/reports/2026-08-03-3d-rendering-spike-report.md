@@ -15,6 +15,14 @@ so three.js was not needed. Gate 2 is partially verified, and gate 5 is verified
 numerically but not visually. The spike found and fixed **seven** real defects,
 four of them in the plan's own pinned recipe, which is what a spike is for.
 
+**Action that follows: issue #31's conclusion is reopened.** Its falsifier was
+named in advance — a p90 above 0.50 m, or any spatially separated coherent
+residual above 1.0 m — and gate 7 hit both (combined p90 0.626 m over 1,920
+samples; B1F Yaesu clusters at 1.57 m and 1.33 m). This changes **no decision in
+this design**: registration accuracy is a data and activation-gate question for
+issues #30 and #31, not a renderer-architecture question. The renderer applies
+the tileset transform unchanged either way.
+
 Hardware: Intel i9-14900K, NVIDIA RTX 4500 Ada, Windows 11, Chromium headless.
 Every number below is from the real JR East assets in `C:/cesium/`, not
 synthetic fixtures.
