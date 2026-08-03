@@ -651,10 +651,15 @@
 }
 
 .visual-language-prototype .vl-diagnostic-outline {
-  fill: none;
   stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+/* `:not(.is-muted-pattern)`: accepted geometry fills with the hatch pattern it
+   references in markup, which a CSS `fill` would outrank. */
+.visual-language-prototype .vl-diagnostic-outline:not(.is-muted-pattern) {
+  fill: none;
 }
 
 .visual-language-prototype .vl-diagnostic-defect .vl-diagnostic-outline {
@@ -688,9 +693,10 @@
   stroke: var(--vl-advisory);
 }
 
+/* `fill` stays with the markup here: accepted geometry carries the muted hatch
+   via a pattern reference, and a CSS fill would outrank that attribute. */
 .visual-language-prototype .vl-diagnostic-accepted .vl-diagnostic-outline,
 .visual-language-prototype .vl-diagnostic-accepted .vl-diagnostic-marker--accepted circle {
-  fill: none;
   stroke: var(--vl-advisory);
   stroke-width: 2;
 }

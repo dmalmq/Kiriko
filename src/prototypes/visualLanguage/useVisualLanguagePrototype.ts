@@ -183,18 +183,29 @@ function reducer(
         playback: nextIndex === lastIndex ? "complete" : "playing",
       };
     }
+    // A simulated Detailed failure only reads as true if Detailed is the single
+    // source on screen: keeping Compare would leave a live Detailed viewport
+    // beside a notice claiming Detailed is unavailable.
     case "simulate-failure":
       return state.reducedMotion
         ? {
             ...state,
+            sourceLayout: "single",
             sourceKind: "generated",
             fallbackPhase: "generated",
             fallbackNoticeVisible: true,
           }
-        : { ...state, fallbackPhase: "veil", fallbackNoticeVisible: true };
+        : {
+            ...state,
+            sourceLayout: "single",
+            sourceKind: "detailed",
+            fallbackPhase: "veil",
+            fallbackNoticeVisible: true,
+          };
     case "complete-fallback":
       return {
         ...state,
+        sourceLayout: "single",
         sourceKind: "generated",
         fallbackPhase: "generated",
         fallbackNoticeVisible: true,
@@ -202,6 +213,7 @@ function reducer(
     case "retry-detailed":
       return {
         ...state,
+        sourceLayout: "single",
         sourceKind: "detailed",
         fallbackPhase: "idle",
         fallbackNoticeVisible: false,
