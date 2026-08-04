@@ -450,26 +450,282 @@ and never read coordinates out of an RFC7946 dump.
 - `pnpm exec tsc --noEmit` — zero diagnostics.
 - `pnpm exec vite build` — success (1,918.13 kB / 599.75 kB gzip).
 
+## 2026-08-04 follow-up pass — Yaesu clusters diagnosed; the 0.50 m collision between #31 and #33 settled
+
+This pass executes next-step items 1 and 2 in one measurement run: it identifies
+what the two B1F Yaesu coherent clusters physically are (Phase 1), measures the
+graph/facility association distances #33 needs (Phase 2), and reconciles the two
+roles of `0.50 m` into one recommendation (Phase 3). All GDAL work ran serially
+in one agent (two earlier concurrent agents produced misleading Emscripten FS
+failures); scripts are in `.diag/` (gitignored): `yaesu-clusters.mjs`,
+`assoc-distances.mjs`, `probe-network.mjs`, `probe-units.mjs`. Raw outputs in
+`target/spike/out/gate33/` (`yaesu-clusters.json`, `assoc-distances.json`).
+
+### Phase 1 — what the two B1F Yaesu clusters actually are (issue #31)
+
+**Verdict: both clusters are localised tile-vs-GDB model-boundary (coverage)
+differences, not a stale GDB revision, not a displacement, and not a
+misplacement defect. The asset does not need geometric revision for them.**
+
+**Vintage comparison kills the stale-revision hypothesis.** The B1 unit layers
+of the two GDB vintages are geometry-identical: 1,909 units each; 1,890 matched
+by `id`; **0 with any vertex displaced more than 1 cm**; 0 added, 0 removed in
+0625. (`G空間_B1` has one duplicated id pair, leaving 19 ids that are present in
+both vintages but not uniquely matchable; that does not affect the result.)
+
+| Vintage pair (JRTokyoSta B1 layers) | Units 0514 | Units 0625 | Matched by id | Moved > 1 cm | Added | Removed |
+|---|---|---|---|---|---|---|
+| `JRTokyoSta_B1_Space` + `G空間_B1_Space` + `Yaechika_B1_Space` | 1,909 | 1,909 | 1,890 | **0** | 0 | 0 |
+
+**Cluster (b) — E 360–400 / N 240–280 (10 samples, median shift 1.33 m): a
+~1.3 m tile-model overhang.** All ten samples lie on tile feature 247
+(`98b4f0da-…-003dce1b`, `Walkable`, 80 triangles, E 353–422 / N 266–346), on the
+silhouette edge facing unit `JRTokyoSta_B1_Space bd9f6b4a` (category B001,
+4,273.5 m²). Every sample is outside the unit's polygon, and the nearest unit
+edge lies **inside** the tile footprint at the sample (offset along the tile
+interior direction +0.53 m median, 100% into the tile): the tile walkable
+surface extends ~1.3 m beyond the unit edge, which no B1 unit (any layer) covers.
+Nearest-unit offset (−1.18, +0.60) m, distance 1.32 m. This is precisely the
+"coverage-difference carve-out for tile-model overhangs" gate 7's report
+contemplated.
+
+**Cluster (a) — E 400–440 / N 320–360 (20 samples in the gate-7 seed, median
+shift 1.57 m): the border zone of a diagonal passage the GDB models
+differently.** The full silhouette has 43 samples in that bbox; they split by
+nearest unit:
+
+| Nearest unit | samples | median offset (m) | median dist (m) | character |
+|---|---|---|---|---|
+| `309ed58f` B001 (5,993.8 m²) | 29 | (+0.47, +0.30) | 4.61 | mix of well-registered edge samples and the protrusion (max 17.55 m) |
+| `af777c42` B023 (13.6 m²) | 5 | (+2.69, −0.83) | 2.82 | tile surface 2.8 m from this tiny unit |
+| `23b6a1b1` B029 (12,877.5 m²) | 4 | (−0.71, +0.22) | 0.74 | ordinary sub-metre residual |
+| `bd9f6b4a` B001 (4,273.5 m²) | 5 | (−0.28, +0.14) | 0.31 | well registered |
+
+The 20-sample gate-7 cluster (offset (+1.33, −0.83)) is the median of the two
+borders: the passage's SW start runs 2.6–2.8 m from the edges of `309ed58f` /
+`af777c42` (tile feature 7430 `ecf46c5f-…-007aa35a`, E 378–438 / N 330–395), then
+the same tile surface continues NE for up to **17.5–20.8 m with no B1 unit
+coverage at all** (25 silhouette samples > 1.5 m not inside any unit), then
+converges back to **0.31 m** at its NE end (E 425–437 / N 381–384). The offset
+rotates continuously along the passage (from (+2.7, −0.8) to (−1.3, −13.7)),
+so a rigid displacement of the unit is excluded; the same unit `bd9f6b4a` is
+registered to 0.31 m at the same time its cluster-(b) edge shows 1.32 m.
+
+**Carve-out quantification (full 755-sample B1F Yaesu silhouette, 0514):**
+
+| Set | p50 | p90 | p95 | max |
+|---|---|---|---|---|
+| Full silhouette (this pass, n=755) | 0.273 | 0.917 | 1.924 | 17.55 |
+| gate 7 (deterministic 600-sample seed, for reference) | 0.275 | 0.921 | 1.924 | 20.83 |
+| Excluding samples > 1 m from **any** unit edge and not inside any unit (coverage-difference carve-out, 70 samples) | 0.249 | **0.608** | 0.845 | 0.99 |
+| Excluding samples > 1.5 m similarly (40 samples) | 0.255 | 0.657 | 1.148 | 1.48 |
+
+The carve-out drops Yaesu's p90 from 0.92 m to **0.61–0.66 m** — still above the
+0.50 m band. So even after removing the two clusters and the protrusion, B1F
+Yaesu's registration noise is genuinely ~0.6 m at p90; the 0.50 m trusted band
+does not describe that floor with or without the carve-out.
+
+### Phase 2 — graph and facility association distances (issue #33)
+
+**Floor-key mapping** (gate-7 floor set, same as the registration table):
+`F1` → `1fl_コンコース_tp_3_45` (TP +3.45); `B1` → `b1fl_地下コンコース_丸の内_tp_3_12`
+(TP −3.12) ∪ `b1fl_地下コンコース_八重洲_tp_1_25` (TP −1.25), union surface;
+`M2` → `m2fl_東海道新幹線コンコース_tp_6_10` (TP +6.10). The network's `FLOOR`
+values are exactly `F1`/`B1`/`M2` (5,230/2,681/144 junctions of 10,118; 13,132/
+6,208/386 paths of 25,625; 819/782/84 facilities of 2,591). Vintage 20260514
+primary (gate 7's vintage — registration numbers are directly comparable);
+20260625 secondary (identical to within measurement noise: layer counts 10,098/
+25,587/2,596; combined p90 deltas ≤ 0.08 m for junctions/paths/facilities).
+"Venue" scope = inside the floor's walkable tile bounding box + 20 m margin; the
+unscoped district-wide sets are reported as context where meaningful. Horizontal
+distance = 0 inside a filled walkable triangle, else distance to the nearest
+triangle edge. Vertical = |junction `altitude` − assigned level TP| (junction
+`altitude` is TP-metres: F1 p50 = 3.45, M2 p50 = 6.10, matching the level names
+exactly; scene `source_elevation_meters` carries the same plane with a constant
+−87.355 m scene-z offset, verified on all four levels).
+
+**Junctions — horizontal (in-venue) and vertical:**
+
+| Floor | n (venue/total) | p50 | p90 | max | ≤ 0.50 m | 0.50–3.0 m | > 3.0 m |
+|---|---|---|---|---|---|---|---|
+| F1 | 2,048/5,230 | 0.000 | 65.97 | 187.6 | 55.9% | 4.6% | 39.5% |
+| B1 | 963/2,681 | 0.000 | 74.99 | 152.3 | 56.0% | 2.4% | 41.6% |
+| M2 | 86/144 | 0.000 | 0.209 | 0.291 | **100%** | 0% | 0% |
+| **Combined** | 3,097/8,055 | 0.000 | 66.98 | 187.6 | 57.1% | 3.8% | 39.1% |
+
+| Floor | n | vertical p50 | vertical p90 | vertical max | ≤ 0.50 m | 0.50–3.0 m | > 3.0 m |
+|---|---|---|---|---|---|---|---|
+| F1 | 2,048 | 0.000 | 1.000 | 3.30 | 83.2% | 16.4% | 0.4% |
+| B1 | 963 | 0.420 | 0.750 | 3.36 | 84.1% | 15.1% | 0.8% |
+| M2 | 86 | 0.000 | 0.000 | 0.00 | 100% | 0% | 0% |
+| **Combined** | 3,097 | 0.000 | 1.000 | 3.36 | 83.9% | 15.5% | 0.5% |
+
+The M2F floor is registered essentially perfectly (max 0.291 m, 100% ≤ 0.5 m) —
+its gate-7 p90 failure (0.678) is a strict-subset artifact of the boundary
+sampling (the tile level is a subset of the GDB floor; some boundary samples lie
+inside GDB units), not a registration error.
+
+**Paths (`net_path`, sampled at vertices + 1 m steps; `net_path` has no Z —
+verified by dumping without `-dim XY` — so the vertical measure for paths is
+n/a; plane agreement is reported via endpoint junction altitudes below):**
+
+| Floor | edges | in-venue samples | p50 | p90 | max | ≤ 0.50 m | 0.50–3.0 m | > 3.0 m |
+|---|---|---|---|---|---|---|---|---|
+| F1 | 13,132 | 60,303 | 0.000 | 77.28 | 230.5 | 54.9% | 2.1% | 43.0% |
+| B1 | 6,208 | 27,188 | 0.000 | 64.02 | 158.7 | 60.9% | 1.4% | 37.7% |
+| M2 | 386 | 1,330 | 0.000 | 0.000 | 0.401 | **100%** | 0% | 0% |
+| **Combined** | 19,726 | 88,821 | 0.000 | 71.33 | 230.5 | 57.4% | 1.8% | 40.7% |
+
+**Connector endpoints** — junctions incident to inter-floor edges, identified
+from the network topology: a `net_path` edge whose `FNODEID`/`TNODEID` junctions
+have different `FLOOR` values. 1,341 of 25,625 edges (5.2%) are inter-floor;
+top pairs `B1→F1` (662), `F1→F2` (195), `B1→B2` (146), `F1→M2` (34). Venue-scoped
+endpoints (inside the endpoint's floor bbox + 20 m): 531 F1 + 279 B1 + 32 M2 =
+842. Measured against the floor's Stairs+Ramp surface (the geometry an
+inter-floor junction should sit on) and, for reference, the walkable surface:
+
+| Floor | n | vs Stairs/Ramp p50 / p90 / max | ≤ 0.50 / mid / > 3 | vs walkable p50 / p90 / max | ≤ 0.50 / mid / > 3 | vertical ≤ 0.50 m |
+|---|---|---|---|---|---|---|
+| F1 | 531 | 23.7 / 149.0 / 258.6 | 10.2% / 6.8% / 83.1% | 0.21 / 65.9 / 187.6 | 58.8% / 7.2% / 34.1% | 88.7% |
+| B1 | 279 | 27.5 / 93.5 / 155.4 | 20.8% / 10.4% / 68.8% | 0.78 / 80.9 / 148.8 | 48.7% / 5.4% / 45.9% | 83.9% |
+| M2 | 32 | 0.31 / 5.02 / 7.50 | 53.1% / 9.4% / 37.5% | 0.20 / 0.28 / 0.29 | 100% / 0% / 0% | 100% |
+| **Combined** | 842 | 21.5 / 127.2 / 258.6 | 15.3% / 8.1% / 76.6% | 0.23 / 70.2 / 187.6 | 57.0% / 6.3% / 36.7% | ~84–89% |
+
+Connector endpoints sit on walkable surface (49–100% ≤ 0.5 m) and on their floor
+plane (84–100% ≤ 0.5 m), but mostly **not** on Stairs/Ramp polygons (10–53%
+≤ 0.5 m). This is an asset content gap, not a network error: the Tokyo tiles
+carry almost no conveyance semantics (17,116 Walls / 2,341 Floors / 708 Ceilings
+/ 529 Runs / 451 Stairs / 344 Mechanical / 279 Landings / 279 Columns / 153 Doors
+/ 138 Supports, then nine categories with ≤ 10 each — **0 Escalator, 0 Elevator**),
+so "associate the connector to the stair geometry" has almost nothing to
+associate to. Inter-floor path samples (both endpoints in venue, 2,654 samples):
+p50 0.000, p90 51.6, max 150.5; 57.3% ≤ 0.5, 10.9% mid, 31.7% > 3.
+
+**Facility anchors (`Facility_Merge`, floor field `F1`/`B1`/`M2`; no altitude
+field — vertical measure n/a, stated):**
+
+| Floor | n (venue/total) | p50 | p90 | max | ≤ 0.50 m | 0.50–3.0 m | > 3.0 m |
+|---|---|---|---|---|---|---|---|
+| F1 | 598/813 | 0.000 | 51.6 | 160.2 | 64.7% | 7.7% | 27.6% |
+| B1 | 325/765 | 0.000 | 72.5 | 152.0 | 58.5% | 5.8% | 35.7% |
+| M2 | 44/75 | 0.198 | 4.89 | 5.47 | 79.5% | 2.3% | 18.2% |
+| **Combined** | 967/1,653 | 0.000 | 55.7 | 160.2 | 63.3% | 6.8% | 29.9% |
+
+**Coverage diagnostic** — in-venue items > 3 m from the measured floor surface,
+re-measured against the walkable union of other same-ordinal tile levels of the
+same asset (F1: `tp_0`, `1fl`, `1fl_トフロム八重洲`, `1fl_東京ミッドタウン八重洲`,
+`1fl_八重洲地下街`; B1: `b1fl`, `東京駅コンコース地下1階`; M2: `m2fl`, `m2fl_tp_4_45`,
+`m2fl_北町ダイニング`, `m2fl_東海道新幹線日本橋コンコース`):
+
+| Floor | junctions > 3 m | covered by same-ordinal levels | facilities > 3 m | covered |
+|---|---|---|---|---|
+| F1 | 809 | 216 (27%) | 165 | 55 (33%) |
+| B1 | 401 | 120 (30%) | 116 | 49 (42%) |
+| M2 | 0 | — | 8 | 8 (100%) |
+
+So the > 3.0 m tail (~30–40% of in-venue items) is dominated by items on *other
+levels or buildings of the same floor ordinal*, not by association ambiguity:
+27–42% of them are within 3 m of another same-ordinal tile level, and the rest
+concentrate in footprint pockets of the measured floors (e.g. 71 F1 junctions in
+the E 440–500 / N 380–450 pocket, median ~47 m) or adjacent buildings. The
+0.50–3.0 m band — the genuine ambiguity range — holds only ~2–8% of items
+depending on class.
+
+### Phase 3 — reconciled band recommendation (issues #31 and #33 together)
+
+**How much of an association distance is registration noise vs ambiguity.**
+The measured floors register to the tiles at p50 0.18–0.28 m and p90 0.43–0.92 m
+(gate 7, unchanged; Yaesu 0.92 m raw / 0.61 m with the coverage carve-out). The
+graph and facility association distances add nothing on top: their p50 is 0.00 m
+for junctions, path samples and facilities (more than half of those in-venue
+items sit *inside* the walkable surface), connector endpoints sit on walkable at
+p50 0.2–0.8 m, and the distances in the
+0.5–3.0 m band are dominated by the same registration/boundary noise, not by
+topological ambiguity. Raising or keeping a threshold therefore mostly trades
+against the registration noise, and the noise is per-floor (1F 0.43, B1M 0.50,
+B1Y 0.92/0.61, M2F 0.68-but-artefactual).
+
+**Recommendation for #33 (auto-association distance).** Replace the flat
+`≤ 0.50 m` auto band with a per-floor threshold of `max(0.50 m, 1.25 × floor
+registration p90 with the coverage carve-out)` — concretely **F1 0.55 m, B1F
+0.65 m, M2F 0.50 m** (M2F's measured association is ≤ 0.3 m, so 0.50 stays).
+A venue-wide simplification with the same effect is **auto ≤ 1.0 m everywhere**:
+the sensitivity data show that moving the auto boundary from 0.50 m to 1.0 m
+adds only ~1 percentage point of auto-associations (the 0.50–1.0 m band holds
+1.0–1.2% of in-venue junctions; facilities ~0.2–2.3%) while covering every
+floor's registration p90 with margin — eliminating the systematic misclassification
+of correct B1F Yaesu associations (up to 0.92 m of legitimate noise) that the
+0.50 m threshold causes. Keep the 0.50–3.0 m producer-review band (with the
+recalibrated auto edge, it becomes the true ambiguity band, holding ~2–8% of
+items) and keep > 3.0 m as no-association, but note that 27–42% of the > 3 m
+tail maps to *other same-ordinal tile levels of the same asset*: the association
+should be tried per level (altitude first, then horizontal) before giving up.
+
+**Recommendation for #31 (trusted registration band).** Re-certify with two
+changes, both evidenced above: (1) a **coverage-difference carve-out** — exclude
+tile-boundary samples that are > 1 m from every GDB unit edge and inside no unit
+(this is exactly the two Yaesu clusters and the east protrusion; the carve-out
+is confirmed as the right frame because the 0625 GDB is geometry-identical to
+0514 and the offsets vary continuously along the features involved, so neither
+revision nor displacement explains them); and (2) **per-floor p90 bands** —
+1F 0.50 m (passes, 0.433), B1F Marunouchi 0.50 m (edge, 0.501), B1F Yaesu
+0.65 m (0.608 carved; 0.921 raw — the floor genuinely needs a wider band), M2F
+0.70 m (0.678, but inflated by the strict-subset sampling artifact; direct
+association shows ≤ 0.3 m). Combined-with-carve-out p90 for the venue is ~0.61 m
+(Yaesu) to 0.43–0.68 m per floor, so no single 0.50 m band describes the asset.
+
+**What, if anything, blocks activation of the supplied Tokyo asset.**
+Nothing blocks *rendering* activation: gates 1–6 pass, the kscene is registered
+to the venue in the median on every floor (median offset vectors 0.080–0.238 m),
+and the two Yaesu pockets are localised boundary differences, not global
+misregistration. Three decisions gate #33 activation specifically: (1) the
+0.50 m collision — resolved above (per-floor auto band, or 1.0 m flat); (2) the
+asset's near-total absence of conveyance semantics (0 Escalator / 0 Elevator,
+451 Stairs triangles venue-wide) — connector endpoints can only associate via
+walkable surface and floor plane (49–100% and 84–100% ≤ 0.5 m), never via stair
+polygons (10–53%), so any conveyance-specific association rule must not require
+stair geometry; (3) per-level association for the ~30–40% of in-venue items that
+are > 3 m from their floor's measured surface (they belong to other same-ordinal
+levels of the same asset or adjacent buildings).
+
+**Stated limitations.** (1) `net_path` carries no Z (verified), so path
+vertical is reported via endpoint junction altitudes only. (2) Facility anchors
+have no altitude field; vertical n/a. (3) B1/M2 junctions were assigned to a
+level by horizontal containment/nearest-surface; junctions at other B1/M2
+sub-level altitudes (e.g. −2.7, −6.0) are still counted in the floor class and
+mostly land in the > 3 m bucket — the coverage diagnostic separates those that
+another same-ordinal tile level covers. (4) The same-ordinal union for the
+coverage diagnostic uses the levels named above, a subset of the asset's full
+ordinal sets (the asset contains district-wide levels — Yurakucho, Otemachi,
+Ginza, Hibiya B1F etc.); the covered fractions are therefore lower bounds. (5)
+The 20260514 `network_WebMercator.gdb.zip` and `point_facility_WebMercator_202006.gdb.zip`
+were recreated from their unzipped directories during this pass after a cleanup
+bug deleted the original archives; the parent agent verified the recreated zips
+are entry-for-entry identical to the directories (662/662 and 254/254 files, no
+size or content mismatch), which proves zip ≡ directory *now* — it cannot
+retroactively prove the original zips matched before deletion, though nothing in
+any measurement depends on archive structure rather than content. (6) All GDAL
+work in this pass ran serially in one process, per the concurrency constraint.
+
 ## Recommended next steps
 
 All six architecture gates are closed, so nothing here blocks issue #23's
 decision. What remains is downstream.
 
 1. **Settle the 0.50 m collision between issues #31 and #33 in one decision.**
-   The same number does two independent jobs: #31's trusted registration
-   residual (p90 ≤ 0.50 m) and #33's provisional auto-association distance
-   (≤ 0.50 m auto, 0.50–3.0 m producer review). Gate 7 measured tiles↔GDB
-   registration noise at p90 **0.626 m** venue-wide and **0.921 m** on B1F
-   Yaesu. If registration noise alone exceeds the auto-association threshold,
-   that threshold will systematically dump correct associations into producer
-   review for reasons that have nothing to do with association ambiguity. These
-   two bands were set independently and are now known to be inconsistent; they
-   must be decided together, from one measurement pass.
+   **RESOLVED in the 2026-08-04 follow-up pass above:** the measured
+   registration noise is p90 0.43–0.92 m per floor (0.61 m on B1F Yaesu after
+   the coverage-difference carve-out), the two Yaesu clusters are localised
+   tile-vs-GDB boundary differences (not revision, not displacement), and the
+   recommendation is a per-floor auto band (max(0.50 m, 1.25 × carved p90):
+   1F 0.55 / B1F 0.65 / M2F 0.50) or a flat 1.0 m, with #31 re-certified per
+   floor with the carve-out.
 2. Diagnose the two B1F Yaesu coherent clusters (1.57 m / 1.33 m) as part of
-   that pass. Median offset there is only 0.083 m, so a global transform error
-   is ruled out — it is localised geometry, a stale GDB revision, or a genuine
-   model defect, and that distinction decides whether #31 re-certifies with a
-   per-floor band or the asset needs revision.
+   that pass. **RESOLVED:** cluster (a) is the border zone of tile feature
+   `ecf46c5f` (a diagonal passage running 2.6–2.8 m from the GDB unit edges at
+   its SW start and up to ~20 m beyond all unit coverage in its middle);
+   cluster (b) is a ~1.3 m tile overhang of tile feature `98b4f0da` over unit
+   `bd9f6b4a`'s edge. Both are coverage differences covered by the carve-out.
 3. Hand the performance numbers to issue #26: 8.1 MB derived scene, 5–6 draw
    calls per active level (308 venue-wide), 60 fps vsync-locked on desktop and
    under a 4× CPU throttle, 1.2–3.4 ms pick latency, 411–593 ms decode, 63–84 ms
