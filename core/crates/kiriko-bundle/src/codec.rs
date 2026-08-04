@@ -542,6 +542,11 @@ pub struct BundleInspection {
     pub bundle_hash: String,
     pub level_ids: Vec<String>,
     pub feature_levels: Vec<(String, Option<String>)>,
+    /// Which optional-section capabilities the inspected bundle offers, and
+    /// why any unavailable one is unavailable. Serialized with the rest of the
+    /// projection, so the server learns a bundle's capabilities from the same
+    /// decode that produced its level relationships.
+    pub capabilities: CapabilityReport,
 }
 
 /// Decode `bytes` once via [`decode_bundle`] and project its level/feature
@@ -617,6 +622,7 @@ pub fn inspect_bundle(bytes: &[u8]) -> Result<BundleInspection, BundleError> {
         bundle_hash,
         level_ids,
         feature_levels,
+        capabilities: document.capabilities,
     })
 }
 
@@ -848,6 +854,35 @@ mod tests {
             document.levels.len(),
             1,
             "the venue's own content must survive a section from a newer writer"
+        );
+    }
+
+    #[test]
+    fn capability_report_serializes_to_the_shape_the_clients_type() {
+        // The TypeScript `SectionCapability` union is hand-written against this
+        // exact shape. If serde's tagging changes, that type silently becomes a
+        // lie -- so pin it here.
+        let report = CapabilityReport {
+            graph: SectionCapability::Available,
+            facilities: SectionCapability::UnsupportedVersion {
+                declared: 2,
+                supported: 1,
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&report).expect("report serializes"),
+            r#"{"graph":{"state":"available"},"facilities":{"state":"unsupportedVersion","declared":2,"supported":1}}"#
+        );
+
+        let invalid = CapabilityReport {
+            graph: SectionCapability::Invalid {
+                reason: "bad bytes".to_string(),
+            },
+            facilities: SectionCapability::DisabledByDependency { requires: 8 },
+        };
+        assert_eq!(
+            serde_json::to_string(&invalid).expect("report serializes"),
+            r#"{"graph":{"state":"invalid","reason":"bad bytes"},"facilities":{"state":"disabledByDependency","requires":8}}"#
         );
     }
 }

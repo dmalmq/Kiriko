@@ -273,6 +273,34 @@ fn reports_optional_sections_as_available_or_absent() {
 }
 
 #[test]
+fn inspection_carries_the_capability_report() {
+    let source = support::build_minimal_imdf_zip();
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(NETWORK_JUNCTIONS),
+        Some(NETWORK_PATHS),
+        None,
+        false,
+        false,
+    )
+    .expect("fixture + network compiles");
+
+    let inspection = inspect_bundle(&compiled.bytes).expect("bundle inspects");
+
+    assert_eq!(
+        inspection.capabilities.graph(),
+        SectionCapability::Available,
+        "the server-side projection must carry the same capabilities the decoder found"
+    );
+    assert_eq!(
+        inspection.capabilities.facilities(),
+        SectionCapability::Absent,
+        "a venue with no facilities must be distinguishable from one whose facilities are broken"
+    );
+}
+
+#[test]
 fn compile_with_facilities_but_no_network_warns_once_and_leaves_anchors_unset() {
     let source = support::build_minimal_imdf_zip();
     let compiled = compile_imdf_with_network(

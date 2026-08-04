@@ -77,6 +77,29 @@ export type BundleErrorCode =
   | "bundle_integrity_failed"
   | "bundle_too_large";
 
+/**
+ * Why one optional section's capability is unavailable, or that it is
+ * available. Carries a discriminated state plus numbers rather than prose, so
+ * the UI renders its own ja/en copy — the same division as `ViewerWarning`
+ * codes.
+ *
+ * `absent` and the failure states are deliberately distinct: a venue that has
+ * no graph is not the same as a venue whose graph cannot be read, and they are
+ * presented differently.
+ */
+export type SectionCapability =
+  | { state: "available" }
+  | { state: "absent" }
+  | { state: "unsupportedVersion"; declared: number; supported: number }
+  | { state: "invalid"; reason: string }
+  | { state: "disabledByDependency"; requires: number };
+
+/** Per-section availability for one decoded bundle. */
+export interface CapabilityReportDto {
+  graph: SectionCapability;
+  facilities: SectionCapability;
+}
+
 export interface DecodeResponseDto {
   ok: boolean;
   venue: DecodedVenueDto | null;
@@ -85,6 +108,11 @@ export interface DecodeResponseDto {
   hasGraph: boolean;
   /** Whether the decoded bundle carries a §7 facilities section (marker UI gate). */
   hasFacilities: boolean;
+  /**
+   * Why an optional section is unavailable, which `hasGraph`/`hasFacilities`
+   * cannot express. `null` when the bundle failed to decode at all.
+   */
+  capabilities: CapabilityReportDto | null;
 }
 
 /** A facility's routing anchor: the network node it snaps to, when linked. */

@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use kiriko_bundle::{BundleDocument, BundleError, decode_bundle};
+use kiriko_bundle::{BundleDocument, BundleError, CapabilityReport, decode_bundle};
 use kiriko_model::canonical::{Object as CanonicalObject, Value as CanonicalValue};
 use kiriko_model::model::{Bounds, ImdfManifest, VenueFeature, ViewerLevel, ViewerWarning};
 use kiriko_route::{Point3, Route};
@@ -101,6 +101,12 @@ struct DecodeErrorDto {
 /// reports whether the decoded bundle carries a §5 network graph, so the
 /// viewer can gate routing UI without attempting a route query; likewise
 /// `has_facilities` reports a §7 point-facilities section.
+///
+/// `capabilities` says *why* an optional section is unavailable, which
+/// `has_graph`/`has_facilities` cannot: a venue with no graph and a venue whose
+/// graph is unreadable both report `hasGraph: false`. It carries a state and
+/// numbers rather than prose, so the client renders its own bilingual copy —
+/// the same division as `ViewerWarning` codes.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DecodeResponseDto {
@@ -109,6 +115,7 @@ struct DecodeResponseDto {
     error: Option<DecodeErrorDto>,
     has_graph: bool,
     has_facilities: bool,
+    capabilities: Option<CapabilityReport>,
 }
 
 fn canonical_to_json(value: &CanonicalValue) -> JsonValue {
@@ -228,6 +235,7 @@ fn to_js(response: &DecodeResponseDto) -> JsValue {
             }),
             has_graph: false,
             has_facilities: false,
+            capabilities: None,
         };
         fallback
             .serialize(&serializer)
@@ -255,12 +263,15 @@ pub fn decode_bundle_js(bytes: &[u8]) -> JsValue {
         Ok(document) => {
             let has_graph = has_routable_graph(&document);
             let has_facilities = document.facilities.is_some();
+            // Taken before `document_dto` consumes the document.
+            let capabilities = document.capabilities.clone();
             DecodeResponseDto {
                 ok: true,
                 venue: Some(document_dto(document)),
                 error: None,
                 has_graph,
                 has_facilities,
+                capabilities: Some(capabilities),
             }
         }
         Err(err) => DecodeResponseDto {
@@ -269,6 +280,7 @@ pub fn decode_bundle_js(bytes: &[u8]) -> JsValue {
             error: Some(error_dto(&err)),
             has_graph: false,
             has_facilities: false,
+            capabilities: None,
         },
     };
     to_js(&response)
