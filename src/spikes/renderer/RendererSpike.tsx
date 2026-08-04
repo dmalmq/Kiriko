@@ -198,21 +198,25 @@ export function RendererSpike() {
       lastRenderRef.current = performance.now();
     };
     /**
-     * MapLibre drops custom layers on context loss and logs "Custom layer ...
-     * cannot be restored after WebGL context loss. You will need to re-add it
-     * manually". `render` is never called again, so the layer cannot heal
-     * itself — the application owns re-adding it. Measured before this handler
-     * existed: 31 picks before a forced loss, 0 after, with the layer's own
-     * stats frozen at its last pre-loss counts.
+     * MapLibre cannot restore custom layers across context loss. On loss it
+     * destroys the style outright (`style.destroy(); style = null`) after
+     * warning "Custom layer ... cannot be restored"; on restore it rebuilds
+     * from a serialized snapshot, which a custom layer cannot survive. So the
+     * application owns re-adding it. Measured without this handler: 31 picks
+     * before a forced loss, 0 after, with `map.getLayer` absent while the
+     * layer's own `stats()` still reported its last pre-loss counts.
+     *
+     * Two things about the trigger, both measured (see the report's gate 2):
+     * the hook must be MapLibre's **Map** event, not the canvas DOM event —
+     * MapLibre registers its own canvas listener at construction and runs the
+     * whole rebuild there (`setStyle(snapshot, {diff: false})`, `_setupPainter`,
+     * `resize`, `_update`, `_resizeInternal`) before firing
+     * `webglcontextrestored` on the Map (`maplibre-gl-dev.js:71362`). And the
+     * re-add must wait for `idle`: at Map-event time `isStyleLoaded()` is still
+     * false and two more `styledata` events follow as `setStyle` swaps the style
+     * object, so anything added earlier is dropped again.
      */
     const readdLayerAfterContextLoss = (): void => {
-      // KNOWN INCOMPLETE: the correct trigger point is unresolved. MapLibre
-      // finishes its own restore after `webglcontextrestored`, so re-adding
-      // synchronously there loses the race and the layer is dropped again.
-      // Deferring to the first `idle` (below) did not fire in a headless
-      // Chromium run either — after a forced loss the layer stays absent
-      // (`map.getLayer("scene-3d")` is undefined) and picks stay at 0.
-      // Production must own this: see the gate 2 section of the spike report.
       map.once("idle", () => {
         const scene = sceneRef.current;
         if (disposed || !scene || map.getLayer("scene-3d")) {
@@ -228,7 +232,7 @@ export function RendererSpike() {
       });
     };
     canvas.addEventListener("webglcontextrestored", resetFrameClock);
-    canvas.addEventListener("webglcontextrestored", readdLayerAfterContextLoss);
+    map.on("webglcontextrestored", readdLayerAfterContextLoss);
     map.on("load", resetFrameClock);
 
     const onRender = (): void => {
@@ -341,6 +345,11 @@ export function RendererSpike() {
           return created;
         });
         layerRef.current = layer;
+        // Never assigned before, which silently disabled every consumer that
+        // reads it: the context-loss re-add and the click pick readout both
+        // bailed on `!scene`. Gate 4 measured through `__spikeScene`/`pickAt`
+        // from the console and so never exercised this path.
+        sceneRef.current = scene;
         // Spike-only: gate 4 probes `pickAt` and `stats()` directly from the
         // console, which is more precise than inferring picks from the HUD.
         window.__spikeLayer = layer;
@@ -381,6 +390,7 @@ export function RendererSpike() {
       disposed = true;
       window.clearInterval(hudTimer);
       canvas.removeEventListener("webglcontextrestored", resetFrameClock);
+      map.off("webglcontextrestored", readdLayerAfterContextLoss);
       map.off("load", resetFrameClock);
       map.off("render", onRender);
       map.off("mousemove", onPointerMove);

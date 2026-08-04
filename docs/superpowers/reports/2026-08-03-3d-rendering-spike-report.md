@@ -8,16 +8,15 @@ Issue: [#23 — Choose the 3D rendering architecture](https://github.com/dmalmq/
 
 ## Verdict
 
-The architecture holds. **Gates 1, 3, 4, 5, and 6 pass on measured numbers,
+The architecture holds. **All six architecture gates pass on measured numbers,
 gate 7 now has measured numbers (issue #31's trusted bands do not hold
-venue-wide), and no documented flip condition triggered** — the D3 raw WebGL2
-path stayed viable, so three.js was not needed. Gate 5 is now confirmed visually
-as well as numerically. **Gate 2 is the one failure**, and its cause is no longer
-a mystery: MapLibre removes custom layers on context loss and requires the
-application to re-add them, so recovery is an application-level contract rather
-than anything the renderer can own. The spike found and fixed **eight** real
-defects, four of them in the plan's own pinned recipe, which is what a spike is
-for.
+venue-wide), and no documented flip condition triggered** — the raw WebGL2 path
+stayed viable, so three.js was not needed. Gate 5 is confirmed visually as well
+as numerically, and gate 2 now passes with its trigger derived from MapLibre's
+source rather than guessed: recovery is an application-level contract, and the
+application must hook the **Map** `webglcontextrestored` event and wait for
+`idle` before re-adding. The spike found and fixed **nine** real defects, four of
+them in the plan's own pinned recipe, which is what a spike is for.
 
 **Action that follows: issue #31's conclusion is reopened.** Its falsifier was
 named in advance — a p90 above 0.50 m, or any spatially separated coherent
@@ -54,43 +53,66 @@ Notes for issue #26:
 - `gatheredPrimitives = 0` on all three assets: every primitive carried identity
   indices, so the de-index gather path is unit-tested only.
 
-## Gate 2 — Custom-layer interop: **FAIL, with the cause identified**
+## Gate 2 — Custom-layer interop: **PASS** (recovery is an application contract)
 
-Verified:
-- MapLibre's own layers render correctly with the custom layer present; GL state
-  is saved and restored around every draw and every pick pass.
-- `webglcontextlost` **and** `webglcontextrestored` both fire and are observed
-  when the loss is forced through `WEBGL_lose_context`.
+MapLibre's own layers render correctly with the custom layer present; GL state is
+saved and restored around every draw and every pick pass.
 
-**A custom layer cannot survive context loss on its own.** MapLibre logs the
-contract explicitly:
+**A custom layer cannot survive context loss on its own**, and MapLibre says so:
 
 > Custom layer with id 'scene-3d' cannot be restored after WebGL context loss.
 > You will need to re-add it manually after context restoration.
 
-MapLibre **removes** the layer, so `render` is never called again and the layer
-can never heal itself. Measured on Tokyo with a forced loss/restore cycle:
+On loss MapLibre destroys the style outright (`style.destroy(); style = null`)
+after snapshotting it; a custom layer cannot survive that serialization. `render`
+is never called again, so the layer can never heal itself. Measured on Tokyo
+before the fix: **31 picks before a forced loss, 0 after**, `map.getLayer` absent.
 
-| | picks in a 8×11 grid | `map.getLayer("scene-3d")` |
+`stats()` reported 5 draw calls and 5 visible batches throughout, because those
+are last-render values and no render happened — a reporting trap for anyone
+verifying recovery by stats alone. Use `map.getLayer(id)` or a pick.
+
+### The trigger, from MapLibre's source
+
+Two things have to be right, and both were wrong at first. The measured event
+order for a forced loss/restore cycle:
+
+| # | Event | `isStyleLoaded()` |
 |---|---|---|
-| before loss | 31 | present |
-| after restore | **0** | **absent** |
+| 1 | `map` `webglcontextlost` | — |
+| 2 | `canvas` `webglcontextlost` | — |
+| 3 | `map` `webglcontextrestored` | **false** |
+| 4 | `canvas` `webglcontextrestored` | false |
+| 5–6 | `styledata` ×2 | — |
+| 7 | `map` `idle` | true |
 
-`stats()` kept reporting 5 draw calls and 5 visible batches throughout, because
-those are last-render values and no render ever happened — a reporting trap for
-anyone verifying recovery by stats alone. Use `map.getLayer(id)` or a pick.
+1. **Hook the Map event, not the canvas DOM event.** MapLibre registers its own
+   canvas listener at construction and runs the entire rebuild there —
+   `setStyle(snapshot, {diff: false})`, `_setupPainter`, `resize`, `_update`,
+   `_resizeInternal` — and only then fires `webglcontextrestored` on the Map
+   (`maplibre-gl-dev.js:71362`). A canvas listener races that sequence.
+2. **Wait for `idle`.** At step 3 the style is still loading and two more
+   `styledata` events follow as `setStyle` swaps the style object, so a layer
+   added before step 7 is silently dropped again.
 
-Two remedies were tried and **both failed**: rebuilding inside the layer's own
-`webglcontextrestored` handler (the layer is already gone), and re-adding from
-the application on `webglcontextrestored` (loses a race with MapLibre's own
-restore) or on the first `idle` after it (never fired in headless Chromium).
-The scaffolding is committed with a `KNOWN INCOMPLETE` marker in
-`RendererSpike.tsx`.
+So: `map.on("webglcontextrestored")` → `map.once("idle")` → re-add. Verified
+through the application with no console assistance:
 
-**Consequence for issue #23:** recovery is an *application-level* contract, not
-a renderer-internal one — whichever rendering boundary is chosen, some owner
-above the layer must detect restoration and re-add. The correct trigger point is
-the one open question and it is unresolved.
+| | picks in an 8×11 grid | `map.getLayer("scene-3d")` | draw calls |
+|---|---|---|---|
+| before loss | 31 | present | 5 |
+| after restore | **31** | **present** | 5 |
+
+The rebuilt layer is a genuinely new object, and a pick on it returns feature
+747 (`Walkable`, level 0) at real venue-local metres — the same identity and
+coordinate behaviour gate 4 established.
+
+**Consequence for issue #23:** recovery is an *application-level* contract, not a
+renderer-internal one. Whichever rendering boundary is chosen, an owner above the
+layer must detect restoration and re-add, restoring active level and context-level
+selection. MapLibre also warns that custom-layer **event listeners** do not
+survive (`maplibre-gl-dev.js:71340–71343`), so that owner must re-register those
+too.
 
 ## Gate 3 — Frame time: **PASS (with a stated ceiling)**
 
@@ -367,6 +389,13 @@ two coherent 1.3–1.6 m pockets.
    — where it type-errors. With it set, captures became content-dependent
    (2.18 MB of distinct images vs a byte-identical 42 KB), unblocking gate 5's
    visual check and making gate 2's failure observable at all.
+9. **`sceneRef.current` was never assigned** (`RendererSpike.tsx`). The ref was
+   read in three places and nulled on teardown, but never set, so every consumer
+   bailed on `!scene` — including the context-loss re-add (which is why gate 2
+   still failed after the trigger was correct) and the click pick readout. Gate 4
+   measured through `window.__spikeScene` and `pickAt` from the console, so it
+   never exercised the app's own path and the wiring gap stayed invisible.
+   A reminder that measuring around the application can hide application bugs.
 
 Plan bugs also caught before they shipped: a payload alignment assumption that
 made `Uint32Array` views throw (`featureIndicesOffset` landed at byte 30); a
@@ -423,24 +452,33 @@ and never read coordinates out of an RFC7946 dump.
 
 ## Recommended next steps
 
-1. **Settle the context-loss re-add trigger (gate 2).** It is the only gate that
-   fails, the cause is known, and the fix is an application-level contract that
-   issue #23's chosen boundary has to name an owner for. Needs a headed browser:
-   `idle` never fired in headless Chromium after restore.
-2. Hand gate 7's numbers to issue #31 (reopened): the venue is not inside the
-   trusted bands (combined p90 0.63 m; B1F Yaesu has two coherent 1.3–1.6 m
-   pockets), and decide whether the bands need tightening, a per-floor scope, or
-   an explicit coverage-difference carve-out for tile-model overhangs.
-3. Hand gate 3 to issue #26 with the vsync caveat stated, and gate 1's 8.1 MB
-   derived-scene figure as the size input.
-4. Resume issue #33's snapping measurement. Its premise is now verified sound
-   (see the registration finding above); the `--roles` exporter selector it
-   needs is committed.
-5. Diagnose the two B1F Yaesu coherent clusters (1.57 m / 1.33 m). Median offset
-   there is only 0.083 m, so a global transform error is ruled out — it is
-   localised geometry, a stale GDB revision, or a genuine model defect, and that
-   distinction decides whether #31 re-certifies with a per-floor band or the
-   asset needs revision.
+All six architecture gates are closed, so nothing here blocks issue #23's
+decision. What remains is downstream.
+
+1. **Settle the 0.50 m collision between issues #31 and #33 in one decision.**
+   The same number does two independent jobs: #31's trusted registration
+   residual (p90 ≤ 0.50 m) and #33's provisional auto-association distance
+   (≤ 0.50 m auto, 0.50–3.0 m producer review). Gate 7 measured tiles↔GDB
+   registration noise at p90 **0.626 m** venue-wide and **0.921 m** on B1F
+   Yaesu. If registration noise alone exceeds the auto-association threshold,
+   that threshold will systematically dump correct associations into producer
+   review for reasons that have nothing to do with association ambiguity. These
+   two bands were set independently and are now known to be inconsistent; they
+   must be decided together, from one measurement pass.
+2. Diagnose the two B1F Yaesu coherent clusters (1.57 m / 1.33 m) as part of
+   that pass. Median offset there is only 0.083 m, so a global transform error
+   is ruled out — it is localised geometry, a stale GDB revision, or a genuine
+   model defect, and that distinction decides whether #31 re-certifies with a
+   per-floor band or the asset needs revision.
+3. Hand the performance numbers to issue #26: 8.1 MB derived scene, 5–6 draw
+   calls per active level (308 venue-wide), 60 fps vsync-locked on desktop and
+   under a 4× CPU throttle, 1.2–3.4 ms pick latency, 411–593 ms decode, 63–84 ms
+   upload. State the vsync caveat: every frame figure sits on the 16.7 ms floor,
+   so these are known-safe, not known-tight. A GPU-timer run would tighten them.
+4. Name the context-loss recovery owner in issue #23's decision. The mechanism
+   is settled (Map event → `idle` → re-add, restoring active level and context
+   selection, plus re-registering custom-layer event listeners), but *which*
+   production component owns it is an architecture choice.
 
 Done during the spike: gate 4's attribution question is resolved (defect 6), the
 design spec's matrix instruction is corrected (`3b6d057` on `main`), and gates 2
