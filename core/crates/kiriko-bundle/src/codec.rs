@@ -818,4 +818,36 @@ mod tests {
             "the venue's own content must survive one unreadable optional section"
         );
     }
+
+    #[test]
+    fn an_optional_section_at_an_unreadable_version_reports_why() {
+        let bundle = encode_bundle(&minimal_document()).expect("minimal document encodes");
+        let future = bundle_with_extra_section(
+            &bundle,
+            format::SECTION_FACILITIES,
+            format::SECTION_VERSION + 1,
+            vec![0x00; 4],
+        );
+
+        let document = decode_bundle(&future)
+            .expect("a section from a future format version must not fail the bundle");
+
+        assert!(
+            document.facilities.is_none(),
+            "bytes at an unknown version must never be interpreted"
+        );
+        assert_eq!(
+            document.capabilities.facilities(),
+            SectionCapability::UnsupportedVersion {
+                declared: format::SECTION_VERSION + 1,
+                supported: format::SECTION_VERSION,
+            },
+            "the report must name both versions so a reader can say what is needed"
+        );
+        assert_eq!(
+            document.levels.len(),
+            1,
+            "the venue's own content must survive a section from a newer writer"
+        );
+    }
 }
