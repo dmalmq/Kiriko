@@ -42,7 +42,11 @@
 ```text
 Shipped web baseline
         ↓
+3D indoor navigation, stages 0–2   ← format, generated source, renderer
+        ↓
 Production-ready shared web platform
+        ↓
+3D indoor navigation, stages 3–6   ← tiles, graph, navigation, QA
         ↓
 Public platform API + @kiriko/web
         ↓
@@ -52,6 +56,22 @@ Positioning research → go/no-go → optional productization
 ```
 
 A phase can conduct discovery for the next phase, but production implementation does not overlap across an unsatisfied release gate. This keeps external contracts from being built on an unstable operational or domain foundation.
+
+**Amendment, 2026-08-04 (issue #28).** The 3D indoor navigation workstream
+(issues #18–#33, design-complete) is split across Phase 1's gate at the point
+where it changes the storage surface. Stages 0–2 — KVB capability gating and §8
+spatial context, the §9 generated scene source and its adapter, and the WebGL2
+renderer with its capability gates — introduce **no new storage class**: they
+grow existing bundles by single-digit megabytes and add a client-side renderer.
+Stage 3 introduces content-addressed 3D Tiles packages at roughly 172 MiB per
+venue version, with reference-counted GC across draft, published, and archived
+versions, against a blob store that today holds 169 MB in total.
+
+That storage change is Workstream 1A's problem, so Stage 3 and everything after
+it sits behind 1A's release gate, and 1A is specified with the tile-package
+model in hand. The two highest-severity risks in #28's register — a GC that can
+delete a pinned package, and a backup surface that grows sharply per venue —
+therefore land on a system with a proven restore drill rather than before one.
 
 ### 1.3 Release definition
 
@@ -412,6 +432,9 @@ Optimize from measured customer/fixture behavior. Maintain current viewer budget
 | Backend | TypeScript/Fastify | Only if measured service constraints cannot be resolved cleanly |
 | Domain core | Rust | Standing decision |
 | Web renderer | MapLibre GL JS | Renderer no longer meets required indoor-map capability/support |
+| 3D scene rendering | Hand-authored WebGL2 in MapLibre's `CustomLayerInterface`, fed by a Rust-compiled scene format (#23) | A documented flip condition from #23's gates triggers; none did |
+| 3D device support | One tier, no degraded middle — WebGL2 + explicit MRT locations + `EXT_color_buffer_float`, else the 2D fallback (#26) | Baseline-device measurement shows the floor excludes required hardware |
+| 3D scene sources | Two per immutable version: generated always retained, one Kiriko-managed 3D Tiles package optionally activated (#30) | A source proves unmaintainable or a third source is justified |
 | Native renderer | MapLibre Native | Evaluate during Phase 3 platform specs |
 | Database | SQLite | Measured concurrency/operational limit after Phase 1 |
 | Queue | In process | Work must survive process restart or scale beyond one worker |
@@ -425,16 +448,27 @@ Optimize from measured customer/fixture behavior. Maintain current viewer budget
 
 ## 9. Required next planning artifacts
 
-Phase 1 must be decomposed before implementation. Create and approve these independent artifacts in order:
+3D stages 0–2 come first under the amendment in §1.2, then Phase 1. Create and
+approve these independent artifacts in order:
 
-1. **Production deployment and recovery spec/plan** — Workstream 1A.
-2. **Production identity and tenant authorization spec/plan** — Workstream 1B.
-3. **Venue version history, sharing, and retention spec/plan** — Workstream 1C.
-4. **Production release acceptance spec/plan** — Workstream 1D, consuming the prior three contracts.
+1. **KVB capability and spatial-context spec/plan** — 3D Stage 0. Inverts the
+   decoder's whole-bundle rejection into per-section capability failure and adds
+   §8. Blocks every other 3D section.
+2. **Generated scene source and adapter spec/plan** — 3D Stage 1 (§9).
+3. **3D renderer and capability-gate spec/plan** — 3D Stage 2.
+4. **Production deployment and recovery spec/plan** — Workstream 1A, written
+   with the 3D tile-package storage model in hand (~172 MiB per venue version,
+   content-addressed, reference-counted GC).
+5. **Production identity and tenant authorization spec/plan** — Workstream 1B.
+6. **Venue version history, sharing, and retention spec/plan** — Workstream 1C,
+   covering tile activation state and GC references.
+7. **Production release acceptance spec/plan** — Workstream 1D, consuming the
+   prior three contracts, with issue #26's capability gates as acceptance
+   criteria.
 
 A workstream plan must name exact files, migrations, interfaces, tests, smoke commands, expected results, and rollback behavior. It must not absorb the next workstream “while here.”
 
-Phase 2 planning begins only after Phase 1’s release gate. Phase 3 planning begins only after a Phase 2 customer integration proves the public contracts. Phase 4 research can prepare data-governance questions earlier, but it cannot add shipping APIs before its go/no-go gate.
+3D stages 3–6 are decomposed after Workstream 1A's release gate. Phase 2 planning begins only after Phase 1’s release gate. Phase 3 planning begins only after a Phase 2 customer integration proves the public contracts. Phase 4 research can prepare data-governance questions earlier, but it cannot add shipping APIs before its go/no-go gate.
 
 ## 10. Roadmap maintenance
 
