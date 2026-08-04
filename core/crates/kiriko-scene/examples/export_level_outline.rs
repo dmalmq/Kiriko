@@ -195,10 +195,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let origin = batch.quantization_origin;
         let scale = batch.quantization_scale;
         let mut ring: Vec<[f64; 2]> = Vec::with_capacity(4);
+        // `feature_indices` runs parallel to `positions` (one entry per
+        // vertex, set by the deriver), so each triangle's source feature is
+        // `doc.features[batch.feature_indices[first_vertex]]`.
+        let mut vertex_in_batch = 0usize;
         for chunk in batch.positions.chunks_exact(3) {
+            let feature_index = batch
+                .feature_indices
+                .get(vertex_in_batch)
+                .map(|&idx| idx as usize)
+                .filter(|&idx| idx < doc.features.len())
+                .unwrap_or(usize::MAX);
+            let source_id = doc
+                .features
+                .get(feature_index)
+                .map(|f| f.source_object_id.as_str())
+                .unwrap_or("");
             let mut z_sum = 0.0_f64;
             let mut enu: Vec<[f64; 2]> = Vec::with_capacity(3);
             for quantized in chunk {
+                vertex_in_batch += 1;
                 let local_x = origin[0] + f32::from(quantized[0]) * scale[0];
                 let local_y = origin[1] + f32::from(quantized[1]) * scale[1];
                 let local_z = origin[2] + f32::from(quantized[2]) * scale[2];
@@ -223,6 +239,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "level_name": level.source_level_name,
                     "elevation_m": level.source_elevation_meters,
                     "resolved_plane_z": level.resolved_plane_z,
+                    // Source feature identity (per triangle): the index into
+                    // the scene's feature table and the GLB revitUniqueId it
+                    // was derived from, empty when the batch has no mapping.
+                    "feature_index": if feature_index == usize::MAX { -1i64 } else { feature_index as i64 },
+                    "source_id": source_id,
                     "z_m": z_sum / 3.0,
                     // Native venue-local ENU metres (frame origin = header's
                     // frame_origin_ecef). These are the exact coordinates the
