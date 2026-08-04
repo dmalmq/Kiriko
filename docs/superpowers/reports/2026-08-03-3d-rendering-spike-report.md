@@ -707,35 +707,32 @@ retroactively prove the original zips matched before deletion, though nothing in
 any measurement depends on archive structure rather than content. (6) All GDAL
 work in this pass ran serially in one process, per the concurrency constraint.
 
-## Recommended next steps
+## Outcome
 
-All six architecture gates are closed, so nothing here blocks issue #23's
-decision. What remains is downstream.
+Every question this spike was created to answer is now closed on the issue
+tracker. Recorded here so the report does not read as if work is still pending.
 
-1. **Settle the 0.50 m collision between issues #31 and #33 in one decision.**
-   **RESOLVED in the 2026-08-04 follow-up pass above:** the measured
-   registration noise is p90 0.43–0.92 m per floor (0.61 m on B1F Yaesu after
-   the coverage-difference carve-out), the two Yaesu clusters are localised
-   tile-vs-GDB boundary differences (not revision, not displacement), and the
-   recommendation is a per-floor auto band (max(0.50 m, 1.25 × carved p90):
-   1F 0.55 / B1F 0.65 / M2F 0.50) or a flat 1.0 m, with #31 re-certified per
-   floor with the carve-out.
-2. Diagnose the two B1F Yaesu coherent clusters (1.57 m / 1.33 m) as part of
-   that pass. **RESOLVED:** cluster (a) is the border zone of tile feature
-   `ecf46c5f` (a diagonal passage running 2.6–2.8 m from the GDB unit edges at
-   its SW start and up to ~20 m beyond all unit coverage in its middle);
-   cluster (b) is a ~1.3 m tile overhang of tile feature `98b4f0da` over unit
-   `bd9f6b4a`'s edge. Both are coverage differences covered by the carve-out.
-3. Hand the performance numbers to issue #26: 8.1 MB derived scene, 5–6 draw
-   calls per active level (308 venue-wide), 60 fps vsync-locked on desktop and
-   under a 4× CPU throttle, 1.2–3.4 ms pick latency, 411–593 ms decode, 63–84 ms
-   upload. State the vsync caveat: every frame figure sits on the 16.7 ms floor,
-   so these are known-safe, not known-tight. A GPU-timer run would tighten them.
-4. Name the context-loss recovery owner in issue #23's decision. The mechanism
-   is settled (Map event → `idle` → re-add, restoring active level and context
-   selection, plus re-registering custom-layer event listeners), but *which*
-   production component owns it is an architecture choice.
+| Issue | Outcome |
+|---|---|
+| #23 Rendering architecture | **Closed.** All six gates pass. Recovery owner named: `src/map/IndoorMap.tsx`, the component that constructs the MapLibre instance. Dormant until the custom layer ships — production uses only native layers today, which MapLibre restores itself. |
+| #26 Capability / accessibility / performance gates | **Closed.** One 3D tier, no degraded middle: WebGL2 + explicit MRT locations + `EXT_color_buffer_float` all required, anything less gets the 2D fallback as a peer view. Budgets are structural, not temporal. Tokyo is the reference ceiling. |
+| #31 Registration | **Closed, re-certified.** Per-floor bands (1F 0.50 / B1F Marunouchi 0.50 / B1F Yaesu 0.65 / M2F 0.70) plus the coverage-difference carve-out. Not activation-blocking. |
+| #33 Graph snapping | **Closed.** Auto-association raised to a flat **1.0 m** venue-wide; 0.5–3.0 m producer review retained; level resolved by altitude before distance; conveyance association never requires stair geometry. |
 
-Done during the spike: gate 4's attribution question is resolved (defect 6), the
-design spec's matrix instruction is corrected (`3b6d057` on `main`), and gates 2
-and 5's visual checks are no longer blocked on capture tooling.
+**The `rgba8` pick path in this spike is evidence, not a supported path.** #26
+requires `EXT_color_buffer_float`, because the packed-depth fallback returns an
+approximate position — precisely the degraded middle tier that decision refuses.
+It stays here because measuring it is what justified ruling it out.
+
+Two things deliberately left open, both recorded on the issues:
+
+1. **Frame-time budgets.** Every frame figure here sits on the 16.7 ms vsync
+   floor on an RTX 4500 Ada, so committing them would commit an unfalsifiable
+   number. A vsync-uncapped or GPU-timer run on weaker GPUs sets them; this
+   harness already does everything else that run needs.
+2. **Delivery sequencing** — issue #28, the last open question in the workstream.
+
+Done during the spike: gate 4's attribution question resolved (defect 6), the
+design spec's matrix instruction corrected (`3b6d057` on `main`), and the visual
+gates unblocked by fixing the capture path (defect 8). The spike branch is
+disposable and is not merged to `main`.
