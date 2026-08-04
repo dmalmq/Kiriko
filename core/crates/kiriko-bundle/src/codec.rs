@@ -33,6 +33,61 @@ pub struct BundleStats {
     pub features: u32,
 }
 
+/// Whether one optional section's capability is available for a decoded
+/// bundle, and when it is not, why.
+///
+/// `Absent` and the unavailable-with-reason variants are deliberately
+/// distinct: a venue that simply has no graph is not the same as a venue
+/// whose graph cannot be read, and callers present them differently.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "state")]
+pub enum SectionCapability {
+    /// Present, at a version this decoder understands, and validated.
+    Available,
+    /// The bundle carries no directory row for this section.
+    Absent,
+    /// Present, but declaring a payload version this decoder cannot read.
+    /// The bytes are never interpreted.
+    UnsupportedVersion { declared: u16, supported: u16 },
+    /// Present and readable, but its contents failed validation.
+    Invalid { reason: String },
+    /// Withheld because a section this one requires is unavailable.
+    DisabledByDependency { requires: u16 },
+}
+
+/// Per-section availability for one decoded bundle, produced by the same
+/// decode that produced the document's content so the two can never disagree
+/// about the same bytes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityReport {
+    graph: SectionCapability,
+    facilities: SectionCapability,
+}
+
+impl CapabilityReport {
+    /// Availability of the routing graph section.
+    pub fn graph(&self) -> SectionCapability {
+        self.graph.clone()
+    }
+
+    /// Availability of the point facilities section.
+    pub fn facilities(&self) -> SectionCapability {
+        self.facilities.clone()
+    }
+}
+
+impl Default for CapabilityReport {
+    /// Every optional capability absent. The starting point for a document
+    /// built before its directory has been examined.
+    fn default() -> Self {
+        Self {
+            graph: SectionCapability::Absent,
+            facilities: SectionCapability::Absent,
+        }
+    }
+}
+
 /// The fully decoded contents of a `kvb1` bundle: bundle metadata, the
 /// source IMDF manifest, and the canonical venue model, with `features` in
 /// the single canonical feature-type order (the geometry/stores section
@@ -53,6 +108,10 @@ pub struct BundleDocument {
     /// Optional point facilities (section 7). `None` when the bundle
     /// carries no facilities; empty facilities are never emitted.
     pub facilities: Option<Facilities>,
+    /// Which optional-section capabilities this bundle offers, and why any
+    /// unavailable one is unavailable. `graph`/`facilities` above say
+    /// *whether* content is present; this says *why* when it is not.
+    pub capabilities: CapabilityReport,
 }
 
 /// The result of compiling raw IMDF source bytes into a bundle.
@@ -125,6 +184,7 @@ pub fn compile_imdf_with_network(
         stats,
         graph: None,
         facilities: None,
+        capabilities: CapabilityReport::default(),
     };
 
     // Clipping was requested but the imported venue carries no level/unit
@@ -410,17 +470,52 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<BundleDocument, BundleError> {
     )?;
 
     let mut document = sections::manifest_into_document(manifest_dto, features)?;
-    // The graph section is optional: absent means `None`, so bundles
-    // written before section 5 existed still decode.
-    if let Some(graph_bytes) = directory.section(&payload, format::SECTION_GRAPH) {
-        document.graph = Some(sections::decode_graph(graph_bytes)?);
+
+    // Both sections are optional. Absent means `None` here, so bundles written
+    // before either section existed still decode. A section present at a
+    // version this decoder cannot read yields no bytes, so it is reported
+    // unavailable rather than interpreted.
+    let graph_bytes = directory.section(&payload, format::SECTION_GRAPH);
+    if let Some(bytes) = graph_bytes {
+        document.graph = Some(sections::decode_graph(bytes)?);
     }
-    // The facilities section is optional: absent means `None`, so bundles
-    // written before section 7 existed still decode.
-    if let Some(facilities_bytes) = directory.section(&payload, format::SECTION_FACILITIES) {
-        document.facilities = Some(sections::decode_facilities(facilities_bytes)?);
+    let facilities_bytes = directory.section(&payload, format::SECTION_FACILITIES);
+    if let Some(bytes) = facilities_bytes {
+        document.facilities = Some(sections::decode_facilities(bytes)?);
     }
+
+    document.capabilities = CapabilityReport {
+        graph: section_capability(&directory, format::SECTION_GRAPH, graph_bytes.is_some()),
+        facilities: section_capability(
+            &directory,
+            format::SECTION_FACILITIES,
+            facilities_bytes.is_some(),
+        ),
+    };
     Ok(document)
+}
+
+/// Classify one optional section's availability from its directory row.
+///
+/// `decoded` is whether the section's bytes were actually handed to a decoder,
+/// which is what keeps the report and the document's content derived from the
+/// same pass over the same bytes.
+fn section_capability(directory: &format::Directory, id: u16, decoded: bool) -> SectionCapability {
+    match directory.declared_version(id) {
+        None => SectionCapability::Absent,
+        Some(declared) if declared != format::SECTION_VERSION => {
+            SectionCapability::UnsupportedVersion {
+                declared,
+                supported: format::SECTION_VERSION,
+            }
+        }
+        Some(_) if decoded => SectionCapability::Available,
+        // A row at a supported version whose bytes were not decoded cannot
+        // happen today; treat it as unavailable rather than claim availability.
+        Some(_) => SectionCapability::Invalid {
+            reason: "section present but not decoded".to_string(),
+        },
+    }
 }
 
 /// A pure anchor-level projection of a decoded bundle: the whole-file
@@ -552,6 +647,7 @@ mod tests {
                 },
                 graph: None,
                 facilities: None,
+                capabilities: CapabilityReport::default(),
             };
 
         // Level ordinal.

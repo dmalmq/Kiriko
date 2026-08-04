@@ -36,7 +36,7 @@ use kiriko_model::model::{
     Bounds, FeatureType, ImdfManifest, VenueFeature, ViewerLevel, ViewerWarning, WarningCode,
 };
 
-use crate::codec::{BundleDocument, BundleMetadata, BundleStats};
+use crate::codec::{BundleDocument, BundleMetadata, BundleStats, CapabilityReport};
 use crate::error::{BundleError, BundleErrorCode};
 
 /// Reject a non-finite (NaN or +/-Infinity) number, and normalize `-0.0` to
@@ -558,6 +558,7 @@ pub(crate) fn manifest_into_document(
         },
         graph: None,
         facilities: None,
+        capabilities: CapabilityReport::default(),
     })
 }
 
@@ -975,6 +976,7 @@ mod tests {
             },
             graph: None,
             facilities: None,
+            capabilities: CapabilityReport::default(),
         }
     }
 

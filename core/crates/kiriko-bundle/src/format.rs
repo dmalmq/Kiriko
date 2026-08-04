@@ -56,23 +56,15 @@ pub(crate) const SECTION_FACILITIES: u16 = 7;
 
 pub(crate) const REQUIRED_SECTIONS: [u16; 3] = [SECTION_MANIFEST, SECTION_GEOMETRY, SECTION_STORES];
 
-/// Every section id this decoder recognizes and will interpret (required plus
-/// the optional/reserved ids). A directory row for any of these declaring a
-/// version this decoder does not understand is rejected; unknown ids are left
-/// tolerated for forward compatibility.
-pub(crate) const KNOWN_SECTIONS: [u16; 7] = [
-    SECTION_MANIFEST,
-    SECTION_GEOMETRY,
-    SECTION_STORES,
-    SECTION_STYLE,
-    SECTION_GRAPH,
-    SECTION_BEACONS,
-    SECTION_FACILITIES,
-];
-
-/// The only section payload version this decoder understands. Any known
-/// section (required or optional) whose directory row declares a different
-/// version is rejected as `unsupported_bundle_version`.
+/// The only section payload version this decoder understands.
+///
+/// A **required** section declaring a different version is rejected as
+/// `unsupported_bundle_version` — the bundle is unreadable. An **optional**
+/// section declaring a different version is retained in the directory but
+/// yields no bytes, so the caller reports that one capability unavailable
+/// while the rest of the bundle decodes. Unknown ids are tolerated and
+/// ignored, which is what lets a decoder predating a section still read a
+/// bundle that carries it.
 pub(crate) const SECTION_VERSION: u16 = 1;
 
 const DIRECTORY_COUNT_LEN: usize = 2;
@@ -82,6 +74,10 @@ const DIRECTORY_ROW_LEN: usize = 20; // id:u16 + version:u16 + offset:u64 + leng
 #[derive(Debug, Clone, Copy)]
 struct SectionRow {
     id: u16,
+    /// The version declared by the directory row. Retained so a caller can
+    /// distinguish "section absent" from "section present at a version this
+    /// decoder does not understand" and report the difference.
+    version: u16,
     offset: u64,
     length: u64,
 }
@@ -95,12 +91,24 @@ pub(crate) struct Directory {
 }
 
 impl Directory {
-    /// The bytes of section `id`, if present.
+    /// The bytes of section `id`, if present **and** declaring a version this
+    /// decoder understands. A row at an unsupported version yields `None`, so
+    /// no caller can decode bytes whose layout it cannot vouch for.
     pub(crate) fn section<'a>(&self, payload: &'a [u8], id: u16) -> Option<&'a [u8]> {
         self.rows
             .iter()
-            .find(|row| row.id == id)
+            .find(|row| row.id == id && row.version == SECTION_VERSION)
             .map(|row| &payload[row.offset as usize..(row.offset + row.length) as usize])
+    }
+
+    /// The version declared for section `id`, if a row for it is present at
+    /// all. `None` means absent; `Some(v)` with `v != SECTION_VERSION` means
+    /// present but unreadable by this decoder.
+    pub(crate) fn declared_version(&self, id: u16) -> Option<u16> {
+        self.rows
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.version)
     }
 }
 
@@ -180,16 +188,25 @@ pub(crate) fn parse_directory(payload: &[u8]) -> Result<Directory, BundleError> 
             return Err(invalid("section row is out of bounds"));
         }
 
-        if KNOWN_SECTIONS.contains(&id) && version != SECTION_VERSION {
+        // Only a *required* section's version is a whole-bundle gate. An
+        // optional section at an unreadable version is retained here and
+        // reported as unavailable by the caller, so one unreadable section
+        // never costs a reader the venue's 2D content or legacy routing.
+        if REQUIRED_SECTIONS.contains(&id) && version != SECTION_VERSION {
             return Err(BundleError::new(
                 BundleErrorCode::UnsupportedBundleVersion,
                 format!(
-                    "section {id} has version {version}, which this decoder does not understand"
+                    "required section {id} has version {version}, which this decoder does not understand"
                 ),
             ));
         }
 
-        rows.push(SectionRow { id, offset, length });
+        rows.push(SectionRow {
+            id,
+            version,
+            offset,
+            length,
+        });
     }
 
     // Overlap check in O(n log n): sort a copy of the (already id-sorted)
@@ -501,6 +518,35 @@ mod tests {
     }
 
     #[test]
+    fn retains_an_optional_section_declaring_an_unsupported_version() {
+        // An optional section this decoder cannot read must never be silently
+        // interpreted -- the original concern -- but it must also not cost the
+        // reader the whole bundle. It is retained, yields no bytes, and the
+        // caller reports it unavailable.
+        for optional in [SECTION_GRAPH, SECTION_FACILITIES] {
+            let dir_len = (DIRECTORY_COUNT_LEN + 4 * DIRECTORY_ROW_LEN) as u64;
+            let rows = [
+                row_bytes(SECTION_MANIFEST, SECTION_VERSION, dir_len, 0),
+                row_bytes(SECTION_GEOMETRY, SECTION_VERSION, dir_len, 0),
+                row_bytes(SECTION_STORES, SECTION_VERSION, dir_len, 0),
+                row_bytes(optional, SECTION_VERSION + 1, dir_len, 0),
+            ];
+            let payload = payload_with_rows(&rows, &[]);
+            let directory = parse_directory(&payload)
+                .expect("an optional section's version must not reject the whole bundle");
+            assert_eq!(
+                directory.declared_version(optional),
+                Some(SECTION_VERSION + 1),
+                "the declared version must be retained so the caller can report why section {optional} is unavailable"
+            );
+            assert!(
+                directory.section(&payload, optional).is_none(),
+                "an unsupported version must not yield section {optional} bytes to decode"
+            );
+        }
+    }
+
+    #[test]
     fn encode_payload_then_decode_payload_round_trips() {
         let payload = build_payload(&[
             (SECTION_MANIFEST, SECTION_VERSION, vec![9, 9, 9]),
@@ -543,25 +589,5 @@ mod tests {
         let err = parse_directory(&payload)
             .expect_err("an overlap among many sections must still be detected");
         assert_eq!(err.code, BundleErrorCode::InvalidBundle);
-    }
-
-    #[test]
-    fn rejects_unsupported_optional_section_version() {
-        // Optional graph (5) and facilities (7) sections must be version-checked
-        // exactly like the required ones; a version this decoder cannot read is
-        // rejected rather than silently interpreted.
-        for optional in [SECTION_GRAPH, SECTION_FACILITIES] {
-            let dir_len = (DIRECTORY_COUNT_LEN + 4 * DIRECTORY_ROW_LEN) as u64;
-            let rows = [
-                row_bytes(SECTION_MANIFEST, SECTION_VERSION, dir_len, 0),
-                row_bytes(SECTION_GEOMETRY, SECTION_VERSION, dir_len, 0),
-                row_bytes(SECTION_STORES, SECTION_VERSION, dir_len, 0),
-                row_bytes(optional, SECTION_VERSION + 1, dir_len, 0),
-            ];
-            let payload = payload_with_rows(&rows, &[]);
-            let err = parse_directory(&payload)
-                .expect_err("an unsupported optional section version must be rejected");
-            assert_eq!(err.code, BundleErrorCode::UnsupportedBundleVersion);
-        }
     }
 }
