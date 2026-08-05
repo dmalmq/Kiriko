@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{BundleError, BundleErrorCode, CompileError};
 use crate::format;
+use crate::resolve::ResolutionProfile;
 use crate::sections;
 
 /// Caller-supplied identity for a compiled bundle. `dataset_id` is
@@ -171,7 +172,7 @@ pub fn compile_imdf(
     source: &[u8],
     metadata: BundleMetadata,
 ) -> Result<CompiledBundle, CompileError> {
-    compile_imdf_with_network(source, metadata, None, None, None, false, false)
+    compile_imdf_with_network(source, metadata, None, None, None, false, false, None)
 }
 
 /// Import `source` (a raw IMDF `.zip`) with `kiriko-model`, optionally build
@@ -194,6 +195,10 @@ pub fn compile_imdf(
 /// embedded as section 7 and the build warnings fold into the compile
 /// warning channel (code `facility_build`). Malformed facilities GeoJSON is
 /// fatal ([`CompileError::Facility`]).
+///
+/// `resolution_profile` is the versioned profile for floor-plane resolution;
+/// `None` applies the versioned default profile (spacing 4.0 m, elevation key
+/// `elevation`, ≥3 network junctions within 1.0 m tolerance).
 pub fn compile_imdf_with_network(
     source: &[u8],
     metadata: BundleMetadata,
@@ -202,6 +207,7 @@ pub fn compile_imdf_with_network(
     facilities_geojson: Option<&str>,
     synthesize_network: bool,
     clip_to_venue: bool,
+    resolution_profile: Option<&ResolutionProfile>,
 ) -> Result<CompiledBundle, CompileError> {
     let venue = import_imdf(source)?;
     // Built before `document` consumes `venue`. `None` when clipping is off, so
@@ -211,10 +217,19 @@ pub fn compile_imdf_with_network(
     } else {
         None
     };
-    // Derived before `document` consumes `venue`. `None` when the venue has
-    // no computable horizontal extent, which leaves the spatial-context
-    // capability `absent` rather than fabricating a frame.
-    let spatial_context = crate::spatial_section::build_spatial_context(&venue);
+    // Derived before `document` consumes `venue`: the horizontal bounds for
+    // the §8 anchor, the venue feature id the anchor evidence points at, and
+    // the explicit level elevations. The resolution itself runs after the
+    // network block, which supplies the preserved network altitudes.
+    let bounds = kiriko_model::spatial::venue_horizontal_bounds(&venue);
+    let venue_feature_id = venue
+        .features
+        .iter()
+        .find(|f| f.feature_type == FeatureType::Venue)
+        .map(|f| f.id.clone());
+    let default_profile = ResolutionProfile::default();
+    let profile = resolution_profile.unwrap_or(&default_profile);
+    let elevations = extract_level_elevations(&venue.features, &profile.elevation_property_key);
     let stats = BundleStats {
         levels: venue.levels.len() as u32,
         features: venue.features.len() as u32,
@@ -230,7 +245,7 @@ pub fn compile_imdf_with_network(
         stats,
         graph: None,
         facilities: None,
-        spatial_context,
+        spatial_context: None,
         capabilities: CapabilityReport::default(),
     };
 
@@ -252,9 +267,16 @@ pub fn compile_imdf_with_network(
         });
     }
 
+    // Preserved network altitudes for floor-plane resolution, grouped by
+    // ordinal from the full (unclipped) graph build. Empty when no network
+    // was supplied or synthesized.
+    let mut network_altitudes: crate::resolve::NetworkAltitudes = Vec::new();
     if let (Some(junctions), Some(paths)) = (junctions_geojson, paths_geojson) {
         let ordinals: Vec<f64> = document.levels.iter().map(|l| l.ordinal).collect();
         let build = kiriko_route::build_route_graph(junctions, paths, &ordinals)?;
+        // Preserved before the graph is moved into the document: the §5
+        // section's byte schema never carries altitudes.
+        network_altitudes = graph_altitudes(&build);
         document
             .warnings
             .extend(build.warnings.into_iter().map(|w| ViewerWarning {
@@ -298,6 +320,8 @@ pub fn compile_imdf_with_network(
         let build = crate::synth_medial::synthesize_network_medial(&document);
         #[cfg(not(feature = "netgen"))]
         let build = crate::synth::synthesize_network(&document);
+        // A synthesized network carries no preserved source altitudes.
+        network_altitudes = Vec::new();
         document
             .warnings
             .extend(build.warnings.into_iter().map(|w| ViewerWarning {
@@ -337,6 +361,19 @@ pub fn compile_imdf_with_network(
             document.graph = Some(graph);
         }
     }
+
+    // Floor-plane resolution: fixed precedence (explicit elevation, then
+    // trustworthy preserved network altitude, then nominal spacing), with
+    // the versioned profile. Assembles the §8 levels and registry evidence;
+    // `None` only when the venue has no computable anchor at all.
+    let outcome = crate::resolve::resolve_level_planes(
+        &document.levels,
+        &elevations,
+        &network_altitudes,
+        profile,
+    );
+    document.spatial_context =
+        crate::spatial_section::build_spatial_context(bounds, venue_feature_id, &outcome, profile);
 
     if let Some(facilities_geojson) = facilities_geojson {
         if document.graph.is_none() {
@@ -395,6 +432,42 @@ pub fn compile_imdf_with_network(
 
 pub(crate) fn postcard_encode_err(context: &str) -> impl Fn(postcard::Error) -> BundleError + '_ {
     move |e| BundleError::new(BundleErrorCode::InvalidBundle, format!("{context}: {e}"))
+}
+
+/// Group a graph build's preserved junction altitudes by node ordinal, for
+/// floor-plane resolution. Deterministic: entries accumulate in node order,
+/// and each level's lookup is by exact ordinal equality.
+fn graph_altitudes(build: &kiriko_route::RouteGraphBuild) -> crate::resolve::NetworkAltitudes {
+    let mut grouped: crate::resolve::NetworkAltitudes = Vec::new();
+    for (node, altitude) in build.graph.nodes.iter().zip(build.node_altitudes.iter()) {
+        let Some(altitude) = altitude else { continue };
+        match grouped.iter_mut().find(|(ordinal, _)| *ordinal == node.ordinal) {
+            Some((_, altitudes)) => altitudes.push(*altitude),
+            None => grouped.push((node.ordinal, vec![*altitude])),
+        }
+    }
+    grouped
+}
+
+/// The explicit elevations a resolution profile reads from the venue's level
+/// features: `source_properties[profile.elevation_property_key]`, finite and
+/// numeric. Unmapped or non-finite values simply contribute nothing — the
+/// precedence then falls through to the network or nominal branch.
+fn extract_level_elevations(
+    features: &[VenueFeature],
+    elevation_property_key: &str,
+) -> crate::resolve::LevelElevations {
+    features
+        .iter()
+        .filter(|f| f.feature_type == FeatureType::Level)
+        .filter_map(|f| {
+            let elevation = f
+                .source_properties
+                .get(elevation_property_key)
+                .and_then(|v| v.as_f64())?;
+            (elevation.is_finite()).then_some((f.id.clone(), elevation))
+        })
+        .collect()
 }
 
 /// Deserialize exactly one postcard value from `bytes` and require that no

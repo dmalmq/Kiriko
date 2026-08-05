@@ -203,6 +203,7 @@ fn main() {
             None,
             true,
             false,
+            None,
         )
         .expect("compile with synthesis");
         decode_bundle(&compiled.bytes).expect("decode")

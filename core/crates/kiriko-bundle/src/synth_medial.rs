@@ -1828,10 +1828,15 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         (a.from, a.to, a.weight.to_bits()).cmp(&(b.from, b.to, b.weight.to_bits()))
     });
     let node_ids: Vec<u64> = (0..nodes.len() as u64).collect();
+    let altitude_count = node_ids.len();
     RouteGraphBuild {
         graph: RouteGraph { nodes, edges },
         warnings,
         node_ids,
+        // A synthesized network has no preserved source altitudes; every
+        // node's altitude is unknown, so floor-plane resolution falls back
+        // to the nominal branch.
+        node_altitudes: vec![None; altitude_count],
     }
 }
 

@@ -75,6 +75,12 @@ pub enum AssumptionKind {
 pub enum EvidenceMethod {
     /// Derived deterministically from the venue's own geometry.
     DerivedFromVenueGeometry,
+    /// An explicit imported or trusted mapped elevation field.
+    ImportedElevation,
+    /// A preserved routing-network altitude.
+    PreservedNetworkAltitude,
+    /// A nominal spacing assumption.
+    NominalSpacing,
 }
 
 /// Reliability class of a registered confidence value.
@@ -137,6 +143,9 @@ pub struct RegistrationEvidence {
     pub source_locator_ref: u32,
     pub transform_ref: Option<u32>,
     pub confidence_ref: Option<u32>,
+    /// Index into [`Registries::assumptions`] when this evidence rests on an
+    /// assumption (e.g. a nominal-spacing placement).
+    pub assumption_ref: Option<u32>,
     pub detail: String,
 }
 
@@ -210,13 +219,54 @@ pub struct Registries {
     pub manual_provenance: Vec<ManualProvenance>,
 }
 
+/// How a level's floor plane was resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionMethod {
+    /// An explicit imported or trusted mapped elevation won the precedence.
+    ImportedElevation,
+    /// A preserved routing-network altitude won (validated, trustworthy).
+    NetworkAltitude,
+    /// Configurable nominal floor spacing was assumed.
+    NominalSpacing,
+}
+
+/// One canonical level's resolved floor plane, referencing the §8 registries.
+///
+/// The resolved value is a checked integer millimetre scene Z; the original
+/// source elevation stays full-precision `f64`. Evidence and confidence are
+/// referenced by registry index, never duplicated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LevelRecord {
+    pub level_id: String,
+    pub ordinal: f64,
+    /// Original source elevation (metres), full precision, when one exists.
+    pub source_elevation_m: Option<f64>,
+    /// Preserved network altitude minus imported elevation, checked integer
+    /// millimetres, when both existed — the disagreement is recorded, never
+    /// silently overwriting either value.
+    pub network_difference_mm: Option<i64>,
+    /// Resolved floor-plane scene Z, checked integer millimetres,
+    /// non-negative (the frame's normalisation offset puts the lowest plane
+    /// at 0).
+    pub resolved_scene_z_mm: i64,
+    /// The precedence branch that actually resolved this level.
+    pub method: ResolutionMethod,
+    /// Index into [`Registries::confidence`].
+    pub confidence_ref: u32,
+    /// Indices into [`Registries::registration_evidence`].
+    pub evidence_refs: Vec<u32>,
+}
+
 /// Section 8 (spatial context) content: the shared frame plus the evidence
-/// registries behind it. `source_properties` preserves bounded source fields
-/// Kiriko does not model, for audit and export; nothing here interprets them.
+/// registries behind it. `levels` holds every canonical level's resolved
+/// floor plane, referencing the registries. `source_properties` preserves
+/// bounded source fields Kiriko does not model, for audit and export; nothing
+/// here interprets them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpatialContext {
     pub frame: Frame,
     pub registries: Registries,
+    pub levels: Vec<LevelRecord>,
     pub source_properties: BTreeMap<String, Value>,
 }
 
@@ -436,11 +486,51 @@ mod tests {
                 anchor_evidence_ref: 0,
             },
             registries: super::Registries::default(),
+            levels: Vec::new(),
             source_properties: BTreeMap::new(),
         };
         assert_eq!(context.frame.axes, Axes::EastNorthUp);
         assert_eq!(context.frame.unit, LengthUnit::Millimetre);
         assert!(context.registries.artifacts.is_empty());
+        assert!(context.levels.is_empty());
         assert!(context.source_properties.is_empty());
+    }
+
+    #[test]
+    fn level_record_and_resolution_method_are_constructible() {
+        use super::{LevelRecord, ResolutionMethod};
+        let record = LevelRecord {
+            level_id: "level-1".into(),
+            ordinal: 1.5,
+            source_elevation_m: Some(12.25),
+            network_difference_mm: Some(-250),
+            resolved_scene_z_mm: 4000,
+            method: ResolutionMethod::ImportedElevation,
+            confidence_ref: 0,
+            evidence_refs: vec![0, 1],
+        };
+        assert_eq!(record.method, ResolutionMethod::ImportedElevation);
+        assert_eq!(record.resolved_scene_z_mm, 4000);
+        assert_eq!(record.evidence_refs, vec![0, 1]);
+        assert_eq!(ResolutionMethod::NetworkAltitude as u8, 1);
+        assert_eq!(ResolutionMethod::NominalSpacing as u8, 2);
+    }
+
+    #[test]
+    fn registration_evidence_carries_an_optional_assumption_reference() {
+        use super::{EvidenceMethod, RegistrationEvidence};
+        let evidence = RegistrationEvidence {
+            method: EvidenceMethod::NominalSpacing,
+            source_locator_ref: 0,
+            transform_ref: None,
+            confidence_ref: Some(0),
+            assumption_ref: Some(2),
+            detail: "nominal spacing applied".into(),
+        };
+        assert_eq!(evidence.assumption_ref, Some(2));
+        assert!(matches!(
+            evidence.method,
+            EvidenceMethod::NominalSpacing | EvidenceMethod::ImportedElevation | EvidenceMethod::PreservedNetworkAltitude
+        ));
     }
 }

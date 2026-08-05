@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 
 use kiriko_bundle::{
     BundleDocument, BundleErrorCode, BundleMetadata, BundleStats, CapabilityReport, CompileError,
-    SectionCapability, compile_imdf, compile_imdf_with_network, decode_bundle, encode_bundle,
-    export_network, inspect_bundle,
+    ResolutionProfile, SectionCapability, compile_imdf, compile_imdf_with_network, decode_bundle,
+    encode_bundle, export_network, inspect_bundle,
 };
 
 fn metadata() -> BundleMetadata {
@@ -68,6 +68,7 @@ fn compile_with_network_embeds_graph_section() {
         None,
         false,
         false,
+        None,
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -103,6 +104,7 @@ fn compile_with_malformed_network_is_a_route_error() {
         None,
         false,
         false,
+        None,
     )
     .expect_err("malformed network GeoJSON must fail the compile");
     assert_eq!(err.code_str(), "route_build_failed");
@@ -112,7 +114,7 @@ fn compile_with_malformed_network_is_a_route_error() {
 #[test]
 fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, true, false)
+    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, true, false, None)
         .expect("fixture compiles with synthesis");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     let graph = document
@@ -125,7 +127,7 @@ fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
 #[test]
 fn compile_with_synthesis_disabled_and_no_network_has_no_graph() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, false, false)
+    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None)
         .expect("fixture compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     assert!(document.graph.is_none());
@@ -153,6 +155,7 @@ fn compile_with_facilities_embeds_facilities_section() {
         Some(FACILITIES),
         false,
         false,
+        None,
     )
     .expect("fixture + network + facilities compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -210,6 +213,7 @@ fn compile_without_facilities_has_no_facilities_section() {
         None,
         false,
         false,
+        None,
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -235,6 +239,7 @@ fn reports_optional_sections_as_available_or_absent() {
         Some(FACILITIES),
         false,
         false,
+        None,
     )
     .expect("fixture + network + facilities compiles");
     let document = decode_bundle(&with_both.bytes).expect("bundle decodes");
@@ -250,7 +255,7 @@ fn reports_optional_sections_as_available_or_absent() {
     );
 
     let with_neither =
-        compile_imdf_with_network(&source, metadata(), None, None, None, false, false)
+        compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None)
             .expect("fixture alone compiles");
     let document = decode_bundle(&with_neither.bytes).expect("bundle decodes");
     assert_eq!(
@@ -276,6 +281,7 @@ fn inspection_carries_the_capability_report() {
         None,
         false,
         false,
+        None,
     )
     .expect("fixture + network compiles");
 
@@ -304,6 +310,7 @@ fn compile_with_facilities_but_no_network_warns_once_and_leaves_anchors_unset() 
         Some(FACILITIES),
         false,
         false,
+        None,
     )
     .expect("fixture + facilities compiles without a network");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -340,6 +347,7 @@ fn compile_with_malformed_facilities_is_a_facility_error() {
         Some("not geojson"),
         false,
         false,
+        None,
     )
     .expect_err("malformed facilities GeoJSON must fail the compile");
     assert_eq!(err.code_str(), "facility_build_failed");
@@ -391,6 +399,7 @@ fn clipping_drops_network_nodes_outside_the_venue() {
         None,
         false,
         false,
+        None,
     )
     .expect("fixture + network compiles unclipped");
     let clipped = compile_imdf_with_network(
@@ -401,6 +410,7 @@ fn clipping_drops_network_nodes_outside_the_venue() {
         None,
         false,
         true,
+        None,
     )
     .expect("fixture + network compiles clipped");
 
@@ -534,17 +544,58 @@ fn compile_emits_a_spatial_context_frame_from_the_venue_bounds() {
     assert_eq!(context.frame.world_translation, context.frame.ecef_origin);
     assert_eq!(context.frame.axes, kiriko_model::spatial::Axes::EastNorthUp);
     assert_eq!(context.frame.unit, kiriko_model::spatial::LengthUnit::Millimetre);
-    assert_eq!(context.frame.vertical_normalisation_offset_mm, 0);
 
     // The declared datum and the anchor's registration evidence are
     // registered, and the frame references them by index.
     assert_eq!(context.registries.datums.len(), 1);
     assert_eq!(context.registries.datums[0].name, "WGS84");
-    assert_eq!(context.registries.locators.len(), 1);
-    assert_eq!(context.registries.locators[0].value, "a1000001-0000-4000-8000-000000000001");
-    assert_eq!(context.registries.registration_evidence.len(), 1);
+    assert_eq!(
+        context.registries.locators[0].value,
+        "a1000001-0000-4000-8000-000000000001",
+        "the venue locator stays first (index 0)"
+    );
+    assert_eq!(
+        context.registries.registration_evidence[0].method,
+        kiriko_model::spatial::EvidenceMethod::DerivedFromVenueGeometry,
+        "the anchor evidence stays first (index 0)"
+    );
     assert_eq!(context.frame.datum_ref, 0);
     assert_eq!(context.frame.anchor_evidence_ref, 0);
+
+    // Floor-plane resolution: the fixture has no elevations and no network,
+    // so all three levels resolve by nominal spacing off ordinal 0 (4.0 m
+    // per step), normalised so the lowest plane (B1, ordinal −1) lands at 0.
+    assert_eq!(
+        context.frame.vertical_normalisation_offset_mm, -4000,
+        "the normalisation offset is derived from the resolved planes, not a constant"
+    );
+    assert_eq!(context.levels.len(), 3, "one record per canonical level");
+    let by_id: BTreeMap<&str, &kiriko_model::spatial::LevelRecord> =
+        context.levels.iter().map(|l| (l.level_id.as_str(), l)).collect();
+    let b1 = by_id["b1000001-0000-4000-8000-0000000000b1"];
+    assert_eq!(b1.method, kiriko_model::spatial::ResolutionMethod::NominalSpacing);
+    assert_eq!(b1.resolved_scene_z_mm, 0, "lowest plane at scene Z 0");
+    assert_eq!(b1.source_elevation_m, None);
+    assert!(
+        context.levels.iter().all(|l| l.method == kiriko_model::spatial::ResolutionMethod::NominalSpacing),
+        "every level is flagged assumed — a scene never presents a guess as a measurement"
+    );
+    for level in &context.levels {
+        assert!(
+            (level.confidence_ref as usize) < context.registries.confidence.len(),
+            "every level's confidence reference must resolve"
+        );
+        for evidence_ref in &level.evidence_refs {
+            assert!(
+                (*evidence_ref as usize) < context.registries.registration_evidence.len(),
+                "every level's evidence references must resolve"
+            );
+        }
+        assert!(
+            level.resolved_scene_z_mm >= 0,
+            "scene Z is normalised non-negative"
+        );
+    }
 }
 
 #[test]
@@ -560,6 +611,126 @@ fn spatial_context_round_trips_through_reencode() {
     let redoc = decode_bundle(&reencoded).expect("re-encoded bundle decodes");
     assert_eq!(redoc.spatial_context, Some(context));
     assert_eq!(redoc.capabilities.spatial_context(), SectionCapability::Available);
+}
+
+#[test]
+fn multi_floor_resolution_exercises_all_three_precedence_branches() {
+    use kiriko_model::spatial::{
+        AssumptionKind, ConfidenceKind, EvidenceMethod, ResolutionMethod,
+    };
+
+    let source = support::build_multi_floor_imdf_zip();
+    // A custom profile proves the nominal spacing is configurable, not a
+    // global constant.
+    let profile = ResolutionProfile {
+        nominal_floor_spacing_m: 4.5,
+        ..ResolutionProfile::default()
+    };
+
+    // Three close junctions on F2 (ordinal 1) and three on B1 (ordinal −1).
+    const JUNCTIONS: &str = r#"{"type":"FeatureCollection","features":[
+      {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F2","altitude":14.0},"geometry":{"type":"Point","coordinates":[139.7665,35.6805]}},
+      {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F2","altitude":14.1},"geometry":{"type":"Point","coordinates":[139.7670,35.6805]}},
+      {"type":"Feature","properties":{"NODEID":3,"FLOOR":"F2","altitude":14.2},"geometry":{"type":"Point","coordinates":[139.7675,35.6805]}},
+      {"type":"Feature","properties":{"NODEID":4,"FLOOR":"B1","altitude":6.5},"geometry":{"type":"Point","coordinates":[139.7665,35.6810]}},
+      {"type":"Feature","properties":{"NODEID":5,"FLOOR":"B1","altitude":6.5},"geometry":{"type":"Point","coordinates":[139.7670,35.6810]}},
+      {"type":"Feature","properties":{"NODEID":6,"FLOOR":"B1","altitude":6.6},"geometry":{"type":"Point","coordinates":[139.7675,35.6810]}}]}"#;
+    const PATHS: &str = r#"{"type":"FeatureCollection","features":[
+      {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7665,35.6805],[139.7670,35.6805]]]}},
+      {"type":"Feature","properties":{"FNODEID":2,"TNODEID":3,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7670,35.6805],[139.7675,35.6805]]]}},
+      {"type":"Feature","properties":{"FNODEID":4,"TNODEID":5,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7665,35.6810],[139.7670,35.6810]]]}},
+      {"type":"Feature","properties":{"FNODEID":5,"TNODEID":6,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7670,35.6810],[139.7675,35.6810]]]}}]}"#;
+
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(JUNCTIONS),
+        Some(PATHS),
+        None,
+        false,
+        false,
+        Some(&profile),
+    )
+    .expect("multi-floor fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    assert_eq!(document.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(
+        document.capabilities.graph(),
+        SectionCapability::Available,
+        "the network graph embeds alongside the §8 resolution"
+    );
+    let context = document.spatial_context.expect("spatial context present");
+    assert_eq!(context.levels.len(), 4, "one record per canonical level");
+
+    let by_id: BTreeMap<&str, &kiriko_model::spatial::LevelRecord> = context
+        .levels
+        .iter()
+        .map(|l| (l.level_id.as_str(), l))
+        .collect();
+
+    let l1 = by_id["b1000003-0000-4000-8000-000000000003"]; // F1, explicit elevation 10.0
+    assert_eq!(l1.method, ResolutionMethod::ImportedElevation);
+    assert_eq!(l1.source_elevation_m, Some(10.0));
+    assert_eq!(l1.network_difference_mm, None, "no network on F1");
+    assert_eq!(l1.resolved_scene_z_mm, 4000, "10000 − offset 6000");
+
+    let l2 = by_id["b1000002-0000-4000-8000-000000000002"]; // F2, three close junction altitudes
+    assert_eq!(l2.method, ResolutionMethod::NetworkAltitude);
+    assert_eq!(l2.source_elevation_m, None);
+    assert_eq!(l2.resolved_scene_z_mm, 8100, "median 14.1 → 14100 − offset 6000");
+
+    let l3 = by_id["b1000001-0000-4000-8000-000000000001"]; // F3, nothing → nominal
+    assert_eq!(l3.method, ResolutionMethod::NominalSpacing);
+    assert_eq!(
+        l3.resolved_scene_z_mm, 13500,
+        "6.0 + configured 4.5 m × 3 (off the lowest real plane, B1) − offset 6000"
+    );
+
+    let b1 = by_id["b1000004-0000-4000-8000-000000000004"]; // B1, elevation 6.0 + network 6.5
+    assert_eq!(b1.method, ResolutionMethod::ImportedElevation, "imported wins the precedence");
+    assert_eq!(b1.source_elevation_m, Some(6.0));
+    assert_eq!(
+        b1.network_difference_mm,
+        Some(500),
+        "the disagreement is recorded as a difference, nothing is overwritten"
+    );
+    assert_eq!(b1.resolved_scene_z_mm, 0, "lowest plane lands at scene Z 0");
+    assert_eq!(context.frame.vertical_normalisation_offset_mm, 6000);
+
+    // Confidence class follows the method: measured / estimated / assumed.
+    let confidence_kind =
+        |idx: u32| context.registries.confidence[idx as usize].kind;
+    assert_eq!(confidence_kind(l1.confidence_ref), ConfidenceKind::Measured);
+    assert_eq!(confidence_kind(l2.confidence_ref), ConfidenceKind::Estimated);
+    assert_eq!(
+        confidence_kind(l3.confidence_ref),
+        ConfidenceKind::Assumed,
+        "a nominal plane is identifiable as assumed, never presented as a measurement"
+    );
+
+    // Every evidence reference resolves; the nominal record's evidence names
+    // the shared nominal assumption, and B1's two sources are both recorded.
+    for level in &context.levels {
+        for evidence_ref in &level.evidence_refs {
+            assert!(
+                (*evidence_ref as usize) < context.registries.registration_evidence.len(),
+                "every evidence reference must resolve"
+            );
+        }
+    }
+    assert_eq!(b1.evidence_refs.len(), 2, "imported elevation + preserved network altitude");
+    let l3_evidence = &context.registries.registration_evidence[l3.evidence_refs[0] as usize];
+    assert_eq!(l3_evidence.method, EvidenceMethod::NominalSpacing);
+    let assumption = l3_evidence
+        .assumption_ref
+        .expect("nominal evidence references the shared assumption");
+    assert_eq!(context.registries.assumptions[assumption as usize].kind, AssumptionKind::Nominal);
+    assert!(
+        context.registries.assumptions[assumption as usize]
+            .detail
+            .contains("4.5"),
+        "the profile value rides in the assumption detail"
+    );
 }
 
 #[test]
@@ -951,7 +1122,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "e0a283a4f4623e72c628d60b3096f48659e14706a073cc5757bbb0997e8919f1";
+const GOLDEN_BUNDLE_HASH: &str = "1fb0c807bc29f4ba0d72bb8bdfc9f52969e256ebf18a6a3fbff3d6fd2163c3ef";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -1343,6 +1514,7 @@ fn an_invalid_spatial_context_leaves_routing_untouched() {
         None,
         false,
         false,
+        None,
     )
     .expect("fixture + network compiles");
     let payload = decompress_payload(&compiled.bytes);

@@ -18,18 +18,19 @@
 
 use std::collections::BTreeMap;
 
-use kiriko_model::model::{FeatureType, VenueModel};
+use kiriko_model::model::Bounds;
 use kiriko_model::spatial::{
     Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid,
-    EvidenceMethod, Frame, LengthUnit, LocatorKind, ManualProvenance, Registries,
-    RegistrationEvidence, SourceArtifact, SourceLocator, SpatialContext, Transform, TransformKind,
-    MAX_VERTICAL_OFFSET_MM, WGS84_INVERSE_FLATTENING, WGS84_SEMI_MAJOR_M, enu_basis_ecef,
-    venue_horizontal_bounds, wgs84_ecef,
+    EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind, ManualProvenance, Registries,
+    RegistrationEvidence, ResolutionMethod, SourceArtifact, SourceLocator, SpatialContext,
+    Transform, TransformKind, MAX_VERTICAL_OFFSET_MM, WGS84_INVERSE_FLATTENING,
+    WGS84_SEMI_MAJOR_M, enu_basis_ecef, wgs84_ecef,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::codec::{postcard_encode_err, postcard_take_exact};
 use crate::error::{BundleError, BundleErrorCode};
+use crate::resolve::{ResolutionOutcome, ResolutionProfile};
 use crate::sections::{JsonObjectDto, canonical_f64, dto_to_object, object_to_dto};
 
 /// Cap on any single registry length. Far beyond any legitimate producer;
@@ -77,6 +78,16 @@ enum AssumptionKindDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum EvidenceMethodDto {
     DerivedFromVenueGeometry,
+    ImportedElevation,
+    PreservedNetworkAltitude,
+    NominalSpacing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum ResolutionMethodDto {
+    ImportedElevation,
+    NetworkAltitude,
+    NominalSpacing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,7 +137,21 @@ struct RegistrationEvidenceDto {
     source_locator_ref: u32,
     transform_ref: Option<u32>,
     confidence_ref: Option<u32>,
+    assumption_ref: Option<u32>,
     detail: String,
+}
+
+/// Serialized mirror of `kiriko_model::spatial::LevelRecord`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct LevelRecordDto {
+    level_id: String,
+    ordinal: f64,
+    source_elevation_m: Option<f64>,
+    network_difference_mm: Option<i64>,
+    resolved_scene_z_mm: i64,
+    method: ResolutionMethodDto,
+    confidence_ref: u32,
+    evidence_refs: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +203,7 @@ struct RegistriesDto {
 pub(crate) struct SpatialContextSectionDto {
     frame: FrameDto,
     registries: RegistriesDto,
+    levels: Vec<LevelRecordDto>,
     source_properties: JsonObjectDto,
 }
 
@@ -273,6 +299,9 @@ impl From<&EvidenceMethod> for EvidenceMethodDto {
     fn from(value: &EvidenceMethod) -> Self {
         match value {
             EvidenceMethod::DerivedFromVenueGeometry => Self::DerivedFromVenueGeometry,
+            EvidenceMethod::ImportedElevation => Self::ImportedElevation,
+            EvidenceMethod::PreservedNetworkAltitude => Self::PreservedNetworkAltitude,
+            EvidenceMethod::NominalSpacing => Self::NominalSpacing,
         }
     }
 }
@@ -281,6 +310,29 @@ impl From<EvidenceMethodDto> for EvidenceMethod {
     fn from(value: EvidenceMethodDto) -> Self {
         match value {
             EvidenceMethodDto::DerivedFromVenueGeometry => Self::DerivedFromVenueGeometry,
+            EvidenceMethodDto::ImportedElevation => Self::ImportedElevation,
+            EvidenceMethodDto::PreservedNetworkAltitude => Self::PreservedNetworkAltitude,
+            EvidenceMethodDto::NominalSpacing => Self::NominalSpacing,
+        }
+    }
+}
+
+impl From<&ResolutionMethod> for ResolutionMethodDto {
+    fn from(value: &ResolutionMethod) -> Self {
+        match value {
+            ResolutionMethod::ImportedElevation => Self::ImportedElevation,
+            ResolutionMethod::NetworkAltitude => Self::NetworkAltitude,
+            ResolutionMethod::NominalSpacing => Self::NominalSpacing,
+        }
+    }
+}
+
+impl From<ResolutionMethodDto> for ResolutionMethod {
+    fn from(value: ResolutionMethodDto) -> Self {
+        match value {
+            ResolutionMethodDto::ImportedElevation => Self::ImportedElevation,
+            ResolutionMethodDto::NetworkAltitude => Self::NetworkAltitude,
+            ResolutionMethodDto::NominalSpacing => Self::NominalSpacing,
         }
     }
 }
@@ -373,6 +425,7 @@ fn registration_evidence_to_dto(
         source_locator_ref: evidence.source_locator_ref,
         transform_ref: evidence.transform_ref,
         confidence_ref: evidence.confidence_ref,
+        assumption_ref: evidence.assumption_ref,
         detail: evidence.detail.clone(),
     })
 }
@@ -385,7 +438,34 @@ fn registration_evidence_from_dto(
         source_locator_ref: dto.source_locator_ref,
         transform_ref: dto.transform_ref,
         confidence_ref: dto.confidence_ref,
+        assumption_ref: dto.assumption_ref,
         detail: dto.detail.clone(),
+    })
+}
+
+fn level_record_to_dto(record: &LevelRecord) -> Result<LevelRecordDto, BundleError> {
+    Ok(LevelRecordDto {
+        level_id: record.level_id.clone(),
+        ordinal: canonical_f64(record.ordinal)?,
+        source_elevation_m: record.source_elevation_m.map(canonical_f64).transpose()?,
+        network_difference_mm: record.network_difference_mm,
+        resolved_scene_z_mm: record.resolved_scene_z_mm,
+        method: ResolutionMethodDto::from(&record.method),
+        confidence_ref: record.confidence_ref,
+        evidence_refs: record.evidence_refs.clone(),
+    })
+}
+
+fn level_record_from_dto(dto: &LevelRecordDto) -> Result<LevelRecord, BundleError> {
+    Ok(LevelRecord {
+        level_id: dto.level_id.clone(),
+        ordinal: canonical_f64(dto.ordinal)?,
+        source_elevation_m: dto.source_elevation_m.map(canonical_f64).transpose()?,
+        network_difference_mm: dto.network_difference_mm,
+        resolved_scene_z_mm: dto.resolved_scene_z_mm,
+        method: ResolutionMethod::from(dto.method),
+        confidence_ref: dto.confidence_ref,
+        evidence_refs: dto.evidence_refs.clone(),
     })
 }
 
@@ -684,6 +764,13 @@ fn validate_spatial_context(context: &SpatialContext) -> Result<(), BundleError>
                 &format!("registration evidence {i} confidence"),
             )?;
         }
+        if let Some(assumption_ref) = evidence.assumption_ref {
+            reference(
+                assumption_ref,
+                registries.assumptions.len(),
+                &format!("registration evidence {i} assumption"),
+            )?;
+        }
         bounded_string(&evidence.detail, &format!("registration evidence {i} detail"))?;
     }
 
@@ -724,6 +811,41 @@ fn validate_spatial_context(context: &SpatialContext) -> Result<(), BundleError>
         }
     }
 
+    bounds(context.levels.len(), "level record registry")?;
+    for (i, record) in context.levels.iter().enumerate() {
+        bounded_string(&record.level_id, &format!("level record {i} id"))?;
+        if record.resolved_scene_z_mm < 0 || record.resolved_scene_z_mm > MAX_VERTICAL_OFFSET_MM {
+            return Err(invalid(format!(
+                "level record {i} resolved scene Z {} is outside 0..={MAX_VERTICAL_OFFSET_MM} mm",
+                record.resolved_scene_z_mm
+            )));
+        }
+        if let Some(difference) = record.network_difference_mm
+            && difference.abs() > MAX_VERTICAL_OFFSET_MM
+        {
+            return Err(invalid(format!(
+                "level record {i} network difference exceeds ±{MAX_VERTICAL_OFFSET_MM} mm"
+            )));
+        }
+        reference(
+            record.confidence_ref,
+            registries.confidence.len(),
+            &format!("level record {i} confidence"),
+        )?;
+        if record.evidence_refs.len() > MAX_REGISTRY_LEN {
+            return Err(invalid(format!(
+                "level record {i} has too many evidence references"
+            )));
+        }
+        for (j, evidence_ref) in record.evidence_refs.iter().enumerate() {
+            reference(
+                *evidence_ref,
+                registries.registration_evidence.len(),
+                &format!("level record {i} evidence {j}"),
+            )?;
+        }
+    }
+
     Ok(())
 }
 
@@ -737,6 +859,11 @@ pub(crate) fn encode_spatial_context(context: &SpatialContext) -> Result<Vec<u8>
     let dto = SpatialContextSectionDto {
         frame: frame_to_dto(&context.frame)?,
         registries: registries_to_dto(&context.registries)?,
+        levels: context
+            .levels
+            .iter()
+            .map(level_record_to_dto)
+            .collect::<Result<_, _>>()?,
         source_properties: object_to_dto(&context.source_properties)?,
     };
     postcard::to_allocvec(&dto).map_err(postcard_encode_err("encode spatial context section"))
@@ -752,6 +879,11 @@ pub(crate) fn decode_spatial_context(bytes: &[u8]) -> Result<SpatialContext, Bun
     let context = SpatialContext {
         frame: frame_from_dto(&dto.frame)?,
         registries: registries_from_dto(&dto.registries)?,
+        levels: dto
+            .levels
+            .iter()
+            .map(level_record_from_dto)
+            .collect::<Result<_, _>>()?,
         source_properties: dto_to_object(&dto.source_properties)?,
     };
     validate_spatial_context(&context)?;
@@ -769,20 +901,197 @@ pub(crate) fn decode_spatial_context(bytes: &[u8]) -> Result<SpatialContext, Bun
 /// anchor, and registry order is fixed. The source archive itself is never
 /// hashed here — raw-zip hashing would make identical canonical inputs
 /// compile to different bytes when ZIP record order differs.
-pub(crate) fn build_spatial_context(venue: &VenueModel) -> Option<SpatialContext> {
-    let bounds = venue_horizontal_bounds(venue)?;
+/// Assemble the §8 spatial context for a compiled venue: the shared WGS84
+/// local east-north-up frame anchored at the canonical venue
+/// horizontal-bounds centre, the registries holding the evidence behind it,
+/// and every level's resolved floor plane referencing those registries.
+/// `None` when the venue has no computable horizontal extent — such a venue
+/// gets no frame and the capability reports `absent`.
+///
+/// Deterministic by construction: the anchor comes from venue geometry
+/// bounds, the transforms are the fixed WGS84 geodesy evaluated at that
+/// anchor, resolution outcome and profile are fixed, and registry append
+/// order is fixed. The source archive itself is never hashed here — raw-zip
+/// hashing would make identical canonical inputs compile to different bytes
+/// when ZIP record order differs.
+pub(crate) fn build_spatial_context(
+    bounds: Option<Bounds>,
+    venue_feature_id: Option<String>,
+    outcome: &ResolutionOutcome,
+    profile: &ResolutionProfile,
+) -> Option<SpatialContext> {
+    let bounds = bounds?;
     let anchor = [
         (bounds.west + bounds.east) / 2.0,
         (bounds.south + bounds.north) / 2.0,
     ];
     let ecef_origin = wgs84_ecef(anchor[0], anchor[1], 0.0);
     let basis = enu_basis_ecef(anchor[0], anchor[1]);
-    let venue_id = venue
-        .features
+    let venue_id = venue_feature_id?;
+
+    let mut registries = Registries {
+        // Source-archive artifacts are intentionally not registered here:
+        // hashing the raw archive would break byte-identical compilation
+        // across ZIP record orders. Later stages register artifacts whose
+        // hashes are canonical.
+        artifacts: Vec::new(),
+        locators: vec![SourceLocator {
+            kind: LocatorKind::FeatureId,
+            value: venue_id,
+            artifact_ref: None,
+        }],
+        datums: vec![Datum {
+            name: "WGS84".into(),
+            ellipsoid: Ellipsoid {
+                semi_major_metres: WGS84_SEMI_MAJOR_M,
+                inverse_flattening: WGS84_INVERSE_FLATTENING,
+            },
+        }],
+        transforms: Vec::new(),
+        registration_evidence: vec![RegistrationEvidence {
+            method: EvidenceMethod::DerivedFromVenueGeometry,
+            source_locator_ref: 0,
+            transform_ref: None,
+            confidence_ref: None,
+            assumption_ref: None,
+            detail: "frame anchor at the canonical venue horizontal-bounds centre".into(),
+        }],
+        assumptions: Vec::new(),
+        confidence: Vec::new(),
+        manual_provenance: Vec::new(),
+    };
+
+    // Shared network-source locator, present only when some level's plane
+    // rests on a preserved routing-network altitude (as its resolver or as
+    // the validating counterpart of an imported elevation).
+    let net_junction_locator = if outcome
+        .levels
         .iter()
-        .find(|f| f.feature_type == FeatureType::Venue)
-        .map(|f| f.id.clone())
-        .expect("import guarantees exactly one venue feature");
+        .any(|l| l.network_altitude_m.is_some())
+    {
+        registries.locators.push(SourceLocator {
+            kind: LocatorKind::LayerName,
+            value: "net_junction".into(),
+            artifact_ref: None,
+        });
+        Some((registries.locators.len() - 1) as u32)
+    } else {
+        None
+    };
+
+    // One shared nominal-spacing assumption, referenced by every level the
+    // nominal branch resolved.
+    let nominal_assumption = if outcome
+        .levels
+        .iter()
+        .any(|l| l.method == ResolutionMethod::NominalSpacing)
+    {
+        registries.assumptions.push(Assumption {
+            kind: AssumptionKind::Nominal,
+            detail: format!(
+                "nominal_floor_spacing_m={} (profile v{})",
+                profile.nominal_floor_spacing_m, profile.profile_version
+            ),
+        });
+        Some((registries.assumptions.len() - 1) as u32)
+    } else {
+        None
+    };
+
+    // Confidence entries are shared per method: a measured, estimated, or
+    // assumed plane is the same class of claim wherever it appears.
+    let mut imported_confidence: Option<u32> = None;
+    let mut network_confidence: Option<u32> = None;
+    let mut nominal_confidence: Option<u32> = None;
+
+    let mut levels = Vec::with_capacity(outcome.levels.len());
+    for resolved in &outcome.levels {
+        let confidence_ref = match resolved.method {
+            ResolutionMethod::ImportedElevation => *imported_confidence.get_or_insert_with(|| {
+                push_confidence(&mut registries, ConfidenceKind::Measured, 1.0)
+            }),
+            ResolutionMethod::NetworkAltitude => *network_confidence.get_or_insert_with(|| {
+                push_confidence(&mut registries, ConfidenceKind::Estimated, 0.7)
+            }),
+            ResolutionMethod::NominalSpacing => *nominal_confidence.get_or_insert_with(|| {
+                push_confidence(&mut registries, ConfidenceKind::Assumed, 0.3)
+            }),
+        };
+
+        // One locator per level: the evidence points at the level it places.
+        registries.locators.push(SourceLocator {
+            kind: LocatorKind::FeatureId,
+            value: resolved.level_id.clone(),
+            artifact_ref: None,
+        });
+        let level_locator = (registries.locators.len() - 1) as u32;
+
+        let mut evidence_refs = Vec::new();
+        match resolved.method {
+            ResolutionMethod::ImportedElevation => {
+                let imported = registries.registration_evidence.len() as u32;
+                registries.registration_evidence.push(RegistrationEvidence {
+                    method: EvidenceMethod::ImportedElevation,
+                    source_locator_ref: level_locator,
+                    transform_ref: None,
+                    confidence_ref: Some(confidence_ref),
+                    assumption_ref: None,
+                    detail: "explicit elevation from level source properties".into(),
+                });
+                evidence_refs.push(imported);
+                if resolved.network_altitude_m.is_some() {
+                    let preserved = registries.registration_evidence.len() as u32;
+                    registries.registration_evidence.push(RegistrationEvidence {
+                        method: EvidenceMethod::PreservedNetworkAltitude,
+                        source_locator_ref: net_junction_locator
+                            .expect("a network altitude implies the shared locator"),
+                        transform_ref: None,
+                        confidence_ref: Some(confidence_ref),
+                        assumption_ref: None,
+                        detail: "preserved routing-network altitude (median)".into(),
+                    });
+                    evidence_refs.push(preserved);
+                }
+            }
+            ResolutionMethod::NetworkAltitude => {
+                let preserved = registries.registration_evidence.len() as u32;
+                registries.registration_evidence.push(RegistrationEvidence {
+                    method: EvidenceMethod::PreservedNetworkAltitude,
+                    source_locator_ref: net_junction_locator
+                        .expect("the network branch implies the shared locator"),
+                    transform_ref: None,
+                    confidence_ref: Some(confidence_ref),
+                    assumption_ref: None,
+                    detail: "preserved routing-network altitude (median)".into(),
+                });
+                evidence_refs.push(preserved);
+            }
+            ResolutionMethod::NominalSpacing => {
+                let nominal = registries.registration_evidence.len() as u32;
+                registries.registration_evidence.push(RegistrationEvidence {
+                    method: EvidenceMethod::NominalSpacing,
+                    source_locator_ref: level_locator,
+                    transform_ref: None,
+                    confidence_ref: Some(confidence_ref),
+                    assumption_ref: nominal_assumption,
+                    detail: "resolved by nominal floor spacing".into(),
+                });
+                evidence_refs.push(nominal);
+            }
+        }
+
+        levels.push(LevelRecord {
+            level_id: resolved.level_id.clone(),
+            ordinal: resolved.ordinal,
+            source_elevation_m: resolved.source_elevation_m,
+            network_difference_mm: resolved.network_difference_mm,
+            resolved_scene_z_mm: resolved.scene_z_mm,
+            method: resolved.method,
+            confidence_ref,
+            evidence_refs,
+        });
+    }
+
     Some(SpatialContext {
         frame: Frame {
             anchor,
@@ -791,44 +1100,24 @@ pub(crate) fn build_spatial_context(venue: &VenueModel) -> Option<SpatialContext
             world_translation: ecef_origin,
             axes: Axes::EastNorthUp,
             unit: LengthUnit::Millimetre,
-            // No floors yet: the normalisation offset is the identity until
-            // floor-plane records (#39) resolve scene Z.
-            vertical_normalisation_offset_mm: 0,
+            // The lowest resolved plane lands at scene Z 0.
+            vertical_normalisation_offset_mm: outcome.normalisation_offset_mm,
             datum_ref: 0,
             anchor_evidence_ref: 0,
         },
-        registries: Registries {
-            // Source-archive artifacts are intentionally not registered
-            // here: hashing the raw archive would break byte-identical
-            // compilation across ZIP record orders. Later stages register
-            // artifacts whose hashes are canonical.
-            artifacts: Vec::new(),
-            locators: vec![SourceLocator {
-                kind: LocatorKind::FeatureId,
-                value: venue_id,
-                artifact_ref: None,
-            }],
-            datums: vec![Datum {
-                name: "WGS84".into(),
-                ellipsoid: Ellipsoid {
-                    semi_major_metres: WGS84_SEMI_MAJOR_M,
-                    inverse_flattening: WGS84_INVERSE_FLATTENING,
-                },
-            }],
-            transforms: Vec::new(),
-            registration_evidence: vec![RegistrationEvidence {
-                method: EvidenceMethod::DerivedFromVenueGeometry,
-                source_locator_ref: 0,
-                transform_ref: None,
-                confidence_ref: None,
-                detail: "frame anchor at the canonical venue horizontal-bounds centre".into(),
-            }],
-            assumptions: Vec::new(),
-            confidence: Vec::new(),
-            manual_provenance: Vec::new(),
-        },
+        registries,
+        levels,
         source_properties: BTreeMap::new(),
     })
+}
+
+fn push_confidence(
+    registries: &mut Registries,
+    kind: ConfidenceKind,
+    value: f64,
+) -> u32 {
+    registries.confidence.push(Confidence { kind, value });
+    (registries.confidence.len() - 1) as u32
 }
 
 #[cfg(test)]
@@ -838,9 +1127,9 @@ mod tests {
     use kiriko_model::canonical::Value;
     use kiriko_model::spatial::{
         Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid,
-        EvidenceMethod, Frame, LengthUnit, LocatorKind, ManualProvenance, Registries,
-        RegistrationEvidence, SourceArtifact, SourceLocator, SpatialContext, Transform,
-        TransformKind, enu_basis_ecef, wgs84_ecef,
+        EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind, ManualProvenance, Registries,
+        RegistrationEvidence, ResolutionMethod, SourceArtifact, SourceLocator, SpatialContext,
+        Transform, TransformKind, enu_basis_ecef, wgs84_ecef,
     };
 
     use super::{decode_spatial_context, encode_spatial_context};
@@ -888,6 +1177,7 @@ mod tests {
                     source_locator_ref: 0,
                     transform_ref: Some(0),
                     confidence_ref: Some(0),
+                    assumption_ref: None,
                     detail: "anchor at venue bounds centre".into(),
                 }],
                 assumptions: vec![Assumption {
@@ -903,6 +1193,7 @@ mod tests {
                     reason: "reviewed".into(),
                 }],
             },
+            levels: Vec::new(),
             source_properties: BTreeMap::from([("vendor_field".into(), Value::String("x".into()))]),
         }
     }
@@ -951,10 +1242,12 @@ mod tests {
                     source_locator_ref: 0,
                     transform_ref: None,
                     confidence_ref: None,
+                    assumption_ref: None,
                     detail: "anchor at venue bounds centre".into(),
                 }],
                 ..Registries::default()
             },
+            levels: Vec::new(),
             source_properties: BTreeMap::new(),
         };
         let bytes = encode_spatial_context(&context).expect("valid context encodes");
@@ -1100,5 +1393,74 @@ mod tests {
         // A well-formed postcard encoding of a wrong type must not decode.
         let bogus = postcard::to_allocvec(&42u8).expect("encodes");
         assert!(decode_spatial_context(&bogus).is_err());
+    }
+
+    fn level_record() -> LevelRecord {
+        LevelRecord {
+            level_id: "level-1".into(),
+            ordinal: 1.0,
+            source_elevation_m: Some(12.25),
+            network_difference_mm: Some(-250),
+            resolved_scene_z_mm: 4000,
+            method: ResolutionMethod::ImportedElevation,
+            confidence_ref: 0,
+            evidence_refs: vec![0],
+        }
+    }
+
+    #[test]
+    fn round_trip_preserves_level_records() {
+        let mut context = base_context();
+        context.levels = vec![level_record()];
+        let bytes = encode_spatial_context(&context).expect("valid context encodes");
+        let decoded = decode_spatial_context(&bytes).expect("bytes decode");
+        assert_eq!(decoded.levels, vec![level_record()]);
+    }
+
+    #[test]
+    fn negative_scene_z_is_rejected() {
+        let mut context = base_context();
+        let mut record = level_record();
+        record.resolved_scene_z_mm = -1;
+        context.levels = vec![record];
+        assert!(encode_spatial_context(&context).is_err());
+    }
+
+    #[test]
+    fn out_of_range_level_confidence_ref_is_rejected() {
+        let mut context = base_context();
+        let mut record = level_record();
+        record.confidence_ref = 1;
+        context.levels = vec![record];
+        assert!(encode_spatial_context(&context).is_err());
+    }
+
+    #[test]
+    fn out_of_range_level_evidence_ref_is_rejected() {
+        let mut context = base_context();
+        let mut record = level_record();
+        record.evidence_refs = vec![7];
+        context.levels = vec![record];
+        assert!(encode_spatial_context(&context).is_err());
+    }
+
+    #[test]
+    fn out_of_range_assumption_ref_is_rejected() {
+        let mut context = base_context();
+        // The base context carries exactly one assumption, so index 1 dangles.
+        context.registries.registration_evidence[0].assumption_ref = Some(1);
+        assert!(
+            encode_spatial_context(&context).is_err(),
+            "an assumption reference beyond the registry must be rejected"
+        );
+    }
+
+    #[test]
+    fn oversize_network_difference_is_rejected() {
+        let mut context = base_context();
+        let mut record = level_record();
+        record.network_difference_mm = Some(1_000_000_001);
+        context.levels = vec![record];
+        assert!(encode_spatial_context(&context).is_err());
     }
 }

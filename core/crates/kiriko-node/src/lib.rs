@@ -81,6 +81,7 @@ impl Task for CompileTask {
                 self.facilities_geojson.as_deref(),
                 self.synthesize_network.unwrap_or(false),
                 self.clip_to_venue.unwrap_or(false),
+                None,
             ) {
                 Ok(compiled) => CompileOutcome::Success(compiled),
                 Err(err) => CompileOutcome::Failure(err),
