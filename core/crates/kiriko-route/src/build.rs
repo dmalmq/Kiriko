@@ -29,10 +29,15 @@ impl std::error::Error for RouteBuildError {}
 
 /// Result of [`build_route_graph`]: the graph, non-fatal warnings, and the
 /// NODEID→index mapping (`node_ids[i]` is the source NODEID of `graph.nodes[i]`).
+/// `node_altitudes[i]` is the junction's preserved `altitude` property
+/// (metres) for `graph.nodes[i]`, `None` when the junction carried none —
+/// aligned with `node_ids`, so floor-plane resolution can group them by
+/// ordinal without touching the graph's own byte schema.
 pub struct RouteGraphBuild {
     pub graph: RouteGraph,
     pub warnings: Vec<RouteBuildWarning>,
     pub node_ids: Vec<u64>,
+    pub node_altitudes: Vec<Option<f64>>,
 }
 
 /// Build a deterministic route graph from network junction and path GeoJSON.
@@ -53,6 +58,7 @@ pub fn build_route_graph(
 
     // Nodes keyed by NODEID; BTreeMap keeps iteration sorted → deterministic output.
     let mut by_id: BTreeMap<u64, RouteNode> = BTreeMap::new();
+    let mut altitude_by_id: BTreeMap<u64, Option<f64>> = BTreeMap::new();
     for feature in &junctions.features {
         let (Some(id), Some(floor), Some(Value::Point(coords))) = (
             prop(&feature.properties, "NODEID").and_then(|v| v.as_u64()),
@@ -71,7 +77,12 @@ pub fn build_route_graph(
             });
             continue;
         };
+        // The preserved routing-network altitude, when the junction carries
+        // one. A present numeric value (even 0) is kept; the GeoJSON parser
+        // already rejects non-finite numbers.
+        let altitude = prop(&feature.properties, "altitude").and_then(|v| v.as_f64());
         by_id.insert(id, RouteNode { lon, lat, ordinal });
+        altitude_by_id.insert(id, altitude);
     }
 
     let index: HashMap<u64, u32> = by_id
@@ -194,6 +205,10 @@ pub fn build_route_graph(
 
     // NODEID order matches `by_id.into_values()` (BTreeMap) → parallel to `nodes`.
     let node_ids: Vec<u64> = by_id.keys().copied().collect();
+    let node_altitudes: Vec<Option<f64>> = node_ids
+        .iter()
+        .map(|id| altitude_by_id.get(id).copied().flatten())
+        .collect();
     let nodes: Vec<RouteNode> = by_id.into_values().collect();
     for node in &nodes {
         if !level_ordinals.contains(&node.ordinal) {
@@ -208,6 +223,7 @@ pub fn build_route_graph(
         graph: RouteGraph { nodes, edges },
         warnings,
         node_ids,
+        node_altitudes,
     })
 }
 
@@ -322,6 +338,23 @@ mod tests {
         // NODEID 1 maps to the node at its index
         let idx = b.node_ids.iter().position(|&id| id == 1).unwrap();
         assert!((b.graph.nodes[idx].lon - 139.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn node_altitudes_are_parsed_and_aligned_with_nodes() {
+        const J: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1","altitude":12.5},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+          {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}},
+          {"type":"Feature","properties":{"NODEID":3,"FLOOR":"F2","altitude":0},"geometry":{"type":"Point","coordinates":[139.001,35.0]}}]}"#;
+        let b = build_route_graph(J, PATHS, &[0.0, 1.0]).unwrap();
+        assert_eq!(b.node_altitudes.len(), b.graph.nodes.len());
+        // Sorted by NODEID (BTreeMap), so node_altitudes[i] parallels node_ids[i].
+        assert_eq!(b.node_ids, vec![1, 2, 3]);
+        assert_eq!(
+            b.node_altitudes,
+            vec![Some(12.5), None, Some(0.0)],
+            "a junction without an altitude property contributes None; a numeric one (even 0) is kept"
+        );
     }
 
     #[test]
