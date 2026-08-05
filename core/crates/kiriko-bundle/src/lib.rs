@@ -20,6 +20,7 @@ mod codec;
 mod error;
 mod export;
 mod format;
+mod resolve;
 mod sections;
 mod spatial_section;
 mod synth;
@@ -33,3 +34,4 @@ pub use codec::{
 };
 pub use error::{BundleError, BundleErrorCode, CompileError};
 pub use export::{ExportError, NetworkGeoJson, export_network, ordinal_to_floor_label};
+pub use resolve::ResolutionProfile;
