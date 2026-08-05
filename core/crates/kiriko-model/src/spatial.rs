@@ -255,6 +255,16 @@ pub struct LevelRecord {
     pub confidence_ref: u32,
     /// Indices into [`Registries::registration_evidence`].
     pub evidence_refs: Vec<u32>,
+    /// The producer's corrected plane, metres (full precision), when this
+    /// level is overridden. The source elevation above stays untouched and
+    /// readable — an override corrects Kiriko's interpretation, never its
+    /// record of the source.
+    pub override_elevation_m: Option<f64>,
+    /// Index into [`Registries::manual_provenance`] — who overrode and why.
+    /// Present exactly when `override_elevation_m` is: an override is never
+    /// silently invented, and its absence is distinguishable from an
+    /// override that happens to match the automatic value.
+    pub override_ref: Option<u32>,
 }
 
 /// Section 8 (spatial context) content: the shared frame plus the evidence
@@ -508,6 +518,8 @@ mod tests {
             method: ResolutionMethod::ImportedElevation,
             confidence_ref: 0,
             evidence_refs: vec![0, 1],
+            override_elevation_m: None,
+            override_ref: None,
         };
         assert_eq!(record.method, ResolutionMethod::ImportedElevation);
         assert_eq!(record.resolved_scene_z_mm, 4000);
