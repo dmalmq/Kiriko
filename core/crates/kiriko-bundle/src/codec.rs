@@ -177,7 +177,7 @@ pub fn compile_imdf(
     source: &[u8],
     metadata: BundleMetadata,
 ) -> Result<CompiledBundle, CompileError> {
-    compile_imdf_with_network(source, metadata, None, None, None, false, false, None, &[])
+    compile_imdf_with_network(source, metadata, None, None, None, false, false, None, &[], None)
 }
 
 /// Import `source` (a raw IMDF `.zip`) with `kiriko-model`, optionally build
@@ -218,6 +218,7 @@ pub fn compile_imdf_with_network(
     clip_to_venue: bool,
     resolution_profile: Option<&ResolutionProfile>,
     overrides: &[FloorOverride],
+    scene_profile: Option<&crate::scene_compile::SceneProfile>,
 ) -> Result<CompiledBundle, CompileError> {
     let venue = import_imdf(source)?;
     // Built before `document` consumes `venue`. `None` when clipping is off, so
@@ -239,6 +240,7 @@ pub fn compile_imdf_with_network(
         .map(|f| f.id.clone());
     let default_profile = ResolutionProfile::default();
     let profile = resolution_profile.unwrap_or(&default_profile);
+    let default_scene_profile = crate::scene_compile::SceneProfile::default();
     let elevations = extract_level_elevations(&venue.features, &profile.elevation_property_key);
     let stats = BundleStats {
         levels: venue.levels.len() as u32,
@@ -394,8 +396,15 @@ pub fn compile_imdf_with_network(
             archive_entry: None,
         });
     }
-    document.spatial_context =
+    let scene_profile = scene_profile.unwrap_or(&default_scene_profile);
+    let mut spatial_context =
         crate::spatial_section::build_spatial_context(bounds, venue_feature_id, &outcome, profile);
+    // The generated scene compiles after §8 assembly so its provenance can
+    // append into §8's registries (records reference, never duplicate).
+    if let Some(spatial) = spatial_context.as_mut() {
+        document.scene = crate::scene_compile::compile_scene(&document, spatial, scene_profile);
+    }
+    document.spatial_context = spatial_context;
 
     if let Some(facilities_geojson) = facilities_geojson {
         if document.graph.is_none() {

@@ -14,7 +14,17 @@
 //! canonical inputs in a fixed order, with `round` applied exactly once per
 //! value.
 
-use kiriko_model::spatial::{Frame, wgs84_ecef};
+use kiriko_model::canonical::Value;
+use kiriko_model::model::{FeatureType, VenueFeature};
+use kiriko_model::scene::{
+    Mesh, OcclusionClass, PrimitiveGeometry, PrimitiveRole, ScenePrimitive, SceneSection,
+};
+use kiriko_model::spatial::{
+    Assumption, AssumptionKind, Confidence, ConfidenceKind, EvidenceMethod, Frame, LocatorKind,
+    Registries, RegistrationEvidence, SourceLocator, SpatialContext, wgs84_ecef,
+};
+
+use crate::codec::BundleDocument;
 
 /// Versioned scene profile: nominal dimensions and tolerances, never global
 /// constants.
@@ -155,6 +165,307 @@ pub(crate) fn triangulate_simple(ring: &[[i64; 2]]) -> Vec<[u32; 3]> {
         triangles.push([remaining[0], remaining[1], remaining[2]]);
     }
     triangles
+}
+
+// -- Geometry extraction ---------------------------------------------------
+
+/// The outer ring of the first `Polygon` in `geometry`, as `[lon, lat]`
+/// pairs. `None` for point/line/collection or missing geometry.
+fn polygon_ring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
+    let obj = geometry.as_object()?;
+    let kind = obj.get("type")?.as_str()?;
+    if kind == "GeometryCollection" {
+        for child in obj.get("geometries")?.as_array()? {
+            if let Some(ring) = polygon_ring(child) {
+                return Some(ring);
+            }
+        }
+        return None;
+    }
+    if kind != "Polygon" {
+        return None;
+    }
+    let rings = obj.get("coordinates")?.as_array()?;
+    let outer = rings.first()?.as_array()?;
+    let mut ring = Vec::with_capacity(outer.len());
+    for position in outer {
+        let coords = position.as_array()?;
+        let (lon, lat) = (coords.first()?.as_f64()?, coords.get(1)?.as_f64()?);
+        if !lon.is_finite() || !lat.is_finite() {
+            return None;
+        }
+        ring.push([lon, lat]);
+    }
+    // Drop the repeated closing vertex of a closed ring so triangulation sees
+    // a simple polygon, not a duplicated point.
+    if ring.len() >= 2 && ring.first() == ring.last() {
+        ring.pop();
+    }
+    (ring.len() >= 3).then_some(ring)
+}
+
+/// The vertices of the first `LineString` in `geometry`, as `[lon, lat]`.
+#[allow(dead_code)] // portals (next pass) consume opening lines
+fn linestring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
+    let obj = geometry.as_object()?;
+    let kind = obj.get("type")?.as_str()?;
+    if kind == "GeometryCollection" {
+        for child in obj.get("geometries")?.as_array()? {
+            if let Some(line) = linestring(child) {
+                return Some(line);
+            }
+        }
+        return None;
+    }
+    if kind != "LineString" {
+        return None;
+    }
+    let positions = obj.get("coordinates")?.as_array()?;
+    let mut line = Vec::with_capacity(positions.len());
+    for position in positions {
+        let coords = position.as_array()?;
+        let (lon, lat) = (coords.first()?.as_f64()?, coords.get(1)?.as_f64()?);
+        if !lon.is_finite() || !lat.is_finite() {
+            return None;
+        }
+        line.push([lon, lat]);
+    }
+    (line.len() >= 2).then_some(line)
+}
+
+/// The projected, triangulated mesh for a polygon ring at `z`.
+fn ring_mesh(frame: &Frame, ring: &[[f64; 2]], z: i64) -> Mesh {
+    let xy: Vec<[i64; 2]> = ring.iter().map(|[lon, lat]| project_local_mm(frame, *lon, *lat)).collect();
+    let faces = triangulate_simple(&xy);
+    Mesh {
+        positions: xy.iter().map(|[x, y]| [*x, *y, z]).collect(),
+        faces,
+    }
+}
+
+// -- Registry helpers ------------------------------------------------------
+
+fn find_or_push_locator(registries: &mut Registries, value: &str) -> u32 {
+    if let Some(index) = registries.locators.iter().position(|l| l.value == value) {
+        return index as u32;
+    }
+    registries.locators.push(SourceLocator {
+        kind: LocatorKind::FeatureId,
+        value: value.to_string(),
+        artifact_ref: None,
+    });
+    (registries.locators.len() - 1) as u32
+}
+
+fn push_evidence(
+    registries: &mut Registries,
+    source_locator_ref: u32,
+    confidence_ref: Option<u32>,
+    assumption_ref: Option<u32>,
+    detail: &str,
+) -> u32 {
+    registries.registration_evidence.push(RegistrationEvidence {
+        method: EvidenceMethod::DerivedFromVenueGeometry,
+        source_locator_ref,
+        transform_ref: None,
+        confidence_ref,
+        assumption_ref,
+        detail: detail.to_string(),
+    });
+    (registries.registration_evidence.len() - 1) as u32
+}
+
+fn push_confidence(registries: &mut Registries, kind: ConfidenceKind, value: f64) -> u32 {
+    registries.confidence.push(Confidence { kind, value });
+    (registries.confidence.len() - 1) as u32
+}
+
+fn push_assumption(registries: &mut Registries, detail: &str) -> u32 {
+    registries.assumptions.push(Assumption {
+        kind: AssumptionKind::Nominal,
+        detail: detail.to_string(),
+    });
+    (registries.assumptions.len() - 1) as u32
+}
+
+// -- Compiler --------------------------------------------------------------
+
+/// The explicit height of a unit from its source properties (metres → mm),
+/// when present and finite.
+fn unit_height_mm(unit: &VenueFeature, profile: &SceneProfile) -> Option<i64> {
+    let height = unit.source_properties.get(&profile.height_property_key)?.as_f64()?;
+    height.is_finite().then(|| (height * 1000.0).round() as i64)
+}
+
+/// Compile the generated scene for a decoded document: slabs, ceilings,
+/// surfaces, walls, portals, and conveyance (the latter three in later
+/// passes). Appends source locators, evidence, confidence, and assumptions
+/// into §8's registries; every primitive references them. `None` when the
+/// venue has no computable scene content (no level geometry).
+pub(crate) fn compile_scene(
+    document: &BundleDocument,
+    spatial: &mut SpatialContext,
+    profile: &SceneProfile,
+) -> Option<SceneSection> {
+    let frame = &spatial.frame;
+    let plane_z = |level_id: &str| -> Option<i64> {
+        spatial
+            .levels
+            .iter()
+            .find(|l| l.level_id == level_id)
+            .map(|l| l.resolved_scene_z_mm)
+    };
+
+    let mut primitives = Vec::new();
+    let mut measured_confidence: Option<u32> = None;
+    let mut assumed_confidence: Option<u32> = None;
+    let mut nominal_ceiling_assumption: Option<u32> = None;
+    let conf_ref = |registries: &mut Registries,
+                    assumed: bool,
+                    measured: &mut Option<u32>,
+                    assumed_slot: &mut Option<u32>|
+     -> u32 {
+        if assumed {
+            *assumed_slot.get_or_insert_with(|| push_confidence(registries, ConfidenceKind::Assumed, 0.3))
+        } else {
+            *measured.get_or_insert_with(|| push_confidence(registries, ConfidenceKind::Measured, 1.0))
+        }
+    };
+
+    let mut emitted = false;
+
+    // Slabs: one per level with a polygon, on the resolved plane.
+    for level in &document.levels {
+        let Some(level_feature) = document
+            .features
+            .iter()
+            .find(|f| f.feature_type == FeatureType::Level && f.id == level.id)
+        else {
+            continue;
+        };
+        let Some(ring) = level_feature.geometry.as_ref().and_then(polygon_ring) else {
+            continue;
+        };
+        let Some(z) = plane_z(&level.id) else {
+            continue;
+        };
+        emitted = true;
+        let locator = find_or_push_locator(&mut spatial.registries, &level.id);
+        let confidence_ref = conf_ref(
+            &mut spatial.registries,
+            false,
+            &mut measured_confidence,
+            &mut assumed_confidence,
+        );
+        let evidence_ref = push_evidence(
+            &mut spatial.registries,
+            locator,
+            Some(confidence_ref),
+            None,
+            "floor slab from level polygon",
+        );
+        primitives.push(ScenePrimitive {
+            id: format!("slab-{}", level.id),
+            role: PrimitiveRole::Surface,
+            level_id: level.id.clone(),
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref,
+            canonical_feature_id: Some(level.id.clone()),
+            source_locator_refs: vec![locator],
+            evidence_refs: vec![evidence_ref],
+            geometry: PrimitiveGeometry::Mesh(ring_mesh(frame, &ring, z)),
+        });
+    }
+
+    // Ceilings and surfaces: one per unit.
+    for unit in document
+        .features
+        .iter()
+        .filter(|f| f.feature_type == FeatureType::Unit)
+    {
+        let Some(level_id) = unit.level_id.as_deref() else { continue };
+        let Some(z) = plane_z(level_id) else { continue };
+        let Some(ring) = unit.geometry.as_ref().and_then(polygon_ring) else {
+            continue;
+        };
+        emitted = true;
+        let locator = find_or_push_locator(&mut spatial.registries, &unit.id);
+        let source_height = unit_height_mm(unit, profile);
+
+        // Surface: the navigable unit polygon on the plane.
+        let surface_confidence = conf_ref(
+            &mut spatial.registries,
+            false,
+            &mut measured_confidence,
+            &mut assumed_confidence,
+        );
+        let surface_evidence = push_evidence(
+            &mut spatial.registries,
+            locator,
+            Some(surface_confidence),
+            None,
+            "navigable surface from unit polygon",
+        );
+        primitives.push(ScenePrimitive {
+            id: format!("surface-{}", unit.id),
+            role: PrimitiveRole::Surface,
+            level_id: level_id.to_string(),
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref: surface_confidence,
+            canonical_feature_id: Some(unit.id.clone()),
+            source_locator_refs: vec![locator],
+            evidence_refs: vec![surface_evidence],
+            geometry: PrimitiveGeometry::Mesh(ring_mesh(frame, &ring, z)),
+        });
+
+        // Ceiling: the unit polygon at the unit's height (source or nominal).
+        let (height, assumed) = match source_height {
+            Some(height) => (height, false),
+            None => (profile.ceiling_height_mm, true),
+        };
+        let ceiling_confidence = conf_ref(
+            &mut spatial.registries,
+            assumed,
+            &mut measured_confidence,
+            &mut assumed_confidence,
+        );
+        let ceiling_assumption = if assumed {
+            Some(*nominal_ceiling_assumption.get_or_insert_with(|| {
+                push_assumption(
+                    &mut spatial.registries,
+                    &format!("nominal ceiling height {} mm", profile.ceiling_height_mm),
+                )
+            }))
+        } else {
+            None
+        };
+        let ceiling_evidence = push_evidence(
+            &mut spatial.registries,
+            locator,
+            Some(ceiling_confidence),
+            ceiling_assumption,
+            if assumed { "ceiling at nominal height" } else { "ceiling at source height" },
+        );
+        primitives.push(ScenePrimitive {
+            id: format!("ceiling-{}", unit.id),
+            role: PrimitiveRole::Ceiling,
+            level_id: level_id.to_string(),
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref: ceiling_confidence,
+            canonical_feature_id: Some(unit.id.clone()),
+            source_locator_refs: vec![locator],
+            evidence_refs: vec![ceiling_evidence],
+            geometry: PrimitiveGeometry::Mesh(ring_mesh(frame, &ring, z + height)),
+        });
+    }
+
+    if !emitted {
+        return None;
+    }
+    Some(SceneSection {
+        primitives,
+        descriptor: None,
+    })
 }
 
 #[cfg(test)]
