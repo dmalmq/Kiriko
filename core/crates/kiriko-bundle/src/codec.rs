@@ -63,6 +63,18 @@ pub enum SectionCapability {
 pub struct CapabilityReport {
     graph: SectionCapability,
     facilities: SectionCapability,
+    /// Availability of the spatial context section (§8).
+    spatial_context: SectionCapability,
+    /// Availability of the declared scene-sources section (§9). No decoder
+    /// exists until Stage 1; the outcome comes from the directory row and
+    /// the §8 dependency edge.
+    scene_sources: SectionCapability,
+    /// Availability of the declared canonical-graph section (§10). No
+    /// decoder exists until Stage 4.
+    canonical_graph: SectionCapability,
+    /// Availability of the declared network-QA section (§11). No decoder
+    /// exists until Stage 6.
+    network_qa: SectionCapability,
 }
 
 impl CapabilityReport {
@@ -75,6 +87,26 @@ impl CapabilityReport {
     pub fn facilities(&self) -> SectionCapability {
         self.facilities.clone()
     }
+
+    /// Availability of the spatial context section.
+    pub fn spatial_context(&self) -> SectionCapability {
+        self.spatial_context.clone()
+    }
+
+    /// Availability of the declared scene-sources section.
+    pub fn scene_sources(&self) -> SectionCapability {
+        self.scene_sources.clone()
+    }
+
+    /// Availability of the declared canonical-graph section.
+    pub fn canonical_graph(&self) -> SectionCapability {
+        self.canonical_graph.clone()
+    }
+
+    /// Availability of the declared network-QA section.
+    pub fn network_qa(&self) -> SectionCapability {
+        self.network_qa.clone()
+    }
 }
 
 impl Default for CapabilityReport {
@@ -84,6 +116,10 @@ impl Default for CapabilityReport {
         Self {
             graph: SectionCapability::Absent,
             facilities: SectionCapability::Absent,
+            spatial_context: SectionCapability::Absent,
+            scene_sources: SectionCapability::Absent,
+            canonical_graph: SectionCapability::Absent,
+            network_qa: SectionCapability::Absent,
         }
     }
 }
@@ -108,9 +144,15 @@ pub struct BundleDocument {
     /// Optional point facilities (section 7). `None` when the bundle
     /// carries no facilities; empty facilities are never emitted.
     pub facilities: Option<Facilities>,
+    /// Optional spatial context (section 8): the venue's shared local ENU
+    /// frame plus the evidence registries behind it. `None` when the bundle
+    /// carries no spatial context (e.g. bundles published before this
+    /// section existed).
+    pub spatial_context: Option<kiriko_model::spatial::SpatialContext>,
     /// Which optional-section capabilities this bundle offers, and why any
-    /// unavailable one is unavailable. `graph`/`facilities` above say
-    /// *whether* content is present; this says *why* when it is not.
+    /// unavailable one is unavailable. `graph`/`facilities`/`spatial_context`
+    /// above say *whether* content is present; this says *why* when it is
+    /// not.
     pub capabilities: CapabilityReport,
 }
 
@@ -184,6 +226,7 @@ pub fn compile_imdf_with_network(
         stats,
         graph: None,
         facilities: None,
+        spatial_context: None,
         capabilities: CapabilityReport::default(),
     };
 
@@ -431,6 +474,15 @@ pub fn encode_bundle(document: &BundleDocument) -> Result<Vec<u8>, BundleError> 
             sections::encode_facilities(facilities)?,
         ));
     }
+    // Section id 8 sorts after 7, so appending keeps the directory
+    // id-ascending as `build_payload` requires.
+    if let Some(spatial_context) = &document.spatial_context {
+        section_list.push((
+            format::SECTION_SPATIAL_CONTEXT,
+            format::SECTION_VERSION,
+            crate::spatial_section::encode_spatial_context(spatial_context)?,
+        ));
+    }
 
     let payload = format::build_payload(&section_list);
 
@@ -487,13 +539,58 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<BundleDocument, BundleError> {
         format::SECTION_FACILITIES,
         sections::decode_facilities,
     );
+    let (spatial_context, spatial_context_capability) = classify_section(
+        &directory,
+        &payload,
+        format::SECTION_SPATIAL_CONTEXT,
+        crate::spatial_section::decode_spatial_context,
+    );
     document.graph = graph;
     document.facilities = facilities;
+    document.spatial_context = spatial_context;
+
+    // The three declared future sections have no decoder yet; their outcomes
+    // come from the directory row and their declared §8 dependency edge. The
+    // dependency gate runs against the outcome of the spatial context section
+    // exactly as it will for a real dependent section once one ships.
+    let outcomes = BTreeMap::from([(format::SECTION_SPATIAL_CONTEXT, spatial_context_capability.clone())]);
     document.capabilities = CapabilityReport {
         graph: graph_capability,
         facilities: facilities_capability,
+        spatial_context: spatial_context_capability,
+        scene_sources: classify_declared_section(&directory, format::SECTION_SCENE_SOURCES, &outcomes),
+        canonical_graph: classify_declared_section(&directory, format::SECTION_CANONICAL_GRAPH, &outcomes),
+        network_qa: classify_declared_section(&directory, format::SECTION_NETWORK_QA, &outcomes),
     };
     Ok(document)
+}
+
+/// Capability of a declared-but-not-yet-decodable section (9/10/11). Its
+/// bytes are never interpreted. `Absent` without a directory row; withheld
+/// with `disabledByDependency` when a section it requires is unavailable;
+/// otherwise unavailable with a diagnostic — this build has no decoder for
+/// the section. The last outcome is unreachable by any real bundle (no
+/// producer emits these ids yet); the arriving decoder (Stage 1/4/6)
+/// replaces it with real classification.
+fn classify_declared_section(
+    directory: &format::Directory,
+    id: u16,
+    outcomes: &BTreeMap<u16, SectionCapability>,
+) -> SectionCapability {
+    if directory.declared_version(id).is_none() {
+        return SectionCapability::Absent;
+    }
+    let (requires, _references) = format::declared_dependencies(id);
+    for requirement in requires {
+        if !matches!(outcomes.get(requirement), Some(SectionCapability::Available)) {
+            return SectionCapability::DisabledByDependency { requires: *requirement };
+        }
+    }
+    SectionCapability::Invalid {
+        reason: format!(
+            "section {id} has no decoder in this build; its bytes were not interpreted"
+        ),
+    }
 }
 
 /// Decode one optional section and classify its availability in the same pass,
@@ -669,6 +766,7 @@ mod tests {
                 },
                 graph: None,
                 facilities: None,
+                spatial_context: None,
                 capabilities: CapabilityReport::default(),
             };
 
@@ -771,6 +869,7 @@ mod tests {
             },
             graph: None,
             facilities: None,
+            spatial_context: None,
             capabilities: CapabilityReport::default(),
         }
     }
@@ -864,19 +963,24 @@ mod tests {
 
     #[test]
     fn capability_report_serializes_to_the_shape_the_clients_type() {
-        // The TypeScript `SectionCapability` union is hand-written against this
-        // exact shape. If serde's tagging changes, that type silently becomes a
-        // lie -- so pin it here.
+        // The TypeScript `SectionCapability` union and `CapabilityReportDto`
+        // are hand-written against this exact shape. If serde's tagging or
+        // the field set changes, that type silently becomes a lie -- so pin
+        // it here.
         let report = CapabilityReport {
             graph: SectionCapability::Available,
             facilities: SectionCapability::UnsupportedVersion {
                 declared: 2,
                 supported: 1,
             },
+            spatial_context: SectionCapability::Absent,
+            scene_sources: SectionCapability::Absent,
+            canonical_graph: SectionCapability::Absent,
+            network_qa: SectionCapability::Absent,
         };
         assert_eq!(
             serde_json::to_string(&report).expect("report serializes"),
-            r#"{"graph":{"state":"available"},"facilities":{"state":"unsupportedVersion","declared":2,"supported":1}}"#
+            r#"{"graph":{"state":"available"},"facilities":{"state":"unsupportedVersion","declared":2,"supported":1},"spatialContext":{"state":"absent"},"sceneSources":{"state":"absent"},"canonicalGraph":{"state":"absent"},"networkQa":{"state":"absent"}}"#
         );
 
         let invalid = CapabilityReport {
@@ -884,10 +988,25 @@ mod tests {
                 reason: "bad bytes".to_string(),
             },
             facilities: SectionCapability::DisabledByDependency { requires: 8 },
+            spatial_context: SectionCapability::Available,
+            scene_sources: SectionCapability::DisabledByDependency { requires: 8 },
+            canonical_graph: SectionCapability::Absent,
+            network_qa: SectionCapability::Absent,
         };
         assert_eq!(
             serde_json::to_string(&invalid).expect("report serializes"),
-            r#"{"graph":{"state":"invalid","reason":"bad bytes"},"facilities":{"state":"disabledByDependency","requires":8}}"#
+            r#"{"graph":{"state":"invalid","reason":"bad bytes"},"facilities":{"state":"disabledByDependency","requires":8},"spatialContext":{"state":"available"},"sceneSources":{"state":"disabledByDependency","requires":8},"canonicalGraph":{"state":"absent"},"networkQa":{"state":"absent"}}"#
         );
+    }
+
+    #[test]
+    fn capability_report_default_reports_every_declared_section_absent() {
+        let report = CapabilityReport::default();
+        assert_eq!(report.graph(), SectionCapability::Absent);
+        assert_eq!(report.facilities(), SectionCapability::Absent);
+        assert_eq!(report.spatial_context(), SectionCapability::Absent);
+        assert_eq!(report.scene_sources(), SectionCapability::Absent);
+        assert_eq!(report.canonical_graph(), SectionCapability::Absent);
+        assert_eq!(report.network_qa(), SectionCapability::Absent);
     }
 }

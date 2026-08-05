@@ -47,12 +47,42 @@ const ZSTD_LEVEL: i32 = 9;
 pub(crate) const SECTION_MANIFEST: u16 = 1;
 pub(crate) const SECTION_GEOMETRY: u16 = 2;
 pub(crate) const SECTION_STORES: u16 = 3;
-#[allow(dead_code)] // reserved id; documented, never emitted in Phase Two
+#[allow(dead_code)] // reserved id; documented, never emitted
 pub(crate) const SECTION_STYLE: u16 = 4;
 pub(crate) const SECTION_GRAPH: u16 = 5;
-#[allow(dead_code)] // reserved id; documented, never emitted in Phase Two
+#[allow(dead_code)] // reserved id; documented, never emitted
 pub(crate) const SECTION_BEACONS: u16 = 6;
 pub(crate) const SECTION_FACILITIES: u16 = 7;
+/// Section 8 (spatial context): one shared local ENU frame per venue version
+/// plus the typed evidence registries behind it. Optional; emitted whenever a
+/// compiled venue has a computable anchor.
+pub(crate) const SECTION_SPATIAL_CONTEXT: u16 = 8;
+/// Declared future sections (3D Stage 0 ticket #38). Their ids, versions,
+/// and dependency edges are format facts from now; their decoders arrive in
+/// later stages (scene sources: Stage 1, canonical graph: Stage 4, network
+/// QA: Stage 6). A present row for one of these is never interpreted by a
+/// decoder that predates the section.
+pub(crate) const SECTION_SCENE_SOURCES: u16 = 9;
+pub(crate) const SECTION_CANONICAL_GRAPH: u16 = 10;
+pub(crate) const SECTION_NETWORK_QA: u16 = 11;
+
+/// Declared availability edges, as `(requires, references)`.
+///
+/// `requires` gates availability: a section whose required section is not
+/// available reports `disabledByDependency` naming the requirement, and its
+/// bytes are never interpreted. `references` are informational cross-section
+/// edges recorded now for later validation (network QA may reference scene
+/// sources and the canonical graph); they never gate availability.
+pub(crate) fn declared_dependencies(id: u16) -> (&'static [u16], &'static [u16]) {
+    match id {
+        SECTION_SCENE_SOURCES | SECTION_CANONICAL_GRAPH => (&[SECTION_SPATIAL_CONTEXT], &[]),
+        SECTION_NETWORK_QA => (
+            &[SECTION_SPATIAL_CONTEXT],
+            &[SECTION_SCENE_SOURCES, SECTION_CANONICAL_GRAPH],
+        ),
+        _ => (&[], &[]),
+    }
+}
 
 pub(crate) const REQUIRED_SECTIONS: [u16; 3] = [SECTION_MANIFEST, SECTION_GEOMETRY, SECTION_STORES];
 

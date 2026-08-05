@@ -767,6 +767,7 @@ fn minimal_document(features: Vec<kiriko_model::model::VenueFeature>) -> BundleD
         },
         graph: None,
         facilities: None,
+        spatial_context: None,
         capabilities: CapabilityReport::default(),
     }
 }
@@ -1117,6 +1118,7 @@ fn bundle_with_graph(graph: kiriko_route::RouteGraph) -> Vec<u8> {
         },
         graph: Some(graph),
         facilities: None,
+        spatial_context: None,
         capabilities: CapabilityReport::default(),
     };
     encode_bundle(&doc).expect("bundle with graph encodes")
