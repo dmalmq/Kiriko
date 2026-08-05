@@ -371,6 +371,7 @@ pub fn compile_imdf_with_network(
         &elevations,
         &network_altitudes,
         profile,
+        &[],
     );
     document.spatial_context =
         crate::spatial_section::build_spatial_context(bounds, venue_feature_id, &outcome, profile);
