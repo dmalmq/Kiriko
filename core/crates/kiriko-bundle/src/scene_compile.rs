@@ -352,7 +352,7 @@ pub(crate) fn compile_scene(
         level_id: String,
         ring_xy: Vec<[i64; 2]>,
         z: i64,
-        height_mm: i64,
+        source_height_mm: Option<i64>,
         surface_index: Option<u32>,
     }
 
@@ -391,7 +391,6 @@ pub(crate) fn compile_scene(
         let Some(ring) = unit.geometry.as_ref().and_then(polygon_ring) else {
             continue;
         };
-        let height_mm = unit_height_mm(unit, profile).unwrap_or(profile.ceiling_height_mm);
         units_data.push(UnitGeom {
             id: unit.id.clone(),
             level_id: level_id.to_string(),
@@ -400,7 +399,7 @@ pub(crate) fn compile_scene(
                 .map(|[lon, lat]| project_local_mm(frame, *lon, *lat))
                 .collect(),
             z,
-            height_mm,
+            source_height_mm: unit_height_mm(unit, profile),
             surface_index: None,
         });
     }
@@ -468,14 +467,7 @@ pub(crate) fn compile_scene(
         });
         unit.surface_index = Some(surface_index);
 
-        let (height, assumed) = match unit_height_mm(
-            document
-                .features
-                .iter()
-                .find(|f| f.id == unit.id)
-                .expect("unit feature"),
-            profile,
-        ) {
+        let (height, assumed) = match unit.source_height_mm {
             Some(height) => (height, false),
             None => (profile.ceiling_height_mm, true),
         };
@@ -527,10 +519,10 @@ pub(crate) fn compile_scene(
             match walls_by_level.iter_mut().find(|(k, _)| {
                 k.0 == unit.level_id && (k.1, k.2, k.3, k.4) == (key.0[0], key.0[1], key.1[0], key.1[1])
             }) {
-                Some((_, heights)) => heights.push(unit.height_mm as u32),
+                Some((_, heights)) => heights.push(unit.source_height_mm.unwrap_or(profile.wall_height_mm) as u32),
                 None => walls_by_level.push((
                     (unit.level_id.clone(), key.0[0], key.0[1], key.1[0], key.1[1]),
-                    vec![unit.height_mm as u32],
+                    vec![unit.source_height_mm.unwrap_or(profile.wall_height_mm) as u32],
                 )),
             }
         }

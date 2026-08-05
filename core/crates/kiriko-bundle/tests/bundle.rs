@@ -2162,3 +2162,80 @@ fn the_scene_compiler_emits_neutral_conveyance_forms() {
     assert_eq!(*zs.iter().min().unwrap(), 0, "bottom on the B1 plane");
     assert_eq!(*zs.iter().max().unwrap(), 3000, "nominal conveyance height");
 }
+
+#[test]
+fn the_scene_compiles_byte_identically_with_the_network_pipeline() {
+    let forward = support::build_multi_floor_imdf_zip();
+    let reversed = support::build_multi_floor_imdf_zip_reversed();
+    let compile = |source: &[u8]| {
+        compile_imdf_with_network(
+            source,
+            metadata(),
+            Some(NETWORK_JUNCTIONS),
+            Some(NETWORK_PATHS),
+            None,
+            false,
+            false,
+            None,
+            &[],
+            None,
+        )
+        .expect("compiles")
+        .bytes
+    };
+    let a = compile(&forward);
+    let b = compile(&forward);
+    let c = compile(&reversed);
+    assert_eq!(a, b, "identical inputs compile byte-identically, scene included");
+    assert_eq!(
+        a, c,
+        "ZIP record order must not affect the compiled scene bytes"
+    );
+}
+
+#[test]
+fn the_scene_profile_drives_nominal_dimensions() {
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    let source = support::build_multi_floor_imdf_zip();
+    let profile = kiriko_bundle::SceneProfile {
+        wall_height_mm: 4000,
+        ..kiriko_bundle::SceneProfile::default()
+    };
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        Some(&profile),
+    )
+    .expect("compiles with a custom scene profile");
+    let document = decode_bundle(&compiled.bytes).expect("decodes");
+    let scene = document.scene.expect("scene present");
+
+    // u2 has no source height → its own boundary walls use the profile's
+    // 4000 mm (the shared u1/u2 edge stays at min(u1 3500, nominal 4000)).
+    let wall = scene
+        .primitives
+        .iter()
+        .find(|p| {
+            let PrimitiveGeometry::Mesh(mesh) = &p.geometry else { return false };
+            p.role == PrimitiveRole::Wall
+                && p.level_id == "b1000003-0000-4000-8000-000000000003"
+                && mesh.positions.iter().map(|p| p[2]).max() == Some(4000 + 4000)
+        })
+        .expect("a nominal-height wall on F1");
+    let PrimitiveGeometry::Mesh(mesh) = &wall.geometry else {
+        panic!("wall mesh expected");
+    };
+    assert_eq!(
+        mesh.positions.iter().map(|p| p[2]).max(),
+        Some(4000 + 4000),
+        "the nominal wall height comes from the versioned profile, not a constant"
+    );
+}

@@ -166,7 +166,7 @@ pub fn build_multi_floor_imdf_zip() -> Vec<u8> {
         ]}}"#
     );
 
-    let entries: &[(&str, String)] = &[
+    let entries: Vec<(&str, String)> = vec![
         ("manifest.json", manifest.to_string()),
         ("venue.geojson", venue),
         ("address.geojson", address),
@@ -176,6 +176,115 @@ pub fn build_multi_floor_imdf_zip() -> Vec<u8> {
         ("drawing.geojson", drawings),
     ];
 
+    let mut forward = entries.clone();
+    forward.sort_by(|a, b| a.0.cmp(b.0));
+    write_zip_entries(&forward)
+}
+
+/// The same multi-floor fixture with the ZIP entries in reverse order — the
+/// importer sorts entries, so both orders must compile byte-identically.
+pub fn build_multi_floor_imdf_zip_reversed() -> Vec<u8> {
+    let mut forward: Vec<(&str, String)> = Vec::new();
+    let mut build = || -> Vec<(&str, String)> {
+        let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;
+        let venue = format!(
+            r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+            feature(
+                "a1000001-0000-4000-8000-000000000001",
+                "venue",
+                r#"{"category":"transit","name":{"en":"Multi Floor Venue"},"address_id":"a1000002-0000-4000-8000-000000000002"}"#,
+                Some(POLYGON),
+            )
+        );
+        let address = format!(
+            r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+            feature(
+                "a1000002-0000-4000-8000-000000000002",
+                "address",
+                r#"{"address":"1 Test Way"}"#,
+                None,
+            )
+        );
+        let level = |id: &str, name: &str, ordinal: i64, elevation: Option<f64>| {
+            let mut properties = format!(
+                r#"{{"category":"unspecified","ordinal":{ordinal},"name":{{"en":"{name}"}},"short_name":{{"en":"{name}"}}}}"#
+            );
+            if let Some(elevation) = elevation {
+                properties.pop();
+                properties.push_str(&format!(r#","elevation":{elevation}}}"#));
+            }
+            feature(id, "level", &properties, Some(POLYGON))
+        };
+        let levels = format!(
+            r#"{{"type":"FeatureCollection","features":[{},{},{},{}]}}"#,
+            level("b1000001-0000-4000-8000-000000000001", "F3", 2, None),
+            level("b1000002-0000-4000-8000-000000000002", "F2", 1, None),
+            level("b1000003-0000-4000-8000-000000000003", "F1", 0, Some(10.0)),
+            level("b1000004-0000-4000-8000-000000000004", "B1", -1, Some(6.0)),
+        );
+        let unit = |id: &str, level_id: &str, ring: &str, extra: &str| {
+            format!(
+                r#"{{"id":"{id}","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":{ring}}},"properties":{{"category":"walkway","level_id":"{level_id}"{extra}}}}}"#
+            )
+        };
+        let units = format!(
+            r#"{{"type":"FeatureCollection","features":[
+                {},
+                {},
+                {}
+            ]}}"#,
+            unit(
+                "c1000001-0000-4000-8000-000000000001",
+                "b1000003-0000-4000-8000-000000000003",
+                "[[[139.7662,35.6806],[139.7678,35.6806],[139.7678,35.6810],[139.7662,35.6810],[139.7662,35.6806]]]",
+                r#","height":3.5"#,
+            ),
+            unit(
+                "c1000002-0000-4000-8000-000000000002",
+                "b1000003-0000-4000-8000-000000000003",
+                "[[[139.7662,35.6810],[139.7678,35.6810],[139.7678,35.6814],[139.7662,35.6814],[139.7662,35.6810]]]",
+                "",
+            ),
+            unit(
+                "c1000003-0000-4000-8000-000000000003",
+                "b1000004-0000-4000-8000-000000000004",
+                "[[[139.7662,35.6802],[139.7678,35.6802],[139.7678,35.6806],[139.7662,35.6806],[139.7662,35.6802]]]",
+                r#","category":"stairs""#,
+            ),
+        );
+        let openings = format!(
+            r#"{{"type":"FeatureCollection","features":[
+                {{"id":"d1000001-0000-4000-8000-000000000001","type":"Feature","feature_type":"opening",
+                  "geometry":{{"type":"LineString","coordinates":[[139.7670,35.6810],[139.7672,35.6810]]}},
+                  "properties":{{"category":"pedestrian.transit","level_id":"b1000003-0000-4000-8000-000000000003"}}}}
+            ]}}"#
+        );
+        let drawings = format!(
+            r#"{{"type":"FeatureCollection","features":[
+                {{"id":"e1000001-0000-4000-8000-000000000001","type":"Feature","feature_type":"drawing",
+                  "geometry":{{"type":"LineString","coordinates":[[139.7665,35.6808],[139.7675,35.6812]]}},
+                  "properties":{{"category":"detail","level_id":"b1000003-0000-4000-8000-000000000003"}}}}
+            ]}}"#
+        );
+        vec![
+            ("manifest.json", manifest.to_string()),
+            ("venue.geojson", venue),
+            ("address.geojson", address),
+            ("level.geojson", levels),
+            ("unit.geojson", units),
+            ("opening.geojson", openings),
+            ("drawing.geojson", drawings),
+        ]
+    };
+    let entries = build();
+    let mut reversed = entries.clone();
+    reversed.reverse();
+    let _ = &mut forward;
+    write_zip_entries(&reversed)
+}
+
+/// Writes `(name, content)` entries into a zip in the given order.
+fn write_zip_entries(entries: &[(&str, String)]) -> Vec<u8> {
     let mut cursor = Cursor::new(Vec::new());
     let mut writer = ZipWriter::new(&mut cursor);
     let options = SimpleFileOptions::default()
@@ -183,7 +292,7 @@ pub fn build_multi_floor_imdf_zip() -> Vec<u8> {
         .compression_level(Some(6));
     for (name, content) in entries {
         writer
-            .start_file(*name, options)
+            .start_file(name, options)
             .expect("start zip entry");
         writer
             .write_all(content.as_bytes())
