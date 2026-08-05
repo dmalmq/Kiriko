@@ -1876,3 +1876,105 @@ fn stage0_fixture_is_frozen_and_reproducible() {
         "the unmappable-floor facility is dropped, as at compile time"
     );
 }
+
+fn stage0_bytes() -> Vec<u8> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    fs::read(repo_root.join("tests/fixtures/stage0.kvb"))
+        .expect("tests/fixtures/stage0.kvb must be committed")
+}
+
+/// The stage0 fixture minus its §8 row: the same bundle as a reader predating
+/// spatial context would see it, derived from the frozen bytes.
+fn stage0_stripped_of_spatial_context() -> Vec<u8> {
+    let payload = decompress_payload(&stage0_bytes());
+    wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        sections.retain(|(id, _, _)| *id != 8);
+    }))
+}
+
+#[test]
+fn stage0_sections_decode_identically_with_and_without_spatial_context() {
+    let with_8 = decode_bundle(&stage0_bytes()).expect("stage0 fixture decodes");
+    let without_8 =
+        decode_bundle(&stage0_stripped_of_spatial_context()).expect("stripped bundle decodes");
+
+    assert_eq!(with_8.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(
+        without_8.capabilities.spatial_context(),
+        SectionCapability::Absent,
+        "the stripped bundle is what a §8-less equivalent reports"
+    );
+    assert!(with_8.spatial_context.is_some());
+    assert!(without_8.spatial_context.is_none());
+
+    // Every field a legacy reader sees is identical; only §8 itself differs.
+    assert_eq!(with_8.manifest, without_8.manifest);
+    assert_eq!(with_8.levels, without_8.levels);
+    assert_eq!(with_8.features, without_8.features);
+    assert_eq!(with_8.bounds_by_level, without_8.bounds_by_level);
+    assert_eq!(with_8.warnings, without_8.warnings);
+    assert_eq!(with_8.stats, without_8.stats);
+    assert_eq!(with_8.graph, without_8.graph, "the routing graph decodes identically");
+    assert_eq!(with_8.facilities, without_8.facilities);
+    assert_eq!(with_8.capabilities.graph(), without_8.capabilities.graph());
+    assert_eq!(with_8.capabilities.facilities(), without_8.capabilities.facilities());
+}
+
+#[test]
+fn routing_over_the_fixture_matches_the_stripped_equivalent() {
+    use kiriko_route::Point3;
+
+    let with_8 = decode_bundle(&stage0_bytes()).expect("stage0 fixture decodes");
+    let without_8 =
+        decode_bundle(&stage0_stripped_of_spatial_context()).expect("stripped bundle decodes");
+    let origin = Point3 { lon: 139.0, lat: 35.0, ordinal: 0.0 };
+    let dest = Point3 { lon: 139.001, lat: 35.0, ordinal: 0.0 };
+
+    let route_with =
+        kiriko_route::route(with_8.graph.as_ref().expect("stage0 carries a graph"), origin, dest);
+    let route_without = kiriko_route::route(
+        without_8.graph.as_ref().expect("stripped bundle carries the same graph"),
+        origin,
+        dest,
+    );
+    let route_with = route_with.expect("the fixture routes");
+    assert_eq!(
+        route_with,
+        route_without.expect("the stripped equivalent routes"),
+        "routing over the §8 bundle and its §8-less equivalent must be identical"
+    );
+    assert!(route_with.total_weight > 0.0);
+}
+
+#[test]
+fn the_full_pipeline_compiles_byte_identically() {
+    let forward = support::build_minimal_imdf_zip();
+    let reversed = support::build_minimal_imdf_zip_reversed();
+    let compile = |source: &[u8]| {
+        compile_imdf_with_network(
+            source,
+            BundleMetadata {
+                dataset_id: "minimal".to_string(),
+                version: 1,
+            },
+            Some(NETWORK_JUNCTIONS),
+            Some(NETWORK_PATHS),
+            Some(FACILITIES),
+            false,
+            false,
+            None,
+            &[],
+        )
+        .expect("stage0 inputs compile")
+        .bytes
+    };
+    let a = compile(&forward);
+    let b = compile(&forward);
+    let c = compile(&reversed);
+    assert_eq!(a, b, "identical inputs compile byte-identically");
+    assert_eq!(
+        a, c,
+        "ZIP record order must not affect the compiled bytes — a regression here means \
+         the test would fail"
+    );
+}
