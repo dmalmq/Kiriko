@@ -181,7 +181,13 @@ describe("bundle route: publication-state semantics", () => {
 
     app.db.prepare("DELETE FROM venues WHERE id = ?").run(venue.id);
     const replacementVenue = await createVenue(app, cookie, "Recreated Identity");
-    expect(replacementVenue).toEqual(venue); // same slug and reclaimed numeric row id
+    // Same slug, and the numeric row id is reclaimed. Asserted field by field
+    // rather than with `toEqual(venue)`: `createVenue` casts the response to
+    // `{ id, slug }` but the runtime object also carries `createdAt`, so
+    // whole-object equality compared a second-resolution timestamp and failed
+    // whenever the two creations straddled a second boundary.
+    expect(replacementVenue.id).toBe(venue.id);
+    expect(replacementVenue.slug).toBe(venue.slug);
     await uploadAndWait(app, cookie, replacementVenue.id, zip);
     const replacementRow = app.db
       .prepare("SELECT id FROM versions WHERE venue_id = ?")
