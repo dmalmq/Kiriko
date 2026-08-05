@@ -951,7 +951,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "e0a283a4f4623e72c628d60b3096f48659e14706a073cc5757bbb0997e8919f1";
+const GOLDEN_BUNDLE_HASH: &str = "486f7135d851588d73d097702466d72495e7e62c61d4528e3d8ab22efd9601ee";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
