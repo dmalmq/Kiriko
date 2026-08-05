@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use crate::graph::{meters_to_cost, RouteEdge, RouteGraph};
+use crate::graph::{RouteEdge, RouteGraph, meters_to_cost};
 
 /// A query endpoint: position plus venue level ordinal.
 #[derive(Debug, Clone, Copy)]
@@ -168,8 +168,8 @@ fn connector_cost(p: &Point3, s: &EdgeSnap) -> f64 {
 /// Route from `origin` to `dest` over the graph: project both endpoints onto
 /// their best same-floor edge candidates, then A* between the virtual
 /// endpoints of every candidate pair (edges traversed in both directions),
-/// choosing the snap pair and path with the lowest total walked cost (graph
-/// + connector legs). A shared-edge pair also competes as a direct
+/// choosing the snap pair and path with the lowest total walked cost
+/// (graph + connector legs). A shared-edge pair also competes as a direct
 /// junction-free walk. Returns floor-grouped corridor polylines that hug the
 /// edge geometry, or `None` when the projections are disconnected.
 pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> {
@@ -298,9 +298,7 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
     {
         // Stale entry: worse (g, origin_edge) than the recorded best.
         let stale = match seed_origin_edge[node] {
-            Some(be) => {
-                g > dist[node] || (g == dist[node] && origin_edge > be)
-            }
+            Some(be) => g > dist[node] || (g == dist[node] && origin_edge > be),
             None => g > dist[node],
         };
         if stale {
@@ -355,8 +353,7 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
                 None => true,
                 Some((bs, bo, bd, bnode)) => {
                     sel.total_cmp(bs) == Ordering::Less
-                        || (sel.total_cmp(bs) == Ordering::Equal
-                            && key < (*bo, *bd, *bnode))
+                        || (sel.total_cmp(bs) == Ordering::Equal && key < (*bo, *bd, *bnode))
                 }
             };
             if better {
@@ -601,7 +598,6 @@ mod tests {
         assert_eq!(second.origin_edge, 9);
     }
 
-
     #[test]
     fn route_traces_the_corridor_polyline() {
         // from(139.0) --bend(139.001,35.001)--> mid(139.002) --> to(139.003)
@@ -798,7 +794,11 @@ mod tests {
         let g = geom_graph();
         let cands = snap_candidates(
             &g,
-            &Point3 { lon: 139.001, lat: 35.0009, ordinal: 0.0 },
+            &Point3 {
+                lon: 139.001,
+                lat: 35.0009,
+                ordinal: 0.0,
+            },
         );
         let s = cands.first().expect("snaps to the only edge");
         assert_eq!(s.edge_index, 0);
@@ -809,10 +809,31 @@ mod tests {
     #[test]
     fn snap_prefers_same_ordinal_edge() {
         let mut g = geom_graph();
-        g.nodes.push(RouteNode { lon: 139.001, lat: 35.0, ordinal: -1.0 });
-        g.nodes.push(RouteNode { lon: 139.0011, lat: 35.0, ordinal: -1.0 });
-        g.edges.push(RouteEdge { from: 2, to: 3, weight: 10.0, ordinal: -1.0, interior: vec![] });
-        let cands = snap_candidates(&g, &Point3 { lon: 139.001, lat: 35.0, ordinal: 0.0 });
+        g.nodes.push(RouteNode {
+            lon: 139.001,
+            lat: 35.0,
+            ordinal: -1.0,
+        });
+        g.nodes.push(RouteNode {
+            lon: 139.0011,
+            lat: 35.0,
+            ordinal: -1.0,
+        });
+        g.edges.push(RouteEdge {
+            from: 2,
+            to: 3,
+            weight: 10.0,
+            ordinal: -1.0,
+            interior: vec![],
+        });
+        let cands = snap_candidates(
+            &g,
+            &Point3 {
+                lon: 139.001,
+                lat: 35.0,
+                ordinal: 0.0,
+            },
+        );
         assert_eq!(g.edges[cands[0].edge_index].ordinal, 0.0);
         assert!(
             cands.iter().all(|s| g.edges[s.edge_index].ordinal == 0.0),
@@ -832,19 +853,51 @@ mod tests {
         // long destination connector.
         let graph = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.0005, lat: 35.001, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.002,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.0005,
+                    lat: 35.001,
+                    ordinal: 0.0,
+                },
             ],
             edges: vec![
-                RouteEdge { from: 0, to: 1, weight: 182_000.0, ordinal: 0.0, interior: vec![] },
-                RouteEdge { from: 0, to: 2, weight: 600_000.0, ordinal: 0.0, interior: vec![] },
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 182_000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
+                RouteEdge {
+                    from: 0,
+                    to: 2,
+                    weight: 600_000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
             ],
         };
         let r = route(
             &graph,
-            Point3 { lon: 139.0005, lat: 35.0009, ordinal: 0.0 },
-            Point3 { lon: 139.002, lat: 35.0, ordinal: 0.0 },
+            Point3 {
+                lon: 139.0005,
+                lat: 35.0009,
+                ordinal: 0.0,
+            },
+            Point3 {
+                lon: 139.002,
+                lat: 35.0,
+                ordinal: 0.0,
+            },
         )
         .expect("endpoints route");
         assert_eq!(
@@ -862,17 +915,49 @@ mod tests {
     fn multi_candidate_route_is_deterministic() {
         let graph = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.0005, lat: 35.001, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.002,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.0005,
+                    lat: 35.001,
+                    ordinal: 0.0,
+                },
             ],
             edges: vec![
-                RouteEdge { from: 0, to: 1, weight: 182_000.0, ordinal: 0.0, interior: vec![] },
-                RouteEdge { from: 0, to: 2, weight: 600_000.0, ordinal: 0.0, interior: vec![] },
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 182_000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
+                RouteEdge {
+                    from: 0,
+                    to: 2,
+                    weight: 600_000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
             ],
         };
-        let o = Point3 { lon: 139.0005, lat: 35.0009, ordinal: 0.0 };
-        let d = Point3 { lon: 139.002, lat: 35.0, ordinal: 0.0 };
+        let o = Point3 {
+            lon: 139.0005,
+            lat: 35.0009,
+            ordinal: 0.0,
+        };
+        let d = Point3 {
+            lon: 139.002,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
         assert_eq!(route(&graph, o, d), route(&graph, o, d));
     }
 
@@ -950,9 +1035,8 @@ mod tests {
         // same_edge_route weight: (e.weight as f64 * (hi-lo) / total) as f32
         // selection: f64::from(weight) + connectors
         let r0 = same_edge_route(&graph, &o0, &d0);
-        let sel0 = f64::from(r0.total_weight)
-            + connector_cost(&origin, &o0)
-            + connector_cost(&dest, &d0);
+        let sel0 =
+            f64::from(r0.total_weight) + connector_cost(&origin, &o0) + connector_cost(&dest, &d0);
         let hi_lo = (o1.along - d1.along).abs();
         let total = o1.total.max(f64::EPSILON);
         let need_tw = sel0 - connector_cost(&origin, &o1) - connector_cost(&dest, &d1);
@@ -978,12 +1062,10 @@ mod tests {
         // Sanity: both same-edge selection costs match; edge 0 is the lower index.
         let r0 = same_edge_route(&graph, &o0, &d0);
         let r1 = same_edge_route(&graph, &o1, &d1);
-        let sel0 = f64::from(r0.total_weight)
-            + connector_cost(&origin, &o0)
-            + connector_cost(&dest, &d0);
-        let sel1 = f64::from(r1.total_weight)
-            + connector_cost(&origin, &o1)
-            + connector_cost(&dest, &d1);
+        let sel0 =
+            f64::from(r0.total_weight) + connector_cost(&origin, &o0) + connector_cost(&dest, &d0);
+        let sel1 =
+            f64::from(r1.total_weight) + connector_cost(&origin, &o1) + connector_cost(&dest, &d1);
         assert_eq!(sel0, sel1, "fixture selection costs must tie");
         let _ = nearer_edge;
         (
@@ -1026,7 +1108,11 @@ mod tests {
         let g = geom_graph();
         let cands = snap_candidates(
             &g,
-            &Point3 { lon: 139.001, lat: 35.0009, ordinal: 5.0 },
+            &Point3 {
+                lon: 139.001,
+                lat: 35.0009,
+                ordinal: 5.0,
+            },
         );
         assert_eq!(cands.len(), 1, "single off-floor fallback candidate");
         assert_eq!(cands[0].edge_index, 0);
@@ -1090,9 +1176,21 @@ mod tests {
         // (1000+1000) is far cheaper than walking the whole U.
         let graph = RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.001, lat: 35.0005, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.002,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0005,
+                    ordinal: 0.0,
+                },
             ],
             edges: vec![
                 RouteEdge {
@@ -1102,14 +1200,34 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![[139.0, 35.002], [139.002, 35.002]],
                 },
-                RouteEdge { from: 0, to: 2, weight: 1000.0, ordinal: 0.0, interior: vec![] },
-                RouteEdge { from: 2, to: 1, weight: 1000.0, ordinal: 0.0, interior: vec![] },
+                RouteEdge {
+                    from: 0,
+                    to: 2,
+                    weight: 1000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
+                RouteEdge {
+                    from: 2,
+                    to: 1,
+                    weight: 1000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
             ],
         };
         let r = route(
             &graph,
-            Point3 { lon: 139.0, lat: 35.0002, ordinal: 0.0 },
-            Point3 { lon: 139.002, lat: 35.0002, ordinal: 0.0 },
+            Point3 {
+                lon: 139.0,
+                lat: 35.0002,
+                ordinal: 0.0,
+            },
+            Point3 {
+                lon: 139.002,
+                lat: 35.0002,
+                ordinal: 0.0,
+            },
         )
         .expect("endpoints route");
         assert!(
@@ -1117,7 +1235,11 @@ mod tests {
             "network detour beats the same-edge U walk: {}",
             r.total_weight
         );
-        let coords: Vec<[f64; 2]> = r.segments.iter().flat_map(|s| s.coordinates.clone()).collect();
+        let coords: Vec<[f64; 2]> = r
+            .segments
+            .iter()
+            .flat_map(|s| s.coordinates.clone())
+            .collect();
         assert!(
             coords.contains(&[139.001, 35.0005]),
             "route passes through the shortcut junction"

@@ -21,8 +21,8 @@ use geo::algorithm::intersects::Intersects;
 use geo::algorithm::orient::{Direction, Orient};
 use geo::{Coord, LineString, MultiPolygon, Polygon};
 use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
-use std::collections::HashMap;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use crate::codec::BundleDocument;
 use crate::synth::{haversine_m, linestring_midpoint, point_boundary_dist_m, polygon_centroid};
@@ -326,8 +326,6 @@ const CHORD_MIN_CLEARANCE_M: f64 = 5.0;
 /// degree-7 hubs of crossing shortcuts.
 const CHORD_MAX_PER_NODE: usize = 2;
 
-
-
 /// Distance (m) from `p` to the nearest boundary ring of `area`
 /// (equirectangular metres at `p`'s latitude). Inside the area this is the
 /// local passage half-width; outside, the distance to the area.
@@ -458,20 +456,13 @@ fn ray_segment_hit(
     if t <= 0.0 || s <= 0.0 || s >= 1.0 {
         return None;
     }
-    let hit = [
-        origin[0] + dir[0] * t / mx,
-        origin[1] + dir[1] * t / my,
-    ];
+    let hit = [origin[0] + dir[0] * t / mx, origin[1] + dir[1] * t / my];
     Some((hit, t, s))
 }
 
 /// Closest point of `p` on segment `a`–`b` in the local metre frame at `p`'s
 /// latitude. Returns `(proj_lonlat, dist_m, s_along_segment)` with `s ∈ [0, 1]`.
-fn project_point_to_segment(
-    p: [f64; 2],
-    a: [f64; 2],
-    b: [f64; 2],
-) -> ([f64; 2], f64, f64) {
+fn project_point_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> ([f64; 2], f64, f64) {
     let mx = 111_320.0 * p[1].to_radians().cos();
     let my = 111_320.0;
     let ax = (a[0] - p[0]) * mx;
@@ -525,7 +516,6 @@ fn split_skeleton_at(
     skeleton.edges.push((p_idx, v));
     p_idx
 }
-
 
 /// True when every interior sample of segment `a`–`b` lies within at least
 /// ONE of `areas` (e.g. the walkable union or the transit unit itself).
@@ -938,7 +928,6 @@ struct DoorwayPlan {
     attaches: Vec<(usize, usize)>,
 }
 
-
 /// Min-heap entry for the bounded Dijkstra inside [`shortcut_chords`].
 #[derive(Clone, Copy, PartialEq)]
 struct Visit(f64, usize);
@@ -1029,8 +1018,7 @@ pub(crate) fn shortcut_chords(
                         continue;
                     }
                     let d = haversine_m(*p, skeleton.nodes[j]);
-                    if d < CHORD_MIN_M
-                        || d > CHORD_MAX_M
+                    if !(CHORD_MIN_M..=CHORD_MAX_M).contains(&d)
                         || uf_find(&mut uf, i) != uf_find(&mut uf, j)
                     {
                         continue;
@@ -1040,7 +1028,7 @@ pub(crate) fn shortcut_chords(
             }
         }
     }
-    pairs.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    pairs.sort_by_key(|a| (a.0, a.1));
 
     // Bounded Dijkstra: true when `dst` is reachable from `src` within `cutoff`.
     let reachable_within = |adj: &[Vec<(usize, f64)>], src: usize, dst: usize, cutoff: f64| {
@@ -1357,11 +1345,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             let s_line = score_dir(line_dir);
             let s_norm = score_dir(normal);
             // Tie → prefer the normal (IMDF threshold semantics: cross the line).
-            let axis = if s_line > s_norm {
-                line_dir
-            } else {
-                normal
-            };
+            let axis = if s_line > s_norm { line_dir } else { normal };
 
             // Upgrade each blob's attach target: axis ray → projection →
             // nearest node. Sorted by root for determinism.
@@ -1448,8 +1432,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                             let better = match best_proj {
                                 None => true,
                                 Some((bd, bei, _)) => {
-                                    dist < bd - 1e-12
-                                        || ((dist - bd).abs() <= 1e-12 && ei < bei)
+                                    dist < bd - 1e-12 || ((dist - bd).abs() <= 1e-12 && ei < bei)
                                 }
                             };
                             if better {
@@ -1592,12 +1575,12 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         // Stub is useful only when the attach target lies past
                         // it along the passage direction and far enough that
                         // the stub is not swallowed by a nearer junction.
-                        let along = axis[0] * (c[0] - mid[0]) * mx
-                            + axis[1] * (c[1] - mid[1]) * 111_320.0;
+                        let along =
+                            axis[0] * (c[0] - mid[0]) * mx + axis[1] * (c[1] - mid[1]) * 111_320.0;
                         let sign = if side_dot >= 0.0 { 1.0 } else { -1.0 };
                         let forward = along * sign > 0.0;
-                        let far_enough = haversine_m(c, mid)
-                            > DOORWAY_STUB_M + DOORWAY_STUB_JUNCTION_MARGIN_M;
+                        let far_enough =
+                            haversine_m(c, mid) > DOORWAY_STUB_M + DOORWAY_STUB_JUNCTION_MARGIN_M;
                         if forward && far_enough {
                             (i, sp)
                         } else {
@@ -1623,7 +1606,6 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             }
             doorway_nodes.push(doorway);
         }
-
 
         // Near-blob bridging: fuse distinct blobs that abut without a doorway.
         // Bucket skeleton nodes on an ~ADJACENCY_BRIDGE_M grid, then keep the
@@ -2826,11 +2808,10 @@ mod tests {
         // geometry/transit; attach lands on M so the stub is not a detour.
         let mid_deg = same_floor_degree(g, onode);
         assert!(
-            mid_deg >= 2 && mid_deg <= 4,
+            (2..=4).contains(&mid_deg),
             "midpoint keeps stub edges and at most two direct attaches, degree={mid_deg}"
         );
     }
-
 
     #[test]
     fn nearby_openings_share_one_doorway_bridge() {
@@ -2872,9 +2853,7 @@ mod tests {
             let group = doorway_group(g, d);
             g.edges
                 .iter()
-                .filter(|e| {
-                    group.contains(&(e.from as usize)) != group.contains(&(e.to as usize))
-                })
+                .filter(|e| group.contains(&(e.from as usize)) != group.contains(&(e.to as usize)))
                 .count()
         };
         assert_eq!(attach_count(&door1), 2, "first doorway bridges both spines");
@@ -3228,7 +3207,10 @@ mod tests {
         let build = synthesize_network_medial(&doc);
         let g = &build.graph;
         let dm = linestring_midpoint(&door).unwrap();
-        assert!(g.nodes.iter().any(|n| [n.lon, n.lat] == dm), "midpoint node exists");
+        assert!(
+            g.nodes.iter().any(|n| [n.lon, n.lat] == dm),
+            "midpoint node exists"
+        );
         let group = doorway_group(g, &door);
         assert_eq!(group.len(), 2, "only the inside stub survives");
         // Surviving stub is on the normal (N), not along the wall.
@@ -3277,7 +3259,11 @@ mod tests {
             .expect("opening midpoint node exists");
         let group = doorway_group(g, &door);
         // Midpoint + one walkable-side stub (room side is not walkable).
-        assert_eq!(group.len(), 2, "only the walkable-side stub survives: {group:?}");
+        assert_eq!(
+            group.len(),
+            2,
+            "only the walkable-side stub survives: {group:?}"
+        );
         let stub_idx = group.into_iter().find(|&i| i != onode).expect("stub");
         let sn = &g.nodes[stub_idx];
         // Perpendicular to the E–W threshold → same lon, different lat.
@@ -3314,12 +3300,7 @@ mod tests {
 
     /// Angle (degrees) between two undirected graph edges sharing `mid`.
     /// 0° = collinear straight-through; 180° = fold-back.
-    fn approach_bend_deg(
-        g: &kiriko_route::RouteGraph,
-        a: usize,
-        mid: usize,
-        b: usize,
-    ) -> f64 {
+    fn approach_bend_deg(g: &kiriko_route::RouteGraph, a: usize, mid: usize, b: usize) -> f64 {
         let mx = 111_320.0 * g.nodes[mid].lat.to_radians().cos();
         let v = |from: usize, to: usize| {
             let (f, t) = (&g.nodes[from], &g.nodes[to]);
@@ -3337,10 +3318,7 @@ mod tests {
 
     /// Skeleton attach target(s) from a doorway group (stub or mid edges that
     /// leave the group). Empty if the door has no attach.
-    fn doorway_attach_targets(
-        g: &kiriko_route::RouteGraph,
-        group: &[usize],
-    ) -> Vec<usize> {
+    fn doorway_attach_targets(g: &kiriko_route::RouteGraph, group: &[usize]) -> Vec<usize> {
         let mut out = Vec::new();
         for e in &g.edges {
             let (a, b) = (e.from as usize, e.to as usize);
@@ -3398,10 +3376,7 @@ mod tests {
             front_n.lon,
             front_n.lat
         );
-        assert!(
-            front_n.lat > dm[1],
-            "split is north of the south-wall door"
-        );
+        assert!(front_n.lat > dm[1], "split is north of the south-wall door");
         // T-junction: original spine edge became two, plus the attach.
         assert!(
             same_floor_degree(g, front_i) >= 3,
@@ -3468,10 +3443,7 @@ mod tests {
             assert!(bend < 5.0, "attach→M along door axis, bend={bend:.2}°");
         } else {
             let bend = approach_bend_deg(g, front_i, approach_from, onode);
-            assert!(
-                bend < 5.0,
-                "attach→stub→M collinear, bend={bend:.2}°"
-            );
+            assert!(bend < 5.0, "attach→stub→M collinear, bend={bend:.2}°");
         }
     }
 
@@ -3530,7 +3502,6 @@ mod tests {
             "precondition: nearest non-split node is off-axis (dist={nd:.2} off={nlo:.3})"
         );
     }
-
 
     #[test]
     fn doorway_attach_falls_back_to_projection_when_the_ray_misses() {
@@ -3607,13 +3578,6 @@ mod tests {
         );
         let _ = dm;
     }
-
-
-
-
-
-
-
 
     #[test]
     fn doorway_attach_falls_back_to_the_nearest_node_when_blocked() {
@@ -3729,7 +3693,10 @@ mod tests {
                 if group.contains(&other) {
                     continue;
                 }
-                arm_lens.push(haversine_m([n.lon, n.lat], [g.nodes[other].lon, g.nodes[other].lat]));
+                arm_lens.push(haversine_m(
+                    [n.lon, n.lat],
+                    [g.nodes[other].lon, g.nodes[other].lat],
+                ));
             }
             let long_arms = arm_lens.iter().filter(|&&d| d > 0.1).count();
             if long_arms >= 2 {
@@ -3771,7 +3738,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn multilinestring_axis_matches_the_midpoints_part() {
         // Two exactly equal-length parts (binary-exact 0.0625 lon spans at
@@ -3779,7 +3745,10 @@ mod tests {
         // must both come from the FIRST part (linestring_midpoint keeps the
         // first on ties; a last-wins axis pick flips the sign).
         let geom = Value::Object(BTreeMap::from([
-            ("type".to_string(), Value::String("MultiLineString".to_string())),
+            (
+                "type".to_string(),
+                Value::String("MultiLineString".to_string()),
+            ),
             (
                 "coordinates".to_string(),
                 Value::Array(vec![
@@ -3949,7 +3918,7 @@ mod tests {
         // Blob already unified as if the bridge was accepted.
         let blob = unioned_blob(2, &[(0, 1)]);
         let bridge_d = haversine_m(skeleton.nodes[0], skeleton.nodes[1]);
-        assert!(bridge_d < CHORD_MAX_M && bridge_d >= 10.0);
+        assert!((10.0..CHORD_MAX_M).contains(&bridge_d));
         // Without the existing edge the pair would qualify (no graph path).
         let without = shortcut_chords(&skeleton, &blob, &area, &[]);
         assert_eq!(without, vec![(0, 1)], "precondition: bare pair is a chord");
@@ -3993,14 +3962,16 @@ mod tests {
             "precondition: old degree grid separates A–C by ≥2 lon cells ({old_ax} vs {old_cx})"
         );
         let d_ac = haversine_m(a, c);
-        assert!(d_ac < CHORD_MAX_M, "precondition: A–C within chord range ({d_ac})");
+        assert!(
+            d_ac < CHORD_MAX_M,
+            "precondition: A–C within chord range ({d_ac})"
+        );
         // Graph path A–B–C is a deep V (~60 m+), so the chord qualifies under
         // both the ratio and absolute-savings gates.
         let d_ab = haversine_m(a, b);
         let d_bc = haversine_m(b, c);
         assert!(
-            d_ab + d_bc > d_ac / CHORD_SAVINGS_RATIO
-                && d_ab + d_bc > d_ac + 15.0,
+            d_ab + d_bc > d_ac / CHORD_SAVINGS_RATIO && d_ab + d_bc > d_ac + 15.0,
             "precondition: detour beats both savings cutoffs"
         );
 
@@ -4118,10 +4089,7 @@ mod tests {
             c < path * CHORD_SAVINGS_RATIO,
             "precondition: ratio rule alone would accept (c={c}, path={path})"
         );
-        assert!(
-            path - c < 15.0,
-            "precondition: absolute savings below 15 m"
-        );
+        assert!(path - c < 15.0, "precondition: absolute savings below 15 m");
         let blob = unioned_blob(3, &detour.edges);
         assert!(
             shortcut_chords(&detour, &blob, &area, &[]).is_empty(),

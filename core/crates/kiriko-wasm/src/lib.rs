@@ -718,8 +718,8 @@ impl DecodedScene {
 
 #[wasm_bindgen(js_name = "decodeScene")]
 pub fn decode_scene_js(bytes: &[u8]) -> Result<DecodedScene, JsError> {
-    let document = kiriko_scene::decode_scene(bytes)
-        .map_err(|error| JsError::new(&format!("{error}")))?;
+    let document =
+        kiriko_scene::decode_scene(bytes).map_err(|error| JsError::new(&format!("{error}")))?;
 
     let mut payload: Vec<u8> = Vec::new();
     let mut batch_meta: Vec<serde_json::Value> = Vec::with_capacity(document.batches.len());
@@ -732,7 +732,7 @@ pub fn decode_scene_js(bytes: &[u8]) -> Result<DecodedScene, JsError> {
         }
         // Pad each section to a 4-byte boundary so the client can build
         // u32-typed views from the meta offsets without re-laying the payload.
-        while payload.len() % 4 != 0 {
+        while !payload.len().is_multiple_of(4) {
             payload.push(0);
         }
         let normals_offset = payload.len();
@@ -741,7 +741,7 @@ pub fn decode_scene_js(bytes: &[u8]) -> Result<DecodedScene, JsError> {
                 payload.extend_from_slice(&component.to_le_bytes());
             }
         }
-        while payload.len() % 4 != 0 {
+        while !payload.len().is_multiple_of(4) {
             payload.push(0);
         }
         let features_offset = payload.len();

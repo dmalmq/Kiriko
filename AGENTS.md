@@ -33,6 +33,17 @@ Key facts: GDAL stays in TypeScript (gdal3.js); all data interpretation is Rust.
 - TDD; commit per logical change; strict TS (no `any`); match existing patterns.
 - Bilingual UI (ja/en) — every user string needs both.
 
+## Agent skills
+
+### Issue tracker
+GitHub issues in `dmalmq/imdf-map-application` via `gh`. `origin` is the tracker remote; `no-mistakes` is a local tooling artifact. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+The five canonical roles, each label string equal to its name. A separate axis from the existing `wayfinder:*` ticket-type labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root, both created lazily by `/domain-modeling`. Until then, architectural decisions of record live in the platform roadmap's §8 decision register. See `docs/agents/domain.md`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

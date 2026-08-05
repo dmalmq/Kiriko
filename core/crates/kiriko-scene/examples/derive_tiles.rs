@@ -4,15 +4,22 @@
 //!        --example derive_tiles -- "C:/cesium/tokyo 3dtiles" target/spike/tokyo
 use std::{collections::BTreeMap, env, fs, path::PathBuf, time::Instant};
 
-use kiriko_scene::{derive_scene_with_report, encode_scene, SemanticRole};
+use kiriko_scene::{SemanticRole, derive_scene_with_report, encode_scene};
 use sha2::{Digest, Sha256};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
-    let input = PathBuf::from(args.next().expect("usage: derive_tiles <tileset dir> <out prefix>"));
-    let out_prefix = PathBuf::from(args.next().expect("usage: derive_tiles <tileset dir> <out prefix>"));
+    let input = PathBuf::from(
+        args.next()
+            .expect("usage: derive_tiles <tileset dir> <out prefix>"),
+    );
+    let out_prefix = PathBuf::from(
+        args.next()
+            .expect("usage: derive_tiles <tileset dir> <out prefix>"),
+    );
 
-    let tileset: serde_json::Value = serde_json::from_slice(&fs::read(input.join("tileset.json"))?)?;
+    let tileset: serde_json::Value =
+        serde_json::from_slice(&fs::read(input.join("tileset.json"))?)?;
     let transform_values = tileset["root"]["transform"]
         .as_array()
         .expect("tileset root transform");
@@ -20,7 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (index, value) in transform_values.iter().enumerate() {
         world_transform[index] = value.as_f64().expect("transform component");
     }
-    let content_uri = tileset["root"]["content"]["uri"].as_str().unwrap_or("content.glb");
+    let content_uri = tileset["root"]["content"]["uri"]
+        .as_str()
+        .unwrap_or("content.glb");
 
     let glb = fs::read(input.join(content_uri))?;
     let levels_json = fs::read(input.join("levels.json"))?;
@@ -45,7 +54,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for batch in &document.batches {
         *per_role.entry(format!("{:?}", batch.role)).or_default() += 1;
     }
-    let vertices: usize = document.batches.iter().map(|b| b.vertex_count as usize).sum();
+    let vertices: usize = document
+        .batches
+        .iter()
+        .map(|b| b.vertex_count as usize)
+        .sum();
     let busiest = document
         .batches
         .iter()

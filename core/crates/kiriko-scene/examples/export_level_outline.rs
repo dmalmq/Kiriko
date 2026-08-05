@@ -23,7 +23,7 @@
 
 use std::{env, fs, path::PathBuf};
 
-use kiriko_scene::{decode_scene, SemanticRole};
+use kiriko_scene::{SemanticRole, decode_scene};
 
 /// WGS84 ellipsoid (used only to turn the header's ECEF origin into geodetic
 /// coordinates; the flat-earth projection below is independent of this).
@@ -90,7 +90,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 doc.levels.len()
             );
             for (index, level) in doc.levels.iter().enumerate() {
-                eprintln!("  {index}: {} — {}", level.source_level_key, level.source_level_name);
+                eprintln!(
+                    "  {index}: {} — {}",
+                    level.source_level_key, level.source_level_name
+                );
             }
             std::process::exit(3);
         }
