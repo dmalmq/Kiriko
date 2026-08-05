@@ -32,7 +32,8 @@ export type ViewerWarningCode =
   | "missing_display_point"
   | "unknown_archive_entry"
   | "route_build"
-  | "facility_build";
+  | "facility_build"
+  | "floor_override";
 
 export interface ImdfManifest {
   version: "1.0.0";

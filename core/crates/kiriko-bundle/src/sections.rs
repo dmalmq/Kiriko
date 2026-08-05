@@ -180,6 +180,7 @@ pub(crate) enum WarningCodeDto {
     UnknownArchiveEntry,
     RouteBuild,
     FacilityBuild,
+    FloorOverride,
 }
 
 impl From<WarningCode> for WarningCodeDto {
@@ -192,6 +193,7 @@ impl From<WarningCode> for WarningCodeDto {
             WarningCode::UnknownArchiveEntry => Self::UnknownArchiveEntry,
             WarningCode::RouteBuild => Self::RouteBuild,
             WarningCode::FacilityBuild => Self::FacilityBuild,
+            WarningCode::FloorOverride => Self::FloorOverride,
         }
     }
 }
@@ -206,6 +208,7 @@ impl From<WarningCodeDto> for WarningCode {
             WarningCodeDto::UnknownArchiveEntry => Self::UnknownArchiveEntry,
             WarningCodeDto::RouteBuild => Self::RouteBuild,
             WarningCodeDto::FacilityBuild => Self::FacilityBuild,
+            WarningCodeDto::FloorOverride => Self::FloorOverride,
         }
     }
 }

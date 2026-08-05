@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{BundleError, BundleErrorCode, CompileError};
 use crate::format;
-use crate::resolve::ResolutionProfile;
+use crate::resolve::{FloorOverride, ResolutionProfile};
 use crate::sections;
 
 /// Caller-supplied identity for a compiled bundle. `dataset_id` is
@@ -172,7 +172,7 @@ pub fn compile_imdf(
     source: &[u8],
     metadata: BundleMetadata,
 ) -> Result<CompiledBundle, CompileError> {
-    compile_imdf_with_network(source, metadata, None, None, None, false, false, None)
+    compile_imdf_with_network(source, metadata, None, None, None, false, false, None, &[])
 }
 
 /// Import `source` (a raw IMDF `.zip`) with `kiriko-model`, optionally build
@@ -198,7 +198,11 @@ pub fn compile_imdf(
 ///
 /// `resolution_profile` is the versioned profile for floor-plane resolution;
 /// `None` applies the versioned default profile (spacing 4.0 m, elevation key
-/// `elevation`, ≥3 network junctions within 1.0 m tolerance).
+/// `elevation`, ≥3 network junctions within 1.0 m tolerance). `overrides` are
+/// producer corrections of individual levels' resolved planes, applied after
+/// automatic resolution; each carries manual provenance, and one naming a
+/// level the venue does not have warns with code `floor_override` instead of
+/// failing the compile.
 pub fn compile_imdf_with_network(
     source: &[u8],
     metadata: BundleMetadata,
@@ -208,6 +212,7 @@ pub fn compile_imdf_with_network(
     synthesize_network: bool,
     clip_to_venue: bool,
     resolution_profile: Option<&ResolutionProfile>,
+    overrides: &[FloorOverride],
 ) -> Result<CompiledBundle, CompileError> {
     let venue = import_imdf(source)?;
     // Built before `document` consumes `venue`. `None` when clipping is off, so
@@ -364,15 +369,25 @@ pub fn compile_imdf_with_network(
 
     // Floor-plane resolution: fixed precedence (explicit elevation, then
     // trustworthy preserved network altitude, then nominal spacing), with
-    // the versioned profile. Assembles the §8 levels and registry evidence;
-    // `None` only when the venue has no computable anchor at all.
+    // the versioned profile and any producer overrides applied last. An
+    // override naming no level is a non-fatal floor_override warning.
     let outcome = crate::resolve::resolve_level_planes(
         &document.levels,
         &elevations,
         &network_altitudes,
         profile,
-        &[],
+        overrides,
     );
+    for level_id in &outcome.unapplied_override_ids {
+        document.warnings.push(ViewerWarning {
+            code: WarningCode::FloorOverride,
+            message: format!(
+                "floor_override: unknown_level {level_id:?}: the override was not applied"
+            ),
+            feature_id: None,
+            archive_entry: None,
+        });
+    }
     document.spatial_context =
         crate::spatial_section::build_spatial_context(bounds, venue_feature_id, &outcome, profile);
 

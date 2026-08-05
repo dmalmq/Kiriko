@@ -169,6 +169,10 @@ pub enum WarningCode {
     /// routing network). The specific facility code (`unmapped_floor`,
     /// `unresolved_anchor`) is embedded in the warning message.
     FacilityBuild,
+    /// Non-fatal problem applying a producer floor-plane override (e.g. an
+    /// override naming a level the venue does not have). The specific
+    /// override detail (`unknown_level`) is embedded in the warning message.
+    FloorOverride,
 }
 
 impl WarningCode {
@@ -182,6 +186,7 @@ impl WarningCode {
             Self::UnknownArchiveEntry => "unknown_archive_entry",
             Self::RouteBuild => "route_build",
             Self::FacilityBuild => "facility_build",
+            Self::FloorOverride => "floor_override",
         }
     }
 }
