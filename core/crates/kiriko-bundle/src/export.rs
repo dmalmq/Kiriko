@@ -298,6 +298,7 @@ mod tests {
             },
             graph: Some(graph),
             facilities: None,
+            capabilities: crate::codec::CapabilityReport::default(),
         };
         encode_bundle(&doc).expect("encode")
     }
@@ -414,6 +415,7 @@ mod tests {
             },
             graph: None,
             facilities: None,
+            capabilities: crate::codec::CapabilityReport::default(),
         };
         let bundle = encode_bundle(&doc).unwrap();
         assert_eq!(export_network(&bundle).unwrap_err().code(), "no_graph");

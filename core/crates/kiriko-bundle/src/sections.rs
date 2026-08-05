@@ -36,7 +36,7 @@ use kiriko_model::model::{
     Bounds, FeatureType, ImdfManifest, VenueFeature, ViewerLevel, ViewerWarning, WarningCode,
 };
 
-use crate::codec::{BundleDocument, BundleMetadata, BundleStats};
+use crate::codec::{BundleDocument, BundleMetadata, BundleStats, CapabilityReport};
 use crate::error::{BundleError, BundleErrorCode};
 
 /// Reject a non-finite (NaN or +/-Infinity) number, and normalize `-0.0` to
@@ -558,6 +558,7 @@ pub(crate) fn manifest_into_document(
         },
         graph: None,
         facilities: None,
+        capabilities: CapabilityReport::default(),
     })
 }
 
@@ -975,6 +976,7 @@ mod tests {
             },
             graph: None,
             facilities: None,
+            capabilities: CapabilityReport::default(),
         }
     }
 
@@ -1201,9 +1203,19 @@ mod tests {
         .expect("a NaN anchor still postcard-encodes");
         let bytes = wrap_bundle_with_facilities(manifest_bytes, facilities_bytes);
 
-        let err = crate::decode_bundle(&bytes)
-            .expect_err("a non-finite anchor coordinate must be rejected");
-        assert_eq!(err.code, BundleErrorCode::InvalidBundle);
+        let document = crate::decode_bundle(&bytes)
+            .expect("an unreadable optional section must not fail the whole bundle");
+        assert!(
+            document.facilities.is_none(),
+            "a non-finite anchor coordinate must never be interpreted"
+        );
+        assert!(
+            matches!(
+                document.capabilities.facilities(),
+                crate::SectionCapability::Invalid { .. }
+            ),
+            "the facilities capability must report why it is unavailable"
+        );
     }
 
     #[test]
@@ -1272,9 +1284,19 @@ mod tests {
         .expect("an out-of-bounds edge still postcard-encodes");
         let bytes = wrap_bundle_with_graph(manifest_bytes, graph_bytes);
 
-        let err = crate::decode_bundle(&bytes)
-            .expect_err("a graph edge past the node count must be rejected");
-        assert_eq!(err.code, BundleErrorCode::InvalidBundle);
+        let document = crate::decode_bundle(&bytes)
+            .expect("an unreadable optional section must not fail the whole bundle");
+        assert!(
+            document.graph.is_none(),
+            "an out-of-bounds edge must never be interpreted"
+        );
+        assert!(
+            matches!(
+                document.capabilities.graph(),
+                crate::SectionCapability::Invalid { .. }
+            ),
+            "the graph capability must report why it is unavailable"
+        );
     }
 
     #[test]
@@ -1304,9 +1326,19 @@ mod tests {
         })
         .expect("a negative-weight edge still postcard-encodes");
         let bytes = wrap_bundle_with_graph(manifest_bytes, graph_bytes);
-        let err = crate::decode_bundle(&bytes)
-            .expect_err("a negative graph edge weight must be rejected on decode");
-        assert_eq!(err.code, BundleErrorCode::InvalidBundle);
+        let document = crate::decode_bundle(&bytes)
+            .expect("an unreadable optional section must not fail the whole bundle");
+        assert!(
+            document.graph.is_none(),
+            "a negative edge weight must never be interpreted"
+        );
+        assert!(
+            matches!(
+                document.capabilities.graph(),
+                crate::SectionCapability::Invalid { .. }
+            ),
+            "the graph capability must report why it is unavailable"
+        );
     }
 
     #[test]

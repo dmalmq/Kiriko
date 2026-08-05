@@ -11,8 +11,9 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha256};
 
 use kiriko_bundle::{
-    BundleDocument, BundleErrorCode, BundleMetadata, BundleStats, CompileError, compile_imdf,
-    compile_imdf_with_network, decode_bundle, encode_bundle, export_network, inspect_bundle,
+    BundleDocument, BundleErrorCode, BundleMetadata, BundleStats, CapabilityReport, CompileError,
+    SectionCapability, compile_imdf, compile_imdf_with_network, decode_bundle, encode_bundle,
+    export_network, inspect_bundle,
 };
 
 fn metadata() -> BundleMetadata {
@@ -219,6 +220,76 @@ fn compile_without_facilities_has_no_facilities_section() {
             .iter()
             .any(|w| w.code.as_str() == "facility_build"),
         "no facilities input must produce no facility warnings"
+    );
+}
+
+#[test]
+fn reports_optional_sections_as_available_or_absent() {
+    let source = support::build_minimal_imdf_zip();
+
+    let with_both = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(NETWORK_JUNCTIONS),
+        Some(NETWORK_PATHS),
+        Some(FACILITIES),
+        false,
+        false,
+    )
+    .expect("fixture + network + facilities compiles");
+    let document = decode_bundle(&with_both.bytes).expect("bundle decodes");
+    assert_eq!(
+        document.capabilities.graph(),
+        SectionCapability::Available,
+        "a bundle carrying a graph must report the graph capability available"
+    );
+    assert_eq!(
+        document.capabilities.facilities(),
+        SectionCapability::Available,
+        "a bundle carrying facilities must report the facilities capability available"
+    );
+
+    let with_neither =
+        compile_imdf_with_network(&source, metadata(), None, None, None, false, false)
+            .expect("fixture alone compiles");
+    let document = decode_bundle(&with_neither.bytes).expect("bundle decodes");
+    assert_eq!(
+        document.capabilities.graph(),
+        SectionCapability::Absent,
+        "absent must be distinguishable from present-but-unreadable"
+    );
+    assert_eq!(
+        document.capabilities.facilities(),
+        SectionCapability::Absent,
+        "absent must be distinguishable from present-but-unreadable"
+    );
+}
+
+#[test]
+fn inspection_carries_the_capability_report() {
+    let source = support::build_minimal_imdf_zip();
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(NETWORK_JUNCTIONS),
+        Some(NETWORK_PATHS),
+        None,
+        false,
+        false,
+    )
+    .expect("fixture + network compiles");
+
+    let inspection = inspect_bundle(&compiled.bytes).expect("bundle inspects");
+
+    assert_eq!(
+        inspection.capabilities.graph(),
+        SectionCapability::Available,
+        "the server-side projection must carry the same capabilities the decoder found"
+    );
+    assert_eq!(
+        inspection.capabilities.facilities(),
+        SectionCapability::Absent,
+        "a venue with no facilities must be distinguishable from one whose facilities are broken"
     );
 }
 
@@ -696,6 +767,7 @@ fn minimal_document(features: Vec<kiriko_model::model::VenueFeature>) -> BundleD
         },
         graph: None,
         facilities: None,
+        capabilities: CapabilityReport::default(),
     }
 }
 
@@ -1045,6 +1117,7 @@ fn bundle_with_graph(graph: kiriko_route::RouteGraph) -> Vec<u8> {
         },
         graph: Some(graph),
         facilities: None,
+        capabilities: CapabilityReport::default(),
     };
     encode_bundle(&doc).expect("bundle with graph encodes")
 }

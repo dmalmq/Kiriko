@@ -33,6 +33,61 @@ pub struct BundleStats {
     pub features: u32,
 }
 
+/// Whether one optional section's capability is available for a decoded
+/// bundle, and when it is not, why.
+///
+/// `Absent` and the unavailable-with-reason variants are deliberately
+/// distinct: a venue that simply has no graph is not the same as a venue
+/// whose graph cannot be read, and callers present them differently.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "state")]
+pub enum SectionCapability {
+    /// Present, at a version this decoder understands, and validated.
+    Available,
+    /// The bundle carries no directory row for this section.
+    Absent,
+    /// Present, but declaring a payload version this decoder cannot read.
+    /// The bytes are never interpreted.
+    UnsupportedVersion { declared: u16, supported: u16 },
+    /// Present and readable, but its contents failed validation.
+    Invalid { reason: String },
+    /// Withheld because a section this one requires is unavailable.
+    DisabledByDependency { requires: u16 },
+}
+
+/// Per-section availability for one decoded bundle, produced by the same
+/// decode that produced the document's content so the two can never disagree
+/// about the same bytes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityReport {
+    graph: SectionCapability,
+    facilities: SectionCapability,
+}
+
+impl CapabilityReport {
+    /// Availability of the routing graph section.
+    pub fn graph(&self) -> SectionCapability {
+        self.graph.clone()
+    }
+
+    /// Availability of the point facilities section.
+    pub fn facilities(&self) -> SectionCapability {
+        self.facilities.clone()
+    }
+}
+
+impl Default for CapabilityReport {
+    /// Every optional capability absent. The starting point for a document
+    /// built before its directory has been examined.
+    fn default() -> Self {
+        Self {
+            graph: SectionCapability::Absent,
+            facilities: SectionCapability::Absent,
+        }
+    }
+}
+
 /// The fully decoded contents of a `kvb1` bundle: bundle metadata, the
 /// source IMDF manifest, and the canonical venue model, with `features` in
 /// the single canonical feature-type order (the geometry/stores section
@@ -53,6 +108,10 @@ pub struct BundleDocument {
     /// Optional point facilities (section 7). `None` when the bundle
     /// carries no facilities; empty facilities are never emitted.
     pub facilities: Option<Facilities>,
+    /// Which optional-section capabilities this bundle offers, and why any
+    /// unavailable one is unavailable. `graph`/`facilities` above say
+    /// *whether* content is present; this says *why* when it is not.
+    pub capabilities: CapabilityReport,
 }
 
 /// The result of compiling raw IMDF source bytes into a bundle.
@@ -125,6 +184,7 @@ pub fn compile_imdf_with_network(
         stats,
         graph: None,
         facilities: None,
+        capabilities: CapabilityReport::default(),
     };
 
     // Clipping was requested but the imported venue carries no level/unit
@@ -410,17 +470,68 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<BundleDocument, BundleError> {
     )?;
 
     let mut document = sections::manifest_into_document(manifest_dto, features)?;
-    // The graph section is optional: absent means `None`, so bundles
-    // written before section 5 existed still decode.
-    if let Some(graph_bytes) = directory.section(&payload, format::SECTION_GRAPH) {
-        document.graph = Some(sections::decode_graph(graph_bytes)?);
-    }
-    // The facilities section is optional: absent means `None`, so bundles
-    // written before section 7 existed still decode.
-    if let Some(facilities_bytes) = directory.section(&payload, format::SECTION_FACILITIES) {
-        document.facilities = Some(sections::decode_facilities(facilities_bytes)?);
-    }
+
+    // Both sections are optional, and neither can fail the bundle. Absent stays
+    // `None`, so bundles written before either section existed still decode; an
+    // unreadable one is reported unavailable and its bytes are never
+    // interpreted.
+    let (graph, graph_capability) = classify_section(
+        &directory,
+        &payload,
+        format::SECTION_GRAPH,
+        sections::decode_graph,
+    );
+    let (facilities, facilities_capability) = classify_section(
+        &directory,
+        &payload,
+        format::SECTION_FACILITIES,
+        sections::decode_facilities,
+    );
+    document.graph = graph;
+    document.facilities = facilities;
+    document.capabilities = CapabilityReport {
+        graph: graph_capability,
+        facilities: facilities_capability,
+    };
     Ok(document)
+}
+
+/// Decode one optional section and classify its availability in the same pass,
+/// which is what keeps a bundle's content and its capability report from ever
+/// disagreeing about the same bytes.
+///
+/// `decode` runs only when the row is present at a supported version, so bytes
+/// whose layout this decoder cannot vouch for are never interpreted.
+fn classify_section<T>(
+    directory: &format::Directory,
+    payload: &[u8],
+    id: u16,
+    decode: impl FnOnce(&[u8]) -> Result<T, BundleError>,
+) -> (Option<T>, SectionCapability) {
+    match directory.declared_version(id) {
+        None => (None, SectionCapability::Absent),
+        Some(declared) if declared != format::SECTION_VERSION => (
+            None,
+            SectionCapability::UnsupportedVersion {
+                declared,
+                supported: format::SECTION_VERSION,
+            },
+        ),
+        Some(_) => {
+            let bytes = directory
+                .section(payload, id)
+                .expect("a row at a supported version yields bytes");
+            match decode(bytes) {
+                Ok(value) => (Some(value), SectionCapability::Available),
+                Err(err) => (
+                    None,
+                    SectionCapability::Invalid {
+                        reason: err.message,
+                    },
+                ),
+            }
+        }
+    }
 }
 
 /// A pure anchor-level projection of a decoded bundle: the whole-file
@@ -436,6 +547,11 @@ pub struct BundleInspection {
     pub bundle_hash: String,
     pub level_ids: Vec<String>,
     pub feature_levels: Vec<(String, Option<String>)>,
+    /// Which optional-section capabilities the inspected bundle offers, and
+    /// why any unavailable one is unavailable. Serialized with the rest of the
+    /// projection, so the server learns a bundle's capabilities from the same
+    /// decode that produced its level relationships.
+    pub capabilities: CapabilityReport,
 }
 
 /// Decode `bytes` once via [`decode_bundle`] and project its level/feature
@@ -511,6 +627,7 @@ pub fn inspect_bundle(bytes: &[u8]) -> Result<BundleInspection, BundleError> {
         bundle_hash,
         level_ids,
         feature_levels,
+        capabilities: document.capabilities,
     })
 }
 
@@ -552,6 +669,7 @@ mod tests {
                 },
                 graph: None,
                 facilities: None,
+                capabilities: CapabilityReport::default(),
             };
 
         // Level ordinal.
@@ -621,6 +739,155 @@ mod tests {
                 .unwrap_err()
                 .code,
             BundleErrorCode::InvalidBundle
+        );
+    }
+
+    /// A minimal, encodable document: one level, no features, no optional
+    /// sections.
+    fn minimal_document() -> BundleDocument {
+        BundleDocument {
+            metadata: BundleMetadata {
+                dataset_id: "test".to_string(),
+                version: 1,
+            },
+            manifest: ImdfManifest {
+                version: "1.0.0".to_string(),
+                language: "en".to_string(),
+                rest: BTreeMap::new(),
+            },
+            venue_id: "venue-1".to_string(),
+            levels: vec![ViewerLevel {
+                id: "level-1".to_string(),
+                ordinal: 0.0,
+                label: BTreeMap::new(),
+                short_name: BTreeMap::new(),
+            }],
+            features: Vec::new(),
+            bounds_by_level: BTreeMap::new(),
+            warnings: Vec::new(),
+            stats: BundleStats {
+                levels: 1,
+                features: 0,
+            },
+            graph: None,
+            facilities: None,
+            capabilities: CapabilityReport::default(),
+        }
+    }
+
+    /// Re-encode `bundle` carrying one extra section, so the decode path for a
+    /// malformed optional section can be exercised through `decode_bundle`.
+    fn bundle_with_extra_section(bundle: &[u8], id: u16, version: u16, bytes: Vec<u8>) -> Vec<u8> {
+        let payload = format::decode_payload(bundle).expect("payload decodes");
+        let directory = format::parse_directory(&payload).expect("directory parses");
+        let mut sections: Vec<(u16, u16, Vec<u8>)> = [
+            format::SECTION_MANIFEST,
+            format::SECTION_GEOMETRY,
+            format::SECTION_STORES,
+        ]
+        .into_iter()
+        .map(|required| {
+            let bytes = directory
+                .section(&payload, required)
+                .expect("required section present");
+            (required, format::SECTION_VERSION, bytes.to_vec())
+        })
+        .collect();
+        sections.push((id, version, bytes));
+        sections.sort_by_key(|(id, _, _)| *id);
+        format::encode_payload(&format::build_payload(&sections)).expect("payload encodes")
+    }
+
+    #[test]
+    fn a_malformed_optional_section_is_invalid_rather_than_fatal() {
+        let bundle = encode_bundle(&minimal_document()).expect("minimal document encodes");
+        let corrupted = bundle_with_extra_section(
+            &bundle,
+            format::SECTION_GRAPH,
+            format::SECTION_VERSION,
+            vec![0xFF; 8],
+        );
+
+        let document = decode_bundle(&corrupted)
+            .expect("a malformed optional section must not fail the whole bundle");
+
+        assert!(
+            document.graph.is_none(),
+            "unreadable graph bytes must never be interpreted"
+        );
+        assert!(
+            matches!(
+                document.capabilities.graph(),
+                SectionCapability::Invalid { .. }
+            ),
+            "a present-but-unreadable section is invalid, not absent: {:?}",
+            document.capabilities.graph()
+        );
+        assert_eq!(
+            document.levels.len(),
+            1,
+            "the venue's own content must survive one unreadable optional section"
+        );
+    }
+
+    #[test]
+    fn an_optional_section_at_an_unreadable_version_reports_why() {
+        let bundle = encode_bundle(&minimal_document()).expect("minimal document encodes");
+        let future = bundle_with_extra_section(
+            &bundle,
+            format::SECTION_FACILITIES,
+            format::SECTION_VERSION + 1,
+            vec![0x00; 4],
+        );
+
+        let document = decode_bundle(&future)
+            .expect("a section from a future format version must not fail the bundle");
+
+        assert!(
+            document.facilities.is_none(),
+            "bytes at an unknown version must never be interpreted"
+        );
+        assert_eq!(
+            document.capabilities.facilities(),
+            SectionCapability::UnsupportedVersion {
+                declared: format::SECTION_VERSION + 1,
+                supported: format::SECTION_VERSION,
+            },
+            "the report must name both versions so a reader can say what is needed"
+        );
+        assert_eq!(
+            document.levels.len(),
+            1,
+            "the venue's own content must survive a section from a newer writer"
+        );
+    }
+
+    #[test]
+    fn capability_report_serializes_to_the_shape_the_clients_type() {
+        // The TypeScript `SectionCapability` union is hand-written against this
+        // exact shape. If serde's tagging changes, that type silently becomes a
+        // lie -- so pin it here.
+        let report = CapabilityReport {
+            graph: SectionCapability::Available,
+            facilities: SectionCapability::UnsupportedVersion {
+                declared: 2,
+                supported: 1,
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&report).expect("report serializes"),
+            r#"{"graph":{"state":"available"},"facilities":{"state":"unsupportedVersion","declared":2,"supported":1}}"#
+        );
+
+        let invalid = CapabilityReport {
+            graph: SectionCapability::Invalid {
+                reason: "bad bytes".to_string(),
+            },
+            facilities: SectionCapability::DisabledByDependency { requires: 8 },
+        };
+        assert_eq!(
+            serde_json::to_string(&invalid).expect("report serializes"),
+            r#"{"graph":{"state":"invalid","reason":"bad bytes"},"facilities":{"state":"disabledByDependency","requires":8}}"#
         );
     }
 }
