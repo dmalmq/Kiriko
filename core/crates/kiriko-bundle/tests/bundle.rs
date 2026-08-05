@@ -1241,3 +1241,211 @@ fn network_round_trip_is_stable_across_two_export_build_cycles() {
     assert_eq!(g2, g1, "the second cycle is a fixed point");
     assert_eq!(net2, net1, "re-export is identical");
 }
+
+// -- Stage 0: §8 capability and dependency matrix --------------------------
+
+/// Rebuilds the uncompressed payload of a compiled bundle under a modified
+/// section directory: `mutate` receives `(id, version, bytes)` in
+/// id-ascending order and may bump versions, replace bytes, or append rows
+/// (which must keep ids ascending). Rows are repacked contiguously, so the
+/// result is a well-formed directory around hand-crafted section content.
+fn rebuild_payload(
+    payload: &[u8],
+    mutate: impl FnOnce(&mut Vec<(u16, u16, Vec<u8>)>),
+) -> Vec<u8> {
+    let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+    let mut sections: Vec<(u16, u16, Vec<u8>)> = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = 2 + i * 20;
+        let id = u16::from_le_bytes([payload[base], payload[base + 1]]);
+        let version = u16::from_le_bytes([payload[base + 2], payload[base + 3]]);
+        let offset =
+            u64::from_le_bytes(payload[base + 4..base + 12].try_into().unwrap()) as usize;
+        let length =
+            u64::from_le_bytes(payload[base + 12..base + 20].try_into().unwrap()) as usize;
+        sections.push((id, version, payload[offset..offset + length].to_vec()));
+    }
+    mutate(&mut sections);
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&(sections.len() as u16).to_le_bytes());
+    let dir_len = 2 + sections.len() * 20;
+    let mut cursor = dir_len as u64;
+    for (id, version, bytes) in &sections {
+        out.extend_from_slice(&id.to_le_bytes());
+        out.extend_from_slice(&version.to_le_bytes());
+        out.extend_from_slice(&cursor.to_le_bytes());
+        out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        cursor += bytes.len() as u64;
+    }
+    for (_, _, bytes) in &sections {
+        out.extend_from_slice(bytes);
+    }
+    out
+}
+
+#[test]
+fn spatial_context_at_an_unreadable_version_degrades_alone() {
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, version, _) in sections.iter_mut() {
+            if *id == 8 {
+                *version = 2;
+            }
+        }
+    }));
+
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::UnsupportedVersion {
+            declared: 2,
+            supported: 1,
+        },
+        "the report must name both versions so a reader can say what is needed"
+    );
+    assert!(
+        document.spatial_context.is_none(),
+        "bytes at an unreadable version are never interpreted"
+    );
+    assert_eq!(document.capabilities.graph(), SectionCapability::Absent);
+    assert_eq!(document.venue_id, "a1000001-0000-4000-8000-000000000001");
+}
+
+#[test]
+fn garbage_spatial_context_bytes_report_invalid_and_the_venue_opens() {
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, _, bytes) in sections.iter_mut() {
+            if *id == 8 {
+                *bytes = vec![0x00, 0xFF, 0x7F];
+            }
+        }
+    }));
+
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    assert!(
+        matches!(document.capabilities.spatial_context(), SectionCapability::Invalid { .. }),
+        "a section that fails validation is reported invalid, not trusted"
+    );
+    assert!(document.spatial_context.is_none());
+    assert_eq!(document.capabilities.scene_sources(), SectionCapability::Absent);
+}
+
+#[test]
+fn an_invalid_spatial_context_leaves_routing_untouched() {
+    let source = support::build_minimal_imdf_zip();
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(NETWORK_JUNCTIONS),
+        Some(NETWORK_PATHS),
+        None,
+        false,
+        false,
+    )
+    .expect("fixture + network compiles");
+    let payload = decompress_payload(&compiled.bytes);
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, _, bytes) in sections.iter_mut() {
+            if *id == 8 {
+                *bytes = vec![0x00, 0xFF];
+            }
+        }
+    }));
+
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    assert!(matches!(document.capabilities.spatial_context(), SectionCapability::Invalid { .. }));
+    assert_eq!(
+        document.capabilities.graph(),
+        SectionCapability::Available,
+        "a broken spatial context must not disable the routing graph"
+    );
+    assert!(document.graph.is_some());
+}
+
+#[test]
+fn a_section_whose_required_section_is_unavailable_is_disabled_end_to_end() {
+    // The end-to-end proof #37 could not make: a bundle carrying a section
+    // that depends on §8, with §8 unavailable. The dependent's bytes are
+    // never interpreted — garbage is fine — and it reports exactly which
+    // section it needs.
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, version, _) in sections.iter_mut() {
+            if *id == 8 {
+                *version = 2;
+            }
+        }
+        sections.push((9, 1, vec![0xDE, 0xAD, 0xBE]));
+    }));
+
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::UnsupportedVersion {
+            declared: 2,
+            supported: 1,
+        }
+    );
+    assert_eq!(
+        document.capabilities.scene_sources(),
+        SectionCapability::DisabledByDependency { requires: 8 },
+        "a present section whose required section is unavailable must be withheld, \
+         naming the requirement"
+    );
+    assert_eq!(document.capabilities.canonical_graph(), SectionCapability::Absent);
+    assert_eq!(document.capabilities.network_qa(), SectionCapability::Absent);
+}
+
+#[test]
+fn a_dependent_section_with_its_requirement_available_has_no_decoder_yet() {
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        sections.push((9, 1, vec![0xDE, 0xAD]));
+    }));
+
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    match document.capabilities.scene_sources() {
+        SectionCapability::Invalid { reason } => {
+            assert!(
+                reason.contains("no decoder"),
+                "the reason must say this build cannot read the section: {reason}"
+            );
+        }
+        other => panic!("expected no-decoder invalid, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_document_with_a_dangling_spatial_context_reference_cannot_be_encoded() {
+    // Producer side of the invalid-cross-reference contract: the section
+    // cannot be produced, but nothing else about the document fails.
+    let mut document = decode_bundle(&compile_minimal()).expect("bundle decodes");
+    document
+        .spatial_context
+        .as_mut()
+        .expect("compiled bundle carries spatial context")
+        .frame
+        .datum_ref = 99;
+    let err = encode_bundle(&document).expect_err("a dangling datum reference must not encode");
+    assert_eq!(err.code, BundleErrorCode::InvalidBundle);
+}
+
+#[test]
+fn a_required_section_at_an_unexpected_version_still_fails_the_bundle() {
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, version, _) in sections.iter_mut() {
+            if *id == 2 {
+                *version = 2;
+            }
+        }
+    }));
+    let err = decode_bundle(&crafted).expect_err("a required section at a new version must fail");
+    assert_eq!(
+        err.code,
+        BundleErrorCode::UnsupportedBundleVersion,
+        "required-section strictness is preserved: §8's optionality changes nothing about §1–3"
+    );
+}
