@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 
 use kiriko_bundle::{
     BundleDocument, BundleErrorCode, BundleMetadata, BundleStats, CapabilityReport, CompileError,
-    SectionCapability, compile_imdf, compile_imdf_with_network, decode_bundle, encode_bundle,
-    export_network, inspect_bundle,
+    ResolutionProfile, SectionCapability, compile_imdf, compile_imdf_with_network, decode_bundle,
+    encode_bundle, export_network, inspect_bundle,
 };
 
 fn metadata() -> BundleMetadata {
@@ -611,6 +611,126 @@ fn spatial_context_round_trips_through_reencode() {
     let redoc = decode_bundle(&reencoded).expect("re-encoded bundle decodes");
     assert_eq!(redoc.spatial_context, Some(context));
     assert_eq!(redoc.capabilities.spatial_context(), SectionCapability::Available);
+}
+
+#[test]
+fn multi_floor_resolution_exercises_all_three_precedence_branches() {
+    use kiriko_model::spatial::{
+        AssumptionKind, ConfidenceKind, EvidenceMethod, ResolutionMethod,
+    };
+
+    let source = support::build_multi_floor_imdf_zip();
+    // A custom profile proves the nominal spacing is configurable, not a
+    // global constant.
+    let profile = ResolutionProfile {
+        nominal_floor_spacing_m: 4.5,
+        ..ResolutionProfile::default()
+    };
+
+    // Three close junctions on F2 (ordinal 1) and three on B1 (ordinal −1).
+    const JUNCTIONS: &str = r#"{"type":"FeatureCollection","features":[
+      {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F2","altitude":14.0},"geometry":{"type":"Point","coordinates":[139.7665,35.6805]}},
+      {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F2","altitude":14.1},"geometry":{"type":"Point","coordinates":[139.7670,35.6805]}},
+      {"type":"Feature","properties":{"NODEID":3,"FLOOR":"F2","altitude":14.2},"geometry":{"type":"Point","coordinates":[139.7675,35.6805]}},
+      {"type":"Feature","properties":{"NODEID":4,"FLOOR":"B1","altitude":6.5},"geometry":{"type":"Point","coordinates":[139.7665,35.6810]}},
+      {"type":"Feature","properties":{"NODEID":5,"FLOOR":"B1","altitude":6.5},"geometry":{"type":"Point","coordinates":[139.7670,35.6810]}},
+      {"type":"Feature","properties":{"NODEID":6,"FLOOR":"B1","altitude":6.6},"geometry":{"type":"Point","coordinates":[139.7675,35.6810]}}]}"#;
+    const PATHS: &str = r#"{"type":"FeatureCollection","features":[
+      {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7665,35.6805],[139.7670,35.6805]]]}},
+      {"type":"Feature","properties":{"FNODEID":2,"TNODEID":3,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7670,35.6805],[139.7675,35.6805]]]}},
+      {"type":"Feature","properties":{"FNODEID":4,"TNODEID":5,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7665,35.6810],[139.7670,35.6810]]]}},
+      {"type":"Feature","properties":{"FNODEID":5,"TNODEID":6,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7670,35.6810],[139.7675,35.6810]]]}}]}"#;
+
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(JUNCTIONS),
+        Some(PATHS),
+        None,
+        false,
+        false,
+        Some(&profile),
+    )
+    .expect("multi-floor fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    assert_eq!(document.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(
+        document.capabilities.graph(),
+        SectionCapability::Available,
+        "the network graph embeds alongside the §8 resolution"
+    );
+    let context = document.spatial_context.expect("spatial context present");
+    assert_eq!(context.levels.len(), 4, "one record per canonical level");
+
+    let by_id: BTreeMap<&str, &kiriko_model::spatial::LevelRecord> = context
+        .levels
+        .iter()
+        .map(|l| (l.level_id.as_str(), l))
+        .collect();
+
+    let l1 = by_id["b1000003-0000-4000-8000-000000000003"]; // F1, explicit elevation 10.0
+    assert_eq!(l1.method, ResolutionMethod::ImportedElevation);
+    assert_eq!(l1.source_elevation_m, Some(10.0));
+    assert_eq!(l1.network_difference_mm, None, "no network on F1");
+    assert_eq!(l1.resolved_scene_z_mm, 4000, "10000 − offset 6000");
+
+    let l2 = by_id["b1000002-0000-4000-8000-000000000002"]; // F2, three close junction altitudes
+    assert_eq!(l2.method, ResolutionMethod::NetworkAltitude);
+    assert_eq!(l2.source_elevation_m, None);
+    assert_eq!(l2.resolved_scene_z_mm, 8100, "median 14.1 → 14100 − offset 6000");
+
+    let l3 = by_id["b1000001-0000-4000-8000-000000000001"]; // F3, nothing → nominal
+    assert_eq!(l3.method, ResolutionMethod::NominalSpacing);
+    assert_eq!(
+        l3.resolved_scene_z_mm, 13500,
+        "6.0 + configured 4.5 m × 3 (off the lowest real plane, B1) − offset 6000"
+    );
+
+    let b1 = by_id["b1000004-0000-4000-8000-000000000004"]; // B1, elevation 6.0 + network 6.5
+    assert_eq!(b1.method, ResolutionMethod::ImportedElevation, "imported wins the precedence");
+    assert_eq!(b1.source_elevation_m, Some(6.0));
+    assert_eq!(
+        b1.network_difference_mm,
+        Some(500),
+        "the disagreement is recorded as a difference, nothing is overwritten"
+    );
+    assert_eq!(b1.resolved_scene_z_mm, 0, "lowest plane lands at scene Z 0");
+    assert_eq!(context.frame.vertical_normalisation_offset_mm, 6000);
+
+    // Confidence class follows the method: measured / estimated / assumed.
+    let confidence_kind =
+        |idx: u32| context.registries.confidence[idx as usize].kind;
+    assert_eq!(confidence_kind(l1.confidence_ref), ConfidenceKind::Measured);
+    assert_eq!(confidence_kind(l2.confidence_ref), ConfidenceKind::Estimated);
+    assert_eq!(
+        confidence_kind(l3.confidence_ref),
+        ConfidenceKind::Assumed,
+        "a nominal plane is identifiable as assumed, never presented as a measurement"
+    );
+
+    // Every evidence reference resolves; the nominal record's evidence names
+    // the shared nominal assumption, and B1's two sources are both recorded.
+    for level in &context.levels {
+        for evidence_ref in &level.evidence_refs {
+            assert!(
+                (*evidence_ref as usize) < context.registries.registration_evidence.len(),
+                "every evidence reference must resolve"
+            );
+        }
+    }
+    assert_eq!(b1.evidence_refs.len(), 2, "imported elevation + preserved network altitude");
+    let l3_evidence = &context.registries.registration_evidence[l3.evidence_refs[0] as usize];
+    assert_eq!(l3_evidence.method, EvidenceMethod::NominalSpacing);
+    let assumption = l3_evidence
+        .assumption_ref
+        .expect("nominal evidence references the shared assumption");
+    assert_eq!(context.registries.assumptions[assumption as usize].kind, AssumptionKind::Nominal);
+    assert!(
+        context.registries.assumptions[assumption as usize]
+            .detail
+            .contains("4.5"),
+        "the profile value rides in the assumption detail"
+    );
 }
 
 #[test]
