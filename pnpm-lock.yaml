@@ -132,6 +132,9 @@ importers:
         specifier: ^0.35.3
         version: 0.35.3(@types/node@24.13.3)
     devDependencies:
+      '@kiriko/wasm':
+        specifier: workspace:*
+        version: link:../core/crates/kiriko-wasm
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13
