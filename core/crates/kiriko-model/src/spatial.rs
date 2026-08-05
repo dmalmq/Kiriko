@@ -230,6 +230,19 @@ pub enum ResolutionMethod {
     NominalSpacing,
 }
 
+impl ResolutionMethod {
+    /// Stable string value, matching the convention of `WarningCode::as_str`
+    /// (snake_case, JSON-safe, never changes for an existing variant).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ImportedElevation => "imported_elevation",
+            Self::NetworkAltitude => "network_altitude",
+            Self::NominalSpacing => "nominal_spacing",
+        }
+    }
+}
+
 /// One canonical level's resolved floor plane, referencing the §8 registries.
 ///
 /// The resolved value is a checked integer millimetre scene Z; the original

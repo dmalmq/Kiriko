@@ -2,12 +2,18 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { decodeBundle, initKirikoWasm } from "./wasm";
+import { decodeBundle, initKirikoWasm, levelElevations } from "./wasm";
 
 const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../tests/fixtures");
 
 async function readGoldenBundle(): Promise<Uint8Array> {
   const bytes = await readFile(join(FIXTURES_DIR, "minimal.kvb"));
+  return new Uint8Array(bytes);
+}
+
+/** The real bundle published before §8 existed (committed as `3e1add8208…`). */
+async function readLegacyBundle(): Promise<Uint8Array> {
+  const bytes = await readFile(join(FIXTURES_DIR, "legacy-minimal.kvb"));
   return new Uint8Array(bytes);
 }
 
@@ -186,5 +192,33 @@ describe("initKirikoWasm", () => {
     await initKirikoWasm();
     const bytes = await readGoldenBundle();
     expect(decodeBundle(bytes).ok).toBe(true);
+  });
+});
+
+describe("levelElevations", () => {
+  it("answers legacyUnknown for every level of the real pre-§8 bundle", async () => {
+    const bytes = await readLegacyBundle();
+    const elevations = levelElevations(bytes);
+
+    expect(elevations).toHaveLength(3);
+    for (const elevation of elevations) {
+      expect(elevation.state).toBe("legacyUnknown");
+      expect(elevation.resolvedSceneZMm).toBeNull();
+      expect(elevation.method).toBeNull();
+    }
+    // The three canonical levels, in ordinal-descending order.
+    expect(elevations.map((e) => e.ordinal)).toEqual([1, 0, -1]);
+  });
+
+  it("answers resolved for the §8-backed golden bundle", async () => {
+    const bytes = await readGoldenBundle();
+    const elevations = levelElevations(bytes);
+
+    expect(elevations).toHaveLength(3);
+    expect(elevations.every((e) => e.state === "resolved")).toBe(true);
+    const lowest = elevations.find((e) => e.ordinal === -1)!;
+    expect(lowest.state).toBe("resolved");
+    expect(lowest.resolvedSceneZMm).toBe(0);
+    expect(lowest.method).toBe("nominal_spacing");
   });
 });

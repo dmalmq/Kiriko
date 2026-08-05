@@ -724,6 +724,52 @@ fn classify_section<T>(
     }
 }
 
+/// The honest answer to "where is this level's floor plane?" — either the
+/// §8-backed resolved plane with its evidence, or an explicit legacy/unknown
+/// for a bundle published before §8 existed. `LegacyUnknown` carries no
+/// confidence field at all: absence is structural, so a confidence value can
+/// never be fabricated for a legacy bundle.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LevelElevation {
+    /// The §8-backed resolved plane: method, confidence, and evidence refs.
+    Resolved {
+        level: kiriko_model::spatial::LevelRecord,
+    },
+    /// No §8 spatial context (or no record for this level): the elevation is
+    /// unknown, and Kiriko says so rather than pretending to knowledge it
+    /// lacks.
+    LegacyUnknown { level_id: String, ordinal: f64 },
+}
+
+/// Per-level elevation answers in canonical level order. A bundle with §8
+/// yields [`LevelElevation::Resolved`] for every level its records cover (a
+/// level the records miss — only possible in a hand-crafted bundle — falls
+/// back to [`LevelElevation::LegacyUnknown`]); a bundle without §8 yields
+/// `LegacyUnknown` for every level. A pure projection: it decodes nothing,
+/// stores nothing, and rewrites nothing about the bundle.
+pub fn level_elevations(document: &BundleDocument) -> Vec<LevelElevation> {
+    let records = document
+        .spatial_context
+        .as_ref()
+        .map(|context| &context.levels)
+        .map_or(&[][..], |levels| levels.as_slice());
+    document
+        .levels
+        .iter()
+        .map(|level| {
+            match records.iter().find(|record| record.level_id == level.id) {
+                Some(record) => LevelElevation::Resolved {
+                    level: record.clone(),
+                },
+                None => LevelElevation::LegacyUnknown {
+                    level_id: level.id.clone(),
+                    ordinal: level.ordinal,
+                },
+            }
+        })
+        .collect()
+}
+
 /// A pure anchor-level projection of a decoded bundle: the whole-file
 /// content hash, the level rows, and each feature's level relationship.
 ///
@@ -1101,5 +1147,111 @@ mod tests {
         assert_eq!(report.scene_sources(), SectionCapability::Absent);
         assert_eq!(report.canonical_graph(), SectionCapability::Absent);
         assert_eq!(report.network_qa(), SectionCapability::Absent);
+    }
+
+    use kiriko_model::model::ViewerLevel;
+    use kiriko_model::spatial::{Frame, LevelRecord, Registries, ResolutionMethod, SpatialContext};
+
+    fn viewer_level(id: &str, ordinal: f64) -> ViewerLevel {
+        ViewerLevel {
+            id: id.to_string(),
+            ordinal,
+            label: BTreeMap::new(),
+            short_name: BTreeMap::new(),
+        }
+    }
+
+    fn record(level_id: &str, ordinal: f64) -> LevelRecord {
+        LevelRecord {
+            level_id: level_id.to_string(),
+            ordinal,
+            source_elevation_m: Some(10.0),
+            network_difference_mm: None,
+            resolved_scene_z_mm: 4000,
+            method: ResolutionMethod::ImportedElevation,
+            confidence_ref: 0,
+            evidence_refs: vec![0],
+            override_elevation_m: None,
+            override_ref: None,
+        }
+    }
+
+    fn with_spatial_context(
+        mut document: BundleDocument,
+        records: Vec<LevelRecord>,
+    ) -> BundleDocument {
+        document.spatial_context = Some(SpatialContext {
+            frame: Frame {
+                anchor: [139.767, 35.681],
+                ecef_origin: [1.0, 2.0, 3.0],
+                enu_basis_ecef: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                world_translation: [1.0, 2.0, 3.0],
+                axes: kiriko_model::spatial::Axes::EastNorthUp,
+                unit: kiriko_model::spatial::LengthUnit::Millimetre,
+                vertical_normalisation_offset_mm: 0,
+                datum_ref: 0,
+                anchor_evidence_ref: 0,
+            },
+            registries: Registries::default(),
+            levels: records,
+            source_properties: BTreeMap::new(),
+        });
+        document
+    }
+
+    #[test]
+    fn level_elevations_resolve_from_the_spatial_context() {
+        let mut document = minimal_document();
+        document.levels = vec![viewer_level("l1", 0.0), viewer_level("l2", 1.0)];
+        document = with_spatial_context(document, vec![record("l1", 0.0), record("l2", 1.0)]);
+
+        let elevations = level_elevations(&document);
+        assert_eq!(elevations.len(), 2, "one answer per canonical level, in level order");
+        assert_eq!(
+            elevations[0],
+            LevelElevation::Resolved { level: record("l1", 0.0) },
+            "the §8-backed plane is returned with its full record"
+        );
+        assert_eq!(
+            elevations[1],
+            LevelElevation::Resolved { level: record("l2", 1.0) }
+        );
+    }
+
+    #[test]
+    fn level_elevations_are_legacy_unknown_without_spatial_context() {
+        let mut document = minimal_document();
+        document.levels = vec![viewer_level("l1", 0.0), viewer_level("l2", -1.0)];
+
+        assert_eq!(
+            level_elevations(&document),
+            vec![
+                LevelElevation::LegacyUnknown {
+                    level_id: "l1".into(),
+                    ordinal: 0.0,
+                },
+                LevelElevation::LegacyUnknown {
+                    level_id: "l2".into(),
+                    ordinal: -1.0,
+                },
+            ],
+            "a legacy bundle answers we-do-not-know for every level"
+        );
+    }
+
+    #[test]
+    fn a_level_missing_from_the_records_falls_back_to_legacy_unknown() {
+        let mut document = minimal_document();
+        document.levels = vec![viewer_level("l1", 0.0)];
+        document = with_spatial_context(document, Vec::new());
+
+        assert_eq!(
+            level_elevations(&document),
+            vec![LevelElevation::LegacyUnknown {
+                level_id: "l1".into(),
+                ordinal: 0.0,
+            }],
+            "a §8 whose records miss a level answers honestly rather than inventing a plane"
+        );
     }
 }
