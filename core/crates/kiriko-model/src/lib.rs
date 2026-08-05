@@ -16,6 +16,7 @@ pub mod error;
 pub mod geometry;
 pub mod model;
 mod normalize;
+pub mod spatial;
 
 pub use error::{ImportError, ImportErrorCode};
 
