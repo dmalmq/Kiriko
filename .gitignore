@@ -15,6 +15,9 @@ server/data/
 core/crates/kiriko-node/index.js
 core/crates/kiriko-node/index.d.ts
 core/crates/kiriko-node/*.node
+# Windows leaves this behind when the addon is loaded and cannot be replaced
+# in place; `*.node` above does not match the extra suffix.
+core/crates/kiriko-node/*.node.inuse
 core/crates/kiriko-wasm/pkg/
 # Local scratch: Vite's dep scan treats every root HTML file as an entry point,
 # so these must stay out of the project root's tracked surface.
