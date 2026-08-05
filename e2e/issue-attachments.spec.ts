@@ -26,14 +26,37 @@ async function openIssues(page: Page): Promise<void> {
 }
 
 async function pastePng(page: Page, label: string): Promise<void> {
-  await page.getByLabel(label).evaluate((element, base64) => {
-    const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
-    const transfer = new DataTransfer();
-    transfer.items.add(new File([bytes], "paste.png", { type: "image/png" }));
-    element.dispatchEvent(
-      new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }),
-    );
-  }, TINY_PNG_BASE64);
+  const fileInput = page.locator('input[data-e2e-paste-file="true"]');
+  await page.locator("body").evaluate((body) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.hidden = true;
+    input.dataset.e2ePasteFile = "true";
+    body.append(input);
+  });
+
+  try {
+    // setInputFiles creates a browser-native FileList in Firefox too. Firefox
+    // ignores DataTransfer.items.add(File), so expose that FileList through a
+    // real paste event instead of constructing the clipboard via DataTransfer.
+    // Adopted from PR #17.
+    await fileInput.setInputFiles({
+      name: "paste.png",
+      mimeType: "image/png",
+      buffer: Buffer.from(TINY_PNG_BASE64, "base64"),
+    });
+    await page.getByLabel(label).evaluate((element) => {
+      const input = document.querySelector<HTMLInputElement>('input[data-e2e-paste-file="true"]');
+      if (input?.files === null || input?.files === undefined) {
+        throw new Error("Paste fixture FileList was not created");
+      }
+      const event = new ClipboardEvent("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", { value: { files: input.files } });
+      element.dispatchEvent(event);
+    });
+  } finally {
+    await fileInput.evaluate((input) => input.remove());
+  }
 }
 
 async function pickerPng(page: Page): Promise<void> {
