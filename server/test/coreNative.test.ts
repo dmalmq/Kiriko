@@ -19,7 +19,7 @@ const LEVEL_1F = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_2F = "b1000003-0000-4000-8000-00000000002f";
 const VENUE_ID = "a1000001-0000-4000-8000-000000000001";
 const UNIT_B1 = "c1000001-0000-4000-8000-0000000000b1";
-const GOLDEN_BUNDLE_HASH = "3e1add8208f77c98fdddf5253c98bb18f533e5b3bf3d35d92ac444525080e136";
+const GOLDEN_BUNDLE_HASH = "e0a283a4f4623e72c628d60b3096f48659e14706a073cc5757bbb0997e8919f1";
 
 function syntheticUnitId(i: number): string {
   // 8-4-4-4-12 hex groups, exactly `is_valid_feature_id`'s 36-byte contract.
@@ -408,6 +408,14 @@ describe("@kiriko/node inspectBundle (raw native contract)", () => {
       bundleHash: string;
       levelIds: string[];
       featureLevels: Array<[string, string | null]>;
+      capabilities: {
+        graph: unknown;
+        facilities: unknown;
+        spatialContext: unknown;
+        sceneSources: unknown;
+        canonicalGraph: unknown;
+        networkQa: unknown;
+      };
     };
     expect(inspection.bundleHash).toBe(GOLDEN_BUNDLE_HASH);
     expect(inspection.levelIds).toEqual([
@@ -421,6 +429,19 @@ describe("@kiriko/node inspectBundle (raw native contract)", () => {
     expect(inspection.featureLevels).toContainEqual([LEVEL_1F, LEVEL_1F]);
     expect(inspection.featureLevels).toContainEqual([UNIT_B1, LEVEL_1F]);
     expect(inspection.featureLevels).toContainEqual([VENUE_ID, null]);
+
+    // Stage 0 parity: the native inspection projection reports exactly the
+    // same six outcomes the browser module reports for the same bytes (the
+    // golden bundle carries §8 but no graph, facilities, or declared
+    // sections §9–§11).
+    expect(inspection.capabilities).toEqual({
+      graph: { state: "absent" },
+      facilities: { state: "absent" },
+      spatialContext: { state: "available" },
+      sceneSources: { state: "absent" },
+      canonicalGraph: { state: "absent" },
+      networkQa: { state: "absent" },
+    });
   });
 
   it("resolves ok:false with invalid_bundle for garbage bytes, never rejecting or crashing", async () => {

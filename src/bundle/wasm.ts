@@ -94,10 +94,22 @@ export type SectionCapability =
   | { state: "invalid"; reason: string }
   | { state: "disabledByDependency"; requires: number };
 
-/** Per-section availability for one decoded bundle. */
+/**
+ * Per-section availability for one decoded bundle. Carries the shipping
+ * optional sections (§5 graph, §7 facilities, §8 spatial context) plus the
+ * three *declared* future sections (§9 scene sources, §10 canonical graph,
+ * §11 network QA) whose ids and dependency edges are format facts before
+ * their decoders arrive. The declared sections' outcomes come from the
+ * directory row and the §8 dependency edge; a present one whose requirement
+ * is unavailable reports `disabledByDependency` naming it.
+ */
 export interface CapabilityReportDto {
   graph: SectionCapability;
   facilities: SectionCapability;
+  spatialContext: SectionCapability;
+  sceneSources: SectionCapability;
+  canonicalGraph: SectionCapability;
+  networkQa: SectionCapability;
 }
 
 export interface DecodeResponseDto {
