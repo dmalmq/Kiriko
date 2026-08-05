@@ -1,6 +1,6 @@
 # KVB Spatial Context Section (§8) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add the §8 spatial-context section (one WGS84 local ENU frame per venue version + shared typed evidence registries) to the `kvb1` codec, wire it through the capability model from #37, and ship the section-dependency mechanism (§§9–11 → §8) proven end to end.
 
@@ -179,11 +179,11 @@ pub fn enu_basis_ecef(lon_deg: f64, lat_deg: f64) -> [[f64; 3]; 3] {
 pub fn venue_horizontal_bounds(venue: &VenueModel) -> Option<Bounds> { ... }
 ```
 
-- [ ] **Step 1: Write the failing tests** (module `#[cfg(test)] mod tests`): WGS84 constants; `wgs84_ecef(0.0, 0.0, 0.0) == [6378137.0, 0.0, 0.0]`; ECEF at the minimal fixture anchor is finite and `up` basis column ≈ normalized ecef origin (h=0); basis columns are unit-norm and mutually orthogonal; `venue_horizontal_bounds` on a `VenueModel` with a venue polygon returns its bounds and the fallback path returns the level-bounds union; `None` when empty.
-- [ ] **Step 2: Run to verify failure** — `cargo test --manifest-path core/Cargo.toml -p kiriko-model` — FAIL (module missing).
-- [ ] **Step 3: Implement** the module + `pub use` in `lib.rs`.
-- [ ] **Step 4: Run to verify pass** — `cargo test --manifest-path core/Cargo.toml -p kiriko-model` — PASS.
-- [ ] **Step 5: Commit** — `git add core/crates/kiriko-model && git commit -m "feat(kiriko-model): spatial context canonical types and WGS84 geodesy"`
+- [x] **Step 1: Write the failing tests** (module `#[cfg(test)] mod tests`): WGS84 constants; `wgs84_ecef(0.0, 0.0, 0.0) == [6378137.0, 0.0, 0.0]`; ECEF at the minimal fixture anchor is finite and `up` basis column ≈ normalized ecef origin (h=0); basis columns are unit-norm and mutually orthogonal; `venue_horizontal_bounds` on a `VenueModel` with a venue polygon returns its bounds and the fallback path returns the level-bounds union; `None` when empty.
+- [x] **Step 2: Run to verify failure** — `cargo test --manifest-path core/Cargo.toml -p kiriko-model` — FAIL (module missing).
+- [x] **Step 3: Implement** the module + `pub use` in `lib.rs`.
+- [x] **Step 4: Run to verify pass** — `cargo test --manifest-path core/Cargo.toml -p kiriko-model` — PASS.
+- [x] **Step 5: Commit** — `git add core/crates/kiriko-model && git commit -m "feat(kiriko-model): spatial context canonical types and WGS84 geodesy"`
 
 ---
 
@@ -211,11 +211,11 @@ pub fn venue_horizontal_bounds(venue: &VenueModel) -> Option<Bounds> { ... }
 - References in range: `frame.datum_ref < datums.len()`, `frame.anchor_evidence_ref < registration_evidence.len()`, `SourceLocator.artifact_ref` in range, `RegistrationEvidence.source_locator_ref` in range, `transform_ref`/`confidence_ref` in range when `Some`.
 - `source_properties`: ≤ 1024 entries, each key ≤ 256 chars; every `Value` finite via `value_to_dto`-style canonicalization (reuse `sections::JsonValueDto` conversion — expose `pub(crate) fn object_from_dto`/`object_to_dto` or reuse through `crate::sections`).
 
-- [ ] **Step 1: Write the failing tests**: round-trip a fully-populated `SpatialContext` (all eight registries non-empty) through encode→decode and assert equality; each validation rule rejects its violation (out-of-range ref, mismatched translation, non-unit basis, NaN anchor, too-long string, oversize map); `-0.0` normalizes to `0.0` in a coefficient.
-- [ ] **Step 2: Run to verify failure** — module missing → compile error.
-- [ ] **Step 3: Implement** DTOs, conversions, validation, `encode_spatial_context` (postcard of DTO), `decode_spatial_context` (`postcard_take_exact` + convert + validate).
-- [ ] **Step 4: Run to verify pass** — `cargo test --manifest-path core/Cargo.toml -p kiriko-bundle`.
-- [ ] **Step 5: Commit** — `git commit -m "feat(kiriko-bundle): §8 spatial context encode/decode with bounded validation"`
+- [x] **Step 1: Write the failing tests**: round-trip a fully-populated `SpatialContext` (all eight registries non-empty) through encode→decode and assert equality; each validation rule rejects its violation (out-of-range ref, mismatched translation, non-unit basis, NaN anchor, too-long string, oversize map); `-0.0` normalizes to `0.0` in a coefficient.
+- [x] **Step 2: Run to verify failure** — module missing → compile error.
+- [x] **Step 3: Implement** DTOs, conversions, validation, `encode_spatial_context` (postcard of DTO), `decode_spatial_context` (`postcard_take_exact` + convert + validate).
+- [x] **Step 4: Run to verify pass** — `cargo test --manifest-path core/Cargo.toml -p kiriko-bundle`.
+- [x] **Step 5: Commit** — `git commit -m "feat(kiriko-bundle): §8 spatial context encode/decode with bounded validation"`
 
 ---
 
@@ -302,11 +302,11 @@ fn classify_declared_section(
 
 Report assembly: `graph`/`facilities`/`spatial_context` direct outcomes; then `scene_sources`/`canonical_graph`/`network_qa` from the above (outcomes map = {8: spatial_capability}). Dependency gate applies to the present declared rows regardless of their direct version.
 
-- [ ] **Step 1: Write the failing tests** (codec.rs unit tests): serialization pin — full report JSON string with all six keys including `{"state":"disabledByDependency","requires":8}`; `CapabilityReport::default()` has six absent outcomes.
-- [ ] **Step 2: Run to verify failure.**
-- [ ] **Step 3: Implement** — format.rs ids/deps, codec fields + encode + decode + gating; update every `BundleDocument { ... }` construction site (codec.rs:176 compile, codec.rs tests, export.rs:267/392, sections.rs:532, synth.rs:698, synth_medial.rs:1958, tests/bundle.rs:751/1099) with `spatial_context: None` (compile sets it in Task 4).
-- [ ] **Step 4: Run to verify pass** — `cargo test --manifest-path core/Cargo.toml --workspace`.
-- [ ] **Step 5: Commit** — `git commit -m "feat(kiriko-bundle): wire §8 into the codec with declared section dependencies"`
+- [x] **Step 1: Write the failing tests** (codec.rs unit tests): serialization pin — full report JSON string with all six keys including `{"state":"disabledByDependency","requires":8}`; `CapabilityReport::default()` has six absent outcomes.
+- [x] **Step 2: Run to verify failure.**
+- [x] **Step 3: Implement** — format.rs ids/deps, codec fields + encode + decode + gating; update every `BundleDocument { ... }` construction site (codec.rs:176 compile, codec.rs tests, export.rs:267/392, sections.rs:532, synth.rs:698, synth_medial.rs:1958, tests/bundle.rs:751/1099) with `spatial_context: None` (compile sets it in Task 4).
+- [x] **Step 4: Run to verify pass** — `cargo test --manifest-path core/Cargo.toml --workspace`.
+- [x] **Step 5: Commit** — `git commit -m "feat(kiriko-bundle): wire §8 into the codec with declared section dependencies"`
 
 ---
 
@@ -374,11 +374,11 @@ fn build_spatial_context(venue: &VenueModel) -> Option<SpatialContext> {
 
 `compile_imdf_with_network` sets `document.spatial_context = build_spatial_context(&venue);` before encoding.
 
-- [ ] **Step 1: Write the failing tests** (tests/bundle.rs): compiled minimal bundle reports `spatialContext: Available` and decodes `document.spatial_context` with anchor `[139.767, 35.681]` (fixture centre), `world_translation == ecef_origin`, datum registry `[WGS84]`, `anchor_evidence_ref` in range; compile twice + reversed-zip-order compile are byte-identical (regression: no source-archive hashing).
-- [ ] **Step 2: Run to verify failure** — compile has no §8 → spatialContext absent / document.spatial_context None.
-- [ ] **Step 3: Implement** `build_spatial_context` + wire into compile.
-- [ ] **Step 4: Run to verify pass.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(kiriko-bundle): compile emits the §8 spatial context frame from venue bounds"`
+- [x] **Step 1: Write the failing tests** (tests/bundle.rs): compiled minimal bundle reports `spatialContext: Available` and decodes `document.spatial_context` with anchor `[139.767, 35.681]` (fixture centre), `world_translation == ecef_origin`, datum registry `[WGS84]`, `anchor_evidence_ref` in range; compile twice + reversed-zip-order compile are byte-identical (regression: no source-archive hashing).
+- [x] **Step 2: Run to verify failure** — compile has no §8 → spatialContext absent / document.spatial_context None.
+- [x] **Step 3: Implement** `build_spatial_context` + wire into compile.
+- [x] **Step 4: Run to verify pass.**
+- [x] **Step 5: Commit** — `git commit -m "feat(kiriko-bundle): compile emits the §8 spatial context frame from venue bounds"`
 
 ---
 
@@ -398,11 +398,11 @@ fn build_spatial_context(venue: &VenueModel) -> Option<SpatialContext> {
 7. Crafted §8 with `datum_ref: 99` (out of range) → `spatialContext: Invalid` — the invalid cross-reference disables the capability, not the bundle.
 8. Required-section strictness preserved: §2 (geometry) at version 2 → whole bundle still rejected (`UnsupportedBundleVersion`) — unchanged behavior, regression guard.
 
-- [ ] **Step 1: Write the failing tests** (all eight; scenario 3 is the heart of the ticket).
-- [ ] **Step 2: Run to verify failure** — no §8 handling yet → scenarios fail.
-- [ ] **Step 3: Implement** — covered by Task 3's gating + Task 2's validation; this task only adds the tests. Fix whatever they expose.
-- [ ] **Step 4: Run to verify pass** — `cargo test --manifest-path core/Cargo.toml --workspace`.
-- [ ] **Step 5: Commit** — `git commit -m "test(kiriko-bundle): prove disabledByDependency end to end with crafted bundles"`
+- [x] **Step 1: Write the failing tests** (all eight; scenario 3 is the heart of the ticket).
+- [x] **Step 2: Run to verify failure** — no §8 handling yet → scenarios fail.
+- [x] **Step 3: Implement** — covered by Task 3's gating + Task 2's validation; this task only adds the tests. Fix whatever they expose.
+- [x] **Step 4: Run to verify pass** — `cargo test --manifest-path core/Cargo.toml --workspace`.
+- [x] **Step 5: Commit** — `git commit -m "test(kiriko-bundle): prove disabledByDependency end to end with crafted bundles"`
 
 ---
 
@@ -426,11 +426,11 @@ export interface CapabilityReportDto {
 }
 ```
 
-- [ ] **Step 1: Write the failing tests**: wasm.test.ts — the golden fixture's full report must equal `{ graph: absent, facilities: absent, spatialContext: available, sceneSources: absent, canonicalGraph: absent, networkQa: absent }` (real built wasm); coreNative.test.ts — `inspection.capabilities` in `inspectionJson` carries the same six outcomes for the same golden bytes (native/browser parity at #38 level).
-- [ ] **Step 2: Run to verify failure** — TS type mismatch / report lacks the new keys.
-- [ ] **Step 3: Implement** the TS interface extension.
-- [ ] **Step 4: Run to verify pass** — `pnpm exec vitest run src/bundle/wasm.test.ts`, `pnpm --dir server exec vitest run test/coreNative.test.ts`.
-- [ ] **Step 5: Commit** — `git commit -m "feat(client): expose spatial context and declared-section capabilities"`
+- [x] **Step 1: Write the failing tests**: wasm.test.ts — the golden fixture's full report must equal `{ graph: absent, facilities: absent, spatialContext: available, sceneSources: absent, canonicalGraph: absent, networkQa: absent }` (real built wasm); coreNative.test.ts — `inspection.capabilities` in `inspectionJson` carries the same six outcomes for the same golden bytes (native/browser parity at #38 level).
+- [x] **Step 2: Run to verify failure** — TS type mismatch / report lacks the new keys.
+- [x] **Step 3: Implement** the TS interface extension.
+- [x] **Step 4: Run to verify pass** — `pnpm exec vitest run src/bundle/wasm.test.ts`, `pnpm --dir server exec vitest run test/coreNative.test.ts`.
+- [x] **Step 5: Commit** — `git commit -m "feat(client): expose spatial context and declared-section capabilities"`
 
 ---
 
@@ -443,10 +443,10 @@ export interface CapabilityReportDto {
 - Modify: `docs/gdb-data-reference.md` (KVB bundle sections inventory: add §8, note declared ids 9–11)
 - Modify: `docs/superpowers/plans/` — this plan, checkboxes marked
 
-- [ ] **Step 1:** Update the directory test first (fails on old expectation), then regenerate the fixture: `cargo run --manifest-path core/Cargo.toml -p kiriko-bundle --example compile_fixture`; write the printed hash into `minimal.kvb.sha256`; update `GOLDEN_BUNDLE_HASH`.
-- [ ] **Step 2:** Update `docs/gdb-data-reference.md` §KVB bundle sections.
-- [ ] **Step 3:** Run all gates: `cargo test --manifest-path core/Cargo.toml --workspace` (expect ~250+ passed), `pnpm exec tsc --noEmit`, `pnpm --dir server exec tsc --noEmit`, `pnpm exec vitest run`, `pnpm --dir server exec vitest run`.
-- [ ] **Step 4:** Commit — `git commit -m "chore: regenerate golden fixture with §8 and document the KVB section layout"`.
+- [x] **Step 1:** Update the directory test first (fails on old expectation), then regenerate the fixture: `cargo run --manifest-path core/Cargo.toml -p kiriko-bundle --example compile_fixture`; write the printed hash into `minimal.kvb.sha256`; update `GOLDEN_BUNDLE_HASH`.
+- [x] **Step 2:** Update `docs/gdb-data-reference.md` §KVB bundle sections.
+- [x] **Step 3:** Run all gates: `cargo test --manifest-path core/Cargo.toml --workspace` (expect ~250+ passed), `pnpm exec tsc --noEmit`, `pnpm --dir server exec tsc --noEmit`, `pnpm exec vitest run`, `pnpm --dir server exec vitest run`.
+- [x] **Step 4:** Commit — `git commit -m "chore: regenerate golden fixture with §8 and document the KVB section layout"`.
 
 ---
 
