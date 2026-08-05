@@ -316,10 +316,12 @@ pub(crate) fn compile_scene(
             .map(|l| l.resolved_scene_z_mm)
     };
 
-    let mut primitives = Vec::new();
+    let mut primitives: Vec<ScenePrimitive> = Vec::new();
     let mut measured_confidence: Option<u32> = None;
     let mut assumed_confidence: Option<u32> = None;
     let mut nominal_ceiling_assumption: Option<u32> = None;
+    let mut nominal_wall_assumption: Option<u32> = None;
+    let mut nominal_door_assumption: Option<u32> = None;
     let conf_ref = |registries: &mut Registries,
                     assumed: bool,
                     measured: &mut Option<u32>,
@@ -332,24 +334,75 @@ pub(crate) fn compile_scene(
         }
     };
 
-    let mut emitted = false;
+    // -- Collect level and unit geometry in canonical order. ----------------
+    struct LevelGeom {
+        id: String,
+        ring_xy: Vec<[i64; 2]>,
+        z: i64,
+    }
+    struct UnitGeom {
+        id: String,
+        level_id: String,
+        ring_xy: Vec<[i64; 2]>,
+        z: i64,
+        height_mm: i64,
+        surface_index: Option<u32>,
+    }
 
-    // Slabs: one per level with a polygon, on the resolved plane.
+    let mut levels_data: Vec<LevelGeom> = Vec::new();
     for level in &document.levels {
-        let Some(level_feature) = document
+        let Some(feature) = document
             .features
             .iter()
             .find(|f| f.feature_type == FeatureType::Level && f.id == level.id)
         else {
             continue;
         };
-        let Some(ring) = level_feature.geometry.as_ref().and_then(polygon_ring) else {
+        let Some(ring) = feature.geometry.as_ref().and_then(polygon_ring) else {
             continue;
         };
         let Some(z) = plane_z(&level.id) else {
             continue;
         };
-        emitted = true;
+        levels_data.push(LevelGeom {
+            id: level.id.clone(),
+            ring_xy: ring
+                .iter()
+                .map(|[lon, lat]| project_local_mm(frame, *lon, *lat))
+                .collect(),
+            z,
+        });
+    }
+    let mut units_data: Vec<UnitGeom> = Vec::new();
+    for unit in document
+        .features
+        .iter()
+        .filter(|f| f.feature_type == FeatureType::Unit)
+    {
+        let Some(level_id) = unit.level_id.as_deref() else { continue };
+        let Some(z) = plane_z(level_id) else { continue };
+        let Some(ring) = unit.geometry.as_ref().and_then(polygon_ring) else {
+            continue;
+        };
+        let height_mm = unit_height_mm(unit, profile).unwrap_or(profile.ceiling_height_mm);
+        units_data.push(UnitGeom {
+            id: unit.id.clone(),
+            level_id: level_id.to_string(),
+            ring_xy: ring
+                .iter()
+                .map(|[lon, lat]| project_local_mm(frame, *lon, *lat))
+                .collect(),
+            z,
+            height_mm,
+            surface_index: None,
+        });
+    }
+    if levels_data.is_empty() && units_data.is_empty() {
+        return None;
+    }
+
+    // -- Slabs: one per level, on the resolved plane. -----------------------
+    for level in &levels_data {
         let locator = find_or_push_locator(&mut spatial.registries, &level.id);
         let confidence_ref = conf_ref(
             &mut spatial.registries,
@@ -373,26 +426,14 @@ pub(crate) fn compile_scene(
             canonical_feature_id: Some(level.id.clone()),
             source_locator_refs: vec![locator],
             evidence_refs: vec![evidence_ref],
-            geometry: PrimitiveGeometry::Mesh(ring_mesh(frame, &ring, z)),
+            geometry: PrimitiveGeometry::Mesh(ring_mesh_from_xy(&level.ring_xy, level.z)),
         });
     }
 
-    // Ceilings and surfaces: one per unit.
-    for unit in document
-        .features
-        .iter()
-        .filter(|f| f.feature_type == FeatureType::Unit)
-    {
-        let Some(level_id) = unit.level_id.as_deref() else { continue };
-        let Some(z) = plane_z(level_id) else { continue };
-        let Some(ring) = unit.geometry.as_ref().and_then(polygon_ring) else {
-            continue;
-        };
-        emitted = true;
+    // -- Ceilings and surfaces: one per unit. -------------------------------
+    for unit in &mut units_data {
         let locator = find_or_push_locator(&mut spatial.registries, &unit.id);
-        let source_height = unit_height_mm(unit, profile);
 
-        // Surface: the navigable unit polygon on the plane.
         let surface_confidence = conf_ref(
             &mut spatial.registries,
             false,
@@ -406,20 +447,28 @@ pub(crate) fn compile_scene(
             None,
             "navigable surface from unit polygon",
         );
+        let surface_index = primitives.len() as u32;
         primitives.push(ScenePrimitive {
             id: format!("surface-{}", unit.id),
             role: PrimitiveRole::Surface,
-            level_id: level_id.to_string(),
+            level_id: unit.level_id.clone(),
             occlusion: OcclusionClass::Opaque,
             confidence_ref: surface_confidence,
             canonical_feature_id: Some(unit.id.clone()),
             source_locator_refs: vec![locator],
             evidence_refs: vec![surface_evidence],
-            geometry: PrimitiveGeometry::Mesh(ring_mesh(frame, &ring, z)),
+            geometry: PrimitiveGeometry::Mesh(ring_mesh_from_xy(&unit.ring_xy, unit.z)),
         });
+        unit.surface_index = Some(surface_index);
 
-        // Ceiling: the unit polygon at the unit's height (source or nominal).
-        let (height, assumed) = match source_height {
+        let (height, assumed) = match unit_height_mm(
+            document
+                .features
+                .iter()
+                .find(|f| f.id == unit.id)
+                .expect("unit feature"),
+            profile,
+        ) {
             Some(height) => (height, false),
             None => (profile.ceiling_height_mm, true),
         };
@@ -449,26 +498,229 @@ pub(crate) fn compile_scene(
         primitives.push(ScenePrimitive {
             id: format!("ceiling-{}", unit.id),
             role: PrimitiveRole::Ceiling,
-            level_id: level_id.to_string(),
+            level_id: unit.level_id.clone(),
             occlusion: OcclusionClass::Opaque,
             confidence_ref: ceiling_confidence,
             canonical_feature_id: Some(unit.id.clone()),
             source_locator_refs: vec![locator],
             evidence_refs: vec![ceiling_evidence],
-            geometry: PrimitiveGeometry::Mesh(ring_mesh(frame, &ring, z + height)),
+            geometry: PrimitiveGeometry::Mesh(ring_mesh_from_xy(&unit.ring_xy, unit.z + height)),
+        });
+    }
+    // -- Walls: one vertical quad per unique unit-boundary edge. -------------
+    // A shared edge between two units yields one wall at the minimum of the
+    // two heights (source or nominal). Drawing lines never add geometry:
+    // corroborated ones mark an existing boundary, all others are detail
+    // linework.
+    let nominal_wall = profile.wall_height_mm;
+    let mut walls_by_level: Vec<((String, i64, i64, i64, i64), Vec<u32>)> = Vec::new();
+    for unit in &units_data {
+        for (a, b) in ring_edges(&unit.ring_xy) {
+            let key = if a <= b { (a, b) } else { (b, a) };
+            match walls_by_level.iter_mut().find(|(k, _)| {
+                k.0 == unit.level_id && (k.1, k.2, k.3, k.4) == (key.0[0], key.0[1], key.1[0], key.1[1])
+            }) {
+                Some((_, heights)) => heights.push(unit.height_mm as u32),
+                None => walls_by_level.push((
+                    (unit.level_id.clone(), key.0[0], key.0[1], key.1[0], key.1[1]),
+                    vec![unit.height_mm as u32],
+                )),
+            }
+        }
+    }
+    walls_by_level.sort_by(|a, b| a.0.cmp(&b.0));
+    for ((level_id, ax, ay, bx, by), heights) in walls_by_level {
+        let z = plane_z(&level_id).expect("level has a plane");
+        let height = *heights.iter().min().expect("at least one height") as i64;
+        let assumed = height == nominal_wall;
+        let wall_confidence = conf_ref(
+            &mut spatial.registries,
+            assumed,
+            &mut measured_confidence,
+            &mut assumed_confidence,
+        );
+        let wall_assumption = if assumed {
+            Some(*nominal_wall_assumption.get_or_insert_with(|| {
+                push_assumption(
+                    &mut spatial.registries,
+                    &format!("nominal wall height {} mm", profile.wall_height_mm),
+                )
+            }))
+        } else {
+            None
+        };
+        let level_locator = find_or_push_locator(&mut spatial.registries, &level_id);
+        let wall_evidence = push_evidence(
+            &mut spatial.registries,
+            level_locator,
+            Some(wall_confidence),
+            wall_assumption,
+            if assumed { "wall at nominal height" } else { "wall at source height" },
+        );
+        let n = primitives
+            .iter()
+            .filter(|p| p.role == PrimitiveRole::Wall && p.level_id == level_id)
+            .count();
+        primitives.push(ScenePrimitive {
+            id: format!("wall-{level_id}-{n}"),
+            role: PrimitiveRole::Wall,
+            level_id,
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref: wall_confidence,
+            canonical_feature_id: None,
+            source_locator_refs: vec![level_locator],
+            evidence_refs: vec![wall_evidence],
+            geometry: PrimitiveGeometry::Mesh(wall_mesh([ax, ay], [bx, by], z, height)),
         });
     }
 
-    if !emitted {
-        return None;
+    // -- Portals: openings on unit-boundary edges. ---------------------------
+    let tolerance = profile.corroboration_tolerance_mm;
+    let door_height = profile.door_height_mm;
+    let door_assumption = *nominal_door_assumption.get_or_insert_with(|| {
+        push_assumption(
+            &mut spatial.registries,
+            &format!("nominal door height {door_height} mm"),
+        )
+    });
+    for opening in document
+        .features
+        .iter()
+        .filter(|f| f.feature_type == FeatureType::Opening)
+    {
+        let Some(level_id) = opening.level_id.as_deref() else { continue };
+        let Some(z) = plane_z(level_id) else { continue };
+        let Some(line) = opening.geometry.as_ref().and_then(linestring) else {
+            continue;
+        };
+        let line_xy: Vec<[i64; 2]> = line
+            .iter()
+            .map(|[lon, lat]| project_local_mm(frame, *lon, *lat))
+            .collect();
+        let (p0, p1) = (line_xy[0], *line_xy.last().expect("line has two endpoints"));
+
+        // The edge this opening sits on: the two units sharing it become the
+        // portal's connects; an edge on the venue boundary connects the unit
+        // to the level slab.
+        // Collect the surfaces whose boundary edges the opening lies on.
+        let mut matched_units: Vec<u32> = Vec::new();
+        let mut matched_edge = false;
+        for unit in &units_data {
+            if unit.level_id != level_id {
+                continue;
+            }
+            for (a, b) in ring_edges(&unit.ring_xy) {
+                if !point_near_segment(p0, a, b, tolerance) || !point_near_segment(p1, a, b, tolerance) {
+                    continue;
+                }
+                // Both endpoints of the opening lie on this edge.
+                matched_units.push(unit.surface_index.expect("unit surface exists"));
+                matched_edge = true;
+                break;
+            }
+        }
+        if !matched_edge {
+            continue; // an opening on no boundary is not part of the topology
+        }
+        matched_units.sort_unstable();
+        matched_units.dedup();
+        let (a_idx, b_idx) = if matched_units.len() >= 2 {
+            (matched_units[0], matched_units[1])
+        } else if matched_units.len() == 1 {
+            // An opening on the venue boundary connects the unit to its slab.
+            let slab_index = primitives
+                .iter()
+                .position(|p| p.id == format!("slab-{level_id}"))
+                .expect("slab exists") as u32;
+            (matched_units[0], slab_index)
+        } else {
+            continue;
+        };
+
+        let locator = find_or_push_locator(&mut spatial.registries, &opening.id);
+        let confidence_ref = conf_ref(
+            &mut spatial.registries,
+            true,
+            &mut measured_confidence,
+            &mut assumed_confidence,
+        );
+        let evidence_ref = push_evidence(
+            &mut spatial.registries,
+            locator,
+            Some(confidence_ref),
+            Some(door_assumption),
+            "portal opening at nominal door height",
+        );
+        primitives.push(ScenePrimitive {
+            id: format!("portal-{}", opening.id),
+            role: PrimitiveRole::Portal,
+            level_id: level_id.to_string(),
+            occlusion: OcclusionClass::Transparent,
+            confidence_ref,
+            canonical_feature_id: Some(opening.id.clone()),
+            source_locator_refs: vec![locator],
+            evidence_refs: vec![evidence_ref],
+            geometry: PrimitiveGeometry::Portal {
+                connects: (a_idx, b_idx),
+                opening: wall_mesh(p0, p1, z, door_height),
+            },
+        });
     }
+
     Some(SceneSection {
         primitives,
         descriptor: None,
     })
 }
 
-#[cfg(test)]
+/// Consecutive ring edges as vertex pairs.
+fn ring_edges(ring: &[[i64; 2]]) -> Vec<([i64; 2], [i64; 2])> {
+    let mut edges = Vec::with_capacity(ring.len());
+    for i in 0..ring.len() {
+        edges.push((ring[i], ring[(i + 1) % ring.len()]));
+    }
+    edges
+}
+
+/// A vertical quad from `z` to `z + height` spanning `a`→`b`.
+fn wall_mesh(a: [i64; 2], b: [i64; 2], z: i64, height: i64) -> Mesh {
+    Mesh {
+        positions: vec![[a[0], a[1], z], [b[0], b[1], z], [b[0], b[1], z + height], [a[0], a[1], z + height]],
+        faces: vec![[0, 1, 2], [0, 2, 3]],
+    }
+}
+
+/// A projected, triangulated mesh from an already-projected ring at `z`.
+fn ring_mesh_from_xy(xy: &[[i64; 2]], z: i64) -> Mesh {
+    Mesh {
+        positions: xy.iter().map(|[x, y]| [*x, *y, z]).collect(),
+        faces: triangulate_simple(xy),
+    }
+}
+
+/// Squared distance from `p` to the segment `a`–`b`.
+fn point_segment_dist2(p: [i64; 2], a: [i64; 2], b: [i64; 2]) -> i128 {
+    let (ax, ay, bx, by, px, py) = (a[0], a[1], b[0], b[1], p[0], p[1]);
+    let dx = i128::from(bx - ax);
+    let dy = i128::from(by - ay);
+    let len2 = dx * dx + dy * dy;
+    if len2 == 0 {
+        let (qx, qy) = (i128::from(px - ax), i128::from(py - ay));
+        return qx * qx + qy * qy;
+    }
+    let t = (i128::from(px - ax) * dx + i128::from(py - ay) * dy).max(0).min(len2);
+    let (cx, cy) = (i128::from(ax) + dx * t / len2, i128::from(ay) + dy * t / len2);
+    let (qx, qy) = (i128::from(px) - cx, i128::from(py) - cy);
+    qx * qx + qy * qy
+}
+
+/// Whether `p` is within `tolerance` millimetres of the segment `a`–`b`.
+fn point_near_segment(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> bool {
+    let t = i128::from(tolerance);
+    point_segment_dist2(p, a, b) <= t * t
+}
+
+#[cfg(test)]#[cfg(test)]
 mod tests {
     use kiriko_model::spatial::{Axes, Frame, LengthUnit, enu_basis_ecef, wgs84_ecef};
 

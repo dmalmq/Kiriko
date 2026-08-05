@@ -156,6 +156,15 @@ pub fn build_multi_floor_imdf_zip() -> Vec<u8> {
               "properties":{{"category":"pedestrian.transit","level_id":"b1000003-0000-4000-8000-000000000003"}}}}
         ]}}"#
     );
+    // A standalone detail line, deliberately on no space boundary: it must be
+    // ignored by the wall compiler (detail linework, not a structural wall).
+    let drawings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"e1000001-0000-4000-8000-000000000001","type":"Feature","feature_type":"drawing",
+              "geometry":{{"type":"LineString","coordinates":[[139.7665,35.6808],[139.7675,35.6812]]}},
+              "properties":{{"category":"detail","level_id":"b1000003-0000-4000-8000-000000000003"}}}}
+        ]}}"#
+    );
 
     let entries: &[(&str, String)] = &[
         ("manifest.json", manifest.to_string()),
@@ -164,6 +173,7 @@ pub fn build_multi_floor_imdf_zip() -> Vec<u8> {
         ("level.geojson", levels),
         ("unit.geojson", units),
         ("opening.geojson", openings),
+        ("drawing.geojson", drawings),
     ];
 
     let mut cursor = Cursor::new(Vec::new());
