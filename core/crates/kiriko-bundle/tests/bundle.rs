@@ -1819,3 +1819,60 @@ fn modern_elevations_are_resolved() {
         "a §8-backed bundle answers with resolved planes"
     );
 }
+
+// -- Stage 0: frozen final-shape fixture (#42) -----------------------------
+
+#[test]
+fn stage0_fixture_is_frozen_and_reproducible() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let committed = fs::read(repo_root.join("tests/fixtures/stage0.kvb")).expect(
+        "tests/fixtures/stage0.kvb must be committed (run `cargo run -p kiriko-bundle --example compile_fixture`)",
+    );
+    let checksum_file = fs::read_to_string(repo_root.join("tests/fixtures/stage0.kvb.sha256"))
+        .expect("tests/fixtures/stage0.kvb.sha256 must be committed");
+    let expected_hash = checksum_file
+        .split_whitespace()
+        .next()
+        .expect("sha256 line has a hash");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&committed)),
+        expected_hash,
+        "the committed sha256 must match the frozen bytes"
+    );
+
+    let source = support::build_minimal_imdf_zip();
+    let compiled = compile_imdf_with_network(
+        &source,
+        BundleMetadata {
+            dataset_id: "minimal".to_string(),
+            version: 1,
+        },
+        Some(NETWORK_JUNCTIONS),
+        Some(NETWORK_PATHS),
+        Some(FACILITIES),
+        false,
+        false,
+        None,
+        &[],
+    )
+    .expect("fixture inputs compile");
+    assert_eq!(
+        compiled.bytes, committed,
+        "compiling the fixture inputs must reproduce the committed stage0 bytes exactly"
+    );
+
+    let document = decode_bundle(&committed).expect("stage0 fixture decodes");
+    assert_eq!(document.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(document.capabilities.graph(), SectionCapability::Available);
+    assert_eq!(document.capabilities.facilities(), SectionCapability::Available);
+    assert_eq!(document.levels.len(), 3);
+    assert_eq!(document.features.len(), 27);
+    let graph = document.graph.as_ref().expect("stage0 fixture carries a graph");
+    assert_eq!(graph.nodes.len(), 3);
+    assert_eq!(graph.edges.len(), 2);
+    assert_eq!(
+        document.facilities.as_ref().expect("stage0 fixture carries facilities").items.len(),
+        2,
+        "the unmappable-floor facility is dropped, as at compile time"
+    );
+}

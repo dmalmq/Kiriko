@@ -16,7 +16,7 @@ use std::fs;
 use std::io::{Cursor, Write};
 use std::path::PathBuf;
 
-use kiriko_bundle::{BundleMetadata, compile_imdf};
+use kiriko_bundle::{BundleMetadata, compile_imdf, compile_imdf_with_network};
 use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -64,26 +64,58 @@ fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Writes `bytes` to `tests/fixtures/<name>.kvb` and prints its sha256 line
+/// (to be written into `<name>.kvb.sha256`).
+fn write_fixture(name: &str, bytes: &[u8], note: &str) {
+    let out_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../../tests/fixtures/{name}.kvb"));
+    fs::write(&out_path, bytes).unwrap_or_else(|e| panic!("write {out_path:?}: {e}"));
+    println!(
+        "{}  tests/fixtures/{name}.kvb",
+        hex_lower(&Sha256::digest(bytes))
+    );
+    eprintln!("wrote {} bytes to {} ({note})", bytes.len(), out_path.display());
+}
+
+/// The Stage 0 fixture's routing network and point facilities — the same
+/// values the bundle integration tests use (`NETWORK_JUNCTIONS`/`NETWORK_PATHS`/
+/// `FACILITIES` in `tests/bundle.rs`), inlined because an example cannot
+/// import test code.
+const STAGE0_JUNCTIONS: &str = r#"{"type":"FeatureCollection","features":[
+  {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+  {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}},
+  {"type":"Feature","properties":{"NODEID":3,"FLOOR":"F2"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}}]}"#;
+const STAGE0_PATHS: &str = r#"{"type":"FeatureCollection","features":[
+  {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}},
+  {"type":"Feature","properties":{"FNODEID":2,"TNODEID":3,"cost":5000},"geometry":{"type":"MultiLineString","coordinates":[[[139.001,35.0],[139.001,35.0]]]}},
+  {"type":"Feature","properties":{"FNODEID":2,"TNODEID":99,"cost":10},"geometry":{"type":"MultiLineString","coordinates":[[[139.001,35.0],[139.002,35.0]]]}}]}"#;
+const STAGE0_FACILITIES: &str = r#"{"type":"FeatureCollection","features":[
+  {"type":"Feature","properties":{"name":"Store A","floor":"F1","image":"/marker/ticket.png"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+  {"type":"Feature","properties":{"name":"Store B","floor":"F2","image":""},"geometry":{"type":"Point","coordinates":[139.001,35.0]}},
+  {"type":"Feature","properties":{"name":"Bad","floor":"garbage","image":""},"geometry":{"type":"Point","coordinates":[139.0,35.0]}}]}"#;
+
 fn main() {
     let source = build_minimal_imdf_zip();
     let metadata = BundleMetadata {
         dataset_id: "minimal".to_string(),
         version: 1,
     };
-    let compiled = compile_imdf(&source, metadata).expect("minimal fixture must compile");
+    let compiled = compile_imdf(&source, metadata.clone()).expect("minimal fixture must compile");
+    write_fixture("minimal", &compiled.bytes, &format!("levels={}, features={}", compiled.stats.levels, compiled.stats.features));
 
-    let out_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../tests/fixtures/minimal.kvb");
-    fs::write(&out_path, &compiled.bytes).unwrap_or_else(|e| panic!("write {out_path:?}: {e}"));
-
-    let mut digest = [0u8; 32];
-    digest.copy_from_slice(&Sha256::digest(&compiled.bytes));
-    println!("{}", hex_lower(&digest));
-    eprintln!(
-        "wrote {} bytes to {} (levels={}, features={})",
-        compiled.bytes.len(),
-        out_path.display(),
-        compiled.stats.levels,
-        compiled.stats.features
-    );
+    // Stage 0's final-shape fixture: required sections + routing graph +
+    // point facilities + spatial context, cut once against the final schema.
+    let stage0 = compile_imdf_with_network(
+        &source,
+        metadata,
+        Some(STAGE0_JUNCTIONS),
+        Some(STAGE0_PATHS),
+        Some(STAGE0_FACILITIES),
+        false,
+        false,
+        None,
+        &[],
+    )
+    .expect("stage0 fixture must compile");
+    write_fixture("stage0", &stage0.bytes, "network + facilities + spatial context");
 }
