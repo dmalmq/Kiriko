@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 
+use crate::SceneError;
 use crate::format::{
     SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel, SemanticRole,
 };
 use crate::glb::read_glb;
 use crate::quantize::{encode_normal_oct, quantize_positions};
 use crate::roles::{occlusion_for_role, role_for_category};
-use crate::SceneError;
 
 /// Deriver output plus the gate-1 measurement the CLI reports.
 #[derive(Debug, Clone)]
@@ -163,12 +163,15 @@ pub fn derive_scene_with_report(
                 features.len()
             ))
         })?;
-        let group = groups.entry((feature.level_index, role_rank(feature.role))).or_default();
+        let group = groups
+            .entry((feature.level_index, role_rank(feature.role)))
+            .or_default();
         group.positions.extend_from_slice(&primitive.positions);
         group.normals.extend_from_slice(&primitive.normals);
-        group
-            .feature_indices
-            .extend(std::iter::repeat_n(primitive.feature_id, primitive.positions.len()));
+        group.feature_indices.extend(std::iter::repeat_n(
+            primitive.feature_id,
+            primitive.positions.len(),
+        ));
         if !primitive.indices_were_identity {
             gathered_primitives += 1;
         }
@@ -198,7 +201,11 @@ pub fn derive_scene_with_report(
             quantization_scale: scale,
             vertex_count: group.positions.len() as u32,
             positions: quantized,
-            normals: group.normals.iter().map(|normal| encode_normal_oct(*normal)).collect(),
+            normals: group
+                .normals
+                .iter()
+                .map(|normal| encode_normal_oct(*normal))
+                .collect(),
             feature_indices: group.feature_indices,
         });
     }
@@ -224,7 +231,10 @@ pub fn derive_scene_with_report(
     };
 
     // 7. Return the document plus the gate measurement.
-    Ok(DeriveReport { document, gathered_primitives })
+    Ok(DeriveReport {
+        document,
+        gathered_primitives,
+    })
 }
 
 /// One accumulating group of concatenated triangle-list geometry.
@@ -253,5 +263,8 @@ const ROLE_ORDER: [SemanticRole; 12] = [
 ];
 
 fn role_rank(role: SemanticRole) -> u8 {
-    ROLE_ORDER.iter().position(|&candidate| candidate == role).unwrap_or(11) as u8
+    ROLE_ORDER
+        .iter()
+        .position(|&candidate| candidate == role)
+        .unwrap_or(11) as u8
 }

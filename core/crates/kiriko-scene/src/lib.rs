@@ -7,12 +7,12 @@ mod glb;
 mod quantize;
 mod roles;
 
-pub use derive::{derive_scene, derive_scene_with_report, DeriveReport};
+pub use derive::{DeriveReport, derive_scene, derive_scene_with_report};
 pub use format::{
-    decode_scene, encode_scene, OcclusionClass, SceneBatch, SceneDocument, SceneFeature,
-    SceneHeader, SceneLevel, SemanticRole, SCENE_MAGIC,
+    OcclusionClass, SCENE_MAGIC, SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel,
+    SemanticRole, decode_scene, encode_scene,
 };
-pub use glb::{read_glb, GlbFeatureRow, GlbPrimitive, GlbScene};
+pub use glb::{GlbFeatureRow, GlbPrimitive, GlbScene, read_glb};
 pub use quantize::{decode_normal_oct, encode_normal_oct, quantize_positions};
 pub use roles::{occlusion_for_role, role_for_category};
 

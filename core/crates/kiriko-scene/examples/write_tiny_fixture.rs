@@ -66,7 +66,7 @@ fn synthetic_glb_with(indices: Option<&[u32]>) -> Vec<u8> {
             bin.extend_from_slice(&value.to_le_bytes());
         }
     }
-    while bin.len() % 4 != 0 {
+    while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
 
@@ -130,8 +130,14 @@ fn synthetic_glb_with(indices: Option<&[u32]>) -> Vec<u8> {
     });
 
     if let Some(indices) = indices {
-        let view_index = gltf["bufferViews"].as_array().map(Vec::len).expect("bufferViews");
-        let accessor_index = gltf["accessors"].as_array().map(Vec::len).expect("accessors");
+        let view_index = gltf["bufferViews"]
+            .as_array()
+            .map(Vec::len)
+            .expect("bufferViews");
+        let accessor_index = gltf["accessors"]
+            .as_array()
+            .map(Vec::len)
+            .expect("accessors");
         gltf["bufferViews"]
             .as_array_mut()
             .expect("bufferViews")
@@ -144,7 +150,7 @@ fn synthetic_glb_with(indices: Option<&[u32]>) -> Vec<u8> {
     }
 
     let mut json_chunk = serde_json::to_vec(&gltf).expect("serialize gltf");
-    while json_chunk.len() % 4 != 0 {
+    while !json_chunk.len().is_multiple_of(4) {
         json_chunk.push(b' ');
     }
 

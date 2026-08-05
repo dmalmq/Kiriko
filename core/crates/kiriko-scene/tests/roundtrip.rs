@@ -1,6 +1,6 @@
 use kiriko_scene::{
-    decode_scene, encode_scene, OcclusionClass, SceneBatch, SceneDocument, SceneFeature,
-    SceneHeader, SceneLevel, SemanticRole,
+    OcclusionClass, SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel, SemanticRole,
+    decode_scene, encode_scene,
 };
 
 fn sample_document() -> SceneDocument {
@@ -9,12 +9,28 @@ fn sample_document() -> SceneDocument {
             format_version: 1,
             deriver_version: 1,
             source_hash: "sha256:abc".to_string(),
-            frame_origin_ecef: [-3_959_720.400_616_091_7, 3_350_435.954_423_757_7, 3_699_347.113_056_253_6],
+            frame_origin_ecef: [
+                -3_959_720.400_616_091_7,
+                3_350_435.954_423_757_7,
+                3_699_347.113_056_253_6,
+            ],
             world_transform: [
-                -0.645_931_378_009_025_9, -0.763_395_477_392_524_9, 0.0, 0.0,
-                0.445_240_265_906_090_45, -0.376_730_891_155_057_09, 0.812_302_247_482_666, 0.0,
-                -0.620_107_862_004_050_66, 0.524_691_510_076_307_21, 0.583_236_709_008_109, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                -0.645_931_378_009_025_9,
+                -0.763_395_477_392_524_9,
+                0.0,
+                0.0,
+                0.445_240_265_906_090_45,
+                -0.376_730_891_155_057_1,
+                0.812_302_247_482_666,
+                0.0,
+                -0.620_107_862_004_050_7,
+                0.524_691_510_076_307_2,
+                0.583_236_709_008_109,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
             ],
             bounds_min: [-10.0, -20.0, -115.7],
             bounds_max: [650.0, 1108.0, 115.7],
@@ -78,7 +94,11 @@ use kiriko_scene::{decode_normal_oct, encode_normal_oct, quantize_positions};
 
 #[test]
 fn quantized_positions_stay_within_one_millimetre() {
-    let input = vec![[0.0_f32, 0.0, 0.0], [12.5, -3.25, 7.125], [650.0, 1108.0, 115.65]];
+    let input = vec![
+        [0.0_f32, 0.0, 0.0],
+        [12.5, -3.25, 7.125],
+        [650.0, 1108.0, 115.65],
+    ];
     let (quantized, origin, scale) = quantize_positions(&input);
     for (index, source) in input.iter().enumerate() {
         let q = quantized[index];
@@ -87,7 +107,10 @@ fn quantized_positions_stay_within_one_millimetre() {
             let error = (restored - source[axis]).abs();
             let extent = 1108.0_f32;
             // u16 over the largest extent gives ~17 mm; assert the bound explicitly.
-            assert!(error <= extent / 65_535.0 + 1e-4, "axis {axis} error {error}");
+            assert!(
+                error <= extent / 65_535.0 + 1e-4,
+                "axis {axis} error {error}"
+            );
         }
     }
 }

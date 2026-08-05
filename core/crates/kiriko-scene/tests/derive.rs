@@ -52,7 +52,7 @@ fn synthetic_glb_with(indices: Option<&[u32]>) -> Vec<u8> {
             bin.extend_from_slice(&value.to_le_bytes());
         }
     }
-    while bin.len() % 4 != 0 {
+    while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
 
@@ -116,8 +116,14 @@ fn synthetic_glb_with(indices: Option<&[u32]>) -> Vec<u8> {
     });
 
     if let Some(indices) = indices {
-        let view_index = gltf["bufferViews"].as_array().map(Vec::len).expect("bufferViews");
-        let accessor_index = gltf["accessors"].as_array().map(Vec::len).expect("accessors");
+        let view_index = gltf["bufferViews"]
+            .as_array()
+            .map(Vec::len)
+            .expect("bufferViews");
+        let accessor_index = gltf["accessors"]
+            .as_array()
+            .map(Vec::len)
+            .expect("accessors");
         gltf["bufferViews"]
             .as_array_mut()
             .expect("bufferViews")
@@ -130,7 +136,7 @@ fn synthetic_glb_with(indices: Option<&[u32]>) -> Vec<u8> {
     }
 
     let mut json_chunk = serde_json::to_vec(&gltf).expect("serialize gltf");
-    while json_chunk.len() % 4 != 0 {
+    while !json_chunk.len().is_multiple_of(4) {
         json_chunk.push(b' ');
     }
 
@@ -192,7 +198,7 @@ fn identity_indices_take_the_fast_path() {
     assert_eq!(scene.primitives[0].positions[0], [0.0, 0.0, 0.0]);
 }
 
-use kiriko_scene::{derive_scene, role_for_category, SemanticRole};
+use kiriko_scene::{SemanticRole, derive_scene, role_for_category};
 
 #[test]
 fn maps_revit_categories_onto_semantic_roles() {
@@ -216,10 +222,19 @@ fn maps_revit_stair_components_and_supports() {
     assert_eq!(role_for_category("Landings"), SemanticRole::Stairs);
     assert_eq!(role_for_category("Supports"), SemanticRole::Structure);
     assert_eq!(role_for_category("Wall Sweeps"), SemanticRole::Structure);
-    assert_eq!(role_for_category("Structural Framing"), SemanticRole::Structure);
-    assert_eq!(role_for_category("Mechanical Equipment"), SemanticRole::Service);
+    assert_eq!(
+        role_for_category("Structural Framing"),
+        SemanticRole::Structure
+    );
+    assert_eq!(
+        role_for_category("Mechanical Equipment"),
+        SemanticRole::Service
+    );
     // Genuinely ambiguous mass stays contextual rather than guessing.
-    assert_eq!(role_for_category("Specialty Equipment"), SemanticRole::Context);
+    assert_eq!(
+        role_for_category("Specialty Equipment"),
+        SemanticRole::Context
+    );
     assert_eq!(role_for_category("Curtain Panels"), SemanticRole::Context);
 }
 
