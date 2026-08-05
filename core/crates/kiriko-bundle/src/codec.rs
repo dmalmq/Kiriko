@@ -211,6 +211,10 @@ pub fn compile_imdf_with_network(
     } else {
         None
     };
+    // Derived before `document` consumes `venue`. `None` when the venue has
+    // no computable horizontal extent, which leaves the spatial-context
+    // capability `absent` rather than fabricating a frame.
+    let spatial_context = crate::spatial_section::build_spatial_context(&venue);
     let stats = BundleStats {
         levels: venue.levels.len() as u32,
         features: venue.features.len() as u32,
@@ -226,7 +230,7 @@ pub fn compile_imdf_with_network(
         stats,
         graph: None,
         facilities: None,
-        spatial_context: None,
+        spatial_context,
         capabilities: CapabilityReport::default(),
     };
 

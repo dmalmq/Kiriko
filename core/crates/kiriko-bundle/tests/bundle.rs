@@ -465,14 +465,14 @@ fn envelope_matches_documented_byte_layout() {
 }
 
 #[test]
-fn directory_is_sorted_fixed_width_and_required_sections_only() {
+fn directory_is_sorted_fixed_width_and_emits_the_spatial_context_section() {
     let bytes = compile_minimal();
     let payload = decompress_payload(&bytes);
 
     let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
     assert_eq!(
-        count, 3,
-        "Phase Two emits exactly manifest, geometry, and stores"
+        count, 4,
+        "a compiled venue emits manifest, geometry, stores, and the spatial context section"
     );
 
     let mut ids = Vec::new();
@@ -494,8 +494,8 @@ fn directory_is_sorted_fixed_width_and_required_sections_only() {
     }
     assert_eq!(
         ids,
-        vec![1, 2, 3],
-        "only manifest(1), geometry(2), and stores(3) are emitted"
+        vec![1, 2, 3, 8],
+        "manifest(1), geometry(2), stores(3), and spatial context(8) are emitted"
     );
     assert_eq!(
         cursor,
@@ -505,6 +505,62 @@ fn directory_is_sorted_fixed_width_and_required_sections_only() {
 }
 
 // -- Step 2/3: section round trip and determinism --------------------------
+
+#[test]
+fn compile_emits_a_spatial_context_frame_from_the_venue_bounds() {
+    let bytes = compile_minimal();
+    let document = decode_bundle(&bytes).expect("bundle decodes");
+    let context = document
+        .spatial_context
+        .expect("a compiled venue with geometry must carry a spatial context section");
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::Available
+    );
+
+    // The fixture venue polygon spans 139.766..139.768 / 35.680..35.682, so
+    // the canonical horizontal-bounds centre is exactly the display point.
+    assert_eq!(context.frame.anchor, [139.767, 35.681]);
+    assert_eq!(
+        context.frame.ecef_origin,
+        kiriko_model::spatial::wgs84_ecef(139.767, 35.681, 0.0),
+        "the ECEF transform must be exactly the WGS84 conversion of the anchor"
+    );
+    assert_eq!(
+        context.frame.enu_basis_ecef,
+        kiriko_model::spatial::enu_basis_ecef(139.767, 35.681),
+        "the world transform rotation must be the ENU basis at the anchor"
+    );
+    assert_eq!(context.frame.world_translation, context.frame.ecef_origin);
+    assert_eq!(context.frame.axes, kiriko_model::spatial::Axes::EastNorthUp);
+    assert_eq!(context.frame.unit, kiriko_model::spatial::LengthUnit::Millimetre);
+    assert_eq!(context.frame.vertical_normalisation_offset_mm, 0);
+
+    // The declared datum and the anchor's registration evidence are
+    // registered, and the frame references them by index.
+    assert_eq!(context.registries.datums.len(), 1);
+    assert_eq!(context.registries.datums[0].name, "WGS84");
+    assert_eq!(context.registries.locators.len(), 1);
+    assert_eq!(context.registries.locators[0].value, "a1000001-0000-4000-8000-000000000001");
+    assert_eq!(context.registries.registration_evidence.len(), 1);
+    assert_eq!(context.frame.datum_ref, 0);
+    assert_eq!(context.frame.anchor_evidence_ref, 0);
+}
+
+#[test]
+fn spatial_context_round_trips_through_reencode() {
+    let bytes = compile_minimal();
+    let document = decode_bundle(&bytes).expect("bundle decodes");
+    let context = document
+        .spatial_context
+        .clone()
+        .expect("compiled bundle carries spatial context");
+
+    let reencoded = encode_bundle(&document).expect("decoded document re-encodes");
+    let redoc = decode_bundle(&reencoded).expect("re-encoded bundle decodes");
+    assert_eq!(redoc.spatial_context, Some(context));
+    assert_eq!(redoc.capabilities.spatial_context(), SectionCapability::Available);
+}
 
 #[test]
 fn decode_roundtrip_preserves_every_feature_field_and_warning() {
@@ -895,7 +951,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "3e1add8208f77c98fdddf5253c98bb18f533e5b3bf3d35d92ac444525080e136";
+const GOLDEN_BUNDLE_HASH: &str = "e0a283a4f4623e72c628d60b3096f48659e14706a073cc5757bbb0997e8919f1";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";

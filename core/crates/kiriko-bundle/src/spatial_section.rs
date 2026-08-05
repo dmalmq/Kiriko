@@ -16,11 +16,15 @@
 //! section, which the capability model (codec.rs) reports as `invalid` while
 //! the rest of the bundle decodes.
 
+use std::collections::BTreeMap;
+
+use kiriko_model::model::{FeatureType, VenueModel};
 use kiriko_model::spatial::{
     Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid,
     EvidenceMethod, Frame, LengthUnit, LocatorKind, ManualProvenance, Registries,
     RegistrationEvidence, SourceArtifact, SourceLocator, SpatialContext, Transform, TransformKind,
-    MAX_VERTICAL_OFFSET_MM,
+    MAX_VERTICAL_OFFSET_MM, WGS84_INVERSE_FLATTENING, WGS84_SEMI_MAJOR_M, enu_basis_ecef,
+    venue_horizontal_bounds, wgs84_ecef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -752,6 +756,79 @@ pub(crate) fn decode_spatial_context(bytes: &[u8]) -> Result<SpatialContext, Bun
     };
     validate_spatial_context(&context)?;
     Ok(context)
+}
+
+/// Derive the §8 spatial context for a compiled venue: one shared WGS84
+/// local east-north-up frame anchored at the canonical venue
+/// horizontal-bounds centre, plus the registries holding the evidence behind
+/// it. `None` when the venue has no computable horizontal extent — such a
+/// venue gets no frame and the capability reports `absent`.
+///
+/// Deterministic by construction: the anchor comes from venue geometry
+/// bounds, the transforms are the fixed WGS84 geodesy evaluated at that
+/// anchor, and registry order is fixed. The source archive itself is never
+/// hashed here — raw-zip hashing would make identical canonical inputs
+/// compile to different bytes when ZIP record order differs.
+pub(crate) fn build_spatial_context(venue: &VenueModel) -> Option<SpatialContext> {
+    let bounds = venue_horizontal_bounds(venue)?;
+    let anchor = [
+        (bounds.west + bounds.east) / 2.0,
+        (bounds.south + bounds.north) / 2.0,
+    ];
+    let ecef_origin = wgs84_ecef(anchor[0], anchor[1], 0.0);
+    let basis = enu_basis_ecef(anchor[0], anchor[1]);
+    let venue_id = venue
+        .features
+        .iter()
+        .find(|f| f.feature_type == FeatureType::Venue)
+        .map(|f| f.id.clone())
+        .expect("import guarantees exactly one venue feature");
+    Some(SpatialContext {
+        frame: Frame {
+            anchor,
+            ecef_origin,
+            enu_basis_ecef: basis,
+            world_translation: ecef_origin,
+            axes: Axes::EastNorthUp,
+            unit: LengthUnit::Millimetre,
+            // No floors yet: the normalisation offset is the identity until
+            // floor-plane records (#39) resolve scene Z.
+            vertical_normalisation_offset_mm: 0,
+            datum_ref: 0,
+            anchor_evidence_ref: 0,
+        },
+        registries: Registries {
+            // Source-archive artifacts are intentionally not registered
+            // here: hashing the raw archive would break byte-identical
+            // compilation across ZIP record orders. Later stages register
+            // artifacts whose hashes are canonical.
+            artifacts: Vec::new(),
+            locators: vec![SourceLocator {
+                kind: LocatorKind::FeatureId,
+                value: venue_id,
+                artifact_ref: None,
+            }],
+            datums: vec![Datum {
+                name: "WGS84".into(),
+                ellipsoid: Ellipsoid {
+                    semi_major_metres: WGS84_SEMI_MAJOR_M,
+                    inverse_flattening: WGS84_INVERSE_FLATTENING,
+                },
+            }],
+            transforms: Vec::new(),
+            registration_evidence: vec![RegistrationEvidence {
+                method: EvidenceMethod::DerivedFromVenueGeometry,
+                source_locator_ref: 0,
+                transform_ref: None,
+                confidence_ref: None,
+                detail: "frame anchor at the canonical venue horizontal-bounds centre".into(),
+            }],
+            assumptions: Vec::new(),
+            confidence: Vec::new(),
+            manual_provenance: Vec::new(),
+        },
+        source_properties: BTreeMap::new(),
+    })
 }
 
 #[cfg(test)]
