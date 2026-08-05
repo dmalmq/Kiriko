@@ -438,7 +438,7 @@ describe("@kiriko/node inspectBundle (raw native contract)", () => {
       graph: { state: "absent" },
       facilities: { state: "absent" },
       spatialContext: { state: "available" },
-      sceneSources: { state: "absent" },
+      sceneSources: { state: "available" },
       canonicalGraph: { state: "absent" },
       networkQa: { state: "absent" },
     });
