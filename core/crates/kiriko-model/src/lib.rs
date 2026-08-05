@@ -15,6 +15,7 @@ pub mod canonical;
 pub mod error;
 pub mod geometry;
 pub mod model;
+pub mod scene;
 mod normalize;
 pub mod spatial;
 
