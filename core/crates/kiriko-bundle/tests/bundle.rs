@@ -249,16 +249,9 @@ fn reports_optional_sections_as_available_or_absent() {
         "a bundle carrying facilities must report the facilities capability available"
     );
 
-    let with_neither = compile_imdf_with_network(
-        &source,
-        metadata(),
-        None,
-        None,
-        None,
-        false,
-        false,
-    )
-    .expect("fixture alone compiles");
+    let with_neither =
+        compile_imdf_with_network(&source, metadata(), None, None, None, false, false)
+            .expect("fixture alone compiles");
     let document = decode_bundle(&with_neither.bytes).expect("bundle decodes");
     assert_eq!(
         document.capabilities.graph(),

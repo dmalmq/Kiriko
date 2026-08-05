@@ -523,7 +523,12 @@ fn classify_section<T>(
                 .expect("a row at a supported version yields bytes");
             match decode(bytes) {
                 Ok(value) => (Some(value), SectionCapability::Available),
-                Err(err) => (None, SectionCapability::Invalid { reason: err.message }),
+                Err(err) => (
+                    None,
+                    SectionCapability::Invalid {
+                        reason: err.message,
+                    },
+                ),
             }
         }
     }
