@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 
 use kiriko_bundle::{
     BundleDocument, BundleErrorCode, BundleMetadata, BundleStats, CapabilityReport, CompileError,
-    ResolutionProfile, SectionCapability, compile_imdf, compile_imdf_with_network, decode_bundle,
-    encode_bundle, export_network, inspect_bundle,
+    LevelElevation, ResolutionProfile, SectionCapability, compile_imdf, compile_imdf_with_network,
+    decode_bundle, encode_bundle, export_network, inspect_bundle, level_elevations,
 };
 
 fn metadata() -> BundleMetadata {
@@ -1730,5 +1730,92 @@ fn a_required_section_at_an_unexpected_version_still_fails_the_bundle() {
         err.code,
         BundleErrorCode::UnsupportedBundleVersion,
         "required-section strictness is preserved: §8's optionality changes nothing about §1–3"
+    );
+}
+
+// -- Stage 0: legacy-bundle provenance honesty (#41) -----------------------
+
+fn legacy_bundle_bytes() -> Vec<u8> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    fs::read(repo_root.join("tests/fixtures/legacy-minimal.kvb"))
+        .expect("tests/fixtures/legacy-minimal.kvb must be committed (the real pre-§8 bundle)")
+}
+
+#[test]
+fn a_legacy_bundle_reports_spatial_context_absent_and_still_opens() {
+    let document = decode_bundle(&legacy_bundle_bytes()).expect("a legacy bundle still decodes");
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::Absent,
+        "a bundle with no §8 row reports absent, never invalid"
+    );
+    assert!(document.spatial_context.is_none());
+    assert_eq!(document.capabilities.graph(), SectionCapability::Absent);
+    assert_eq!(document.capabilities.facilities(), SectionCapability::Absent);
+    // The pre-§8 artifact opens with its full content, exactly as before.
+    assert_eq!(document.venue_id, "a1000001-0000-4000-8000-000000000001");
+    assert_eq!(document.levels.len(), 3);
+    assert_eq!(document.features.len(), 27);
+    assert_eq!(document.warnings.len(), 5);
+}
+
+#[test]
+fn legacy_content_is_unchanged_from_the_modern_decode() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let legacy = decode_bundle(&legacy_bundle_bytes()).expect("legacy decodes");
+    let modern =
+        decode_bundle(&fs::read(repo_root.join("tests/fixtures/minimal.kvb")).expect("golden"))
+            .expect("modern decodes");
+
+    // The only difference between the two decodes is the §8 section itself:
+    // every field a legacy reader sees is byte-for-field identical.
+    assert_eq!(legacy.manifest, modern.manifest);
+    assert_eq!(legacy.levels, modern.levels);
+    assert_eq!(legacy.features, modern.features);
+    assert_eq!(legacy.bounds_by_level, modern.bounds_by_level);
+    assert_eq!(legacy.warnings, modern.warnings);
+    assert_eq!(legacy.stats, modern.stats);
+    assert_eq!(legacy.capabilities.graph(), modern.capabilities.graph());
+    assert_eq!(legacy.capabilities.facilities(), modern.capabilities.facilities());
+    assert!(legacy.spatial_context.is_none());
+    assert_eq!(
+        modern.capabilities.spatial_context(),
+        SectionCapability::Available,
+        "the modern golden carries §8; the legacy one does not — that is the whole difference"
+    );
+}
+
+#[test]
+fn legacy_elevations_are_explicitly_unknown_without_confidence() {
+    let document = decode_bundle(&legacy_bundle_bytes()).expect("legacy decodes");
+    let elevations = level_elevations(&document);
+    assert_eq!(elevations.len(), 3, "one honest answer per canonical level");
+    for elevation in &elevations {
+        match elevation {
+            LevelElevation::LegacyUnknown { level_id, ordinal } => {
+                assert!(!level_id.is_empty());
+                assert!(ordinal.is_finite());
+            }
+            other => panic!(
+                "a legacy bundle must answer legacy/unknown, got {other:?} — a resolved plane \
+                 (and its confidence) would be fabricated"
+            ),
+        }
+    }
+}
+
+#[test]
+fn modern_elevations_are_resolved() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let document =
+        decode_bundle(&fs::read(repo_root.join("tests/fixtures/minimal.kvb")).expect("golden"))
+            .expect("modern decodes");
+    let elevations = level_elevations(&document);
+    assert_eq!(elevations.len(), 3);
+    assert!(
+        elevations
+            .iter()
+            .all(|e| matches!(e, LevelElevation::Resolved { .. })),
+        "a §8-backed bundle answers with resolved planes"
     );
 }
