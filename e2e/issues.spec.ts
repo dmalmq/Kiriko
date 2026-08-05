@@ -271,19 +271,12 @@ test.describe("version-pinned review issues", () => {
       await expect(latestPage.getByText("No active issues")).toBeVisible();
       await expect(page.getByRole("option", { name: /#1 Pinned to version one/ })).toBeVisible();
 
-      const reconnect404 = page.waitForResponse(
-        (response) =>
-          new URL(response.url()).pathname === streamPath(old.publicVersionId) &&
-          response.status() === 404,
-      );
       const deletion = await page.request.delete(`/api/venues/${original.venueId}`);
       expect(deletion.status(), await deletion.text()).toBe(204);
       originalDeleted = true;
       await waitForIssueStreamClose(page, old.publicVersionId);
-      // The 404 body is read via a fresh request rather than the live EventSource
-      // response captured above: Chrome/CDP does not reliably retain response bodies
-      // for streaming (EventSource) resources, which makes reading them flaky.
-      await reconnect404;
+      // Verify the deleted stream with a fresh request. Browser EventSource clients
+      // reconnect differently after a clean EOF, and WebKit may not issue a retry.
       const reconnectResponse = await page.request.get(streamPath(old.publicVersionId));
       expect(reconnectResponse.status()).toBe(404);
       const reconnectBody = (await reconnectResponse.json()) as { error?: string };
