@@ -18,18 +18,19 @@
 
 use std::collections::BTreeMap;
 
-use kiriko_model::model::{FeatureType, VenueModel};
+use kiriko_model::model::Bounds;
 use kiriko_model::spatial::{
     Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid,
     EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind, ManualProvenance, Registries,
     RegistrationEvidence, ResolutionMethod, SourceArtifact, SourceLocator, SpatialContext,
     Transform, TransformKind, MAX_VERTICAL_OFFSET_MM, WGS84_INVERSE_FLATTENING,
-    WGS84_SEMI_MAJOR_M, enu_basis_ecef, venue_horizontal_bounds, wgs84_ecef,
+    WGS84_SEMI_MAJOR_M, enu_basis_ecef, wgs84_ecef,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::codec::{postcard_encode_err, postcard_take_exact};
 use crate::error::{BundleError, BundleErrorCode};
+use crate::resolve::{ResolutionOutcome, ResolutionProfile};
 use crate::sections::{JsonObjectDto, canonical_f64, dto_to_object, object_to_dto};
 
 /// Cap on any single registry length. Far beyond any legitimate producer;
@@ -900,20 +901,197 @@ pub(crate) fn decode_spatial_context(bytes: &[u8]) -> Result<SpatialContext, Bun
 /// anchor, and registry order is fixed. The source archive itself is never
 /// hashed here — raw-zip hashing would make identical canonical inputs
 /// compile to different bytes when ZIP record order differs.
-pub(crate) fn build_spatial_context(venue: &VenueModel) -> Option<SpatialContext> {
-    let bounds = venue_horizontal_bounds(venue)?;
+/// Assemble the §8 spatial context for a compiled venue: the shared WGS84
+/// local east-north-up frame anchored at the canonical venue
+/// horizontal-bounds centre, the registries holding the evidence behind it,
+/// and every level's resolved floor plane referencing those registries.
+/// `None` when the venue has no computable horizontal extent — such a venue
+/// gets no frame and the capability reports `absent`.
+///
+/// Deterministic by construction: the anchor comes from venue geometry
+/// bounds, the transforms are the fixed WGS84 geodesy evaluated at that
+/// anchor, resolution outcome and profile are fixed, and registry append
+/// order is fixed. The source archive itself is never hashed here — raw-zip
+/// hashing would make identical canonical inputs compile to different bytes
+/// when ZIP record order differs.
+pub(crate) fn build_spatial_context(
+    bounds: Option<Bounds>,
+    venue_feature_id: Option<String>,
+    outcome: &ResolutionOutcome,
+    profile: &ResolutionProfile,
+) -> Option<SpatialContext> {
+    let bounds = bounds?;
     let anchor = [
         (bounds.west + bounds.east) / 2.0,
         (bounds.south + bounds.north) / 2.0,
     ];
     let ecef_origin = wgs84_ecef(anchor[0], anchor[1], 0.0);
     let basis = enu_basis_ecef(anchor[0], anchor[1]);
-    let venue_id = venue
-        .features
+    let venue_id = venue_feature_id?;
+
+    let mut registries = Registries {
+        // Source-archive artifacts are intentionally not registered here:
+        // hashing the raw archive would break byte-identical compilation
+        // across ZIP record orders. Later stages register artifacts whose
+        // hashes are canonical.
+        artifacts: Vec::new(),
+        locators: vec![SourceLocator {
+            kind: LocatorKind::FeatureId,
+            value: venue_id,
+            artifact_ref: None,
+        }],
+        datums: vec![Datum {
+            name: "WGS84".into(),
+            ellipsoid: Ellipsoid {
+                semi_major_metres: WGS84_SEMI_MAJOR_M,
+                inverse_flattening: WGS84_INVERSE_FLATTENING,
+            },
+        }],
+        transforms: Vec::new(),
+        registration_evidence: vec![RegistrationEvidence {
+            method: EvidenceMethod::DerivedFromVenueGeometry,
+            source_locator_ref: 0,
+            transform_ref: None,
+            confidence_ref: None,
+            assumption_ref: None,
+            detail: "frame anchor at the canonical venue horizontal-bounds centre".into(),
+        }],
+        assumptions: Vec::new(),
+        confidence: Vec::new(),
+        manual_provenance: Vec::new(),
+    };
+
+    // Shared network-source locator, present only when some level's plane
+    // rests on a preserved routing-network altitude (as its resolver or as
+    // the validating counterpart of an imported elevation).
+    let net_junction_locator = if outcome
+        .levels
         .iter()
-        .find(|f| f.feature_type == FeatureType::Venue)
-        .map(|f| f.id.clone())
-        .expect("import guarantees exactly one venue feature");
+        .any(|l| l.network_altitude_m.is_some())
+    {
+        registries.locators.push(SourceLocator {
+            kind: LocatorKind::LayerName,
+            value: "net_junction".into(),
+            artifact_ref: None,
+        });
+        Some((registries.locators.len() - 1) as u32)
+    } else {
+        None
+    };
+
+    // One shared nominal-spacing assumption, referenced by every level the
+    // nominal branch resolved.
+    let nominal_assumption = if outcome
+        .levels
+        .iter()
+        .any(|l| l.method == ResolutionMethod::NominalSpacing)
+    {
+        registries.assumptions.push(Assumption {
+            kind: AssumptionKind::Nominal,
+            detail: format!(
+                "nominal_floor_spacing_m={} (profile v{})",
+                profile.nominal_floor_spacing_m, profile.profile_version
+            ),
+        });
+        Some((registries.assumptions.len() - 1) as u32)
+    } else {
+        None
+    };
+
+    // Confidence entries are shared per method: a measured, estimated, or
+    // assumed plane is the same class of claim wherever it appears.
+    let mut imported_confidence: Option<u32> = None;
+    let mut network_confidence: Option<u32> = None;
+    let mut nominal_confidence: Option<u32> = None;
+
+    let mut levels = Vec::with_capacity(outcome.levels.len());
+    for resolved in &outcome.levels {
+        let confidence_ref = match resolved.method {
+            ResolutionMethod::ImportedElevation => *imported_confidence.get_or_insert_with(|| {
+                push_confidence(&mut registries, ConfidenceKind::Measured, 1.0)
+            }),
+            ResolutionMethod::NetworkAltitude => *network_confidence.get_or_insert_with(|| {
+                push_confidence(&mut registries, ConfidenceKind::Estimated, 0.7)
+            }),
+            ResolutionMethod::NominalSpacing => *nominal_confidence.get_or_insert_with(|| {
+                push_confidence(&mut registries, ConfidenceKind::Assumed, 0.3)
+            }),
+        };
+
+        // One locator per level: the evidence points at the level it places.
+        registries.locators.push(SourceLocator {
+            kind: LocatorKind::FeatureId,
+            value: resolved.level_id.clone(),
+            artifact_ref: None,
+        });
+        let level_locator = (registries.locators.len() - 1) as u32;
+
+        let mut evidence_refs = Vec::new();
+        match resolved.method {
+            ResolutionMethod::ImportedElevation => {
+                let imported = registries.registration_evidence.len() as u32;
+                registries.registration_evidence.push(RegistrationEvidence {
+                    method: EvidenceMethod::ImportedElevation,
+                    source_locator_ref: level_locator,
+                    transform_ref: None,
+                    confidence_ref: Some(confidence_ref),
+                    assumption_ref: None,
+                    detail: "explicit elevation from level source properties".into(),
+                });
+                evidence_refs.push(imported);
+                if resolved.network_altitude_m.is_some() {
+                    let preserved = registries.registration_evidence.len() as u32;
+                    registries.registration_evidence.push(RegistrationEvidence {
+                        method: EvidenceMethod::PreservedNetworkAltitude,
+                        source_locator_ref: net_junction_locator
+                            .expect("a network altitude implies the shared locator"),
+                        transform_ref: None,
+                        confidence_ref: Some(confidence_ref),
+                        assumption_ref: None,
+                        detail: "preserved routing-network altitude (median)".into(),
+                    });
+                    evidence_refs.push(preserved);
+                }
+            }
+            ResolutionMethod::NetworkAltitude => {
+                let preserved = registries.registration_evidence.len() as u32;
+                registries.registration_evidence.push(RegistrationEvidence {
+                    method: EvidenceMethod::PreservedNetworkAltitude,
+                    source_locator_ref: net_junction_locator
+                        .expect("the network branch implies the shared locator"),
+                    transform_ref: None,
+                    confidence_ref: Some(confidence_ref),
+                    assumption_ref: None,
+                    detail: "preserved routing-network altitude (median)".into(),
+                });
+                evidence_refs.push(preserved);
+            }
+            ResolutionMethod::NominalSpacing => {
+                let nominal = registries.registration_evidence.len() as u32;
+                registries.registration_evidence.push(RegistrationEvidence {
+                    method: EvidenceMethod::NominalSpacing,
+                    source_locator_ref: level_locator,
+                    transform_ref: None,
+                    confidence_ref: Some(confidence_ref),
+                    assumption_ref: nominal_assumption,
+                    detail: "resolved by nominal floor spacing".into(),
+                });
+                evidence_refs.push(nominal);
+            }
+        }
+
+        levels.push(LevelRecord {
+            level_id: resolved.level_id.clone(),
+            ordinal: resolved.ordinal,
+            source_elevation_m: resolved.source_elevation_m,
+            network_difference_mm: resolved.network_difference_mm,
+            resolved_scene_z_mm: resolved.scene_z_mm,
+            method: resolved.method,
+            confidence_ref,
+            evidence_refs,
+        });
+    }
+
     Some(SpatialContext {
         frame: Frame {
             anchor,
@@ -922,46 +1100,24 @@ pub(crate) fn build_spatial_context(venue: &VenueModel) -> Option<SpatialContext
             world_translation: ecef_origin,
             axes: Axes::EastNorthUp,
             unit: LengthUnit::Millimetre,
-            // No floors yet: the normalisation offset is the identity until
-            // floor-plane records (#39) resolve scene Z.
-            vertical_normalisation_offset_mm: 0,
+            // The lowest resolved plane lands at scene Z 0.
+            vertical_normalisation_offset_mm: outcome.normalisation_offset_mm,
             datum_ref: 0,
             anchor_evidence_ref: 0,
         },
-        registries: Registries {
-            // Source-archive artifacts are intentionally not registered
-            // here: hashing the raw archive would break byte-identical
-            // compilation across ZIP record orders. Later stages register
-            // artifacts whose hashes are canonical.
-            artifacts: Vec::new(),
-            locators: vec![SourceLocator {
-                kind: LocatorKind::FeatureId,
-                value: venue_id,
-                artifact_ref: None,
-            }],
-            datums: vec![Datum {
-                name: "WGS84".into(),
-                ellipsoid: Ellipsoid {
-                    semi_major_metres: WGS84_SEMI_MAJOR_M,
-                    inverse_flattening: WGS84_INVERSE_FLATTENING,
-                },
-            }],
-            transforms: Vec::new(),
-            registration_evidence: vec![RegistrationEvidence {
-                method: EvidenceMethod::DerivedFromVenueGeometry,
-                source_locator_ref: 0,
-                transform_ref: None,
-                confidence_ref: None,
-                assumption_ref: None,
-                detail: "frame anchor at the canonical venue horizontal-bounds centre".into(),
-            }],
-            assumptions: Vec::new(),
-            confidence: Vec::new(),
-            manual_provenance: Vec::new(),
-        },
-        levels: Vec::new(),
+        registries,
+        levels,
         source_properties: BTreeMap::new(),
     })
+}
+
+fn push_confidence(
+    registries: &mut Registries,
+    kind: ConfidenceKind,
+    value: f64,
+) -> u32 {
+    registries.confidence.push(Confidence { kind, value });
+    (registries.confidence.len() - 1) as u32
 }
 
 #[cfg(test)]

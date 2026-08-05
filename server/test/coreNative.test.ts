@@ -19,7 +19,7 @@ const LEVEL_1F = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_2F = "b1000003-0000-4000-8000-00000000002f";
 const VENUE_ID = "a1000001-0000-4000-8000-000000000001";
 const UNIT_B1 = "c1000001-0000-4000-8000-0000000000b1";
-const GOLDEN_BUNDLE_HASH = "486f7135d851588d73d097702466d72495e7e62c61d4528e3d8ab22efd9601ee";
+const GOLDEN_BUNDLE_HASH = "1fb0c807bc29f4ba0d72bb8bdfc9f52969e256ebf18a6a3fbff3d6fd2163c3ef";
 
 function syntheticUnitId(i: number): string {
   // 8-4-4-4-12 hex groups, exactly `is_valid_feature_id`'s 36-byte contract.

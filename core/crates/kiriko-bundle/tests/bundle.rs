@@ -68,6 +68,7 @@ fn compile_with_network_embeds_graph_section() {
         None,
         false,
         false,
+        None,
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -103,6 +104,7 @@ fn compile_with_malformed_network_is_a_route_error() {
         None,
         false,
         false,
+        None,
     )
     .expect_err("malformed network GeoJSON must fail the compile");
     assert_eq!(err.code_str(), "route_build_failed");
@@ -112,7 +114,7 @@ fn compile_with_malformed_network_is_a_route_error() {
 #[test]
 fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, true, false)
+    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, true, false, None)
         .expect("fixture compiles with synthesis");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     let graph = document
@@ -125,7 +127,7 @@ fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
 #[test]
 fn compile_with_synthesis_disabled_and_no_network_has_no_graph() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, false, false)
+    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None)
         .expect("fixture compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     assert!(document.graph.is_none());
@@ -153,6 +155,7 @@ fn compile_with_facilities_embeds_facilities_section() {
         Some(FACILITIES),
         false,
         false,
+        None,
     )
     .expect("fixture + network + facilities compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -210,6 +213,7 @@ fn compile_without_facilities_has_no_facilities_section() {
         None,
         false,
         false,
+        None,
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -235,6 +239,7 @@ fn reports_optional_sections_as_available_or_absent() {
         Some(FACILITIES),
         false,
         false,
+        None,
     )
     .expect("fixture + network + facilities compiles");
     let document = decode_bundle(&with_both.bytes).expect("bundle decodes");
@@ -250,7 +255,7 @@ fn reports_optional_sections_as_available_or_absent() {
     );
 
     let with_neither =
-        compile_imdf_with_network(&source, metadata(), None, None, None, false, false)
+        compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None)
             .expect("fixture alone compiles");
     let document = decode_bundle(&with_neither.bytes).expect("bundle decodes");
     assert_eq!(
@@ -276,6 +281,7 @@ fn inspection_carries_the_capability_report() {
         None,
         false,
         false,
+        None,
     )
     .expect("fixture + network compiles");
 
@@ -304,6 +310,7 @@ fn compile_with_facilities_but_no_network_warns_once_and_leaves_anchors_unset() 
         Some(FACILITIES),
         false,
         false,
+        None,
     )
     .expect("fixture + facilities compiles without a network");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -340,6 +347,7 @@ fn compile_with_malformed_facilities_is_a_facility_error() {
         Some("not geojson"),
         false,
         false,
+        None,
     )
     .expect_err("malformed facilities GeoJSON must fail the compile");
     assert_eq!(err.code_str(), "facility_build_failed");
@@ -391,6 +399,7 @@ fn clipping_drops_network_nodes_outside_the_venue() {
         None,
         false,
         false,
+        None,
     )
     .expect("fixture + network compiles unclipped");
     let clipped = compile_imdf_with_network(
@@ -401,6 +410,7 @@ fn clipping_drops_network_nodes_outside_the_venue() {
         None,
         false,
         true,
+        None,
     )
     .expect("fixture + network compiles clipped");
 
@@ -534,17 +544,58 @@ fn compile_emits_a_spatial_context_frame_from_the_venue_bounds() {
     assert_eq!(context.frame.world_translation, context.frame.ecef_origin);
     assert_eq!(context.frame.axes, kiriko_model::spatial::Axes::EastNorthUp);
     assert_eq!(context.frame.unit, kiriko_model::spatial::LengthUnit::Millimetre);
-    assert_eq!(context.frame.vertical_normalisation_offset_mm, 0);
 
     // The declared datum and the anchor's registration evidence are
     // registered, and the frame references them by index.
     assert_eq!(context.registries.datums.len(), 1);
     assert_eq!(context.registries.datums[0].name, "WGS84");
-    assert_eq!(context.registries.locators.len(), 1);
-    assert_eq!(context.registries.locators[0].value, "a1000001-0000-4000-8000-000000000001");
-    assert_eq!(context.registries.registration_evidence.len(), 1);
+    assert_eq!(
+        context.registries.locators[0].value,
+        "a1000001-0000-4000-8000-000000000001",
+        "the venue locator stays first (index 0)"
+    );
+    assert_eq!(
+        context.registries.registration_evidence[0].method,
+        kiriko_model::spatial::EvidenceMethod::DerivedFromVenueGeometry,
+        "the anchor evidence stays first (index 0)"
+    );
     assert_eq!(context.frame.datum_ref, 0);
     assert_eq!(context.frame.anchor_evidence_ref, 0);
+
+    // Floor-plane resolution: the fixture has no elevations and no network,
+    // so all three levels resolve by nominal spacing off ordinal 0 (4.0 m
+    // per step), normalised so the lowest plane (B1, ordinal −1) lands at 0.
+    assert_eq!(
+        context.frame.vertical_normalisation_offset_mm, -4000,
+        "the normalisation offset is derived from the resolved planes, not a constant"
+    );
+    assert_eq!(context.levels.len(), 3, "one record per canonical level");
+    let by_id: BTreeMap<&str, &kiriko_model::spatial::LevelRecord> =
+        context.levels.iter().map(|l| (l.level_id.as_str(), l)).collect();
+    let b1 = by_id["b1000001-0000-4000-8000-0000000000b1"];
+    assert_eq!(b1.method, kiriko_model::spatial::ResolutionMethod::NominalSpacing);
+    assert_eq!(b1.resolved_scene_z_mm, 0, "lowest plane at scene Z 0");
+    assert_eq!(b1.source_elevation_m, None);
+    assert!(
+        context.levels.iter().all(|l| l.method == kiriko_model::spatial::ResolutionMethod::NominalSpacing),
+        "every level is flagged assumed — a scene never presents a guess as a measurement"
+    );
+    for level in &context.levels {
+        assert!(
+            (level.confidence_ref as usize) < context.registries.confidence.len(),
+            "every level's confidence reference must resolve"
+        );
+        for evidence_ref in &level.evidence_refs {
+            assert!(
+                (*evidence_ref as usize) < context.registries.registration_evidence.len(),
+                "every level's evidence references must resolve"
+            );
+        }
+        assert!(
+            level.resolved_scene_z_mm >= 0,
+            "scene Z is normalised non-negative"
+        );
+    }
 }
 
 #[test]
@@ -951,7 +1002,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "486f7135d851588d73d097702466d72495e7e62c61d4528e3d8ab22efd9601ee";
+const GOLDEN_BUNDLE_HASH: &str = "1fb0c807bc29f4ba0d72bb8bdfc9f52969e256ebf18a6a3fbff3d6fd2163c3ef";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -1343,6 +1394,7 @@ fn an_invalid_spatial_context_leaves_routing_untouched() {
         None,
         false,
         false,
+        None,
     )
     .expect("fixture + network compiles");
     let payload = decompress_payload(&compiled.bytes);
