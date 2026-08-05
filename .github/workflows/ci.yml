@@ -73,7 +73,10 @@ jobs:
           pnpm exec playwright test --project=chromium
           # Single worker: real-time thresholds need an uncontended CPU.
           pnpm exec playwright test --project=chromium-performance --workers=1
-          pnpm exec playwright test --project=firefox
+          # Firefox needs an X display to expose Mesa software WebGL on the
+          # headless runner; without it MapLibre never reaches load/idle and
+          # every map-dependent assertion times out. Adopted from PR #17.
+          xvfb-run --auto-servernum pnpm exec playwright test --project=firefox
           pnpm exec playwright test --project=webkit
           pnpm exec playwright test --project=chromium-visual
           npx -y node@24 -e "const core=require('./core/crates/kiriko-node'); if(typeof core.compileImdf!=='function'||typeof core.inspectBundle!=='function') process.exit(1)"
