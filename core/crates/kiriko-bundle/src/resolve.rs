@@ -61,13 +61,35 @@ pub(crate) type LevelElevations = BTreeMap<String, f64>;
 /// level ordinals passed to it, so a matching node's ordinal is bit-identical.
 pub(crate) type NetworkAltitudes = Vec<(f64, Vec<f64>)>;
 
+/// A producer's manual correction of one level's resolved plane. An override
+/// corrects Kiriko's interpretation, never its record of the source: the
+/// original source elevation stays untouched and readable, and removing the
+/// override returns the level to automatic resolution from that unchanged
+/// source value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FloorOverride {
+    pub level_id: String,
+    /// The corrected resolved-plane elevation, metres (full precision).
+    pub elevation_m: f64,
+    pub actor: String,
+    pub reason: String,
+}
+
+/// An override that was actually applied to a level.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AppliedOverride {
+    pub elevation_m: f64,
+    pub actor: String,
+    pub reason: String,
+}
+
 /// One level's resolution result, before registry assembly.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResolvedLevel {
     pub level_id: String,
     pub ordinal: f64,
     /// The elevation that produced the resolved plane, metres (imported,
-    /// network, or nominal-derived).
+    /// network, nominal-derived, or overridden).
     pub resolved_elevation_m: f64,
     /// Original source elevation, full precision, when one existed.
     pub source_elevation_m: Option<f64>,
@@ -76,16 +98,22 @@ pub(crate) struct ResolvedLevel {
     pub method: ResolutionMethod,
     /// Network minus imported, checked integer millimetres, when both existed.
     pub network_difference_mm: Option<i64>,
-    /// Resolved plane as checked integer millimetres, non-negative.
+    /// Resolved plane as checked integer millimetres. Non-negative for
+    /// automatic planes; an overridden plane may be negative — the frame's
+    /// normalisation offset is never recomputed for an override.
     pub scene_z_mm: i64,
+    /// The applied producer override, when this level is overridden.
+    pub override_: Option<AppliedOverride>,
 }
 
 /// The resolution outcome: per-level records in `levels` order, plus the
-/// normalisation offset that puts the lowest resolved plane at scene Z 0.
+/// normalisation offset that puts the lowest *automatic* resolved plane at
+/// scene Z 0, and the ids of overrides that named no level.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResolutionOutcome {
     pub levels: Vec<ResolvedLevel>,
     pub normalisation_offset_mm: i64,
+    pub unapplied_override_ids: Vec<String>,
 }
 
 /// metres → checked integer millimetres, round half away from zero.
@@ -120,12 +148,17 @@ fn trustworthy_network_altitude(
     })
 }
 
-/// Resolve every level's floor plane by the fixed precedence.
+/// Resolve every level's floor plane by the fixed precedence, then apply
+/// producer overrides. Overrides apply in input order with the last duplicate
+/// winning; they change only the named level's effective plane — the offset
+/// is computed from the automatic planes, so no override ever shifts another
+/// level or the shared frame.
 pub(crate) fn resolve_level_planes(
     levels: &[ViewerLevel],
     elevations: &LevelElevations,
     network: &NetworkAltitudes,
     profile: &ResolutionProfile,
+    overrides: &[FloorOverride],
 ) -> ResolutionOutcome {
     // Pass 1: pick the winning source per level by precedence.
     let mut resolved: Vec<ResolvedLevel> = Vec::with_capacity(levels.len());
@@ -156,6 +189,7 @@ pub(crate) fn resolve_level_planes(
             method,
             network_difference_mm,
             scene_z_mm: 0,
+            override_: None,
         });
     }
 
@@ -185,9 +219,31 @@ pub(crate) fn resolve_level_planes(
         level.scene_z_mm = to_mm(level.resolved_elevation_m) - offset_mm;
     }
 
+    // Pass 4: producer overrides. Only the named level's effective plane
+    // changes; the offset from pass 3 stands, so an overridden plane may sit
+    // below the automatic minimum (negative scene Z). Last duplicate wins.
+    let mut unapplied_override_ids = Vec::new();
+    for override_ in overrides {
+        let Some(level) = resolved
+            .iter_mut()
+            .find(|l| l.level_id == override_.level_id)
+        else {
+            unapplied_override_ids.push(override_.level_id.clone());
+            continue;
+        };
+        level.resolved_elevation_m = override_.elevation_m;
+        level.scene_z_mm = to_mm(override_.elevation_m) - offset_mm;
+        level.override_ = Some(AppliedOverride {
+            elevation_m: override_.elevation_m,
+            actor: override_.actor.clone(),
+            reason: override_.reason.clone(),
+        });
+    }
+
     ResolutionOutcome {
         levels: resolved,
         normalisation_offset_mm: offset_mm,
+        unapplied_override_ids,
     }
 }
 
@@ -230,7 +286,7 @@ mod tests {
             (-1.0, vec![6.5, 6.5, 6.6]),
         ];
 
-        let outcome = resolve_level_planes(&levels, &elevations, &network, &default_profile());
+        let outcome = resolve_level_planes(&levels, &elevations, &network, &default_profile(), &[]);
 
         let by_id: BTreeMap<&str, _> = outcome
             .levels
@@ -275,7 +331,7 @@ mod tests {
     #[test]
     fn all_nominal_levels_measure_spacing_from_ordinal_zero() {
         let levels = vec![level("F1", 1.0), level("G", 0.0), level("B1", -1.0)];
-        let outcome = resolve_level_planes(&levels, &BTreeMap::new(), &Vec::new(), &default_profile());
+        let outcome = resolve_level_planes(&levels, &BTreeMap::new(), &Vec::new(), &default_profile(), &[]);
         assert_eq!(outcome.normalisation_offset_mm, -4000);
         assert_eq!(outcome.levels[0].scene_z_mm, 8000, "4.0 × 1 − (−4000)");
         assert_eq!(outcome.levels[1].scene_z_mm, 4000, "4.0 × 0 − (−4000)");
@@ -290,7 +346,7 @@ mod tests {
     fn a_network_source_with_too_few_nodes_is_not_trustworthy() {
         let levels = vec![level("F1", 0.0)];
         let network = vec![(0.0, vec![10.0, 10.5])];
-        let outcome = resolve_level_planes(&levels, &BTreeMap::new(), &network, &default_profile());
+        let outcome = resolve_level_planes(&levels, &BTreeMap::new(), &network, &default_profile(), &[]);
         assert_eq!(
             outcome.levels[0].method,
             ResolutionMethod::NominalSpacing,
@@ -302,7 +358,7 @@ mod tests {
     fn a_network_source_with_a_wide_spread_is_not_trustworthy() {
         let levels = vec![level("F1", 0.0)];
         let network = vec![(0.0, vec![10.0, 10.1, 12.5])];
-        let outcome = resolve_level_planes(&levels, &BTreeMap::new(), &network, &default_profile());
+        let outcome = resolve_level_planes(&levels, &BTreeMap::new(), &network, &default_profile(), &[]);
         assert_eq!(
             outcome.levels[0].method,
             ResolutionMethod::NominalSpacing,
@@ -318,7 +374,7 @@ mod tests {
             nominal_floor_spacing_m: 4.5,
             ..ResolutionProfile::default()
         };
-        let outcome = resolve_level_planes(&levels, &elevations, &Vec::new(), &profile);
+        let outcome = resolve_level_planes(&levels, &elevations, &Vec::new(), &profile, &[]);
         assert_eq!(outcome.levels[0].method, ResolutionMethod::NominalSpacing);
         assert_eq!(
             outcome.levels[0].resolved_elevation_m, 19.0,
@@ -328,7 +384,7 @@ mod tests {
 
     #[test]
     fn empty_levels_produce_an_empty_outcome_with_zero_offset() {
-        let outcome = resolve_level_planes(&[], &BTreeMap::new(), &Vec::new(), &default_profile());
+        let outcome = resolve_level_planes(&[], &BTreeMap::new(), &Vec::new(), &default_profile(), &[]);
         assert!(outcome.levels.is_empty());
         assert_eq!(outcome.normalisation_offset_mm, 0);
     }
@@ -341,5 +397,133 @@ mod tests {
         assert_eq!(profile.nominal_floor_spacing_m, 4.0);
         assert_eq!(profile.network_min_nodes_per_level, 3);
         assert_eq!(profile.network_altitude_tolerance_m, 1.0);
+    }
+
+    #[test]
+    fn an_override_moves_only_its_level_and_never_the_frame() {
+        let levels = vec![level("L1", 0.0), level("B1", -1.0)];
+        let elevations = BTreeMap::from([("L1".to_string(), 10.0), ("B1".to_string(), 6.0)]);
+        let overrides = vec![super::FloorOverride {
+            level_id: "L1".into(),
+            elevation_m: 12.5,
+            actor: "alice".into(),
+            reason: "survey says 12.5".into(),
+        }];
+        let outcome = resolve_level_planes(
+            &levels,
+            &elevations,
+            &Vec::new(),
+            &default_profile(),
+            &overrides,
+        );
+        assert_eq!(outcome.normalisation_offset_mm, 6000, "the offset comes from the automatic planes");
+        let by_id: BTreeMap<&str, _> = outcome
+            .levels
+            .iter()
+            .map(|l| (l.level_id.as_str(), l))
+            .collect();
+        let l1 = by_id["L1"];
+        assert_eq!(l1.resolved_elevation_m, 12.5, "the override wins for L1");
+        assert_eq!(l1.scene_z_mm, 6500, "12500 − offset 6000");
+        let override_ = l1.override_.as_ref().expect("L1 is overridden");
+        assert_eq!(override_.elevation_m, 12.5);
+        assert_eq!(override_.actor, "alice");
+        assert_eq!(override_.reason, "survey says 12.5");
+        let b1 = by_id["B1"];
+        assert_eq!(b1.resolved_elevation_m, 6.0, "other levels are untouched");
+        assert_eq!(b1.scene_z_mm, 0);
+        assert!(b1.override_.is_none());
+        assert!(outcome.unapplied_override_ids.is_empty());
+    }
+
+    #[test]
+    fn an_override_below_the_lowest_plane_may_yield_negative_scene_z() {
+        let levels = vec![level("B1", -1.0), level("L1", 0.0)];
+        let elevations = BTreeMap::from([("B1".to_string(), 6.0), ("L1".to_string(), 10.0)]);
+        let overrides = vec![super::FloorOverride {
+            level_id: "B1".into(),
+            elevation_m: 5.0,
+            actor: "bob".into(),
+            reason: "pit floor".into(),
+        }];
+        let outcome = resolve_level_planes(
+            &levels,
+            &elevations,
+            &Vec::new(),
+            &default_profile(),
+            &overrides,
+        );
+        assert_eq!(
+            outcome.levels.iter().find(|l| l.level_id == "B1").unwrap().scene_z_mm,
+            -1000,
+            "5000 − offset 6000: the frame is not recomputed for an override"
+        );
+    }
+
+    #[test]
+    fn replacing_an_override_takes_the_last_duplicate() {
+        let levels = vec![level("L1", 0.0)];
+        let elevations = BTreeMap::from([("L1".to_string(), 10.0)]);
+        let overrides = vec![
+            super::FloorOverride {
+                level_id: "L1".into(),
+                elevation_m: 11.0,
+                actor: "a".into(),
+                reason: "first".into(),
+            },
+            super::FloorOverride {
+                level_id: "L1".into(),
+                elevation_m: 13.0,
+                actor: "b".into(),
+                reason: "second".into(),
+            },
+        ];
+        let outcome = resolve_level_planes(
+            &levels,
+            &elevations,
+            &Vec::new(),
+            &default_profile(),
+            &overrides,
+        );
+        let l1 = &outcome.levels[0];
+        assert_eq!(l1.resolved_elevation_m, 13.0, "the last override wins");
+        assert_eq!(l1.override_.as_ref().unwrap().reason, "second");
+        assert!(outcome.unapplied_override_ids.is_empty());
+    }
+
+    #[test]
+    fn without_an_override_the_level_stays_automatic() {
+        let levels = vec![level("L1", 0.0)];
+        let elevations = BTreeMap::from([("L1".to_string(), 10.0)]);
+        let outcome = resolve_level_planes(
+            &levels,
+            &elevations,
+            &Vec::new(),
+            &default_profile(),
+            &[],
+        );
+        assert!(outcome.levels[0].override_.is_none());
+        assert_eq!(outcome.levels[0].resolved_elevation_m, 10.0);
+        assert!(outcome.unapplied_override_ids.is_empty());
+    }
+
+    #[test]
+    fn an_override_naming_an_unknown_level_is_reported_unapplied() {
+        let levels = vec![level("L1", 0.0)];
+        let overrides = vec![super::FloorOverride {
+            level_id: "L9".into(),
+            elevation_m: 5.0,
+            actor: "a".into(),
+            reason: "typo".into(),
+        }];
+        let outcome = resolve_level_planes(
+            &levels,
+            &BTreeMap::new(),
+            &Vec::new(),
+            &default_profile(),
+            &overrides,
+        );
+        assert_eq!(outcome.unapplied_override_ids, vec!["L9".to_string()]);
+        assert!(outcome.levels[0].override_.is_none());
     }
 }

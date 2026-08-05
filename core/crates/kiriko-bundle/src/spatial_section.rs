@@ -152,6 +152,8 @@ struct LevelRecordDto {
     method: ResolutionMethodDto,
     confidence_ref: u32,
     evidence_refs: Vec<u32>,
+    override_elevation_m: Option<f64>,
+    override_ref: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +455,8 @@ fn level_record_to_dto(record: &LevelRecord) -> Result<LevelRecordDto, BundleErr
         method: ResolutionMethodDto::from(&record.method),
         confidence_ref: record.confidence_ref,
         evidence_refs: record.evidence_refs.clone(),
+        override_elevation_m: record.override_elevation_m.map(canonical_f64).transpose()?,
+        override_ref: record.override_ref,
     })
 }
 
@@ -466,6 +470,8 @@ fn level_record_from_dto(dto: &LevelRecordDto) -> Result<LevelRecord, BundleErro
         method: ResolutionMethod::from(dto.method),
         confidence_ref: dto.confidence_ref,
         evidence_refs: dto.evidence_refs.clone(),
+        override_elevation_m: dto.override_elevation_m.map(canonical_f64).transpose()?,
+        override_ref: dto.override_ref,
     })
 }
 
@@ -814,12 +820,6 @@ fn validate_spatial_context(context: &SpatialContext) -> Result<(), BundleError>
     bounds(context.levels.len(), "level record registry")?;
     for (i, record) in context.levels.iter().enumerate() {
         bounded_string(&record.level_id, &format!("level record {i} id"))?;
-        if record.resolved_scene_z_mm < 0 || record.resolved_scene_z_mm > MAX_VERTICAL_OFFSET_MM {
-            return Err(invalid(format!(
-                "level record {i} resolved scene Z {} is outside 0..={MAX_VERTICAL_OFFSET_MM} mm",
-                record.resolved_scene_z_mm
-            )));
-        }
         if let Some(difference) = record.network_difference_mm
             && difference.abs() > MAX_VERTICAL_OFFSET_MM
         {
@@ -843,6 +843,45 @@ fn validate_spatial_context(context: &SpatialContext) -> Result<(), BundleError>
                 registries.registration_evidence.len(),
                 &format!("level record {i} evidence {j}"),
             )?;
+        }
+        match (record.override_elevation_m, record.override_ref) {
+            (None, None) => {
+                // Automatic plane: normalised non-negative.
+                if record.resolved_scene_z_mm < 0 {
+                    return Err(invalid(format!(
+                        "level record {i} resolved scene Z {} is negative without an override",
+                        record.resolved_scene_z_mm
+                    )));
+                }
+            }
+            (Some(override_elevation), Some(override_ref)) => {
+                reference(
+                    override_ref,
+                    registries.manual_provenance.len(),
+                    &format!("level record {i} override provenance"),
+                )?;
+                // The override and the effective plane must agree exactly:
+                // z = round(override_m × 1000) − frame offset. The frame is
+                // never recomputed for an override, so z may be negative.
+                let expected = (override_elevation * 1000.0).round() as i64
+                    - context.frame.vertical_normalisation_offset_mm;
+                if record.resolved_scene_z_mm != expected {
+                    return Err(invalid(format!(
+                        "level record {i} resolved scene Z {} is inconsistent with its override ({expected} expected)",
+                        record.resolved_scene_z_mm
+                    )));
+                }
+            }
+            _ => {
+                return Err(invalid(format!(
+                    "level record {i} has an override value without provenance or vice versa"
+                )));
+            }
+        }
+        if record.resolved_scene_z_mm.abs() > MAX_VERTICAL_OFFSET_MM {
+            return Err(invalid(format!(
+                "level record {i} resolved scene Z exceeds ±{MAX_VERTICAL_OFFSET_MM} mm"
+            )));
         }
     }
 
@@ -1080,6 +1119,22 @@ pub(crate) fn build_spatial_context(
             }
         }
 
+        // A producer override registers its manual provenance and marks the
+        // record; the automatic method/evidence stay as the derivation trail.
+        let (override_elevation_m, override_ref) = match &resolved.override_ {
+            Some(override_) => {
+                registries.manual_provenance.push(ManualProvenance {
+                    actor: override_.actor.clone(),
+                    reason: override_.reason.clone(),
+                });
+                (
+                    Some(override_.elevation_m),
+                    Some((registries.manual_provenance.len() - 1) as u32),
+                )
+            }
+            None => (None, None),
+        };
+
         levels.push(LevelRecord {
             level_id: resolved.level_id.clone(),
             ordinal: resolved.ordinal,
@@ -1089,6 +1144,8 @@ pub(crate) fn build_spatial_context(
             method: resolved.method,
             confidence_ref,
             evidence_refs,
+            override_elevation_m,
+            override_ref,
         });
     }
 
@@ -1405,6 +1462,8 @@ mod tests {
             method: ResolutionMethod::ImportedElevation,
             confidence_ref: 0,
             evidence_refs: vec![0],
+            override_elevation_m: None,
+            override_ref: None,
         }
     }
 
@@ -1462,5 +1521,93 @@ mod tests {
         record.network_difference_mm = Some(1_000_000_001);
         context.levels = vec![record];
         assert!(encode_spatial_context(&context).is_err());
+    }
+
+    fn overridden_record() -> LevelRecord {
+        // The base context carries one manual-provenance entry (index 0) and
+        // a zero normalisation offset, so an override at 12.5 m resolves to
+        // scene Z 12500 exactly.
+        LevelRecord {
+            level_id: "level-1".into(),
+            ordinal: 1.0,
+            source_elevation_m: Some(12.25),
+            network_difference_mm: None,
+            resolved_scene_z_mm: 12_500,
+            method: ResolutionMethod::ImportedElevation,
+            confidence_ref: 0,
+            evidence_refs: vec![0],
+            override_elevation_m: Some(12.5),
+            override_ref: Some(0),
+        }
+    }
+
+    #[test]
+    fn an_overridden_level_round_trips_with_value_and_provenance() {
+        let mut context = base_context();
+        context.levels = vec![overridden_record()];
+        let bytes = encode_spatial_context(&context).expect("valid context encodes");
+        let decoded = decode_spatial_context(&bytes).expect("bytes decode");
+        assert_eq!(decoded.levels, vec![overridden_record()]);
+        assert_eq!(
+            decoded.registries.manual_provenance[0].actor, "alice",
+            "the provenance entry survives the round trip"
+        );
+    }
+
+    #[test]
+    fn an_override_value_without_provenance_is_rejected() {
+        let mut context = base_context();
+        let mut record = overridden_record();
+        record.override_ref = None;
+        context.levels = vec![record];
+        assert!(
+            encode_spatial_context(&context).is_err(),
+            "a value without provenance would be a silently invented override"
+        );
+    }
+
+    #[test]
+    fn provenance_without_an_override_value_is_rejected() {
+        let mut context = base_context();
+        let mut record = overridden_record();
+        record.override_elevation_m = None;
+        context.levels = vec![record];
+        assert!(encode_spatial_context(&context).is_err());
+    }
+
+    #[test]
+    fn an_inconsistent_override_scene_z_is_rejected() {
+        let mut context = base_context();
+        let mut record = overridden_record();
+        record.resolved_scene_z_mm = 12_400; // 12.5 m must be 12500 at offset 0
+        context.levels = vec![record];
+        assert!(encode_spatial_context(&context).is_err());
+    }
+
+    #[test]
+    fn out_of_range_override_ref_is_rejected() {
+        let mut context = base_context();
+        let mut record = overridden_record();
+        record.override_ref = Some(1);
+        context.levels = vec![record];
+        assert!(encode_spatial_context(&context).is_err());
+    }
+
+    #[test]
+    fn negative_scene_z_is_allowed_only_for_overridden_levels() {
+        // Automatic: negative is rejected.
+        let mut automatic = base_context();
+        let mut record = level_record();
+        record.resolved_scene_z_mm = -1;
+        automatic.levels = vec![record];
+        assert!(encode_spatial_context(&automatic).is_err());
+
+        // Overridden: negative is legitimate — the frame is not recomputed.
+        let mut consistent = base_context();
+        consistent.frame.vertical_normalisation_offset_mm = 13_500;
+        let mut record = overridden_record();
+        record.resolved_scene_z_mm = -1000; // 12500 − 13500
+        consistent.levels = vec![record];
+        assert!(encode_spatial_context(&consistent).is_ok());
     }
 }

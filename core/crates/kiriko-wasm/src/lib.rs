@@ -524,6 +524,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
         )
         .expect("fixture + network compiles")
         .bytes
@@ -548,6 +549,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
         )
         .expect("fixture + network + facilities compiles")
         .bytes

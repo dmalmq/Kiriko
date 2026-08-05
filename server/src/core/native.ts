@@ -13,7 +13,8 @@ export type ViewerWarningCode =
   | "missing_display_point"
   | "unknown_archive_entry"
   | "route_build"
-  | "facility_build";
+  | "facility_build"
+  | "floor_override";
 
 export interface ViewerWarning {
   code: ViewerWarningCode;
@@ -94,6 +95,7 @@ const WARNING_CODES: Record<ViewerWarningCode, true> = {
   unknown_archive_entry: true,
   route_build: true,
   facility_build: true,
+  floor_override: true,
 };
 
 const U32_MAX = 0xffff_ffff;

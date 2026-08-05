@@ -34,4 +34,4 @@ pub use codec::{
 };
 pub use error::{BundleError, BundleErrorCode, CompileError};
 pub use export::{ExportError, NetworkGeoJson, export_network, ordinal_to_floor_label};
-pub use resolve::ResolutionProfile;
+pub use resolve::{FloorOverride, ResolutionProfile};

@@ -69,6 +69,7 @@ fn compile_with_network_embeds_graph_section() {
         false,
         false,
         None,
+        &[],
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -105,6 +106,7 @@ fn compile_with_malformed_network_is_a_route_error() {
         false,
         false,
         None,
+        &[],
     )
     .expect_err("malformed network GeoJSON must fail the compile");
     assert_eq!(err.code_str(), "route_build_failed");
@@ -114,7 +116,7 @@ fn compile_with_malformed_network_is_a_route_error() {
 #[test]
 fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, true, false, None)
+    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, true, false, None, &[])
         .expect("fixture compiles with synthesis");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     let graph = document
@@ -127,7 +129,7 @@ fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
 #[test]
 fn compile_with_synthesis_disabled_and_no_network_has_no_graph() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None)
+    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None, &[])
         .expect("fixture compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     assert!(document.graph.is_none());
@@ -156,6 +158,7 @@ fn compile_with_facilities_embeds_facilities_section() {
         false,
         false,
         None,
+        &[],
     )
     .expect("fixture + network + facilities compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -214,6 +217,7 @@ fn compile_without_facilities_has_no_facilities_section() {
         false,
         false,
         None,
+        &[],
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -240,6 +244,7 @@ fn reports_optional_sections_as_available_or_absent() {
         false,
         false,
         None,
+        &[],
     )
     .expect("fixture + network + facilities compiles");
     let document = decode_bundle(&with_both.bytes).expect("bundle decodes");
@@ -255,7 +260,7 @@ fn reports_optional_sections_as_available_or_absent() {
     );
 
     let with_neither =
-        compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None)
+        compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None, &[])
             .expect("fixture alone compiles");
     let document = decode_bundle(&with_neither.bytes).expect("bundle decodes");
     assert_eq!(
@@ -282,6 +287,7 @@ fn inspection_carries_the_capability_report() {
         false,
         false,
         None,
+        &[],
     )
     .expect("fixture + network compiles");
 
@@ -311,6 +317,7 @@ fn compile_with_facilities_but_no_network_warns_once_and_leaves_anchors_unset() 
         false,
         false,
         None,
+        &[],
     )
     .expect("fixture + facilities compiles without a network");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -348,6 +355,7 @@ fn compile_with_malformed_facilities_is_a_facility_error() {
         false,
         false,
         None,
+        &[],
     )
     .expect_err("malformed facilities GeoJSON must fail the compile");
     assert_eq!(err.code_str(), "facility_build_failed");
@@ -400,6 +408,7 @@ fn clipping_drops_network_nodes_outside_the_venue() {
         false,
         false,
         None,
+        &[],
     )
     .expect("fixture + network compiles unclipped");
     let clipped = compile_imdf_with_network(
@@ -411,6 +420,7 @@ fn clipping_drops_network_nodes_outside_the_venue() {
         false,
         true,
         None,
+        &[],
     )
     .expect("fixture + network compiles clipped");
 
@@ -627,29 +637,16 @@ fn multi_floor_resolution_exercises_all_three_precedence_branches() {
         ..ResolutionProfile::default()
     };
 
-    // Three close junctions on F2 (ordinal 1) and three on B1 (ordinal −1).
-    const JUNCTIONS: &str = r#"{"type":"FeatureCollection","features":[
-      {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F2","altitude":14.0},"geometry":{"type":"Point","coordinates":[139.7665,35.6805]}},
-      {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F2","altitude":14.1},"geometry":{"type":"Point","coordinates":[139.7670,35.6805]}},
-      {"type":"Feature","properties":{"NODEID":3,"FLOOR":"F2","altitude":14.2},"geometry":{"type":"Point","coordinates":[139.7675,35.6805]}},
-      {"type":"Feature","properties":{"NODEID":4,"FLOOR":"B1","altitude":6.5},"geometry":{"type":"Point","coordinates":[139.7665,35.6810]}},
-      {"type":"Feature","properties":{"NODEID":5,"FLOOR":"B1","altitude":6.5},"geometry":{"type":"Point","coordinates":[139.7670,35.6810]}},
-      {"type":"Feature","properties":{"NODEID":6,"FLOOR":"B1","altitude":6.6},"geometry":{"type":"Point","coordinates":[139.7675,35.6810]}}]}"#;
-    const PATHS: &str = r#"{"type":"FeatureCollection","features":[
-      {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7665,35.6805],[139.7670,35.6805]]]}},
-      {"type":"Feature","properties":{"FNODEID":2,"TNODEID":3,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7670,35.6805],[139.7675,35.6805]]]}},
-      {"type":"Feature","properties":{"FNODEID":4,"TNODEID":5,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7665,35.6810],[139.7670,35.6810]]]}},
-      {"type":"Feature","properties":{"FNODEID":5,"TNODEID":6,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7670,35.6810],[139.7675,35.6810]]]}}]}"#;
-
     let compiled = compile_imdf_with_network(
         &source,
         metadata(),
-        Some(JUNCTIONS),
-        Some(PATHS),
+        Some(ALTITUDE_JUNCTIONS),
+        Some(ALTITUDE_PATHS),
         None,
         false,
         false,
         Some(&profile),
+        &[],
     )
     .expect("multi-floor fixture compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -730,6 +727,104 @@ fn multi_floor_resolution_exercises_all_three_precedence_branches() {
             .detail
             .contains("4.5"),
         "the profile value rides in the assumption detail"
+    );
+}
+
+#[test]
+fn a_producer_override_moves_the_plane_and_keeps_the_source_untouched() {
+    use kiriko_model::spatial::ResolutionMethod;
+
+    let source = support::build_multi_floor_imdf_zip();
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(ALTITUDE_JUNCTIONS),
+        Some(ALTITUDE_PATHS),
+        None,
+        false,
+        false,
+        None,
+        &[kiriko_bundle::FloorOverride {
+            level_id: "b1000002-0000-4000-8000-000000000002".into(), // F2, network-resolved
+            elevation_m: 15.0,
+            actor: "alice".into(),
+            reason: "survey corrected F2".into(),
+        }],
+    )
+    .expect("fixture compiles with an override");
+    assert!(
+        !compiled.warnings.iter().any(|w| w.code.as_str() == "floor_override"),
+        "a valid override produces no warning"
+    );
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let context = document.spatial_context.expect("spatial context present");
+    let by_id: BTreeMap<&str, &kiriko_model::spatial::LevelRecord> = context
+        .levels
+        .iter()
+        .map(|l| (l.level_id.as_str(), l))
+        .collect();
+
+    let l2 = by_id["b1000002-0000-4000-8000-000000000002"];
+    assert_eq!(l2.method, ResolutionMethod::NetworkAltitude, "the automatic derivation stays recorded");
+    assert_eq!(
+        l2.override_elevation_m,
+        Some(15.0),
+        "the override value is stored at full precision"
+    );
+    assert_eq!(l2.resolved_scene_z_mm, 9000, "15000 − automatic offset 6000");
+    let provenance = &context.registries.manual_provenance[l2.override_ref.expect("override ref") as usize];
+    assert_eq!(provenance.actor, "alice");
+    assert_eq!(provenance.reason, "survey corrected F2");
+
+    // The other levels and the shared frame are untouched.
+    assert_eq!(
+        context.frame.vertical_normalisation_offset_mm, 6000,
+        "an override never recomputes the frame"
+    );
+    let l1 = by_id["b1000003-0000-4000-8000-000000000003"];
+    assert_eq!(l1.override_ref, None);
+    assert_eq!(l1.resolved_scene_z_mm, 4000);
+    let b1 = by_id["b1000004-0000-4000-8000-000000000004"];
+    assert_eq!(b1.source_elevation_m, Some(6.0), "the source elevation survives untouched");
+    assert_eq!(b1.resolved_scene_z_mm, 0);
+}
+
+#[test]
+fn an_override_naming_an_unknown_level_warns_and_compiles() {
+    let source = support::build_multi_floor_imdf_zip();
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[kiriko_bundle::FloorOverride {
+            level_id: "nope-9999".into(),
+            elevation_m: 5.0,
+            actor: "alice".into(),
+            reason: "typo".into(),
+        }],
+    )
+    .expect("an unapplied override must not fail the compile");
+    assert!(
+        compiled
+            .warnings
+            .iter()
+            .any(|w| w.code.as_str() == "floor_override" && w.message.contains("nope-9999")),
+        "the unapplied override must surface as a floor_override warning naming the level"
+    );
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    assert!(
+        document
+            .spatial_context
+            .expect("spatial context present")
+            .levels
+            .iter()
+            .all(|l| l.override_ref.is_none()),
+        "no level may be overridden by an id that names nothing"
     );
 }
 
@@ -1122,7 +1217,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "1fb0c807bc29f4ba0d72bb8bdfc9f52969e256ebf18a6a3fbff3d6fd2163c3ef";
+const GOLDEN_BUNDLE_HASH: &str = "70eb1a88ad66fa0e7e441fe701da63b2c268dd35dcca69e65e67acbcab207f77";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -1415,6 +1510,21 @@ fn network_round_trip_is_stable_across_two_export_build_cycles() {
 
 // -- Stage 0: §8 capability and dependency matrix --------------------------
 
+// Three close junctions on F2 (ordinal 1) and three on B1 (ordinal −1) with
+// preserved altitudes, for the multi-floor resolution fixtures.
+const ALTITUDE_JUNCTIONS: &str = r#"{"type":"FeatureCollection","features":[
+  {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F2","altitude":14.0},"geometry":{"type":"Point","coordinates":[139.7665,35.6805]}},
+  {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F2","altitude":14.1},"geometry":{"type":"Point","coordinates":[139.7670,35.6805]}},
+  {"type":"Feature","properties":{"NODEID":3,"FLOOR":"F2","altitude":14.2},"geometry":{"type":"Point","coordinates":[139.7675,35.6805]}},
+  {"type":"Feature","properties":{"NODEID":4,"FLOOR":"B1","altitude":6.5},"geometry":{"type":"Point","coordinates":[139.7665,35.6810]}},
+  {"type":"Feature","properties":{"NODEID":5,"FLOOR":"B1","altitude":6.5},"geometry":{"type":"Point","coordinates":[139.7670,35.6810]}},
+  {"type":"Feature","properties":{"NODEID":6,"FLOOR":"B1","altitude":6.6},"geometry":{"type":"Point","coordinates":[139.7675,35.6810]}}]}"#;
+const ALTITUDE_PATHS: &str = r#"{"type":"FeatureCollection","features":[
+  {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7665,35.6805],[139.7670,35.6805]]]}},
+  {"type":"Feature","properties":{"FNODEID":2,"TNODEID":3,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7670,35.6805],[139.7675,35.6805]]]}},
+  {"type":"Feature","properties":{"FNODEID":4,"TNODEID":5,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7665,35.6810],[139.7670,35.6810]]]}},
+  {"type":"Feature","properties":{"FNODEID":5,"TNODEID":6,"cost":100},"geometry":{"type":"MultiLineString","coordinates":[[[139.7670,35.6810],[139.7675,35.6810]]]}}]}"#;
+
 /// Rebuilds the uncompressed payload of a compiled bundle under a modified
 /// section directory: `mutate` receives `(id, version, bytes)` in
 /// id-ascending order and may bump versions, replace bytes, or append rows
@@ -1515,6 +1625,7 @@ fn an_invalid_spatial_context_leaves_routing_untouched() {
         false,
         false,
         None,
+        &[],
     )
     .expect("fixture + network compiles");
     let payload = decompress_payload(&compiled.bytes);
