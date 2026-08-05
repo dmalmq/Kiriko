@@ -17,7 +17,8 @@
 use kiriko_model::canonical::Value;
 use kiriko_model::model::{FeatureType, VenueFeature};
 use kiriko_model::scene::{
-    Mesh, OcclusionClass, PrimitiveGeometry, PrimitiveRole, ScenePrimitive, SceneSection,
+    ConveyanceKind, Mesh, OcclusionClass, PrimitiveGeometry, PrimitiveRole, ScenePrimitive,
+    SceneSection,
 };
 use kiriko_model::spatial::{
     Assumption, AssumptionKind, Confidence, ConfidenceKind, EvidenceMethod, Frame, LocatorKind,
@@ -46,6 +47,10 @@ pub struct SceneProfile {
     /// Vertical extent of the neutral conveyance box for a transit footprint
     /// without graph endpoints.
     pub conveyance_height_mm: i64,
+    /// Half the square cross-section of the neutral conveyance prism for a
+    /// vertical graph connection (a point-to-point connection gets a
+    /// nominal volume, never fabricated machinery).
+    pub conveyance_half_width_mm: i64,
 }
 
 impl Default for SceneProfile {
@@ -59,6 +64,7 @@ impl Default for SceneProfile {
             height_property_key: "height".to_string(),
             corroboration_tolerance_mm: 200,
             conveyance_height_mm: 3000,
+            conveyance_half_width_mm: 600,
         }
     }
 }
@@ -322,6 +328,7 @@ pub(crate) fn compile_scene(
     let mut nominal_ceiling_assumption: Option<u32> = None;
     let mut nominal_wall_assumption: Option<u32> = None;
     let mut nominal_door_assumption: Option<u32> = None;
+    let mut nominal_conveyance_assumption: Option<u32> = None;
     let conf_ref = |registries: &mut Registries,
                     assumed: bool,
                     measured: &mut Option<u32>,
@@ -667,10 +674,216 @@ pub(crate) fn compile_scene(
         });
     }
 
+    // -- Conveyance: neutral forms only. --------------------------------------
+    // A vertical graph edge connects its two level planes with a nominal
+    // prism at the junctions' positions; a transit-category unit extrudes its
+    // footprint by the nominal conveyance height. Both are kind Neutral —
+    // detailed machinery is emitted only when evidence determines it, which
+    // is never here.
+    let neutral_assumption = *nominal_conveyance_assumption.get_or_insert_with(|| {
+        push_assumption(
+            &mut spatial.registries,
+            "neutral conveyance form (never fabricated machinery)",
+        )
+    });
+    let net_junction_locator = {
+        let index = spatial
+            .registries
+            .locators
+            .iter()
+            .position(|l| l.kind == LocatorKind::LayerName && l.value == "net_junction");
+        match index {
+            Some(i) => i as u32,
+            None => {
+                spatial.registries.locators.push(SourceLocator {
+                    kind: LocatorKind::LayerName,
+                    value: "net_junction".to_string(),
+                    artifact_ref: None,
+                });
+                (spatial.registries.locators.len() - 1) as u32
+            }
+        }
+    };
+    let conveyance_confidence = conf_ref(
+        &mut spatial.registries,
+        true,
+        &mut measured_confidence,
+        &mut assumed_confidence,
+    );
+    let mut conveyance_count = 0usize;
+
+    if let Some(graph) = &document.graph {
+        let ordinal_planes: Vec<(f64, i64)> = spatial
+            .levels
+            .iter()
+            .map(|l| (l.ordinal, l.resolved_scene_z_mm))
+            .collect();
+        for edge in &graph.edges {
+            let from = &graph.nodes[edge.from as usize];
+            let to = &graph.nodes[edge.to as usize];
+            if from.ordinal == to.ordinal {
+                continue;
+            }
+            let Some(&(_, z_from)) = ordinal_planes
+                .iter()
+                .find(|(ordinal, _)| *ordinal == from.ordinal)
+            else {
+                continue;
+            };
+            let Some(&(_, z_to)) = ordinal_planes
+                .iter()
+                .find(|(ordinal, _)| *ordinal == to.ordinal)
+            else {
+                continue;
+            };
+            let c_from = project_local_mm(frame, from.lon, from.lat);
+            let c_to = project_local_mm(frame, to.lon, to.lat);
+            let evidence = push_evidence(
+                &mut spatial.registries,
+                net_junction_locator,
+                Some(conveyance_confidence),
+                Some(neutral_assumption),
+                "neutral conveyance from a vertical graph connection",
+            );
+            primitives.push(ScenePrimitive {
+                id: format!("conveyance-{}", conveyance_count),
+                role: PrimitiveRole::Conveyance,
+                level_id: from_level_for(&spatial, from.ordinal)
+                    .unwrap_or_else(|| "".to_string()),
+                occlusion: OcclusionClass::Opaque,
+                confidence_ref: conveyance_confidence,
+                canonical_feature_id: None,
+                source_locator_refs: vec![net_junction_locator],
+                evidence_refs: vec![evidence],
+                geometry: PrimitiveGeometry::Conveyance {
+                    kind: ConveyanceKind::Neutral,
+                    mesh: prism_mesh(c_from, c_to, z_from, z_to, profile.conveyance_half_width_mm),
+                },
+            });
+            conveyance_count += 1;
+        }
+    }
+
+    for unit in &units_data {
+        if !is_transit_unit(document, &unit.id) {
+            continue;
+        }
+        let locator = find_or_push_locator(&mut spatial.registries, &unit.id);
+        let evidence = push_evidence(
+            &mut spatial.registries,
+            locator,
+            Some(conveyance_confidence),
+            Some(neutral_assumption),
+            "neutral conveyance from a transit footprint",
+        );
+        primitives.push(ScenePrimitive {
+            id: format!("conveyance-{}", conveyance_count),
+            role: PrimitiveRole::Conveyance,
+            level_id: unit.level_id.clone(),
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref: conveyance_confidence,
+            canonical_feature_id: Some(unit.id.clone()),
+            source_locator_refs: vec![locator],
+            evidence_refs: vec![evidence],
+            geometry: PrimitiveGeometry::Conveyance {
+                kind: ConveyanceKind::Neutral,
+                mesh: extrude_ring_mesh(&unit.ring_xy, unit.z, unit.z + profile.conveyance_height_mm),
+            },
+        });
+        conveyance_count += 1;
+    }
+
     Some(SceneSection {
         primitives,
         descriptor: None,
     })
+}
+
+/// The level id whose record carries `ordinal`, for conveying a graph
+/// connection's level membership.
+fn from_level_for(spatial: &SpatialContext, ordinal: f64) -> Option<String> {
+    spatial
+        .levels
+        .iter()
+        .find(|l| l.ordinal == ordinal)
+        .map(|l| l.level_id.clone())
+}
+
+/// Whether a unit's source category marks it as a conveyance footprint
+/// (stairs, escalator, elevator, ramp, lift, or transit).
+fn is_transit_unit(document: &BundleDocument, unit_id: &str) -> bool {
+    let Some(unit) = document.features.iter().find(|f| f.id == unit_id) else {
+        return false;
+    };
+    let Some(category) = unit
+        .source_properties
+        .get("category")
+        .and_then(|v| v.as_str())
+    else {
+        return false;
+    };
+    ["stair", "escalator", "elevator", "ramp", "lift", "transit"]
+        .iter()
+        .any(|token| category.to_ascii_lowercase().contains(token))
+}
+
+/// A closed box from a bottom center at `z0` to a top center at `z1`, with a
+/// square cross-section of `2 × half_width` millimetres.
+fn prism_mesh(bottom: [i64; 2], top: [i64; 2], z0: i64, z1: i64, half_width: i64) -> Mesh {
+    let (bx, by, tx, ty) = (bottom[0], bottom[1], top[0], top[1]);
+    box_mesh(
+        &[
+            [bx - half_width, by - half_width],
+            [bx + half_width, by - half_width],
+            [bx + half_width, by + half_width],
+            [bx - half_width, by + half_width],
+        ],
+        &[
+            [tx - half_width, ty - half_width],
+            [tx + half_width, ty - half_width],
+            [tx + half_width, ty + half_width],
+            [tx - half_width, ty + half_width],
+        ],
+        z0,
+        z1,
+    )
+}
+
+/// A closed box from a bottom ring (same XY) at `z0` to the top at `z1`.
+fn extrude_ring_mesh(ring: &[[i64; 2]], z0: i64, z1: i64) -> Mesh {
+    box_mesh(ring, ring, z0, z1)
+}
+
+/// A closed box: `bottom` and `top` rings of equal length, at `z0`/`z1`.
+/// Faces: bottom + top triangulated, one quad per side.
+fn box_mesh(bottom: &[[i64; 2]], top: &[[i64; 2]], z0: i64, z1: i64) -> Mesh {
+    let n = bottom.len();
+    let mut positions = Vec::with_capacity(2 * n);
+    for [x, y] in bottom {
+        positions.push([*x, *y, z0]);
+    }
+    for [x, y] in top {
+        positions.push([*x, *y, z1]);
+    }
+    let mut faces = Vec::new();
+    for triangle in triangulate_simple(bottom) {
+        faces.push(triangle);
+    }
+    let mut top_faces = Vec::new();
+    for [a, b, c] in triangulate_simple(top) {
+        top_faces.push([a + n as u32, b + n as u32, c + n as u32]);
+    }
+    // Orient the top faces outward (reverse winding).
+    for [a, b, c] in top_faces {
+        faces.push([c, b, a]);
+    }
+    for i in 0..n {
+        let (a, b) = (i as u32, ((i + 1) % n) as u32);
+        let (c, d) = (b + n as u32, a + n as u32);
+        faces.push([a, b, c]);
+        faces.push([a, c, d]);
+    }
+    Mesh { positions, faces }
 }
 
 /// Consecutive ring edges as vertex pairs.
@@ -752,6 +965,7 @@ mod tests {
         assert_eq!(profile.height_property_key, "height");
         assert_eq!(profile.corroboration_tolerance_mm, 200);
         assert_eq!(profile.conveyance_height_mm, 3000);
+        assert_eq!(profile.conveyance_half_width_mm, 600);
     }
 
     #[test]

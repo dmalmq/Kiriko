@@ -1231,7 +1231,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "13f6a3a533f45771e28ae6b83c9151603a7ab2d20d130cf3d99d0ff5702a311e";
+const GOLDEN_BUNDLE_HASH: &str = "b995c817f8817d2e5c4144536d208cb96011a2f556c0ac2ad62fff09114b8c6e";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -2089,4 +2089,76 @@ fn debug_scene_units() {
     for u in &units {
         eprintln!("  {} level={:?} geometry_present={}", u.id, u.level_id, u.geometry.is_some());
     }
+}
+
+#[test]
+fn the_scene_compiler_emits_neutral_conveyance_forms() {
+    use kiriko_model::scene::{ConveyanceKind, PrimitiveGeometry, PrimitiveRole};
+
+    let source = support::build_multi_floor_imdf_zip();
+    // The stage0 network carries a vertical F1→F2 edge; the fixture carries a
+    // stairs-category unit on B1.
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(NETWORK_JUNCTIONS),
+        Some(NETWORK_PATHS),
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+    )
+    .expect("fixture + network compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let scene = document.scene.expect("a venue with geometry carries a generated scene");
+
+    let conveyances: Vec<_> = scene
+        .primitives
+        .iter()
+        .filter(|p| p.role == PrimitiveRole::Conveyance)
+        .collect();
+    assert_eq!(
+        conveyances.len(),
+        2,
+        "one from the vertical graph edge, one from the stairs footprint"
+    );
+    for conveyance in &conveyances {
+        let PrimitiveGeometry::Conveyance { kind, mesh } = &conveyance.geometry else {
+            panic!("conveyance geometry expected");
+        };
+        assert_eq!(
+            *kind,
+            ConveyanceKind::Neutral,
+            "the never-guess rule: a neutral form, never fabricated stairs"
+        );
+        assert!(!mesh.positions.is_empty());
+        assert_eq!(mesh.faces.len() * 3, mesh.positions.len() * 6 - 12, "closed box");
+    }
+
+    // The graph conveyance spans the F1 (z 4000) and F2 (z 8000) planes.
+    let graph_conveyance = conveyances
+        .iter()
+        .find(|c| c.id.starts_with("conveyance-0"))
+        .expect("graph conveyance first");
+    let PrimitiveGeometry::Conveyance { mesh, .. } = &graph_conveyance.geometry else {
+        unreachable!()
+    };
+    let zs: Vec<i64> = mesh.positions.iter().map(|p| p[2]).collect();
+    assert_eq!(*zs.iter().min().unwrap(), 4000, "bottom on the F1 plane");
+    assert_eq!(*zs.iter().max().unwrap(), 8000, "top on the F2 plane");
+
+    // The stairs footprint box sits on the B1 plane and rises by the nominal
+    // conveyance height.
+    let unit_conveyance = conveyances
+        .iter()
+        .find(|c| c.id.starts_with("conveyance-1"))
+        .expect("unit conveyance second");
+    let PrimitiveGeometry::Conveyance { mesh, .. } = &unit_conveyance.geometry else {
+        unreachable!()
+    };
+    let zs: Vec<i64> = mesh.positions.iter().map(|p| p[2]).collect();
+    assert_eq!(*zs.iter().min().unwrap(), 0, "bottom on the B1 plane");
+    assert_eq!(*zs.iter().max().unwrap(), 3000, "nominal conveyance height");
 }
