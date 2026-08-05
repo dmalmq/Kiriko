@@ -1978,3 +1978,46 @@ fn the_full_pipeline_compiles_byte_identically() {
          the test would fail"
     );
 }
+
+fn crafted_fixture(name: &str) -> Vec<u8> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let bytes = fs::read(repo_root.join(format!("tests/fixtures/{name}.kvb")))
+        .expect("crafted fixture must be committed");
+    let checksum = fs::read_to_string(repo_root.join(format!("tests/fixtures/{name}.kvb.sha256")))
+        .expect("crafted fixture sha256 must be committed");
+    let expected = checksum.split_whitespace().next().expect("hash line");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        expected,
+        "{name} must stay frozen"
+    );
+    bytes
+}
+
+#[test]
+fn crafted_fixtures_pin_every_remaining_capability_outcome() {
+    // Unsupported version: §8 declares version 2; the venue still opens.
+    let document =
+        decode_bundle(&crafted_fixture("stage0-unsupported")).expect("venue still opens");
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::UnsupportedVersion { declared: 2, supported: 1 }
+    );
+    assert!(document.spatial_context.is_none());
+
+    // Invalid: §8 bytes are garbage; the venue still opens and routes.
+    let document = decode_bundle(&crafted_fixture("stage0-invalid")).expect("venue still opens");
+    assert!(matches!(
+        document.capabilities.spatial_context(),
+        SectionCapability::Invalid { .. }
+    ));
+    assert_eq!(document.capabilities.graph(), SectionCapability::Available);
+
+    // Disabled by dependency: §8 unavailable and a declared §9 is present.
+    let document = decode_bundle(&crafted_fixture("stage0-disabled")).expect("venue still opens");
+    assert_eq!(
+        document.capabilities.scene_sources(),
+        SectionCapability::DisabledByDependency { requires: 8 }
+    );
+    assert_eq!(document.capabilities.spatial_context(), SectionCapability::UnsupportedVersion { declared: 2, supported: 1 });
+}
