@@ -117,11 +117,53 @@ pub fn build_multi_floor_imdf_zip() -> Vec<u8> {
         level("b1000004-0000-4000-8000-000000000004", "B1", -1, Some(6.0)),
     );
 
+    // Two adjacent units on F1 (u1 carries a source height), one stairs unit
+    // on B1, and one opening on the shared F1 boundary.
+    let unit = |id: &str, level_id: &str, ring: &str, extra: &str| {
+        format!(
+            r#"{{"id":"{id}","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":{ring}}},"properties":{{"category":"walkway","level_id":"{level_id}"{extra}}}}}"#
+        )
+    };
+    let units = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {},
+            {},
+            {}
+        ]}}"#,
+        unit(
+            "c1000001-0000-4000-8000-000000000001",
+            "b1000003-0000-4000-8000-000000000003",
+            "[[[139.7662,35.6806],[139.7678,35.6806],[139.7678,35.6810],[139.7662,35.6810],[139.7662,35.6806]]]",
+            r#","height":3.5"#,
+        ),
+        unit(
+            "c1000002-0000-4000-8000-000000000002",
+            "b1000003-0000-4000-8000-000000000003",
+            "[[[139.7662,35.6810],[139.7678,35.6810],[139.7678,35.6814],[139.7662,35.6814],[139.7662,35.6810]]]",
+            "",
+        ),
+        unit(
+            "c1000003-0000-4000-8000-000000000003",
+            "b1000004-0000-4000-8000-000000000004",
+            "[[[139.7662,35.6802],[139.7678,35.6802],[139.7678,35.6806],[139.7662,35.6806],[139.7662,35.6802]]]",
+            r#","category":"stairs""#,
+        ),
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000001","type":"Feature","feature_type":"opening",
+              "geometry":{{"type":"LineString","coordinates":[[139.7670,35.6810],[139.7672,35.6810]]}},
+              "properties":{{"category":"pedestrian.transit","level_id":"b1000003-0000-4000-8000-000000000003"}}}}
+        ]}}"#
+    );
+
     let entries: &[(&str, String)] = &[
         ("manifest.json", manifest.to_string()),
         ("venue.geojson", venue),
         ("address.geojson", address),
         ("level.geojson", levels),
+        ("unit.geojson", units),
+        ("opening.geojson", openings),
     ];
 
     let mut cursor = Cursor::new(Vec::new());
