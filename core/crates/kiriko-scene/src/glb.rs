@@ -68,25 +68,34 @@ pub fn read_glb(bytes: &[u8]) -> Result<GlbScene, SceneError> {
 
     let primitives = read_primitives(&root, bin)?;
     let features = read_property_tables(&root, bin)?;
-    Ok(GlbScene { primitives, features })
+    Ok(GlbScene {
+        primitives,
+        features,
+    })
 }
 
 /// Walk the container: header plus JSON/BIN chunks. Rejects bad magic, a
 /// version other than 2, and any chunk length that overruns the buffer.
 fn parse_container(bytes: &[u8]) -> Result<(&[u8], Option<&[u8]>), SceneError> {
     if bytes.len() < 12 {
-        return Err(SceneError::Glb("container shorter than the 12-byte GLB header".into()));
+        return Err(SceneError::Glb(
+            "container shorter than the 12-byte GLB header".into(),
+        ));
     }
     if &bytes[0..4] != GLB_MAGIC {
         return Err(SceneError::Glb("bad GLB container magic".into()));
     }
     let version = u32_le(&bytes[4..8]);
     if version != 2 {
-        return Err(SceneError::Glb(format!("unsupported GLB version {version}")));
+        return Err(SceneError::Glb(format!(
+            "unsupported GLB version {version}"
+        )));
     }
     let declared_len = u32_le(&bytes[8..12]) as usize;
     if declared_len > bytes.len() {
-        return Err(SceneError::Glb("GLB length field exceeds the input buffer".into()));
+        return Err(SceneError::Glb(
+            "GLB length field exceeds the input buffer".into(),
+        ));
     }
 
     let mut offset = 12;
@@ -101,7 +110,9 @@ fn parse_container(bytes: &[u8]) -> Result<(&[u8], Option<&[u8]>), SceneError> {
         let data_start = offset + 8;
         let data_end = data_start + chunk_len;
         if data_end > declared_len {
-            return Err(SceneError::Glb("GLB chunk length exceeds the remaining buffer".into()));
+            return Err(SceneError::Glb(
+                "GLB chunk length exceeds the remaining buffer".into(),
+            ));
         }
         let chunk = &bytes[data_start..data_end];
         if chunk_type == CHUNK_JSON {
@@ -154,9 +165,25 @@ fn parse_accessor(value: &Value) -> Result<Accessor, SceneError> {
         return Err(err("sparse accessors are not supported"));
     }
     let byte_offset = value.get("byteOffset").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let min = value.get("min").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_f64);
-    let max = value.get("max").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_f64);
-    Ok(Accessor { buffer_view, byte_offset, count, component_type, type_name, min, max })
+    let min = value
+        .get("min")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(Value::as_f64);
+    let max = value
+        .get("max")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(Value::as_f64);
+    Ok(Accessor {
+        buffer_view,
+        byte_offset,
+        count,
+        component_type,
+        type_name,
+        min,
+        max,
+    })
 }
 
 /// One bufferView: always buffer 0, the GLB BIN chunk.
@@ -179,7 +206,9 @@ fn buffer_view(root: &Value, index: usize) -> Result<BufferView, SceneError> {
         .and_then(Value::as_u64)
         .ok_or_else(|| SceneError::Glb("bufferView missing buffer".into()))?;
     if buffer != 0 {
-        return Err(SceneError::Glb(format!("external buffer {buffer} is not supported")));
+        return Err(SceneError::Glb(format!(
+            "external buffer {buffer} is not supported"
+        )));
     }
     let byte_offset = view.get("byteOffset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let byte_length = view
@@ -187,8 +216,15 @@ fn buffer_view(root: &Value, index: usize) -> Result<BufferView, SceneError> {
         .and_then(Value::as_u64)
         .ok_or_else(|| SceneError::Glb("bufferView missing byteLength".into()))?
         as usize;
-    let byte_stride = view.get("byteStride").and_then(Value::as_u64).map(|s| s as usize);
-    Ok(BufferView { byte_offset, byte_length, byte_stride })
+    let byte_stride = view
+        .get("byteStride")
+        .and_then(Value::as_u64)
+        .map(|s| s as usize);
+    Ok(BufferView {
+        byte_offset,
+        byte_length,
+        byte_stride,
+    })
 }
 
 fn read_primitives(root: &Value, bin: Option<&[u8]>) -> Result<Vec<GlbPrimitive>, SceneError> {
@@ -224,66 +260,71 @@ fn read_primitives(root: &Value, bin: Option<&[u8]>) -> Result<Vec<GlbPrimitive>
             let normal_index = attribute("NORMAL")?;
             let feature_id_index = attribute("_FEATURE_ID_0")?;
 
-            let position_accessor = parse_accessor(
-                accessors
-                    .get(position_index)
-                    .ok_or_else(|| SceneError::Glb(format!("accessor {position_index} out of range")))?,
-            )?;
-            let normal_accessor = parse_accessor(
-                accessors
-                    .get(normal_index)
-                    .ok_or_else(|| SceneError::Glb(format!("accessor {normal_index} out of range")))?,
-            )?;
-            let feature_id_accessor = parse_accessor(
-                accessors
-                    .get(feature_id_index)
-                    .ok_or_else(|| SceneError::Glb(format!("accessor {feature_id_index} out of range")))?,
-            )?;
+            let position_accessor =
+                parse_accessor(accessors.get(position_index).ok_or_else(|| {
+                    SceneError::Glb(format!("accessor {position_index} out of range"))
+                })?)?;
+            let normal_accessor =
+                parse_accessor(accessors.get(normal_index).ok_or_else(|| {
+                    SceneError::Glb(format!("accessor {normal_index} out of range"))
+                })?)?;
+            let feature_id_accessor =
+                parse_accessor(accessors.get(feature_id_index).ok_or_else(|| {
+                    SceneError::Glb(format!("accessor {feature_id_index} out of range"))
+                })?)?;
 
             check_constant_feature_id(&feature_id_accessor)?;
             let feature_id = read_scalar_element(&feature_id_accessor, root, bin, 0)?;
 
-            let (positions, normals, indices_were_identity) = match primitive.get("indices").and_then(Value::as_u64) {
-                Some(index) => {
-                    let index = index as usize;
-                    let index_accessor = parse_accessor(
-                        accessors
-                            .get(index)
-                            .ok_or_else(|| SceneError::Glb(format!("accessor {index} out of range")))?,
-                    )?;
-                    let indices = read_scalar_all(&index_accessor, root, bin)?;
-                    let positions = read_vec3_f32(&position_accessor, root, bin)?;
-                    let normals = read_vec3_f32(&normal_accessor, root, bin)?;
-                    let identity = indices.len() == positions.len()
-                        && indices.iter().enumerate().all(|(i, &value)| value as usize == i);
-                    if identity {
-                        (positions, normals, true)
-                    } else {
-                        // Gather into triangle-list order; never drop a
-                        // non-identity buffer silently.
-                        let mut gathered_positions = Vec::with_capacity(indices.len());
-                        let mut gathered_normals = Vec::with_capacity(indices.len());
-                        for &value in &indices {
-                            let p = positions
-                                .get(value as usize)
-                                .ok_or_else(|| SceneError::Glb("index out of range".into()))?;
-                            let n = normals
-                                .get(value as usize)
-                                .ok_or_else(|| SceneError::Glb("index out of range".into()))?;
-                            gathered_positions.push(*p);
-                            gathered_normals.push(*n);
+            let (positions, normals, indices_were_identity) =
+                match primitive.get("indices").and_then(Value::as_u64) {
+                    Some(index) => {
+                        let index = index as usize;
+                        let index_accessor =
+                            parse_accessor(accessors.get(index).ok_or_else(|| {
+                                SceneError::Glb(format!("accessor {index} out of range"))
+                            })?)?;
+                        let indices = read_scalar_all(&index_accessor, root, bin)?;
+                        let positions = read_vec3_f32(&position_accessor, root, bin)?;
+                        let normals = read_vec3_f32(&normal_accessor, root, bin)?;
+                        let identity = indices.len() == positions.len()
+                            && indices
+                                .iter()
+                                .enumerate()
+                                .all(|(i, &value)| value as usize == i);
+                        if identity {
+                            (positions, normals, true)
+                        } else {
+                            // Gather into triangle-list order; never drop a
+                            // non-identity buffer silently.
+                            let mut gathered_positions = Vec::with_capacity(indices.len());
+                            let mut gathered_normals = Vec::with_capacity(indices.len());
+                            for &value in &indices {
+                                let p = positions
+                                    .get(value as usize)
+                                    .ok_or_else(|| SceneError::Glb("index out of range".into()))?;
+                                let n = normals
+                                    .get(value as usize)
+                                    .ok_or_else(|| SceneError::Glb("index out of range".into()))?;
+                                gathered_positions.push(*p);
+                                gathered_normals.push(*n);
+                            }
+                            (gathered_positions, gathered_normals, false)
                         }
-                        (gathered_positions, gathered_normals, false)
                     }
-                }
-                None => {
-                    let positions = read_vec3_f32(&position_accessor, root, bin)?;
-                    let normals = read_vec3_f32(&normal_accessor, root, bin)?;
-                    (positions, normals, true)
-                }
-            };
+                    None => {
+                        let positions = read_vec3_f32(&position_accessor, root, bin)?;
+                        let normals = read_vec3_f32(&normal_accessor, root, bin)?;
+                        (positions, normals, true)
+                    }
+                };
 
-            primitives.push(GlbPrimitive { positions, normals, feature_id, indices_were_identity });
+            primitives.push(GlbPrimitive {
+                positions,
+                normals,
+                feature_id,
+                indices_were_identity,
+            });
         }
     }
     Ok(primitives)
@@ -293,18 +334,22 @@ fn read_primitives(root: &Value, bin: Option<&[u8]>) -> Result<Vec<GlbPrimitive>
 /// declares both `min` and `max`, they must agree or a future non-constant
 /// asset fails loudly instead of rendering wrong picks.
 fn check_constant_feature_id(accessor: &Accessor) -> Result<(), SceneError> {
-    if let (Some(min), Some(max)) = (accessor.min, accessor.max) {
-        if min != max {
-            return Err(SceneError::Glb(format!(
-                "_FEATURE_ID_0 accessor is not constant (min {min}, max {max})"
-            )));
-        }
+    if let (Some(min), Some(max)) = (accessor.min, accessor.max)
+        && min != max
+    {
+        return Err(SceneError::Glb(format!(
+            "_FEATURE_ID_0 accessor is not constant (min {min}, max {max})"
+        )));
     }
     Ok(())
 }
 
 /// Read a `VEC3` f32 accessor into triangle-list positions or normals.
-fn read_vec3_f32(accessor: &Accessor, root: &Value, bin: &[u8]) -> Result<Vec<[f32; 3]>, SceneError> {
+fn read_vec3_f32(
+    accessor: &Accessor,
+    root: &Value,
+    bin: &[u8],
+) -> Result<Vec<[f32; 3]>, SceneError> {
     if accessor.component_type != COMPONENT_F32 {
         return Err(SceneError::Glb(format!(
             "unsupported componentType {} for VEC3",
@@ -320,7 +365,9 @@ fn read_vec3_f32(accessor: &Accessor, root: &Value, bin: &[u8]) -> Result<Vec<[f
     let view = buffer_view(root, accessor.buffer_view)?;
     let stride = view.byte_stride.unwrap_or(12);
     if stride < 12 {
-        return Err(SceneError::Glb(format!("byteStride {stride} too small for VEC3 f32")));
+        return Err(SceneError::Glb(format!(
+            "byteStride {stride} too small for VEC3 f32"
+        )));
     }
     let start = view.byte_offset + accessor.byte_offset;
     let view_end = view.byte_offset + view.byte_length;
@@ -331,7 +378,9 @@ fn read_vec3_f32(accessor: &Accessor, root: &Value, bin: &[u8]) -> Result<Vec<[f
     for i in 0..accessor.count {
         let base = start + i * stride;
         if base + 12 > view_end {
-            return Err(SceneError::Glb("accessor data exceeds its bufferView".into()));
+            return Err(SceneError::Glb(
+                "accessor data exceeds its bufferView".into(),
+            ));
         }
         let data = &bin[base..base + 12];
         out.push([
@@ -353,7 +402,12 @@ fn read_scalar_all(accessor: &Accessor, root: &Value, bin: &[u8]) -> Result<Vec<
 }
 
 /// Read one element of a SCALAR u32/u16/u8 accessor.
-fn read_scalar_element(accessor: &Accessor, root: &Value, bin: &[u8], element: usize) -> Result<u32, SceneError> {
+fn read_scalar_element(
+    accessor: &Accessor,
+    root: &Value,
+    bin: &[u8],
+    element: usize,
+) -> Result<u32, SceneError> {
     if element >= accessor.count {
         return Err(SceneError::Glb(format!(
             "scalar accessor element {element} out of range (count {})",
@@ -390,7 +444,9 @@ fn read_scalar_element(accessor: &Accessor, root: &Value, bin: &[u8], element: u
     }
     let base = start + element * stride;
     if base + width > view_end {
-        return Err(SceneError::Glb("accessor data exceeds its bufferView".into()));
+        return Err(SceneError::Glb(
+            "accessor data exceeds its bufferView".into(),
+        ));
     }
     let data = &bin[base..base + width];
     let value = match width {
@@ -401,9 +457,17 @@ fn read_scalar_element(accessor: &Accessor, root: &Value, bin: &[u8], element: u
     Ok(value)
 }
 
-fn read_property_tables(root: &Value, bin: Option<&[u8]>) -> Result<Vec<GlbFeatureRow>, SceneError> {
-    let Some(bin) = bin else { return Ok(Vec::new()) };
-    let Some(extension) = root.get("extensions").and_then(|e| e.get("EXT_structural_metadata")) else {
+fn read_property_tables(
+    root: &Value,
+    bin: Option<&[u8]>,
+) -> Result<Vec<GlbFeatureRow>, SceneError> {
+    let Some(bin) = bin else {
+        return Ok(Vec::new());
+    };
+    let Some(extension) = root
+        .get("extensions")
+        .and_then(|e| e.get("EXT_structural_metadata"))
+    else {
         return Ok(Vec::new());
     };
     let Some(tables) = extension.get("propertyTables").and_then(Value::as_array) else {
@@ -448,17 +512,40 @@ fn read_property_tables(root: &Value, bin: Option<&[u8]>) -> Result<Vec<GlbFeatu
             for (name, spec) in properties {
                 let type_info = class_properties.and_then(|p| p.get(name));
                 match name.as_str() {
-                    "revitUniqueId" => feature.revit_unique_id = read_string_field(spec, type_info, row, count, root, bin)?,
-                    "category" => feature.category = read_string_field(spec, type_info, row, count, root, bin)?,
-                    "levelKey" => feature.level_key = read_string_field(spec, type_info, row, count, root, bin)?,
-                    "levelName" => feature.level_name = read_string_field(spec, type_info, row, count, root, bin)?,
-                    "levelElevationMeters" => {
-                        feature.level_elevation_meters = read_scalar_field(spec, type_info, row, root, bin)?
+                    "revitUniqueId" => {
+                        feature.revit_unique_id =
+                            read_string_field(spec, type_info, row, count, root, bin)?
                     }
-                    "minZMeters" => feature.min_z = read_scalar_field(spec, type_info, row, root, bin)?,
-                    "maxZMeters" => feature.max_z = read_scalar_field(spec, type_info, row, root, bin)?,
-                    "sourceDocument" => feature.source_document = read_string_field(spec, type_info, row, count, root, bin)?,
-                    "sourceLinkName" => feature.source_link_name = read_string_field(spec, type_info, row, count, root, bin)?,
+                    "category" => {
+                        feature.category =
+                            read_string_field(spec, type_info, row, count, root, bin)?
+                    }
+                    "levelKey" => {
+                        feature.level_key =
+                            read_string_field(spec, type_info, row, count, root, bin)?
+                    }
+                    "levelName" => {
+                        feature.level_name =
+                            read_string_field(spec, type_info, row, count, root, bin)?
+                    }
+                    "levelElevationMeters" => {
+                        feature.level_elevation_meters =
+                            read_scalar_field(spec, type_info, row, root, bin)?
+                    }
+                    "minZMeters" => {
+                        feature.min_z = read_scalar_field(spec, type_info, row, root, bin)?
+                    }
+                    "maxZMeters" => {
+                        feature.max_z = read_scalar_field(spec, type_info, row, root, bin)?
+                    }
+                    "sourceDocument" => {
+                        feature.source_document =
+                            read_string_field(spec, type_info, row, count, root, bin)?
+                    }
+                    "sourceLinkName" => {
+                        feature.source_link_name =
+                            read_string_field(spec, type_info, row, count, root, bin)?
+                    }
                     // Unknown properties are ignored.
                     _ => {}
                 }
@@ -477,10 +564,12 @@ fn read_string_field(
     root: &Value,
     bin: &[u8],
 ) -> Result<String, SceneError> {
-    if let Some(type_info) = type_info {
-        if type_info.get("type").and_then(Value::as_str) != Some("STRING") {
-            return Err(SceneError::Glb("property declared non-STRING but read as a string".into()));
-        }
+    if let Some(type_info) = type_info
+        && type_info.get("type").and_then(Value::as_str) != Some("STRING")
+    {
+        return Err(SceneError::Glb(
+            "property declared non-STRING but read as a string".into(),
+        ));
     }
     read_string_property(spec, row, count, root, bin)
 }
@@ -494,14 +583,16 @@ fn read_scalar_field(
 ) -> Result<f32, SceneError> {
     if let Some(type_info) = type_info {
         if type_info.get("type").and_then(Value::as_str) != Some("SCALAR") {
-            return Err(SceneError::Glb("property declared non-SCALAR but read as f32".into()));
+            return Err(SceneError::Glb(
+                "property declared non-SCALAR but read as f32".into(),
+            ));
         }
-        if let Some(component_type) = type_info.get("componentType").and_then(Value::as_str) {
-            if component_type != "FLOAT32" {
-                return Err(SceneError::Glb(format!(
-                    "unsupported SCALAR componentType {component_type}"
-                )));
-            }
+        if let Some(component_type) = type_info.get("componentType").and_then(Value::as_str)
+            && component_type != "FLOAT32"
+        {
+            return Err(SceneError::Glb(format!(
+                "unsupported SCALAR componentType {component_type}"
+            )));
         }
     }
     read_f32_property(spec, row, root, bin)
@@ -510,11 +601,19 @@ fn read_scalar_field(
 /// STRING property: `values` holds UTF-8 bytes, `stringOffsets` holds u32
 /// offsets with `count + 1` entries (UINT32 is the spec default; the Tokyo
 /// asset declares no `stringOffsetType`).
-fn read_string_property(spec: &Value, row: usize, count: usize, root: &Value, bin: &[u8]) -> Result<String, SceneError> {
-    if let Some(offset_type) = spec.get("stringOffsetType").and_then(Value::as_str) {
-        if offset_type != "UINT32" {
-            return Err(SceneError::Glb(format!("unsupported stringOffsetType {offset_type}")));
-        }
+fn read_string_property(
+    spec: &Value,
+    row: usize,
+    count: usize,
+    root: &Value,
+    bin: &[u8],
+) -> Result<String, SceneError> {
+    if let Some(offset_type) = spec.get("stringOffsetType").and_then(Value::as_str)
+        && offset_type != "UINT32"
+    {
+        return Err(SceneError::Glb(format!(
+            "unsupported stringOffsetType {offset_type}"
+        )));
     }
     let values_view = spec
         .get("values")
@@ -544,7 +643,12 @@ fn read_string_property(spec: &Value, row: usize, count: usize, root: &Value, bi
 }
 
 /// SCALAR FLOAT32 property: a single `values` bufferView, one f32 per row.
-fn read_f32_property(spec: &Value, row: usize, root: &Value, bin: &[u8]) -> Result<f32, SceneError> {
+fn read_f32_property(
+    spec: &Value,
+    row: usize,
+    root: &Value,
+    bin: &[u8],
+) -> Result<f32, SceneError> {
     let values_view = spec
         .get("values")
         .and_then(Value::as_u64)
@@ -553,18 +657,27 @@ fn read_f32_property(spec: &Value, row: usize, root: &Value, bin: &[u8]) -> Resu
     let view = buffer_view(root, values_view)?;
     let start = view.byte_offset + row * 4;
     if row * 4 + 4 > view.byte_length {
-        return Err(SceneError::Glb("scalar property row exceeds its bufferView".into()));
+        return Err(SceneError::Glb(
+            "scalar property row exceeds its bufferView".into(),
+        ));
     }
-    let data = bin
-        .get(start..start + 4)
-        .ok_or_else(|| SceneError::Glb("scalar property bufferView exceeds the BIN chunk".into()))?;
+    let data = bin.get(start..start + 4).ok_or_else(|| {
+        SceneError::Glb("scalar property bufferView exceeds the BIN chunk".into())
+    })?;
     Ok(f32::from_le_bytes([data[0], data[1], data[2], data[3]]))
 }
 
-fn read_u32_view(root: &Value, buffer_view_index: usize, count: usize, bin: &[u8]) -> Result<Vec<u32>, SceneError> {
+fn read_u32_view(
+    root: &Value,
+    buffer_view_index: usize,
+    count: usize,
+    bin: &[u8],
+) -> Result<Vec<u32>, SceneError> {
     let view = buffer_view(root, buffer_view_index)?;
     if count * 4 > view.byte_length {
-        return Err(SceneError::Glb("offset bufferView is smaller than count + 1 u32 entries".into()));
+        return Err(SceneError::Glb(
+            "offset bufferView is smaller than count + 1 u32 entries".into(),
+        ));
     }
     let start = view.byte_offset;
     let mut out = Vec::with_capacity(count);
