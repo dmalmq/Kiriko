@@ -81,6 +81,19 @@ jobs:
           pnpm exec playwright test --project=chromium-visual
           npx -y node@24 -e "const core=require('./core/crates/kiriko-node'); if(typeof core.compileImdf!=='function'||typeof core.inspectBundle!=='function') process.exit(1)"
 
+      # Without this the Playwright output never leaves the runner, so a visual
+      # baseline failure reports a pixel count and nothing anyone can look at.
+      - name: Upload Playwright diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
   native-addon:
     name: Native addon (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
