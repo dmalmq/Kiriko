@@ -346,7 +346,7 @@ pub fn compile_imdf_with_network(
     })
 }
 
-fn postcard_encode_err(context: &str) -> impl Fn(postcard::Error) -> BundleError + '_ {
+pub(crate) fn postcard_encode_err(context: &str) -> impl Fn(postcard::Error) -> BundleError + '_ {
     move |e| BundleError::new(BundleErrorCode::InvalidBundle, format!("{context}: {e}"))
 }
 

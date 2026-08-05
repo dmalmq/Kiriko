@@ -21,6 +21,7 @@ mod error;
 mod export;
 mod format;
 mod sections;
+mod spatial_section;
 mod synth;
 #[cfg(feature = "netgen")]
 mod synth_medial;
