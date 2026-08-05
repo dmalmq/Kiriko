@@ -45,6 +45,19 @@ describe("decodeBundle", () => {
     expect(decodeBundle(bytes).hasGraph).toBe(false);
   });
 
+  it("reports why each optional section is unavailable, not just that it is", async () => {
+    const bytes = await readGoldenBundle();
+    const response = decodeBundle(bytes);
+
+    // The golden fixture carries neither optional section. `absent` must be
+    // distinguishable from a section that is present but unreadable, which is
+    // what `hasGraph`/`hasFacilities` alone cannot express.
+    expect(response.capabilities).toEqual({
+      graph: { state: "absent" },
+      facilities: { state: "absent" },
+    });
+  });
+
   it("decodes complete source properties, including nulls and unknown keys", async () => {
     const bytes = await readGoldenBundle();
     const response = decodeBundle(bytes);
