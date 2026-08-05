@@ -465,14 +465,14 @@ fn envelope_matches_documented_byte_layout() {
 }
 
 #[test]
-fn directory_is_sorted_fixed_width_and_required_sections_only() {
+fn directory_is_sorted_fixed_width_and_emits_the_spatial_context_section() {
     let bytes = compile_minimal();
     let payload = decompress_payload(&bytes);
 
     let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
     assert_eq!(
-        count, 3,
-        "Phase Two emits exactly manifest, geometry, and stores"
+        count, 4,
+        "a compiled venue emits manifest, geometry, stores, and the spatial context section"
     );
 
     let mut ids = Vec::new();
@@ -494,8 +494,8 @@ fn directory_is_sorted_fixed_width_and_required_sections_only() {
     }
     assert_eq!(
         ids,
-        vec![1, 2, 3],
-        "only manifest(1), geometry(2), and stores(3) are emitted"
+        vec![1, 2, 3, 8],
+        "manifest(1), geometry(2), stores(3), and spatial context(8) are emitted"
     );
     assert_eq!(
         cursor,
@@ -505,6 +505,62 @@ fn directory_is_sorted_fixed_width_and_required_sections_only() {
 }
 
 // -- Step 2/3: section round trip and determinism --------------------------
+
+#[test]
+fn compile_emits_a_spatial_context_frame_from_the_venue_bounds() {
+    let bytes = compile_minimal();
+    let document = decode_bundle(&bytes).expect("bundle decodes");
+    let context = document
+        .spatial_context
+        .expect("a compiled venue with geometry must carry a spatial context section");
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::Available
+    );
+
+    // The fixture venue polygon spans 139.766..139.768 / 35.680..35.682, so
+    // the canonical horizontal-bounds centre is exactly the display point.
+    assert_eq!(context.frame.anchor, [139.767, 35.681]);
+    assert_eq!(
+        context.frame.ecef_origin,
+        kiriko_model::spatial::wgs84_ecef(139.767, 35.681, 0.0),
+        "the ECEF transform must be exactly the WGS84 conversion of the anchor"
+    );
+    assert_eq!(
+        context.frame.enu_basis_ecef,
+        kiriko_model::spatial::enu_basis_ecef(139.767, 35.681),
+        "the world transform rotation must be the ENU basis at the anchor"
+    );
+    assert_eq!(context.frame.world_translation, context.frame.ecef_origin);
+    assert_eq!(context.frame.axes, kiriko_model::spatial::Axes::EastNorthUp);
+    assert_eq!(context.frame.unit, kiriko_model::spatial::LengthUnit::Millimetre);
+    assert_eq!(context.frame.vertical_normalisation_offset_mm, 0);
+
+    // The declared datum and the anchor's registration evidence are
+    // registered, and the frame references them by index.
+    assert_eq!(context.registries.datums.len(), 1);
+    assert_eq!(context.registries.datums[0].name, "WGS84");
+    assert_eq!(context.registries.locators.len(), 1);
+    assert_eq!(context.registries.locators[0].value, "a1000001-0000-4000-8000-000000000001");
+    assert_eq!(context.registries.registration_evidence.len(), 1);
+    assert_eq!(context.frame.datum_ref, 0);
+    assert_eq!(context.frame.anchor_evidence_ref, 0);
+}
+
+#[test]
+fn spatial_context_round_trips_through_reencode() {
+    let bytes = compile_minimal();
+    let document = decode_bundle(&bytes).expect("bundle decodes");
+    let context = document
+        .spatial_context
+        .clone()
+        .expect("compiled bundle carries spatial context");
+
+    let reencoded = encode_bundle(&document).expect("decoded document re-encodes");
+    let redoc = decode_bundle(&reencoded).expect("re-encoded bundle decodes");
+    assert_eq!(redoc.spatial_context, Some(context));
+    assert_eq!(redoc.capabilities.spatial_context(), SectionCapability::Available);
+}
 
 #[test]
 fn decode_roundtrip_preserves_every_feature_field_and_warning() {
@@ -767,6 +823,7 @@ fn minimal_document(features: Vec<kiriko_model::model::VenueFeature>) -> BundleD
         },
         graph: None,
         facilities: None,
+        spatial_context: None,
         capabilities: CapabilityReport::default(),
     }
 }
@@ -894,7 +951,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "3e1add8208f77c98fdddf5253c98bb18f533e5b3bf3d35d92ac444525080e136";
+const GOLDEN_BUNDLE_HASH: &str = "e0a283a4f4623e72c628d60b3096f48659e14706a073cc5757bbb0997e8919f1";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -1117,6 +1174,7 @@ fn bundle_with_graph(graph: kiriko_route::RouteGraph) -> Vec<u8> {
         },
         graph: Some(graph),
         facilities: None,
+        spatial_context: None,
         capabilities: CapabilityReport::default(),
     };
     encode_bundle(&doc).expect("bundle with graph encodes")
@@ -1182,4 +1240,212 @@ fn network_round_trip_is_stable_across_two_export_build_cycles() {
         .graph;
     assert_eq!(g2, g1, "the second cycle is a fixed point");
     assert_eq!(net2, net1, "re-export is identical");
+}
+
+// -- Stage 0: §8 capability and dependency matrix --------------------------
+
+/// Rebuilds the uncompressed payload of a compiled bundle under a modified
+/// section directory: `mutate` receives `(id, version, bytes)` in
+/// id-ascending order and may bump versions, replace bytes, or append rows
+/// (which must keep ids ascending). Rows are repacked contiguously, so the
+/// result is a well-formed directory around hand-crafted section content.
+fn rebuild_payload(
+    payload: &[u8],
+    mutate: impl FnOnce(&mut Vec<(u16, u16, Vec<u8>)>),
+) -> Vec<u8> {
+    let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+    let mut sections: Vec<(u16, u16, Vec<u8>)> = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = 2 + i * 20;
+        let id = u16::from_le_bytes([payload[base], payload[base + 1]]);
+        let version = u16::from_le_bytes([payload[base + 2], payload[base + 3]]);
+        let offset =
+            u64::from_le_bytes(payload[base + 4..base + 12].try_into().unwrap()) as usize;
+        let length =
+            u64::from_le_bytes(payload[base + 12..base + 20].try_into().unwrap()) as usize;
+        sections.push((id, version, payload[offset..offset + length].to_vec()));
+    }
+    mutate(&mut sections);
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&(sections.len() as u16).to_le_bytes());
+    let dir_len = 2 + sections.len() * 20;
+    let mut cursor = dir_len as u64;
+    for (id, version, bytes) in &sections {
+        out.extend_from_slice(&id.to_le_bytes());
+        out.extend_from_slice(&version.to_le_bytes());
+        out.extend_from_slice(&cursor.to_le_bytes());
+        out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        cursor += bytes.len() as u64;
+    }
+    for (_, _, bytes) in &sections {
+        out.extend_from_slice(bytes);
+    }
+    out
+}
+
+#[test]
+fn spatial_context_at_an_unreadable_version_degrades_alone() {
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, version, _) in sections.iter_mut() {
+            if *id == 8 {
+                *version = 2;
+            }
+        }
+    }));
+
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::UnsupportedVersion {
+            declared: 2,
+            supported: 1,
+        },
+        "the report must name both versions so a reader can say what is needed"
+    );
+    assert!(
+        document.spatial_context.is_none(),
+        "bytes at an unreadable version are never interpreted"
+    );
+    assert_eq!(document.capabilities.graph(), SectionCapability::Absent);
+    assert_eq!(document.venue_id, "a1000001-0000-4000-8000-000000000001");
+}
+
+#[test]
+fn garbage_spatial_context_bytes_report_invalid_and_the_venue_opens() {
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, _, bytes) in sections.iter_mut() {
+            if *id == 8 {
+                *bytes = vec![0x00, 0xFF, 0x7F];
+            }
+        }
+    }));
+
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    assert!(
+        matches!(document.capabilities.spatial_context(), SectionCapability::Invalid { .. }),
+        "a section that fails validation is reported invalid, not trusted"
+    );
+    assert!(document.spatial_context.is_none());
+    assert_eq!(document.capabilities.scene_sources(), SectionCapability::Absent);
+}
+
+#[test]
+fn an_invalid_spatial_context_leaves_routing_untouched() {
+    let source = support::build_minimal_imdf_zip();
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(NETWORK_JUNCTIONS),
+        Some(NETWORK_PATHS),
+        None,
+        false,
+        false,
+    )
+    .expect("fixture + network compiles");
+    let payload = decompress_payload(&compiled.bytes);
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, _, bytes) in sections.iter_mut() {
+            if *id == 8 {
+                *bytes = vec![0x00, 0xFF];
+            }
+        }
+    }));
+
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    assert!(matches!(document.capabilities.spatial_context(), SectionCapability::Invalid { .. }));
+    assert_eq!(
+        document.capabilities.graph(),
+        SectionCapability::Available,
+        "a broken spatial context must not disable the routing graph"
+    );
+    assert!(document.graph.is_some());
+}
+
+#[test]
+fn a_section_whose_required_section_is_unavailable_is_disabled_end_to_end() {
+    // The end-to-end proof #37 could not make: a bundle carrying a section
+    // that depends on §8, with §8 unavailable. The dependent's bytes are
+    // never interpreted — garbage is fine — and it reports exactly which
+    // section it needs.
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, version, _) in sections.iter_mut() {
+            if *id == 8 {
+                *version = 2;
+            }
+        }
+        sections.push((9, 1, vec![0xDE, 0xAD, 0xBE]));
+    }));
+
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::UnsupportedVersion {
+            declared: 2,
+            supported: 1,
+        }
+    );
+    assert_eq!(
+        document.capabilities.scene_sources(),
+        SectionCapability::DisabledByDependency { requires: 8 },
+        "a present section whose required section is unavailable must be withheld, \
+         naming the requirement"
+    );
+    assert_eq!(document.capabilities.canonical_graph(), SectionCapability::Absent);
+    assert_eq!(document.capabilities.network_qa(), SectionCapability::Absent);
+}
+
+#[test]
+fn a_dependent_section_with_its_requirement_available_has_no_decoder_yet() {
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        sections.push((9, 1, vec![0xDE, 0xAD]));
+    }));
+
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    match document.capabilities.scene_sources() {
+        SectionCapability::Invalid { reason } => {
+            assert!(
+                reason.contains("no decoder"),
+                "the reason must say this build cannot read the section: {reason}"
+            );
+        }
+        other => panic!("expected no-decoder invalid, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_document_with_a_dangling_spatial_context_reference_cannot_be_encoded() {
+    // Producer side of the invalid-cross-reference contract: the section
+    // cannot be produced, but nothing else about the document fails.
+    let mut document = decode_bundle(&compile_minimal()).expect("bundle decodes");
+    document
+        .spatial_context
+        .as_mut()
+        .expect("compiled bundle carries spatial context")
+        .frame
+        .datum_ref = 99;
+    let err = encode_bundle(&document).expect_err("a dangling datum reference must not encode");
+    assert_eq!(err.code, BundleErrorCode::InvalidBundle);
+}
+
+#[test]
+fn a_required_section_at_an_unexpected_version_still_fails_the_bundle() {
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, version, _) in sections.iter_mut() {
+            if *id == 2 {
+                *version = 2;
+            }
+        }
+    }));
+    let err = decode_bundle(&crafted).expect_err("a required section at a new version must fail");
+    assert_eq!(
+        err.code,
+        BundleErrorCode::UnsupportedBundleVersion,
+        "required-section strictness is preserved: §8's optionality changes nothing about §1–3"
+    );
 }

@@ -298,6 +298,7 @@ mod tests {
             },
             graph: Some(graph),
             facilities: None,
+            spatial_context: None,
             capabilities: crate::codec::CapabilityReport::default(),
         };
         encode_bundle(&doc).expect("encode")
@@ -415,6 +416,7 @@ mod tests {
             },
             graph: None,
             facilities: None,
+            spatial_context: None,
             capabilities: crate::codec::CapabilityReport::default(),
         };
         let bundle = encode_bundle(&doc).unwrap();

@@ -41,7 +41,7 @@ use crate::error::{BundleError, BundleErrorCode};
 
 /// Reject a non-finite (NaN or +/-Infinity) number, and normalize `-0.0` to
 /// `0.0`. Applied to every `f64` at the codec boundary (see module docs).
-fn canonical_f64(v: f64) -> Result<f64, BundleError> {
+pub(crate) fn canonical_f64(v: f64) -> Result<f64, BundleError> {
     if !v.is_finite() {
         return Err(BundleError::new(
             BundleErrorCode::InvalidBundle,
@@ -64,7 +64,7 @@ pub(crate) enum JsonValueDto {
     Object(JsonObjectDto),
 }
 
-fn value_to_dto(value: &CanonicalValue) -> Result<JsonValueDto, BundleError> {
+pub(crate) fn value_to_dto(value: &CanonicalValue) -> Result<JsonValueDto, BundleError> {
     Ok(match value {
         CanonicalValue::Null => JsonValueDto::Null,
         CanonicalValue::Bool(b) => JsonValueDto::Bool(*b),
@@ -77,7 +77,7 @@ fn value_to_dto(value: &CanonicalValue) -> Result<JsonValueDto, BundleError> {
     })
 }
 
-fn dto_to_value(dto: &JsonValueDto) -> Result<CanonicalValue, BundleError> {
+pub(crate) fn dto_to_value(dto: &JsonValueDto) -> Result<CanonicalValue, BundleError> {
     Ok(match dto {
         JsonValueDto::Null => CanonicalValue::Null,
         JsonValueDto::Bool(b) => CanonicalValue::Bool(*b),
@@ -90,14 +90,14 @@ fn dto_to_value(dto: &JsonValueDto) -> Result<CanonicalValue, BundleError> {
     })
 }
 
-fn object_to_dto(object: &canonical::Object) -> Result<JsonObjectDto, BundleError> {
+pub(crate) fn object_to_dto(object: &canonical::Object) -> Result<JsonObjectDto, BundleError> {
     object
         .iter()
         .map(|(k, v)| Ok((k.clone(), value_to_dto(v)?)))
         .collect()
 }
 
-fn dto_to_object(dto: &JsonObjectDto) -> Result<canonical::Object, BundleError> {
+pub(crate) fn dto_to_object(dto: &JsonObjectDto) -> Result<canonical::Object, BundleError> {
     dto.iter()
         .map(|(k, v)| Ok((k.clone(), dto_to_value(v)?)))
         .collect()
@@ -558,6 +558,7 @@ pub(crate) fn manifest_into_document(
         },
         graph: None,
         facilities: None,
+        spatial_context: None,
         capabilities: CapabilityReport::default(),
     })
 }
@@ -976,6 +977,7 @@ mod tests {
             },
             graph: None,
             facilities: None,
+            spatial_context: None,
             capabilities: CapabilityReport::default(),
         }
     }

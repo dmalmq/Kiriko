@@ -169,8 +169,10 @@ polygons.
 - `1 manifest`, `2 geometry`, `3 stores` — always (IMDF).
 - `5 graph` — routing graph, present when a network GDB was imported. §5 edges carry per-edge `interior` polyline geometry + `ordinal`.
 - `7 facilities` — point facilities, present when a point-facility GDB was imported.
+- `8 spatial context` — one shared WGS84 local east-north-up frame per venue version (anchored at the canonical venue horizontal-bounds centre, with ECEF/world transforms, declared units, and the vertical normalisation offset) plus the typed evidence registries (artifacts, locators, datums, transforms, registration evidence, assumptions, confidence, manual provenance) and bounded source-property preservation. Present on every compiled venue with a computable anchor. Floor-plane records reference its registries (3D Stage 0).
 - `4 style`, `6 beacons` — reserved, not emitted.
-- Sections 5 and 7 are **optional and backward compatible**: older decoders read 1–3 and ignore unknown ids. Directory rows are id-ascending.
+- Sections `9` (scene sources), `10` (canonical graph), `11` (network QA) are **declared** format ids with dependency edges onto §8; their decoders arrive in later 3D stages, and a present row is never interpreted by a decoder that predates them.
+- Sections 5, 7, and 8 are **optional and backward compatible**: older decoders read 1–3 and ignore unknown ids. Directory rows are id-ascending. Availability of every optional/declared section is reported through the capability model (available / absent / unsupported version / invalid / disabled by dependency), so one unreadable optional section never costs a reader the venue.
 
 **Routing (`kiriko-route`):**
 - `build_route_graph(junctions_geojson, paths_geojson, level_ordinals)` → `RouteGraphBuild { graph, warnings, node_ids }`. Nodes carry `(lon, lat, ordinal)`; edges carry `(from, to, weight = net_path.cost, ordinal, interior)` where `interior` is the `net_path` polyline's bend points with the two endpoint vertices stripped (empty for the ~97% straight edges). Full edge polyline = `[from node, …interior…, to node]`. `node_ids[i]` is the source NODEID of `graph.nodes[i]`.

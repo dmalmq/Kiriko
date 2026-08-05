@@ -725,6 +725,7 @@ mod tests {
             },
             graph: None,
             facilities: None,
+            spatial_context: None,
             capabilities: crate::codec::CapabilityReport::default(),
         }
     }

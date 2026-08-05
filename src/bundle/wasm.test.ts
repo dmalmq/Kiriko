@@ -49,12 +49,18 @@ describe("decodeBundle", () => {
     const bytes = await readGoldenBundle();
     const response = decodeBundle(bytes);
 
-    // The golden fixture carries neither optional section. `absent` must be
-    // distinguishable from a section that is present but unreadable, which is
-    // what `hasGraph`/`hasFacilities` alone cannot express.
+    // The golden fixture carries no graph or facilities but does carry the
+    // §8 spatial context section. `absent` must be distinguishable from a
+    // section that is present but unreadable, which is what
+    // `hasGraph`/`hasFacilities` alone cannot express; the declared future
+    // sections (§9–§11) are absent in this bundle.
     expect(response.capabilities).toEqual({
       graph: { state: "absent" },
       facilities: { state: "absent" },
+      spatialContext: { state: "available" },
+      sceneSources: { state: "absent" },
+      canonicalGraph: { state: "absent" },
+      networkQa: { state: "absent" },
     });
   });
 
