@@ -12,6 +12,7 @@ import init, {
   routeBundle as routeBundleWasm,
   facilities as facilitiesWasm,
   exportNetwork as exportNetworkWasm,
+  levelElevations as levelElevationsWasm,
 } from "@kiriko/wasm";
 // Vite emits a hashed, origin-relative asset path (e.g.
 // `/assets/kiriko_wasm_bg-[hash].wasm`) for this `?url` import. Resolving
@@ -144,6 +145,29 @@ export interface FacilityDto {
   anchor: FacilityAnchorDto | null;
 }
 
+/**
+ * One level's elevation answer as serialized by the wasm `levelElevations`
+ * binding. `resolved` is a §8-backed plane (with its resolved Z and method);
+ * `legacyUnknown` is the honest answer for a bundle published before §8
+ * existed — it carries no confidence and no number, so a reviewer sees "we
+ * do not know this" rather than a value that looks measured.
+ */
+export type LevelElevationDto =
+  | {
+      levelId: string;
+      ordinal: number;
+      state: "resolved";
+      resolvedSceneZMm: number;
+      method: "imported_elevation" | "network_altitude" | "nominal_spacing";
+    }
+  | {
+      levelId: string;
+      ordinal: number;
+      state: "legacyUnknown";
+      resolvedSceneZMm: null;
+      method: null;
+    };
+
 /** One floor-grouped run of the route polyline. */
 export interface RouteSegmentDto {
   ordinal: number;
@@ -256,6 +280,16 @@ export function routeBundle(
  */
 export function facilities(bytes: Uint8Array): FacilityDto[] {
   return facilitiesWasm(bytes) as FacilityDto[];
+}
+
+/**
+ * Lists one elevation answer per level: `resolved` (with the §8-backed
+ * resolved Z and method) or `legacyUnknown` for a bundle published before §8
+ * existed. Must only be called after `initKirikoWasm` has resolved. Throws
+ * when the bundle fails to decode.
+ */
+export function levelElevations(bytes: Uint8Array): LevelElevationDto[] {
+  return levelElevationsWasm(bytes) as LevelElevationDto[];
 }
 
 /** The two network feature classes as GeoJSON `FeatureCollection` text. */

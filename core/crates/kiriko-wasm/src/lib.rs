@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use kiriko_bundle::{BundleDocument, BundleError, CapabilityReport, decode_bundle};
+use kiriko_bundle::{BundleDocument, BundleError, CapabilityReport, LevelElevation, decode_bundle, level_elevations};
 use kiriko_model::canonical::{Object as CanonicalObject, Value as CanonicalValue};
 use kiriko_model::model::{Bounds, ImdfManifest, VenueFeature, ViewerLevel, ViewerWarning};
 use kiriko_route::{Point3, Route};
@@ -429,6 +429,60 @@ fn facilities_in_document(document: &BundleDocument) -> Vec<FacilityDto> {
 pub fn facilities_js(bundle: &[u8]) -> Result<JsValue, JsError> {
     let document = decode_bundle(bundle).map_err(|e| JsError::new(&e.message))?;
     facilities_in_document(&document)
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
+// -- Level elevations (legacy-honesty Task) --------------------------------
+
+/// One level's elevation answer: `{ levelId, ordinal, state,
+/// resolvedSceneZMm?, method? }`. `state` is `"resolved"` for a §8-backed
+/// plane (with its resolved Z and method) or `"legacyUnknown"` for a bundle
+/// published before §8 existed — no confidence is ever serialized for the
+/// legacy answer, so a reviewer sees "we do not know this", never a number
+/// that looks measured.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LevelElevationDto {
+    level_id: String,
+    ordinal: f64,
+    state: &'static str,
+    resolved_scene_z_mm: Option<i64>,
+    method: Option<&'static str>,
+}
+
+/// Non-wasm core of [`level_elevations_js`]: one answer per canonical level.
+fn level_elevations_in_document(document: &BundleDocument) -> Vec<LevelElevationDto> {
+    level_elevations(document)
+        .iter()
+        .map(|elevation| match elevation {
+            LevelElevation::Resolved { level } => LevelElevationDto {
+                level_id: level.level_id.clone(),
+                ordinal: level.ordinal,
+                state: "resolved",
+                resolved_scene_z_mm: Some(level.resolved_scene_z_mm),
+                method: Some(level.method.as_str()),
+            },
+            LevelElevation::LegacyUnknown { level_id, ordinal } => LevelElevationDto {
+                level_id: level_id.clone(),
+                ordinal: *ordinal,
+                state: "legacyUnknown",
+                resolved_scene_z_mm: None,
+                method: None,
+            },
+        })
+        .collect()
+}
+
+/// List a `kvb1` bundle's per-level elevation answers. A bundle with §8
+/// answers `resolved` for every level its records cover; a legacy bundle
+/// answers `legacyUnknown` for every level. Serialized with the same
+/// json-compatible serializer as [`facilities_js`]; bundle-format failures
+/// throw (unlike [`decode_bundle_js`], which reports them structurally).
+#[wasm_bindgen(js_name = "levelElevations")]
+pub fn level_elevations_js(bundle: &[u8]) -> Result<JsValue, JsError> {
+    let document = decode_bundle(bundle).map_err(|e| JsError::new(&e.message))?;
+    level_elevations_in_document(&document)
         .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
         .map_err(|e| JsError::new(&e.to_string()))
 }
