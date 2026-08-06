@@ -190,6 +190,7 @@ fn main() {
         false,
         None,
         &[],
+        None,
     )
     .expect("stage0 fixture must compile");
     write_fixture("stage0", &stage0.bytes, "network + facilities + spatial context");
@@ -216,6 +217,12 @@ fn main() {
                 *version = 2;
             }
         }
-        sections.push((9, 1, vec![0xDE, 0xAD, 0xBE]));
-    }, "§8 unavailable + declared §9 present");
+        // The stage0 bundle now carries a real §9; its bytes are never
+        // interpreted while its required §8 is unavailable.
+        for (id, _, bytes) in sections.iter_mut() {
+            if *id == 9 {
+                *bytes = vec![0xDE, 0xAD, 0xBE];
+            }
+        }
+    }, "§8 unavailable + real §9 present");
 }

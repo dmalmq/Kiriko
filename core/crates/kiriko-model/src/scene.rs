@@ -13,6 +13,20 @@
 //! Primitive evidence/confidence references therefore resolve into the §8
 //! registries of the same bundle.
 
+impl PrimitiveRole {
+    /// Stable string value (snake_case, never changes for an existing variant).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Surface => "surface",
+            Self::Wall => "wall",
+            Self::Ceiling => "ceiling",
+            Self::Portal => "portal",
+            Self::Conveyance => "conveyance",
+        }
+    }
+}
+
 /// Semantic role of a scene primitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimitiveRole {
@@ -30,12 +44,35 @@ pub enum PrimitiveRole {
     Conveyance,
 }
 
+impl OcclusionClass {
+    /// Stable string value (snake_case, never changes for an existing variant).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Opaque => "opaque",
+            Self::SemiTransparent => "semi_transparent",
+            Self::Transparent => "transparent",
+        }
+    }
+}
+
 /// How much a primitive blocks the view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OcclusionClass {
     Opaque,
     SemiTransparent,
     Transparent,
+}
+
+impl ConveyanceKind {
+    /// Stable string value (snake_case, never changes for an existing variant).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceEvidenced => "source_evidenced",
+            Self::Neutral => "neutral",
+        }
+    }
 }
 
 /// Whether a conveyance form is derived from source evidence or is the

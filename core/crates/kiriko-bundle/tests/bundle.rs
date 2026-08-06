@@ -1911,6 +1911,7 @@ fn stage0_fixture_is_frozen_and_reproducible() {
         false,
         None,
         &[],
+        None,
     )
     .expect("fixture inputs compile");
     assert_eq!(
@@ -2021,6 +2022,7 @@ fn the_full_pipeline_compiles_byte_identically() {
             false,
             None,
             &[],
+            None,
         )
         .expect("stage0 inputs compile")
         .bytes
@@ -2440,4 +2442,100 @@ fn the_scene_profile_drives_nominal_dimensions() {
         Some(4000 + 4000),
         "the nominal wall height comes from the versioned profile, not a constant"
     );
+}
+
+// -- Stage 1: scene-source adapter contract (#53) --------------------------
+
+#[test]
+fn the_generated_scene_source_adapts_the_bundle_content() {
+    use kiriko_model::scene_projection::{SceneCapabilityState, SceneSourceKind};
+
+    let source = support::build_multi_floor_imdf_zip();
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(NETWORK_JUNCTIONS),
+        Some(NETWORK_PATHS),
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+    )
+    .expect("fixture + network compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let projection = kiriko_bundle::scene_projection(&document);
+
+    // Identity and capability.
+    assert_eq!(projection.identity.kind, SceneSourceKind::Generated);
+    assert_eq!(projection.capability, SceneCapabilityState::Ready);
+
+    // Frame mirrors §8 exactly.
+    let spatial = document.spatial_context.as_ref().expect("spatial");
+    let frame = projection.frame.as_ref().expect("frame from §8");
+    assert_eq!(frame.anchor, spatial.frame.anchor);
+    assert_eq!(frame.ecef_origin, spatial.frame.ecef_origin);
+    assert_eq!(frame.vertical_normalisation_offset_mm, spatial.frame.vertical_normalisation_offset_mm);
+    assert_eq!(frame.unit, "millimetre");
+    assert_eq!(frame.axes, "east_north_up");
+
+    // One level group per canonical level, with scene bounds from the slab.
+    assert_eq!(projection.levels.len(), 4);
+    for level in &projection.levels {
+        assert!(
+            spatial
+                .levels
+                .iter()
+                .any(|l| l.level_id == level.level_id && l.resolved_scene_z_mm == level.resolved_scene_z_mm),
+            "level {} resolves to the §8 plane",
+            level.level_id
+        );
+        assert!(level.bounds_mm.is_some(), "level {} has slab bounds", level.level_id);
+        assert!(level.source_levels.is_empty(), "generated source has no composite levels");
+    }
+
+    // Primitives map roles/occlusion/confidence/locators/evidence.
+    let surface_count = projection
+        .primitives
+        .iter()
+        .filter(|p| p.role == "surface")
+        .count();
+    assert_eq!(surface_count, 4 + 3, "4 slabs + 3 unit surfaces");
+    let unit_surface = projection
+        .primitives
+        .iter()
+        .find(|p| p.canonical_feature_id.as_deref() == Some("c1000001-0000-4000-8000-000000000001"))
+        .expect("u1 surface projected");
+    assert_eq!(unit_surface.source_object_ids, vec!["c1000001-0000-4000-8000-000000000001"]);
+    assert_eq!(unit_surface.confidence.kind, "measured");
+    assert!(!unit_surface.evidence.is_empty(), "evidence resolves into §8");
+    assert!(
+        projection.primitives.iter().any(|p| p.role == "wall" && p.occlusion == "opaque"),
+        "walls project with their occlusion class"
+    );
+    assert!(
+        projection.primitives.iter().any(|p| p.role == "conveyance" && p.conveyance_kind.as_deref() == Some("neutral")),
+        "conveyance projects with its neutral kind"
+    );
+
+    // Pick: an associated source object returns its canonical feature.
+    let pick = projection
+        .pick("c1000001-0000-4000-8000-000000000001")
+        .expect("u1 is a source object");
+    assert_eq!(pick.canonical_feature_id.as_deref(), Some("c1000001-0000-4000-8000-000000000001"));
+    assert_eq!(pick.canonical_level_id.as_deref(), Some("b1000003-0000-4000-8000-000000000003"));
+    assert!(!pick.evidence.is_empty());
+    // An unknown source object picks nothing.
+    assert!(projection.pick("no-such-object").is_none());
+}
+
+#[test]
+fn a_bundle_without_a_scene_reports_absent_capability() {
+    use kiriko_model::scene_projection::SceneCapabilityState;
+
+    let document = decode_bundle(&legacy_bundle_bytes()).expect("legacy decodes");
+    let projection = kiriko_bundle::scene_projection(&document);
+    assert_eq!(projection.capability, SceneCapabilityState::Absent);
+    assert!(projection.primitives.is_empty());
 }

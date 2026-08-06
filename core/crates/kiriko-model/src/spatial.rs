@@ -31,10 +31,30 @@ pub const WGS84_INVERSE_FLATTENING: f64 = 298.257_223_563;
 /// reached by a legitimate producer.
 pub const MAX_VERTICAL_OFFSET_MM: i64 = 1_000_000_000;
 
+impl Axes {
+    /// Stable string value (snake_case, never changes for an existing variant).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EastNorthUp => "east_north_up",
+        }
+    }
+}
+
 /// The frame's declared axis convention. Local X is east, Y north, Z up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axes {
     EastNorthUp,
+}
+
+impl LengthUnit {
+    /// Stable string value (snake_case, never changes for an existing variant).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Millimetre => "millimetre",
+        }
+    }
 }
 
 /// Declared units for resolved coordinates in this frame.
@@ -70,6 +90,19 @@ pub enum AssumptionKind {
     Inferred,
 }
 
+impl EvidenceMethod {
+    /// Stable string value (snake_case, never changes for an existing variant).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DerivedFromVenueGeometry => "derived_from_venue_geometry",
+            Self::ImportedElevation => "imported_elevation",
+            Self::PreservedNetworkAltitude => "preserved_network_altitude",
+            Self::NominalSpacing => "nominal_spacing",
+        }
+    }
+}
+
 /// How a piece of [`RegistrationEvidence`] was produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvidenceMethod {
@@ -81,6 +114,19 @@ pub enum EvidenceMethod {
     PreservedNetworkAltitude,
     /// A nominal spacing assumption.
     NominalSpacing,
+}
+
+impl ConfidenceKind {
+    /// Stable string value (snake_case, never changes for an existing variant).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Measured => "measured",
+            Self::Estimated => "estimated",
+            Self::Assumed => "assumed",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Reliability class of a registered confidence value.
