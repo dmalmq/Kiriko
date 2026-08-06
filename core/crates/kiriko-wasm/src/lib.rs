@@ -781,7 +781,7 @@ mod tests {
     }
 }
 
-// -- Scene decode (3D rendering spike Task 4) ------------------------------
+// -- Scene decode: the renderer's source-neutral entry ---------------------
 
 /// Decoded scene split into a JSON description plus one packed payload.
 /// The payload concatenates, per batch in order: positions (u16 x3), normals
@@ -806,11 +806,39 @@ impl DecodedScene {
     }
 }
 
+/// Decode an already-derived `.kscene` package — the Tiles source's path
+/// (Stage 3), where the deriver ran server-side and the client receives the
+/// render document as bytes.
 #[wasm_bindgen(js_name = "decodeScene")]
 pub fn decode_scene_js(bytes: &[u8]) -> Result<DecodedScene, JsError> {
     let document =
         kiriko_scene::decode_scene(bytes).map_err(|error| JsError::new(&format!("{error}")))?;
+    describe_scene(&document)
+}
 
+/// Compile a venue bundle's generated §9 scene into the same render document.
+/// The renderer cannot tell which of these two entries produced its scene —
+/// that is what keeps one visual language over both sources (#23 D4).
+#[wasm_bindgen(js_name = "generatedScene")]
+pub fn generated_scene_js(bytes: &[u8]) -> Result<DecodedScene, JsError> {
+    let bundle = kiriko_bundle::decode_bundle(bytes)
+        .map_err(|error| JsError::new(&format!("bundle decode: {error}")))?;
+    let scene = bundle
+        .scene
+        .as_ref()
+        .ok_or_else(|| JsError::new("bundle carries no generated scene"))?;
+    let spatial = bundle
+        .spatial_context
+        .as_ref()
+        .ok_or_else(|| JsError::new("bundle carries no spatial context"))?;
+    let document = kiriko_scene::compile_generated_scene(scene, spatial, &bundle.features)
+        .map_err(|error| JsError::new(&format!("scene compile: {error}")))?;
+    describe_scene(&document)
+}
+
+/// Split a render document into the JSON description plus the packed payload
+/// the client builds typed-array views over.
+fn describe_scene(document: &kiriko_scene::SceneDocument) -> Result<DecodedScene, JsError> {
     let mut payload: Vec<u8> = Vec::new();
     let mut batch_meta: Vec<serde_json::Value> = Vec::with_capacity(document.batches.len());
     for batch in &document.batches {
