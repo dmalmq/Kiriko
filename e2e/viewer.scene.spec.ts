@@ -90,6 +90,26 @@ async function publishScene(
   return { slug: venue.slug, venueId: venue.venueId };
 }
 
+/**
+ * Focus the map without clicking: a click would select a feature, and the
+ * selection highlight would change pixels for a reason that is not the camera.
+ * Focus itself paints a ring, so callers baseline *after* this.
+ */
+async function focusMap(page: Page): Promise<void> {
+  await mapCanvas(page).focus();
+  await page.waitForTimeout(400);
+}
+
+/** Tilt through MapLibre's keyboard handler; a no-op when pitch is clamped. */
+async function tilt(page: Page): Promise<void> {
+  for (let press = 0; press < 6; press += 1) {
+    await page.keyboard.press("Shift+ArrowUp");
+    await page.waitForTimeout(80);
+  }
+  await waitForMapIdle(page);
+  await page.waitForTimeout(400);
+}
+
 test.describe("3D scene layer", () => {
   test.setTimeout(120_000);
   test("renders a published venue's generated scene inside the map", async ({ page }, testInfo) => {
@@ -165,6 +185,30 @@ test.describe("3D scene layer", () => {
       const lower = await sceneDiagnostics(page);
       expect(lower.activeLevel).not.toBe(upper.activeLevel);
       expect(lower.stats.drawCalls).toBeGreaterThan(0);
+    } finally {
+      await page.request.delete(`/api/venues/${venueId}`);
+    }
+  });
+
+  test("lets the camera tilt only when a scene is present", async ({ page }, testInfo) => {
+    const { slug, venueId } = await publishScene(page, testInfo, "scene-camera");
+    try {
+      // 2D: the pitch ceiling is zero, so the tilt gesture cannot move it.
+      await page.goto(`/?dataset=${encodeURIComponent(slug)}&lang=en`);
+      await waitForMapIdle(page);
+      await focusMap(page);
+      const flatBefore = await canvasSignature(page);
+      await tilt(page);
+      expect(await canvasSignature(page)).toBe(flatBefore);
+
+      // 3D: the same gesture pitches the camera, so the view changes.
+      await page.goto(`/?dataset=${encodeURIComponent(slug)}&lang=en&scene=1`);
+      await waitForMapIdle(page);
+      await waitForScene(page);
+      await focusMap(page);
+      const sceneBefore = await canvasSignature(page);
+      await tilt(page);
+      expect(await canvasSignature(page)).not.toBe(sceneBefore);
     } finally {
       await page.request.delete(`/api/venues/${venueId}`);
     }

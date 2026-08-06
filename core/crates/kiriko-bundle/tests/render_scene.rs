@@ -102,12 +102,16 @@ fn the_fixture_exercises_the_semantic_role_span() {
         .map(|feature| format!("{:?}", feature.role))
         .collect();
 
-    // The multi-floor fixture carries walkways, rooms, walls, ceilings,
-    // openings, and vertical connections — the classes a renderer must style
-    // differently. A regression that collapsed the mapping would shrink this.
+    // The multi-floor fixture carries walkways, a stairs unit, floor plates,
+    // walls, ceilings, and openings — the classes a renderer must style
+    // differently. `Stairs` proves a conveyance types itself from its
+    // canonical unit's category rather than staying untyped, and `Context`
+    // proves the level plate is distinct from the finishes on it. A regression
+    // that collapsed the mapping would shrink this set.
     for expected in [
         SemanticRole::Walkable,
-        SemanticRole::Public,
+        SemanticRole::Context,
+        SemanticRole::Stairs,
         SemanticRole::Structure,
         SemanticRole::Ceiling,
         SemanticRole::Opening,
