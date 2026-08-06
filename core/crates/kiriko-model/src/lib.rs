@@ -16,6 +16,7 @@ pub mod error;
 pub mod geometry;
 pub mod model;
 pub mod scene;
+pub mod scene_projection;
 mod normalize;
 pub mod spatial;
 
