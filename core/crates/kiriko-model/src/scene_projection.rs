@@ -107,10 +107,17 @@ pub enum SceneCapabilityState {
     /// The bundle carries no scene source.
     Absent,
     /// The scene section is present but failed validation.
-    Invalid { reason: String },
-    UnsupportedVersion { declared: u16, supported: u16 },
+    Invalid {
+        reason: String,
+    },
+    UnsupportedVersion {
+        declared: u16,
+        supported: u16,
+    },
     /// The scene requires §8, which is unavailable.
-    DisabledByDependency { requires: u16 },
+    DisabledByDependency {
+        requires: u16,
+    },
 }
 
 /// A pick result: the selected source object, its primitive, and the
@@ -190,7 +197,11 @@ mod tests {
         SceneSource, SceneSourceIdentity, SceneSourceKind,
     };
 
-    fn primitive(id: &str, source_objects: Vec<&str>, canonical_feature: Option<&str>) -> ScenePrimitiveProjection {
+    fn primitive(
+        id: &str,
+        source_objects: Vec<&str>,
+        canonical_feature: Option<&str>,
+    ) -> ScenePrimitiveProjection {
         ScenePrimitiveProjection {
             id: id.to_string(),
             role: "surface".to_string(),
@@ -240,7 +251,9 @@ mod tests {
 
     #[test]
     fn pick_returns_the_associated_canonical_object_with_evidence() {
-        let pick = projection().pick("so-1").expect("so-1 is a source object of p1");
+        let pick = projection()
+            .pick("so-1")
+            .expect("so-1 is a source object of p1");
         assert_eq!(pick.primitive_id, "p1");
         assert_eq!(pick.canonical_feature_id.as_deref(), Some("f1"));
         assert_eq!(pick.canonical_level_id.as_deref(), Some("l1"));
@@ -250,8 +263,13 @@ mod tests {
 
     #[test]
     fn an_unassociated_source_object_cannot_impersonate_a_canonical_feature() {
-        let pick = projection().pick("so-2").expect("so-2 is a source object of p2");
-        assert_eq!(pick.canonical_feature_id, None, "no canonical feature is invented");
+        let pick = projection()
+            .pick("so-2")
+            .expect("so-2 is a source object of p2");
+        assert_eq!(
+            pick.canonical_feature_id, None,
+            "no canonical feature is invented"
+        );
         assert_eq!(pick.canonical_conveyance_id, None);
         assert_eq!(pick.canonical_graph_object_id, None);
     }

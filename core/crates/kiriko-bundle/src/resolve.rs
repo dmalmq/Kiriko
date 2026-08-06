@@ -164,14 +164,12 @@ pub(crate) fn resolve_level_planes(
     let mut resolved: Vec<ResolvedLevel> = Vec::with_capacity(levels.len());
     for level in levels {
         let source_elevation_m = elevations.get(&level.id).copied();
-        let network_altitude_m =
-            trustworthy_network_altitude(level.ordinal, network, profile);
+        let network_altitude_m = trustworthy_network_altitude(level.ordinal, network, profile);
         let (resolved_elevation_m, method, network_difference_mm) = match source_elevation_m {
             Some(imported) => (
                 imported,
                 ResolutionMethod::ImportedElevation,
-                network_altitude_m
-                    .map(|network_altitude| to_mm(network_altitude - imported)),
+                network_altitude_m.map(|network_altitude| to_mm(network_altitude - imported)),
             ),
             None => match network_altitude_m {
                 Some(network_altitude) => {
@@ -281,10 +279,7 @@ mod tests {
             level("B1", -1.0),
         ];
         let elevations = BTreeMap::from([("L1".to_string(), 10.0), ("B1".to_string(), 6.0)]);
-        let network = vec![
-            (1.0, vec![14.0, 14.1, 14.2]),
-            (-1.0, vec![6.5, 6.5, 6.6]),
-        ];
+        let network = vec![(1.0, vec![14.0, 14.1, 14.2]), (-1.0, vec![6.5, 6.5, 6.6])];
 
         let outcome = resolve_level_planes(&levels, &elevations, &network, &default_profile(), &[]);
 
@@ -302,7 +297,11 @@ mod tests {
 
         let l2 = by_id["L2"];
         assert_eq!(l2.method, ResolutionMethod::NetworkAltitude);
-        assert_eq!(l2.network_altitude_m, Some(14.1), "median of 14.0/14.1/14.2");
+        assert_eq!(
+            l2.network_altitude_m,
+            Some(14.1),
+            "median of 14.0/14.1/14.2"
+        );
         assert_eq!(l2.source_elevation_m, None);
         assert_eq!(l2.scene_z_mm, 8100, "14100 − offset 6000");
 
@@ -315,7 +314,11 @@ mod tests {
         assert_eq!(l3.scene_z_mm, 12000, "18000 − offset 6000");
 
         let b1 = by_id["B1"];
-        assert_eq!(b1.method, ResolutionMethod::ImportedElevation, "precedence: imported beats network");
+        assert_eq!(
+            b1.method,
+            ResolutionMethod::ImportedElevation,
+            "precedence: imported beats network"
+        );
         assert_eq!(b1.source_elevation_m, Some(6.0));
         assert_eq!(b1.network_altitude_m, Some(6.5));
         assert_eq!(
@@ -331,13 +334,22 @@ mod tests {
     #[test]
     fn all_nominal_levels_measure_spacing_from_ordinal_zero() {
         let levels = vec![level("F1", 1.0), level("G", 0.0), level("B1", -1.0)];
-        let outcome = resolve_level_planes(&levels, &BTreeMap::new(), &Vec::new(), &default_profile(), &[]);
+        let outcome = resolve_level_planes(
+            &levels,
+            &BTreeMap::new(),
+            &Vec::new(),
+            &default_profile(),
+            &[],
+        );
         assert_eq!(outcome.normalisation_offset_mm, -4000);
         assert_eq!(outcome.levels[0].scene_z_mm, 8000, "4.0 × 1 − (−4000)");
         assert_eq!(outcome.levels[1].scene_z_mm, 4000, "4.0 × 0 − (−4000)");
         assert_eq!(outcome.levels[2].scene_z_mm, 0, "4.0 × −1 − (−4000)");
         assert!(
-            outcome.levels.iter().all(|l| l.method == ResolutionMethod::NominalSpacing),
+            outcome
+                .levels
+                .iter()
+                .all(|l| l.method == ResolutionMethod::NominalSpacing),
             "every level is flagged assumed when nothing real exists"
         );
     }
@@ -346,7 +358,8 @@ mod tests {
     fn a_network_source_with_too_few_nodes_is_not_trustworthy() {
         let levels = vec![level("F1", 0.0)];
         let network = vec![(0.0, vec![10.0, 10.5])];
-        let outcome = resolve_level_planes(&levels, &BTreeMap::new(), &network, &default_profile(), &[]);
+        let outcome =
+            resolve_level_planes(&levels, &BTreeMap::new(), &network, &default_profile(), &[]);
         assert_eq!(
             outcome.levels[0].method,
             ResolutionMethod::NominalSpacing,
@@ -358,7 +371,8 @@ mod tests {
     fn a_network_source_with_a_wide_spread_is_not_trustworthy() {
         let levels = vec![level("F1", 0.0)];
         let network = vec![(0.0, vec![10.0, 10.1, 12.5])];
-        let outcome = resolve_level_planes(&levels, &BTreeMap::new(), &network, &default_profile(), &[]);
+        let outcome =
+            resolve_level_planes(&levels, &BTreeMap::new(), &network, &default_profile(), &[]);
         assert_eq!(
             outcome.levels[0].method,
             ResolutionMethod::NominalSpacing,
@@ -384,7 +398,8 @@ mod tests {
 
     #[test]
     fn empty_levels_produce_an_empty_outcome_with_zero_offset() {
-        let outcome = resolve_level_planes(&[], &BTreeMap::new(), &Vec::new(), &default_profile(), &[]);
+        let outcome =
+            resolve_level_planes(&[], &BTreeMap::new(), &Vec::new(), &default_profile(), &[]);
         assert!(outcome.levels.is_empty());
         assert_eq!(outcome.normalisation_offset_mm, 0);
     }
@@ -416,7 +431,10 @@ mod tests {
             &default_profile(),
             &overrides,
         );
-        assert_eq!(outcome.normalisation_offset_mm, 6000, "the offset comes from the automatic planes");
+        assert_eq!(
+            outcome.normalisation_offset_mm, 6000,
+            "the offset comes from the automatic planes"
+        );
         let by_id: BTreeMap<&str, _> = outcome
             .levels
             .iter()
@@ -454,7 +472,12 @@ mod tests {
             &overrides,
         );
         assert_eq!(
-            outcome.levels.iter().find(|l| l.level_id == "B1").unwrap().scene_z_mm,
+            outcome
+                .levels
+                .iter()
+                .find(|l| l.level_id == "B1")
+                .unwrap()
+                .scene_z_mm,
             -1000,
             "5000 − offset 6000: the frame is not recomputed for an override"
         );
@@ -495,13 +518,8 @@ mod tests {
     fn without_an_override_the_level_stays_automatic() {
         let levels = vec![level("L1", 0.0)];
         let elevations = BTreeMap::from([("L1".to_string(), 10.0)]);
-        let outcome = resolve_level_planes(
-            &levels,
-            &elevations,
-            &Vec::new(),
-            &default_profile(),
-            &[],
-        );
+        let outcome =
+            resolve_level_planes(&levels, &elevations, &Vec::new(), &default_profile(), &[]);
         assert!(outcome.levels[0].override_.is_none());
         assert_eq!(outcome.levels[0].resolved_elevation_m, 10.0);
         assert!(outcome.unapplied_override_ids.is_empty());

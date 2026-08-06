@@ -343,7 +343,8 @@ pub struct SpatialContext {
 /// ECEF metres. Deterministic: fixed constants, one evaluation order.
 pub fn wgs84_ecef(lon_deg: f64, lat_deg: f64, height_m: f64) -> [f64; 3] {
     let (lon, lat) = (lon_deg.to_radians(), lat_deg.to_radians());
-    let e2 = 2.0 / WGS84_INVERSE_FLATTENING - 1.0 / (WGS84_INVERSE_FLATTENING * WGS84_INVERSE_FLATTENING);
+    let e2 = 2.0 / WGS84_INVERSE_FLATTENING
+        - 1.0 / (WGS84_INVERSE_FLATTENING * WGS84_INVERSE_FLATTENING);
     let prime_vertical = WGS84_SEMI_MAJOR_M / (1.0 - e2 * lat.sin() * lat.sin()).sqrt();
     let (cos_lon, sin_lon, cos_lat, sin_lat) = (lon.cos(), lon.sin(), lat.cos(), lat.sin());
     [
@@ -399,8 +400,8 @@ mod tests {
     use crate::model::{Bounds, FeatureType, ImdfManifest, VenueFeature, VenueModel};
 
     use super::{
-        Axes, LengthUnit, SpatialContext, WGS84_INVERSE_FLATTENING, WGS84_SEMI_MAJOR_M, enu_basis_ecef,
-        venue_horizontal_bounds, wgs84_ecef,
+        Axes, LengthUnit, SpatialContext, WGS84_INVERSE_FLATTENING, WGS84_SEMI_MAJOR_M,
+        enu_basis_ecef, venue_horizontal_bounds, wgs84_ecef,
     };
 
     #[test]
@@ -441,7 +442,10 @@ mod tests {
         let norm = |v: &[f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         let dot = |a: &[f64; 3], b: &[f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
         for col in &basis {
-            assert!((norm(col) - 1.0).abs() < 1e-9, "basis column is not a unit vector");
+            assert!(
+                (norm(col) - 1.0).abs() < 1e-9,
+                "basis column is not a unit vector"
+            );
         }
         assert!(dot(&basis[0], &basis[1]).abs() < 1e-9, "east · north != 0");
         assert!(dot(&basis[0], &basis[2]).abs() < 1e-9, "east · up != 0");
@@ -472,7 +476,10 @@ mod tests {
         ]))
     }
 
-    fn venue_model(feature_geometry: Option<Value>, level_bounds: Vec<(&str, Bounds)>) -> VenueModel {
+    fn venue_model(
+        feature_geometry: Option<Value>,
+        level_bounds: Vec<(&str, Bounds)>,
+    ) -> VenueModel {
         let features = match feature_geometry {
             Some(geom) => vec![VenueFeature {
                 id: "venue-1".into(),
@@ -525,8 +532,18 @@ mod tests {
 
     #[test]
     fn venue_horizontal_bounds_fall_back_to_the_level_bounds_union() {
-        let b1 = Bounds { west: 139.0, south: 35.0, east: 139.1, north: 35.1 };
-        let b2 = Bounds { west: 139.05, south: 34.95, east: 139.2, north: 35.05 };
+        let b1 = Bounds {
+            west: 139.0,
+            south: 35.0,
+            east: 139.1,
+            north: 35.1,
+        };
+        let b2 = Bounds {
+            west: 139.05,
+            south: 34.95,
+            east: 139.2,
+            north: 35.05,
+        };
         let model = venue_model(None, vec![("l1", b1), ("l2", b2)]);
         let bounds = venue_horizontal_bounds(&model).expect("level bounds yield a union");
         assert_eq!(
@@ -601,7 +618,9 @@ mod tests {
         assert_eq!(evidence.assumption_ref, Some(2));
         assert!(matches!(
             evidence.method,
-            EvidenceMethod::NominalSpacing | EvidenceMethod::ImportedElevation | EvidenceMethod::PreservedNetworkAltitude
+            EvidenceMethod::NominalSpacing
+                | EvidenceMethod::ImportedElevation
+                | EvidenceMethod::PreservedNetworkAltitude
         ));
     }
 }

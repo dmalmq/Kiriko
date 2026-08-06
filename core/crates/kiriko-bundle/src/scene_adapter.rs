@@ -75,14 +75,16 @@ impl SceneSource for GeneratedSceneSource<'_> {
         if let Some(scene) = &self.document.scene {
             for primitive in &scene.primitives {
                 if primitive.role != PrimitiveRole::Surface
-                    || primitive.canonical_feature_id.as_deref() != Some(primitive.level_id.as_str())
+                    || primitive.canonical_feature_id.as_deref()
+                        != Some(primitive.level_id.as_str())
                 {
                     continue;
                 }
                 let PrimitiveGeometry::Mesh(mesh) = &primitive.geometry else {
                     continue;
                 };
-                let (mut min_x, mut min_y, mut max_x, mut max_y) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+                let (mut min_x, mut min_y, mut max_x, mut max_y) =
+                    (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
                 for [x, y, _] in &mesh.positions {
                     min_x = min_x.min(*x);
                     min_y = min_y.min(*y);
@@ -119,13 +121,14 @@ impl SceneSource for GeneratedSceneSource<'_> {
             .primitives
             .iter()
             .map(|primitive| {
-                let confidence =
-                    &spatial.registries.confidence[primitive.confidence_ref as usize];
+                let confidence = &spatial.registries.confidence[primitive.confidence_ref as usize];
                 let source_object_ids = primitive
                     .source_locator_refs
                     .iter()
                     .map(|reference| {
-                        spatial.registries.locators[*reference as usize].value.clone()
+                        spatial.registries.locators[*reference as usize]
+                            .value
+                            .clone()
                     })
                     .collect();
                 let evidence = primitive
@@ -140,9 +143,7 @@ impl SceneSource for GeneratedSceneSource<'_> {
                     })
                     .collect();
                 let conveyance_kind = match &primitive.geometry {
-                    PrimitiveGeometry::Conveyance { kind, .. } => {
-                        Some(kind.as_str().to_string())
-                    }
+                    PrimitiveGeometry::Conveyance { kind, .. } => Some(kind.as_str().to_string()),
                     _ => None,
                 };
                 ScenePrimitiveProjection {
@@ -168,9 +169,13 @@ impl SceneSource for GeneratedSceneSource<'_> {
             SectionCapability::Available => SceneCapabilityState::Ready,
             SectionCapability::Absent => SceneCapabilityState::Absent,
             SectionCapability::Invalid { reason } => SceneCapabilityState::Invalid { reason },
-            SectionCapability::UnsupportedVersion { declared, supported } => {
-                SceneCapabilityState::UnsupportedVersion { declared, supported }
-            }
+            SectionCapability::UnsupportedVersion {
+                declared,
+                supported,
+            } => SceneCapabilityState::UnsupportedVersion {
+                declared,
+                supported,
+            },
             SectionCapability::DisabledByDependency { requires } => {
                 SceneCapabilityState::DisabledByDependency { requires }
             }

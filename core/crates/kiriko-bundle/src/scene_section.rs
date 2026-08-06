@@ -15,9 +15,9 @@
 //! bounded and runs before availability is offered.
 
 use kiriko_model::scene::{
-    ActivationState, ContextualClassification, ConveyanceKind, FloorMapping, Mesh,
-    OcclusionClass, PrimitiveGeometry, PrimitiveRole, ScenePrimitive, SceneSection,
-    SourceObjectAssociation, TilesDescriptor,
+    ActivationState, ContextualClassification, ConveyanceKind, FloorMapping, Mesh, OcclusionClass,
+    PrimitiveGeometry, PrimitiveRole, ScenePrimitive, SceneSection, SourceObjectAssociation,
+    TilesDescriptor,
 };
 use kiriko_model::spatial::SpatialContext;
 use serde::{Deserialize, Serialize};
@@ -68,8 +68,14 @@ struct MeshDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum PrimitiveGeometryDto {
     Mesh(MeshDto),
-    Portal { connects: (u32, u32), opening: MeshDto },
-    Conveyance { kind: ConveyanceKindDto, mesh: MeshDto },
+    Portal {
+        connects: (u32, u32),
+        opening: MeshDto,
+    },
+    Conveyance {
+        kind: ConveyanceKindDto,
+        mesh: MeshDto,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -442,7 +448,9 @@ fn validate_scene(scene: &SceneSection, spatial: &SpatialContext) -> Result<(), 
         }
         match &primitive.geometry {
             PrimitiveGeometry::Mesh(mesh) => {
-                if primitive.role == PrimitiveRole::Portal || primitive.role == PrimitiveRole::Conveyance {
+                if primitive.role == PrimitiveRole::Portal
+                    || primitive.role == PrimitiveRole::Conveyance
+                {
                     return Err(invalid(format!(
                         "primitive {i} role {:?} cannot carry plain mesh geometry",
                         primitive.role
@@ -484,7 +492,10 @@ fn validate_scene(scene: &SceneSection, spatial: &SpatialContext) -> Result<(), 
     }
 
     if let Some(descriptor) = &scene.descriptor {
-        bounded_string(&descriptor.registration_profile_id, "tiles registration profile")?;
+        bounded_string(
+            &descriptor.registration_profile_id,
+            "tiles registration profile",
+        )?;
         if descriptor.floor_mappings.len() > MAX_DESCRIPTOR_ENTRIES
             || descriptor.source_object_associations.len() > MAX_DESCRIPTOR_ENTRIES
             || descriptor.contextual_classifications.len() > MAX_DESCRIPTOR_ENTRIES
@@ -494,7 +505,10 @@ fn validate_scene(scene: &SceneSection, spatial: &SpatialContext) -> Result<(), 
             )));
         }
         for (i, mapping) in descriptor.floor_mappings.iter().enumerate() {
-            bounded_string(&mapping.canonical_level_id, &format!("floor mapping {i} level"))?;
+            bounded_string(
+                &mapping.canonical_level_id,
+                &format!("floor mapping {i} level"),
+            )?;
             if !known_levels.contains(&mapping.canonical_level_id.as_str()) {
                 return Err(invalid(format!(
                     "floor mapping {i} references unknown level {:?}",
@@ -502,20 +516,31 @@ fn validate_scene(scene: &SceneSection, spatial: &SpatialContext) -> Result<(), 
                 )));
             }
             if mapping.composite_source_levels.len() > MAX_DESCRIPTOR_ENTRIES {
-                return Err(invalid(format!("floor mapping {i} has too many source levels")));
+                return Err(invalid(format!(
+                    "floor mapping {i} has too many source levels"
+                )));
             }
             for composite in &mapping.composite_source_levels {
                 bounded_string(composite, &format!("floor mapping {i} composite identity"))?;
             }
         }
         for (i, association) in descriptor.source_object_associations.iter().enumerate() {
-            bounded_string(&association.source_object_id, &format!("source object association {i}"))?;
+            bounded_string(
+                &association.source_object_id,
+                &format!("source object association {i}"),
+            )?;
             if let Some(feature_id) = &association.canonical_feature_id {
-                bounded_string(feature_id, &format!("source object association {i} feature"))?;
+                bounded_string(
+                    feature_id,
+                    &format!("source object association {i} feature"),
+                )?;
             }
         }
         for (i, classification) in descriptor.contextual_classifications.iter().enumerate() {
-            bounded_string(&classification.source_object_id, &format!("contextual classification {i}"))?;
+            bounded_string(
+                &classification.source_object_id,
+                &format!("contextual classification {i}"),
+            )?;
         }
     }
 
@@ -566,8 +591,8 @@ mod tests {
     };
     use kiriko_model::spatial::{
         Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid,
-        EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind, ManualProvenance, Registries,
-        RegistrationEvidence, ResolutionMethod, SourceArtifact, SourceLocator, SpatialContext,
+        EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind, RegistrationEvidence,
+        Registries, ResolutionMethod, SourceLocator, SpatialContext,
     };
 
     use super::{decode_scene_section, encode_scene_section};

@@ -118,8 +118,19 @@ fn compile_with_malformed_network_is_a_route_error() {
 #[test]
 fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, true, false, None, &[], None)
-        .expect("fixture compiles with synthesis");
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        None,
+        true,
+        false,
+        None,
+        &[],
+        None,
+    )
+    .expect("fixture compiles with synthesis");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     let graph = document
         .graph
@@ -131,8 +142,19 @@ fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
 #[test]
 fn compile_with_synthesis_disabled_and_no_network_has_no_graph() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None, &[], None)
-        .expect("fixture compiles");
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+    )
+    .expect("fixture compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     assert!(document.graph.is_none());
 }
@@ -264,9 +286,19 @@ fn reports_optional_sections_as_available_or_absent() {
         "a bundle carrying facilities must report the facilities capability available"
     );
 
-    let with_neither =
-        compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None, &[], None)
-            .expect("fixture alone compiles");
+    let with_neither = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+    )
+    .expect("fixture alone compiles");
     let document = decode_bundle(&with_neither.bytes).expect("bundle decodes");
     assert_eq!(
         document.capabilities.graph(),
@@ -563,15 +595,17 @@ fn compile_emits_a_spatial_context_frame_from_the_venue_bounds() {
     );
     assert_eq!(context.frame.world_translation, context.frame.ecef_origin);
     assert_eq!(context.frame.axes, kiriko_model::spatial::Axes::EastNorthUp);
-    assert_eq!(context.frame.unit, kiriko_model::spatial::LengthUnit::Millimetre);
+    assert_eq!(
+        context.frame.unit,
+        kiriko_model::spatial::LengthUnit::Millimetre
+    );
 
     // The declared datum and the anchor's registration evidence are
     // registered, and the frame references them by index.
     assert_eq!(context.registries.datums.len(), 1);
     assert_eq!(context.registries.datums[0].name, "WGS84");
     assert_eq!(
-        context.registries.locators[0].value,
-        "a1000001-0000-4000-8000-000000000001",
+        context.registries.locators[0].value, "a1000001-0000-4000-8000-000000000001",
         "the venue locator stays first (index 0)"
     );
     assert_eq!(
@@ -590,14 +624,23 @@ fn compile_emits_a_spatial_context_frame_from_the_venue_bounds() {
         "the normalisation offset is derived from the resolved planes, not a constant"
     );
     assert_eq!(context.levels.len(), 3, "one record per canonical level");
-    let by_id: BTreeMap<&str, &kiriko_model::spatial::LevelRecord> =
-        context.levels.iter().map(|l| (l.level_id.as_str(), l)).collect();
+    let by_id: BTreeMap<&str, &kiriko_model::spatial::LevelRecord> = context
+        .levels
+        .iter()
+        .map(|l| (l.level_id.as_str(), l))
+        .collect();
     let b1 = by_id["b1000001-0000-4000-8000-0000000000b1"];
-    assert_eq!(b1.method, kiriko_model::spatial::ResolutionMethod::NominalSpacing);
+    assert_eq!(
+        b1.method,
+        kiriko_model::spatial::ResolutionMethod::NominalSpacing
+    );
     assert_eq!(b1.resolved_scene_z_mm, 0, "lowest plane at scene Z 0");
     assert_eq!(b1.source_elevation_m, None);
     assert!(
-        context.levels.iter().all(|l| l.method == kiriko_model::spatial::ResolutionMethod::NominalSpacing),
+        context
+            .levels
+            .iter()
+            .all(|l| l.method == kiriko_model::spatial::ResolutionMethod::NominalSpacing),
         "every level is flagged assumed — a scene never presents a guess as a measurement"
     );
     for level in &context.levels {
@@ -630,14 +673,15 @@ fn spatial_context_round_trips_through_reencode() {
     let reencoded = encode_bundle(&document).expect("decoded document re-encodes");
     let redoc = decode_bundle(&reencoded).expect("re-encoded bundle decodes");
     assert_eq!(redoc.spatial_context, Some(context));
-    assert_eq!(redoc.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(
+        redoc.capabilities.spatial_context(),
+        SectionCapability::Available
+    );
 }
 
 #[test]
 fn multi_floor_resolution_exercises_all_three_precedence_branches() {
-    use kiriko_model::spatial::{
-        AssumptionKind, ConfidenceKind, EvidenceMethod, ResolutionMethod,
-    };
+    use kiriko_model::spatial::{AssumptionKind, ConfidenceKind, EvidenceMethod, ResolutionMethod};
 
     let source = support::build_multi_floor_imdf_zip();
     // A custom profile proves the nominal spacing is configurable, not a
@@ -661,7 +705,10 @@ fn multi_floor_resolution_exercises_all_three_precedence_branches() {
     )
     .expect("multi-floor fixture compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
-    assert_eq!(document.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::Available
+    );
     assert_eq!(
         document.capabilities.graph(),
         SectionCapability::Available,
@@ -685,7 +732,10 @@ fn multi_floor_resolution_exercises_all_three_precedence_branches() {
     let l2 = by_id["b1000002-0000-4000-8000-000000000002"]; // F2, three close junction altitudes
     assert_eq!(l2.method, ResolutionMethod::NetworkAltitude);
     assert_eq!(l2.source_elevation_m, None);
-    assert_eq!(l2.resolved_scene_z_mm, 8100, "median 14.1 → 14100 − offset 6000");
+    assert_eq!(
+        l2.resolved_scene_z_mm, 8100,
+        "median 14.1 → 14100 − offset 6000"
+    );
 
     let l3 = by_id["b1000001-0000-4000-8000-000000000001"]; // F3, nothing → nominal
     assert_eq!(l3.method, ResolutionMethod::NominalSpacing);
@@ -695,7 +745,11 @@ fn multi_floor_resolution_exercises_all_three_precedence_branches() {
     );
 
     let b1 = by_id["b1000004-0000-4000-8000-000000000004"]; // B1, elevation 6.0 + network 6.5
-    assert_eq!(b1.method, ResolutionMethod::ImportedElevation, "imported wins the precedence");
+    assert_eq!(
+        b1.method,
+        ResolutionMethod::ImportedElevation,
+        "imported wins the precedence"
+    );
     assert_eq!(b1.source_elevation_m, Some(6.0));
     assert_eq!(
         b1.network_difference_mm,
@@ -706,10 +760,12 @@ fn multi_floor_resolution_exercises_all_three_precedence_branches() {
     assert_eq!(context.frame.vertical_normalisation_offset_mm, 6000);
 
     // Confidence class follows the method: measured / estimated / assumed.
-    let confidence_kind =
-        |idx: u32| context.registries.confidence[idx as usize].kind;
+    let confidence_kind = |idx: u32| context.registries.confidence[idx as usize].kind;
     assert_eq!(confidence_kind(l1.confidence_ref), ConfidenceKind::Measured);
-    assert_eq!(confidence_kind(l2.confidence_ref), ConfidenceKind::Estimated);
+    assert_eq!(
+        confidence_kind(l2.confidence_ref),
+        ConfidenceKind::Estimated
+    );
     assert_eq!(
         confidence_kind(l3.confidence_ref),
         ConfidenceKind::Assumed,
@@ -726,13 +782,20 @@ fn multi_floor_resolution_exercises_all_three_precedence_branches() {
             );
         }
     }
-    assert_eq!(b1.evidence_refs.len(), 2, "imported elevation + preserved network altitude");
+    assert_eq!(
+        b1.evidence_refs.len(),
+        2,
+        "imported elevation + preserved network altitude"
+    );
     let l3_evidence = &context.registries.registration_evidence[l3.evidence_refs[0] as usize];
     assert_eq!(l3_evidence.method, EvidenceMethod::NominalSpacing);
     let assumption = l3_evidence
         .assumption_ref
         .expect("nominal evidence references the shared assumption");
-    assert_eq!(context.registries.assumptions[assumption as usize].kind, AssumptionKind::Nominal);
+    assert_eq!(
+        context.registries.assumptions[assumption as usize].kind,
+        AssumptionKind::Nominal
+    );
     assert!(
         context.registries.assumptions[assumption as usize]
             .detail
@@ -765,7 +828,10 @@ fn a_producer_override_moves_the_plane_and_keeps_the_source_untouched() {
     )
     .expect("fixture compiles with an override");
     assert!(
-        !compiled.warnings.iter().any(|w| w.code.as_str() == "floor_override"),
+        !compiled
+            .warnings
+            .iter()
+            .any(|w| w.code.as_str() == "floor_override"),
         "a valid override produces no warning"
     );
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -777,14 +843,22 @@ fn a_producer_override_moves_the_plane_and_keeps_the_source_untouched() {
         .collect();
 
     let l2 = by_id["b1000002-0000-4000-8000-000000000002"];
-    assert_eq!(l2.method, ResolutionMethod::NetworkAltitude, "the automatic derivation stays recorded");
+    assert_eq!(
+        l2.method,
+        ResolutionMethod::NetworkAltitude,
+        "the automatic derivation stays recorded"
+    );
     assert_eq!(
         l2.override_elevation_m,
         Some(15.0),
         "the override value is stored at full precision"
     );
-    assert_eq!(l2.resolved_scene_z_mm, 9000, "15000 − automatic offset 6000");
-    let provenance = &context.registries.manual_provenance[l2.override_ref.expect("override ref") as usize];
+    assert_eq!(
+        l2.resolved_scene_z_mm, 9000,
+        "15000 − automatic offset 6000"
+    );
+    let provenance =
+        &context.registries.manual_provenance[l2.override_ref.expect("override ref") as usize];
     assert_eq!(provenance.actor, "alice");
     assert_eq!(provenance.reason, "survey corrected F2");
 
@@ -797,7 +871,11 @@ fn a_producer_override_moves_the_plane_and_keeps_the_source_untouched() {
     assert_eq!(l1.override_ref, None);
     assert_eq!(l1.resolved_scene_z_mm, 4000);
     let b1 = by_id["b1000004-0000-4000-8000-000000000004"];
-    assert_eq!(b1.source_elevation_m, Some(6.0), "the source elevation survives untouched");
+    assert_eq!(
+        b1.source_elevation_m,
+        Some(6.0),
+        "the source elevation survives untouched"
+    );
     assert_eq!(b1.resolved_scene_z_mm, 0);
 }
 
@@ -1545,20 +1623,15 @@ const ALTITUDE_PATHS: &str = r#"{"type":"FeatureCollection","features":[
 /// id-ascending order and may bump versions, replace bytes, or append rows
 /// (which must keep ids ascending). Rows are repacked contiguously, so the
 /// result is a well-formed directory around hand-crafted section content.
-fn rebuild_payload(
-    payload: &[u8],
-    mutate: impl FnOnce(&mut Vec<(u16, u16, Vec<u8>)>),
-) -> Vec<u8> {
+fn rebuild_payload(payload: &[u8], mutate: impl FnOnce(&mut Vec<(u16, u16, Vec<u8>)>)) -> Vec<u8> {
     let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
     let mut sections: Vec<(u16, u16, Vec<u8>)> = Vec::with_capacity(count);
     for i in 0..count {
         let base = 2 + i * 20;
         let id = u16::from_le_bytes([payload[base], payload[base + 1]]);
         let version = u16::from_le_bytes([payload[base + 2], payload[base + 3]]);
-        let offset =
-            u64::from_le_bytes(payload[base + 4..base + 12].try_into().unwrap()) as usize;
-        let length =
-            u64::from_le_bytes(payload[base + 12..base + 20].try_into().unwrap()) as usize;
+        let offset = u64::from_le_bytes(payload[base + 4..base + 12].try_into().unwrap()) as usize;
+        let length = u64::from_le_bytes(payload[base + 12..base + 20].try_into().unwrap()) as usize;
         sections.push((id, version, payload[offset..offset + length].to_vec()));
     }
     mutate(&mut sections);
@@ -1621,7 +1694,10 @@ fn garbage_spatial_context_bytes_report_invalid_and_the_venue_opens() {
 
     let document = decode_bundle(&crafted).expect("the venue still opens");
     assert!(
-        matches!(document.capabilities.spatial_context(), SectionCapability::Invalid { .. }),
+        matches!(
+            document.capabilities.spatial_context(),
+            SectionCapability::Invalid { .. }
+        ),
         "a section that fails validation is reported invalid, not trusted"
     );
     assert!(document.spatial_context.is_none());
@@ -1658,7 +1734,10 @@ fn an_invalid_spatial_context_leaves_routing_untouched() {
     }));
 
     let document = decode_bundle(&crafted).expect("the venue still opens");
-    assert!(matches!(document.capabilities.spatial_context(), SectionCapability::Invalid { .. }));
+    assert!(matches!(
+        document.capabilities.spatial_context(),
+        SectionCapability::Invalid { .. }
+    ));
     assert_eq!(
         document.capabilities.graph(),
         SectionCapability::Available,
@@ -1703,8 +1782,14 @@ fn a_section_whose_required_section_is_unavailable_is_disabled_end_to_end() {
         "a present section whose required section is unavailable must be withheld, \
          naming the requirement"
     );
-    assert_eq!(document.capabilities.canonical_graph(), SectionCapability::Absent);
-    assert_eq!(document.capabilities.network_qa(), SectionCapability::Absent);
+    assert_eq!(
+        document.capabilities.canonical_graph(),
+        SectionCapability::Absent
+    );
+    assert_eq!(
+        document.capabilities.network_qa(),
+        SectionCapability::Absent
+    );
 }
 
 #[test]
@@ -1750,11 +1835,17 @@ fn a_present_scene_with_garbage_bytes_reports_invalid() {
 
     let document = decode_bundle(&crafted).expect("the venue still opens");
     assert!(
-        matches!(document.capabilities.scene_sources(), SectionCapability::Invalid { .. }),
+        matches!(
+            document.capabilities.scene_sources(),
+            SectionCapability::Invalid { .. }
+        ),
         "a malformed §9 is reported invalid, not trusted"
     );
     assert!(document.scene.is_none());
-    assert_eq!(document.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::Available
+    );
 }
 
 #[test]
@@ -1808,7 +1899,10 @@ fn a_legacy_bundle_reports_spatial_context_absent_and_still_opens() {
     );
     assert!(document.spatial_context.is_none());
     assert_eq!(document.capabilities.graph(), SectionCapability::Absent);
-    assert_eq!(document.capabilities.facilities(), SectionCapability::Absent);
+    assert_eq!(
+        document.capabilities.facilities(),
+        SectionCapability::Absent
+    );
     // The pre-§8 artifact opens with its full content, exactly as before.
     assert_eq!(document.venue_id, "a1000001-0000-4000-8000-000000000001");
     assert_eq!(document.levels.len(), 3);
@@ -1833,7 +1927,10 @@ fn legacy_content_is_unchanged_from_the_modern_decode() {
     assert_eq!(legacy.warnings, modern.warnings);
     assert_eq!(legacy.stats, modern.stats);
     assert_eq!(legacy.capabilities.graph(), modern.capabilities.graph());
-    assert_eq!(legacy.capabilities.facilities(), modern.capabilities.facilities());
+    assert_eq!(
+        legacy.capabilities.facilities(),
+        modern.capabilities.facilities()
+    );
     assert!(legacy.spatial_context.is_none());
     assert_eq!(
         modern.capabilities.spatial_context(),
@@ -1920,16 +2017,30 @@ fn stage0_fixture_is_frozen_and_reproducible() {
     );
 
     let document = decode_bundle(&committed).expect("stage0 fixture decodes");
-    assert_eq!(document.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::Available
+    );
     assert_eq!(document.capabilities.graph(), SectionCapability::Available);
-    assert_eq!(document.capabilities.facilities(), SectionCapability::Available);
+    assert_eq!(
+        document.capabilities.facilities(),
+        SectionCapability::Available
+    );
     assert_eq!(document.levels.len(), 3);
     assert_eq!(document.features.len(), 27);
-    let graph = document.graph.as_ref().expect("stage0 fixture carries a graph");
+    let graph = document
+        .graph
+        .as_ref()
+        .expect("stage0 fixture carries a graph");
     assert_eq!(graph.nodes.len(), 3);
     assert_eq!(graph.edges.len(), 2);
     assert_eq!(
-        document.facilities.as_ref().expect("stage0 fixture carries facilities").items.len(),
+        document
+            .facilities
+            .as_ref()
+            .expect("stage0 fixture carries facilities")
+            .items
+            .len(),
         2,
         "the unmappable-floor facility is dropped, as at compile time"
     );
@@ -1956,7 +2067,10 @@ fn stage0_sections_decode_identically_with_and_without_spatial_context() {
     let without_8 =
         decode_bundle(&stage0_stripped_of_spatial_context()).expect("stripped bundle decodes");
 
-    assert_eq!(with_8.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(
+        with_8.capabilities.spatial_context(),
+        SectionCapability::Available
+    );
     assert_eq!(
         without_8.capabilities.spatial_context(),
         SectionCapability::Absent,
@@ -1972,10 +2086,16 @@ fn stage0_sections_decode_identically_with_and_without_spatial_context() {
     assert_eq!(with_8.bounds_by_level, without_8.bounds_by_level);
     assert_eq!(with_8.warnings, without_8.warnings);
     assert_eq!(with_8.stats, without_8.stats);
-    assert_eq!(with_8.graph, without_8.graph, "the routing graph decodes identically");
+    assert_eq!(
+        with_8.graph, without_8.graph,
+        "the routing graph decodes identically"
+    );
     assert_eq!(with_8.facilities, without_8.facilities);
     assert_eq!(with_8.capabilities.graph(), without_8.capabilities.graph());
-    assert_eq!(with_8.capabilities.facilities(), without_8.capabilities.facilities());
+    assert_eq!(
+        with_8.capabilities.facilities(),
+        without_8.capabilities.facilities()
+    );
 }
 
 #[test]
@@ -1985,13 +2105,27 @@ fn routing_over_the_fixture_matches_the_stripped_equivalent() {
     let with_8 = decode_bundle(&stage0_bytes()).expect("stage0 fixture decodes");
     let without_8 =
         decode_bundle(&stage0_stripped_of_spatial_context()).expect("stripped bundle decodes");
-    let origin = Point3 { lon: 139.0, lat: 35.0, ordinal: 0.0 };
-    let dest = Point3 { lon: 139.001, lat: 35.0, ordinal: 0.0 };
+    let origin = Point3 {
+        lon: 139.0,
+        lat: 35.0,
+        ordinal: 0.0,
+    };
+    let dest = Point3 {
+        lon: 139.001,
+        lat: 35.0,
+        ordinal: 0.0,
+    };
 
-    let route_with =
-        kiriko_route::route(with_8.graph.as_ref().expect("stage0 carries a graph"), origin, dest);
+    let route_with = kiriko_route::route(
+        with_8.graph.as_ref().expect("stage0 carries a graph"),
+        origin,
+        dest,
+    );
     let route_without = kiriko_route::route(
-        without_8.graph.as_ref().expect("stripped bundle carries the same graph"),
+        without_8
+            .graph
+            .as_ref()
+            .expect("stripped bundle carries the same graph"),
         origin,
         dest,
     );
@@ -2060,7 +2194,10 @@ fn crafted_fixtures_pin_every_remaining_capability_outcome() {
         decode_bundle(&crafted_fixture("stage0-unsupported")).expect("venue still opens");
     assert_eq!(
         document.capabilities.spatial_context(),
-        SectionCapability::UnsupportedVersion { declared: 2, supported: 1 }
+        SectionCapability::UnsupportedVersion {
+            declared: 2,
+            supported: 1
+        }
     );
     assert!(document.spatial_context.is_none());
 
@@ -2078,7 +2215,13 @@ fn crafted_fixtures_pin_every_remaining_capability_outcome() {
         document.capabilities.scene_sources(),
         SectionCapability::DisabledByDependency { requires: 8 }
     );
-    assert_eq!(document.capabilities.spatial_context(), SectionCapability::UnsupportedVersion { declared: 2, supported: 1 });
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::UnsupportedVersion {
+            declared: 2,
+            supported: 1
+        }
+    );
 }
 
 // -- Stage 1: §9 scene sources (#51) ---------------------------------------
@@ -2124,7 +2267,10 @@ fn a_scene_round_trips_through_the_bundle_with_capability_available() {
         SectionCapability::Available,
         "a valid §9 reports available"
     );
-    assert_eq!(decoded.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(
+        decoded.capabilities.spatial_context(),
+        SectionCapability::Available
+    );
 }
 
 #[test]
@@ -2164,10 +2310,16 @@ fn a_scene_at_an_unreadable_version_degrades_alone() {
     let decoded = decode_bundle(&crafted).expect("the venue still opens");
     assert_eq!(
         decoded.capabilities.scene_sources(),
-        SectionCapability::UnsupportedVersion { declared: 2, supported: 1 }
+        SectionCapability::UnsupportedVersion {
+            declared: 2,
+            supported: 1
+        }
     );
     assert!(decoded.scene.is_none());
-    assert_eq!(decoded.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(
+        decoded.capabilities.spatial_context(),
+        SectionCapability::Available
+    );
     assert_eq!(decoded.capabilities.graph(), SectionCapability::Absent);
 }
 
@@ -2204,7 +2356,9 @@ fn the_scene_compiler_emits_slabs_ceilings_and_surfaces() {
     let source = support::build_multi_floor_imdf_zip();
     let compiled = compile_imdf(&source, metadata()).expect("fixture compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
-    let scene = document.scene.expect("a venue with geometry carries a generated scene");
+    let scene = document
+        .scene
+        .expect("a venue with geometry carries a generated scene");
     let spatial = document.spatial_context.expect("spatial context present");
 
     // Resolved planes with the default profile: B1 0, F1 4000, F2 8000, F3 12000.
@@ -2222,7 +2376,11 @@ fn the_scene_compiler_emits_slabs_ceilings_and_surfaces() {
     let by_id = |id: &str| scene.primitives.iter().find(|p| p.id == id);
 
     // One slab per level (role Surface, associated with the level feature).
-    assert_eq!(by_role(PrimitiveRole::Surface), 4 + 3, "4 slabs + 3 unit surfaces");
+    assert_eq!(
+        by_role(PrimitiveRole::Surface),
+        4 + 3,
+        "4 slabs + 3 unit surfaces"
+    );
     for level_id in [
         "b1000001-0000-4000-8000-000000000001",
         "b1000002-0000-4000-8000-000000000002",
@@ -2234,7 +2392,8 @@ fn the_scene_compiler_emits_slabs_ceilings_and_surfaces() {
             panic!("slab must be a mesh");
         };
         assert_eq!(
-            mesh.faces.len(), 2,
+            mesh.faces.len(),
+            2,
             "a rectangular level polygon triangulates into two triangles"
         );
         assert_eq!(
@@ -2265,11 +2424,27 @@ fn the_scene_compiler_emits_slabs_ceilings_and_surfaces() {
         let PrimitiveGeometry::Mesh(mesh) = &ceiling.geometry else {
             panic!("ceiling must be a mesh");
         };
-        mesh.positions.iter().map(|p| p[2]).min().expect("positions")
+        mesh.positions
+            .iter()
+            .map(|p| p[2])
+            .min()
+            .expect("positions")
     };
-    assert_eq!(ceiling_z("c1000001-0000-4000-8000-000000000001"), 4000 + 3500, "source height 3.5 m wins");
-    assert_eq!(ceiling_z("c1000002-0000-4000-8000-000000000002"), 4000 + 3000, "nominal ceiling height");
-    assert_eq!(ceiling_z("c1000003-0000-4000-8000-000000000003"), 0 + 3000, "nominal on B1");
+    assert_eq!(
+        ceiling_z("c1000001-0000-4000-8000-000000000001"),
+        4000 + 3500,
+        "source height 3.5 m wins"
+    );
+    assert_eq!(
+        ceiling_z("c1000002-0000-4000-8000-000000000002"),
+        4000 + 3000,
+        "nominal ceiling height"
+    );
+    assert_eq!(
+        ceiling_z("c1000003-0000-4000-8000-000000000003"),
+        3000,
+        "nominal on B1"
+    );
 
     // Every primitive's references resolve into §8's registries.
     for primitive in &scene.primitives {
@@ -2280,18 +2455,6 @@ fn the_scene_compiler_emits_slabs_ceilings_and_surfaces() {
         for evidence in &primitive.evidence_refs {
             assert!((*evidence as usize) < spatial.registries.registration_evidence.len());
         }
-    }
-}
-
-#[test]
-fn debug_scene_units() {
-    let source = support::build_multi_floor_imdf_zip();
-    let compiled = compile_imdf(&source, metadata()).expect("compiles");
-    let document = decode_bundle(&compiled.bytes).expect("decodes");
-    let units: Vec<_> = document.features.iter().filter(|f| f.feature_type == kiriko_model::model::FeatureType::Unit).collect();
-    eprintln!("decoded unit count: {}", units.len());
-    for u in &units {
-        eprintln!("  {} level={:?} geometry_present={}", u.id, u.level_id, u.geometry.is_some());
     }
 }
 
@@ -2316,7 +2479,9 @@ fn the_scene_compiler_emits_neutral_conveyance_forms() {
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
-    let scene = document.scene.expect("a venue with geometry carries a generated scene");
+    let scene = document
+        .scene
+        .expect("a venue with geometry carries a generated scene");
 
     let conveyances: Vec<_> = scene
         .primitives
@@ -2338,7 +2503,11 @@ fn the_scene_compiler_emits_neutral_conveyance_forms() {
             "the never-guess rule: a neutral form, never fabricated stairs"
         );
         assert!(!mesh.positions.is_empty());
-        assert_eq!(mesh.faces.len() * 3, mesh.positions.len() * 6 - 12, "closed box");
+        assert_eq!(
+            mesh.faces.len() * 3,
+            mesh.positions.len() * 6 - 12,
+            "closed box"
+        );
     }
 
     // The graph conveyance spans the F1 (z 4000) and F2 (z 8000) planes.
@@ -2390,7 +2559,10 @@ fn the_scene_compiles_byte_identically_with_the_network_pipeline() {
     let a = compile(&forward);
     let b = compile(&forward);
     let c = compile(&reversed);
-    assert_eq!(a, b, "identical inputs compile byte-identically, scene included");
+    assert_eq!(
+        a, b,
+        "identical inputs compile byte-identically, scene included"
+    );
     assert_eq!(
         a, c,
         "ZIP record order must not affect the compiled scene bytes"
@@ -2428,7 +2600,9 @@ fn the_scene_profile_drives_nominal_dimensions() {
         .primitives
         .iter()
         .find(|p| {
-            let PrimitiveGeometry::Mesh(mesh) = &p.geometry else { return false };
+            let PrimitiveGeometry::Mesh(mesh) = &p.geometry else {
+                return false;
+            };
             p.role == PrimitiveRole::Wall
                 && p.level_id == "b1000003-0000-4000-8000-000000000003"
                 && mesh.positions.iter().map(|p| p[2]).max() == Some(4000 + 4000)
@@ -2476,7 +2650,10 @@ fn the_generated_scene_source_adapts_the_bundle_content() {
     let frame = projection.frame.as_ref().expect("frame from §8");
     assert_eq!(frame.anchor, spatial.frame.anchor);
     assert_eq!(frame.ecef_origin, spatial.frame.ecef_origin);
-    assert_eq!(frame.vertical_normalisation_offset_mm, spatial.frame.vertical_normalisation_offset_mm);
+    assert_eq!(
+        frame.vertical_normalisation_offset_mm,
+        spatial.frame.vertical_normalisation_offset_mm
+    );
     assert_eq!(frame.unit, "millimetre");
     assert_eq!(frame.axes, "east_north_up");
 
@@ -2484,15 +2661,20 @@ fn the_generated_scene_source_adapts_the_bundle_content() {
     assert_eq!(projection.levels.len(), 4);
     for level in &projection.levels {
         assert!(
-            spatial
-                .levels
-                .iter()
-                .any(|l| l.level_id == level.level_id && l.resolved_scene_z_mm == level.resolved_scene_z_mm),
+            spatial.levels.iter().any(|l| l.level_id == level.level_id
+                && l.resolved_scene_z_mm == level.resolved_scene_z_mm),
             "level {} resolves to the §8 plane",
             level.level_id
         );
-        assert!(level.bounds_mm.is_some(), "level {} has slab bounds", level.level_id);
-        assert!(level.source_levels.is_empty(), "generated source has no composite levels");
+        assert!(
+            level.bounds_mm.is_some(),
+            "level {} has slab bounds",
+            level.level_id
+        );
+        assert!(
+            level.source_levels.is_empty(),
+            "generated source has no composite levels"
+        );
     }
 
     // Primitives map roles/occlusion/confidence/locators/evidence.
@@ -2507,15 +2689,27 @@ fn the_generated_scene_source_adapts_the_bundle_content() {
         .iter()
         .find(|p| p.canonical_feature_id.as_deref() == Some("c1000001-0000-4000-8000-000000000001"))
         .expect("u1 surface projected");
-    assert_eq!(unit_surface.source_object_ids, vec!["c1000001-0000-4000-8000-000000000001"]);
+    assert_eq!(
+        unit_surface.source_object_ids,
+        vec!["c1000001-0000-4000-8000-000000000001"]
+    );
     assert_eq!(unit_surface.confidence.kind, "measured");
-    assert!(!unit_surface.evidence.is_empty(), "evidence resolves into §8");
     assert!(
-        projection.primitives.iter().any(|p| p.role == "wall" && p.occlusion == "opaque"),
+        !unit_surface.evidence.is_empty(),
+        "evidence resolves into §8"
+    );
+    assert!(
+        projection
+            .primitives
+            .iter()
+            .any(|p| p.role == "wall" && p.occlusion == "opaque"),
         "walls project with their occlusion class"
     );
     assert!(
-        projection.primitives.iter().any(|p| p.role == "conveyance" && p.conveyance_kind.as_deref() == Some("neutral")),
+        projection
+            .primitives
+            .iter()
+            .any(|p| p.role == "conveyance" && p.conveyance_kind.as_deref() == Some("neutral")),
         "conveyance projects with its neutral kind"
     );
 
@@ -2523,8 +2717,14 @@ fn the_generated_scene_source_adapts_the_bundle_content() {
     let pick = projection
         .pick("c1000001-0000-4000-8000-000000000001")
         .expect("u1 is a source object");
-    assert_eq!(pick.canonical_feature_id.as_deref(), Some("c1000001-0000-4000-8000-000000000001"));
-    assert_eq!(pick.canonical_level_id.as_deref(), Some("b1000003-0000-4000-8000-000000000003"));
+    assert_eq!(
+        pick.canonical_feature_id.as_deref(),
+        Some("c1000001-0000-4000-8000-000000000001")
+    );
+    assert_eq!(
+        pick.canonical_level_id.as_deref(),
+        Some("b1000003-0000-4000-8000-000000000003")
+    );
     assert!(!pick.evidence.is_empty());
     // An unknown source object picks nothing.
     assert!(projection.pick("no-such-object").is_none());

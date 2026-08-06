@@ -15,9 +15,9 @@ pub mod canonical;
 pub mod error;
 pub mod geometry;
 pub mod model;
+mod normalize;
 pub mod scene;
 pub mod scene_projection;
-mod normalize;
 pub mod spatial;
 
 pub use error::{ImportError, ImportErrorCode};

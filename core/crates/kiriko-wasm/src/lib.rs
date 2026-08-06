@@ -15,7 +15,9 @@
 
 use std::collections::BTreeMap;
 
-use kiriko_bundle::{BundleDocument, BundleError, CapabilityReport, LevelElevation, decode_bundle, level_elevations};
+use kiriko_bundle::{
+    BundleDocument, BundleError, CapabilityReport, LevelElevation, decode_bundle, level_elevations,
+};
 use kiriko_model::canonical::{Object as CanonicalObject, Value as CanonicalValue};
 use kiriko_model::model::{Bounds, ImdfManifest, VenueFeature, ViewerLevel, ViewerWarning};
 use kiriko_route::{Point3, Route};

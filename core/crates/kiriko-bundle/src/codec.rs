@@ -177,7 +177,18 @@ pub fn compile_imdf(
     source: &[u8],
     metadata: BundleMetadata,
 ) -> Result<CompiledBundle, CompileError> {
-    compile_imdf_with_network(source, metadata, None, None, None, false, false, None, &[], None)
+    compile_imdf_with_network(
+        source,
+        metadata,
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+    )
 }
 
 /// Import `source` (a raw IMDF `.zip`) with `kiriko-model`, optionally build
@@ -208,6 +219,8 @@ pub fn compile_imdf(
 /// automatic resolution; each carries manual provenance, and one naming a
 /// level the venue does not have warns with code `floor_override` instead of
 /// failing the compile.
+/// Deliberately wide: the immutable-bundle compile surface.
+#[allow(clippy::too_many_arguments)]
 pub fn compile_imdf_with_network(
     source: &[u8],
     metadata: BundleMetadata,
@@ -472,7 +485,10 @@ fn graph_altitudes(build: &kiriko_route::RouteGraphBuild) -> crate::resolve::Net
     let mut grouped: crate::resolve::NetworkAltitudes = Vec::new();
     for (node, altitude) in build.graph.nodes.iter().zip(build.node_altitudes.iter()) {
         let Some(altitude) = altitude else { continue };
-        match grouped.iter_mut().find(|(ordinal, _)| *ordinal == node.ordinal) {
+        match grouped
+            .iter_mut()
+            .find(|(ordinal, _)| *ordinal == node.ordinal)
+        {
             Some((_, altitudes)) => altitudes.push(*altitude),
             None => grouped.push((node.ordinal, vec![*altitude])),
         }
@@ -677,34 +693,43 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<BundleDocument, BundleError> {
     // the decoded §8 — the first cross-section validation. The dependency
     // gate runs first: a present §9 whose §8 is unavailable (absent, at an
     // unreadable version, or invalid) is withheld and never interpreted.
-    let (scene, scene_sources_capability) =
-        match (&document.spatial_context, directory.declared_version(format::SECTION_SCENE_SOURCES)) {
-            (Some(spatial), Some(_)) => classify_section(
-                &directory,
-                &payload,
-                format::SECTION_SCENE_SOURCES,
-                |bytes| crate::scene_section::decode_scene_section(bytes, spatial),
-            ),
-            (Some(_), None) => (None, SectionCapability::Absent),
-            (None, Some(_)) => (
-                None,
-                SectionCapability::DisabledByDependency {
-                    requires: format::SECTION_SPATIAL_CONTEXT,
-                },
-            ),
-            (None, None) => (None, SectionCapability::Absent),
-        };
+    let (scene, scene_sources_capability) = match (
+        &document.spatial_context,
+        directory.declared_version(format::SECTION_SCENE_SOURCES),
+    ) {
+        (Some(spatial), Some(_)) => classify_section(
+            &directory,
+            &payload,
+            format::SECTION_SCENE_SOURCES,
+            |bytes| crate::scene_section::decode_scene_section(bytes, spatial),
+        ),
+        (Some(_), None) => (None, SectionCapability::Absent),
+        (None, Some(_)) => (
+            None,
+            SectionCapability::DisabledByDependency {
+                requires: format::SECTION_SPATIAL_CONTEXT,
+            },
+        ),
+        (None, None) => (None, SectionCapability::Absent),
+    };
     document.scene = scene;
 
     // §10 and §11 are still declared-without-a-decoder; their outcomes come
     // from the directory row and their declared §8 dependency edge.
-    let outcomes = BTreeMap::from([(format::SECTION_SPATIAL_CONTEXT, spatial_context_capability.clone())]);
+    let outcomes = BTreeMap::from([(
+        format::SECTION_SPATIAL_CONTEXT,
+        spatial_context_capability.clone(),
+    )]);
     document.capabilities = CapabilityReport {
         graph: graph_capability,
         facilities: facilities_capability,
         spatial_context: spatial_context_capability,
         scene_sources: scene_sources_capability,
-        canonical_graph: classify_declared_section(&directory, format::SECTION_CANONICAL_GRAPH, &outcomes),
+        canonical_graph: classify_declared_section(
+            &directory,
+            format::SECTION_CANONICAL_GRAPH,
+            &outcomes,
+        ),
         network_qa: classify_declared_section(&directory, format::SECTION_NETWORK_QA, &outcomes),
     };
     Ok(document)
@@ -727,8 +752,13 @@ fn classify_declared_section(
     }
     let (requires, _references) = format::declared_dependencies(id);
     for requirement in requires {
-        if !matches!(outcomes.get(requirement), Some(SectionCapability::Available)) {
-            return SectionCapability::DisabledByDependency { requires: *requirement };
+        if !matches!(
+            outcomes.get(requirement),
+            Some(SectionCapability::Available)
+        ) {
+            return SectionCapability::DisabledByDependency {
+                requires: *requirement,
+            };
         }
     }
     SectionCapability::Invalid {
@@ -808,8 +838,8 @@ pub fn level_elevations(document: &BundleDocument) -> Vec<LevelElevation> {
     document
         .levels
         .iter()
-        .map(|level| {
-            match records.iter().find(|record| record.level_id == level.id) {
+        .map(
+            |level| match records.iter().find(|record| record.level_id == level.id) {
                 Some(record) => LevelElevation::Resolved {
                     level: record.clone(),
                 },
@@ -817,8 +847,8 @@ pub fn level_elevations(document: &BundleDocument) -> Vec<LevelElevation> {
                     level_id: level.id.clone(),
                     ordinal: level.ordinal,
                 },
-            }
-        })
+            },
+        )
         .collect()
 }
 
@@ -1260,15 +1290,23 @@ mod tests {
         document = with_spatial_context(document, vec![record("l1", 0.0), record("l2", 1.0)]);
 
         let elevations = level_elevations(&document);
-        assert_eq!(elevations.len(), 2, "one answer per canonical level, in level order");
+        assert_eq!(
+            elevations.len(),
+            2,
+            "one answer per canonical level, in level order"
+        );
         assert_eq!(
             elevations[0],
-            LevelElevation::Resolved { level: record("l1", 0.0) },
+            LevelElevation::Resolved {
+                level: record("l1", 0.0)
+            },
             "the §8-backed plane is returned with its full record"
         );
         assert_eq!(
             elevations[1],
-            LevelElevation::Resolved { level: record("l2", 1.0) }
+            LevelElevation::Resolved {
+                level: record("l2", 1.0)
+            }
         );
     }
 

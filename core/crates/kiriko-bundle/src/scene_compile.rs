@@ -22,7 +22,7 @@ use kiriko_model::scene::{
 };
 use kiriko_model::spatial::{
     Assumption, AssumptionKind, Confidence, ConfidenceKind, EvidenceMethod, Frame, LocatorKind,
-    Registries, RegistrationEvidence, SourceLocator, SpatialContext, wgs84_ecef,
+    RegistrationEvidence, Registries, SourceLocator, SpatialContext, wgs84_ecef,
 };
 
 use crate::codec::BundleDocument;
@@ -122,7 +122,11 @@ pub(crate) fn triangulate_simple(ring: &[[i64; 2]]) -> Vec<[u32; 3]> {
     if n < 3 {
         return Vec::new();
     }
-    let poly_sign = if signed_area2(ring) >= 0 { 1i128 } else { -1i128 };
+    let poly_sign = if signed_area2(ring) >= 0 {
+        1i128
+    } else {
+        -1i128
+    };
     let mut remaining: Vec<u32> = (0..n as u32).collect();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
 
@@ -239,16 +243,6 @@ fn linestring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
     (line.len() >= 2).then_some(line)
 }
 
-/// The projected, triangulated mesh for a polygon ring at `z`.
-fn ring_mesh(frame: &Frame, ring: &[[f64; 2]], z: i64) -> Mesh {
-    let xy: Vec<[i64; 2]> = ring.iter().map(|[lon, lat]| project_local_mm(frame, *lon, *lat)).collect();
-    let faces = triangulate_simple(&xy);
-    Mesh {
-        positions: xy.iter().map(|[x, y]| [*x, *y, z]).collect(),
-        faces,
-    }
-}
-
 // -- Registry helpers ------------------------------------------------------
 
 fn find_or_push_locator(registries: &mut Registries, value: &str) -> u32 {
@@ -296,10 +290,16 @@ fn push_assumption(registries: &mut Registries, detail: &str) -> u32 {
 
 // -- Compiler --------------------------------------------------------------
 
+/// A unique boundary edge keyed by (level id, ordered vertex pair).
+type WallEdgeKey = (String, i64, i64, i64, i64);
+
 /// The explicit height of a unit from its source properties (metres → mm),
 /// when present and finite.
 fn unit_height_mm(unit: &VenueFeature, profile: &SceneProfile) -> Option<i64> {
-    let height = unit.source_properties.get(&profile.height_property_key)?.as_f64()?;
+    let height = unit
+        .source_properties
+        .get(&profile.height_property_key)?
+        .as_f64()?;
     height.is_finite().then(|| (height * 1000.0).round() as i64)
 }
 
@@ -335,9 +335,11 @@ pub(crate) fn compile_scene(
                     assumed_slot: &mut Option<u32>|
      -> u32 {
         if assumed {
-            *assumed_slot.get_or_insert_with(|| push_confidence(registries, ConfidenceKind::Assumed, 0.3))
+            *assumed_slot
+                .get_or_insert_with(|| push_confidence(registries, ConfidenceKind::Assumed, 0.3))
         } else {
-            *measured.get_or_insert_with(|| push_confidence(registries, ConfidenceKind::Measured, 1.0))
+            *measured
+                .get_or_insert_with(|| push_confidence(registries, ConfidenceKind::Measured, 1.0))
         }
     };
 
@@ -386,7 +388,9 @@ pub(crate) fn compile_scene(
         .iter()
         .filter(|f| f.feature_type == FeatureType::Unit)
     {
-        let Some(level_id) = unit.level_id.as_deref() else { continue };
+        let Some(level_id) = unit.level_id.as_deref() else {
+            continue;
+        };
         let Some(z) = plane_z(level_id) else { continue };
         let Some(ring) = unit.geometry.as_ref().and_then(polygon_ring) else {
             continue;
@@ -492,7 +496,11 @@ pub(crate) fn compile_scene(
             locator,
             Some(ceiling_confidence),
             ceiling_assumption,
-            if assumed { "ceiling at nominal height" } else { "ceiling at source height" },
+            if assumed {
+                "ceiling at nominal height"
+            } else {
+                "ceiling at source height"
+            },
         );
         primitives.push(ScenePrimitive {
             id: format!("ceiling-{}", unit.id),
@@ -512,16 +520,25 @@ pub(crate) fn compile_scene(
     // corroborated ones mark an existing boundary, all others are detail
     // linework.
     let nominal_wall = profile.wall_height_mm;
-    let mut walls_by_level: Vec<((String, i64, i64, i64, i64), Vec<u32>)> = Vec::new();
+    let mut walls_by_level: Vec<(WallEdgeKey, Vec<u32>)> = Vec::new();
     for unit in &units_data {
         for (a, b) in ring_edges(&unit.ring_xy) {
             let key = if a <= b { (a, b) } else { (b, a) };
             match walls_by_level.iter_mut().find(|(k, _)| {
-                k.0 == unit.level_id && (k.1, k.2, k.3, k.4) == (key.0[0], key.0[1], key.1[0], key.1[1])
+                k.0 == unit.level_id
+                    && (k.1, k.2, k.3, k.4) == (key.0[0], key.0[1], key.1[0], key.1[1])
             }) {
-                Some((_, heights)) => heights.push(unit.source_height_mm.unwrap_or(profile.wall_height_mm) as u32),
+                Some((_, heights)) => {
+                    heights.push(unit.source_height_mm.unwrap_or(profile.wall_height_mm) as u32)
+                }
                 None => walls_by_level.push((
-                    (unit.level_id.clone(), key.0[0], key.0[1], key.1[0], key.1[1]),
+                    (
+                        unit.level_id.clone(),
+                        key.0[0],
+                        key.0[1],
+                        key.1[0],
+                        key.1[1],
+                    ),
                     vec![unit.source_height_mm.unwrap_or(profile.wall_height_mm) as u32],
                 )),
             }
@@ -554,7 +571,11 @@ pub(crate) fn compile_scene(
             level_locator,
             Some(wall_confidence),
             wall_assumption,
-            if assumed { "wall at nominal height" } else { "wall at source height" },
+            if assumed {
+                "wall at nominal height"
+            } else {
+                "wall at source height"
+            },
         );
         let n = primitives
             .iter()
@@ -587,7 +608,9 @@ pub(crate) fn compile_scene(
         .iter()
         .filter(|f| f.feature_type == FeatureType::Opening)
     {
-        let Some(level_id) = opening.level_id.as_deref() else { continue };
+        let Some(level_id) = opening.level_id.as_deref() else {
+            continue;
+        };
         let Some(z) = plane_z(level_id) else { continue };
         let Some(line) = opening.geometry.as_ref().and_then(linestring) else {
             continue;
@@ -609,7 +632,9 @@ pub(crate) fn compile_scene(
                 continue;
             }
             for (a, b) in ring_edges(&unit.ring_xy) {
-                if !point_near_segment(p0, a, b, tolerance) || !point_near_segment(p1, a, b, tolerance) {
+                if !point_near_segment(p0, a, b, tolerance)
+                    || !point_near_segment(p1, a, b, tolerance)
+                {
                     continue;
                 }
                 // Both endpoints of the opening lie on this edge.
@@ -740,8 +765,7 @@ pub(crate) fn compile_scene(
             primitives.push(ScenePrimitive {
                 id: format!("conveyance-{}", conveyance_count),
                 role: PrimitiveRole::Conveyance,
-                level_id: from_level_for(&spatial, from.ordinal)
-                    .unwrap_or_else(|| "".to_string()),
+                level_id: from_level_for(spatial, from.ordinal).unwrap_or_default(),
                 occlusion: OcclusionClass::Opaque,
                 confidence_ref: conveyance_confidence,
                 canonical_feature_id: None,
@@ -779,7 +803,11 @@ pub(crate) fn compile_scene(
             evidence_refs: vec![evidence],
             geometry: PrimitiveGeometry::Conveyance {
                 kind: ConveyanceKind::Neutral,
-                mesh: extrude_ring_mesh(&unit.ring_xy, unit.z, unit.z + profile.conveyance_height_mm),
+                mesh: extrude_ring_mesh(
+                    &unit.ring_xy,
+                    unit.z,
+                    unit.z + profile.conveyance_height_mm,
+                ),
             },
         });
         conveyance_count += 1;
@@ -890,7 +918,12 @@ fn ring_edges(ring: &[[i64; 2]]) -> Vec<([i64; 2], [i64; 2])> {
 /// A vertical quad from `z` to `z + height` spanning `a`→`b`.
 fn wall_mesh(a: [i64; 2], b: [i64; 2], z: i64, height: i64) -> Mesh {
     Mesh {
-        positions: vec![[a[0], a[1], z], [b[0], b[1], z], [b[0], b[1], z + height], [a[0], a[1], z + height]],
+        positions: vec![
+            [a[0], a[1], z],
+            [b[0], b[1], z],
+            [b[0], b[1], z + height],
+            [a[0], a[1], z + height],
+        ],
         faces: vec![[0, 1, 2], [0, 2, 3]],
     }
 }
@@ -913,8 +946,13 @@ fn point_segment_dist2(p: [i64; 2], a: [i64; 2], b: [i64; 2]) -> i128 {
         let (qx, qy) = (i128::from(px - ax), i128::from(py - ay));
         return qx * qx + qy * qy;
     }
-    let t = (i128::from(px - ax) * dx + i128::from(py - ay) * dy).max(0).min(len2);
-    let (cx, cy) = (i128::from(ax) + dx * t / len2, i128::from(ay) + dy * t / len2);
+    let t = (i128::from(px - ax) * dx + i128::from(py - ay) * dy)
+        .max(0)
+        .min(len2);
+    let (cx, cy) = (
+        i128::from(ax) + dx * t / len2,
+        i128::from(ay) + dy * t / len2,
+    );
     let (qx, qy) = (i128::from(px) - cx, i128::from(py) - cy);
     qx * qx + qy * qy
 }
@@ -925,7 +963,8 @@ fn point_near_segment(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> 
     point_segment_dist2(p, a, b) <= t * t
 }
 
-#[cfg(test)]#[cfg(test)]
+#[cfg(test)]
+#[cfg(test)]
 mod tests {
     use kiriko_model::spatial::{Axes, Frame, LengthUnit, enu_basis_ecef, wgs84_ecef};
 
@@ -1001,7 +1040,14 @@ mod tests {
     #[test]
     fn a_concave_polygon_triangulates_to_n_minus_two_triangles() {
         // L-shaped ring (concave).
-        let ring = [[0, 0], [2000, 0], [2000, 1000], [1000, 1000], [1000, 2000], [0, 2000]];
+        let ring = [
+            [0, 0],
+            [2000, 0],
+            [2000, 1000],
+            [1000, 1000],
+            [1000, 2000],
+            [0, 2000],
+        ];
         let triangles = triangulate_simple(&ring);
         assert_eq!(triangles.len(), 4, "n − 2 triangles for a simple polygon");
         for triangle in &triangles {

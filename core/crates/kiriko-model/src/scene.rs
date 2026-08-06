@@ -97,14 +97,8 @@ pub struct Mesh {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrimitiveGeometry {
     Mesh(Mesh),
-    Portal {
-        connects: (u32, u32),
-        opening: Mesh,
-    },
-    Conveyance {
-        kind: ConveyanceKind,
-        mesh: Mesh,
-    },
+    Portal { connects: (u32, u32), opening: Mesh },
+    Conveyance { kind: ConveyanceKind, mesh: Mesh },
 }
 
 /// One compiled semantic scene primitive, referencing §8's registries for its
@@ -191,8 +185,7 @@ pub struct SceneSection {
 mod tests {
     use super::{
         ActivationState, ConveyanceKind, FloorMapping, Mesh, OcclusionClass, PrimitiveGeometry,
-        PrimitiveRole, ScenePrimitive, SceneSection, SourceObjectAssociation,
-        TilesDescriptor,
+        PrimitiveRole, ScenePrimitive, SceneSection, SourceObjectAssociation, TilesDescriptor,
     };
 
     #[test]
@@ -261,9 +254,7 @@ mod tests {
             registration_profile_id: "tokyo-v1".into(),
             floor_mappings: vec![FloorMapping {
                 canonical_level_id: "l1".into(),
-                composite_source_levels: vec![
-                    "asset-v1|doc.glb|link-a|L1|elev-100".into(),
-                ],
+                composite_source_levels: vec!["asset-v1|doc.glb|link-a|L1|elev-100".into()],
             }],
             source_object_associations: vec![SourceObjectAssociation {
                 source_object_id: "so-1".into(),
@@ -272,7 +263,10 @@ mod tests {
             contextual_classifications: Vec::new(),
         };
         assert_eq!(descriptor.activation_state, ActivationState::NotActivated);
-        assert_eq!(descriptor.floor_mappings[0].composite_source_levels.len(), 1);
+        assert_eq!(
+            descriptor.floor_mappings[0].composite_source_levels.len(),
+            1
+        );
     }
 
     #[test]
