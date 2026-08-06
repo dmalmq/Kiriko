@@ -8,6 +8,7 @@ description = "Strict canonical IMDF venue model shared by Kiriko native and WAS
 
 [dependencies]
 serde = { workspace = true }
+libm = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 zip = { workspace = true }

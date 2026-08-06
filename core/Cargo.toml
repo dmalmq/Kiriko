@@ -26,6 +26,8 @@ zip = "8"
 geojson = "0.24"
 # Bundle codec
 postcard = { version = "1", features = ["alloc"] }
+# Platform-independent libm for deterministic cross-platform compile bytes
+libm = "0.2"
 zstd = "0.13"
 sha2 = "0.10"
 # napi-rs server bindings (major 3 stack)
