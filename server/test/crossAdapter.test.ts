@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { inspectBundle } from "@kiriko/node";
-import initWasm, { decodeBundle, levelElevations } from "@kiriko/wasm";
+import { inspectBundle, sceneProjection as nativeSceneProjection } from "@kiriko/node";
+import initWasm, { decodeBundle, levelElevations, sceneProjection as wasmSceneProjection } from "@kiriko/wasm";
 import { beforeAll, describe, expect, it } from "vitest";
 
 const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../tests/fixtures");
@@ -127,5 +127,28 @@ describe("cross-adapter Stage 0 parity (frozen bytes)", () => {
       (await inspectBundle(Buffer.from(bytes))).inspectionJson ?? "null",
     ) as { levelIds: string[] };
     expect(elevations.map((e) => e.levelId).sort()).toEqual([...inspection.levelIds].sort());
+  });
+});
+
+describe("cross-adapter scene projection parity", () => {
+  it("reports identical typed scene projections for the §9 bundle", async () => {
+    const bytes = await readFixture("stage0.kvb");
+    const native = await nativeSceneProjection(Buffer.from(bytes));
+    expect(native.ok).toBe(true);
+    const projection = JSON.parse(native.projectionJson ?? "null") as unknown;
+    expect(projection).toEqual(wasmSceneProjection(bytes));
+    expect(projection).toMatchObject({
+      identity: { kind: "generated" },
+      capability: { state: "ready" },
+    });
+  });
+
+  it("reports the typed absent state for a legacy bundle on both adapters", async () => {
+    const bytes = await readFixture("legacy-minimal.kvb");
+    const native = JSON.parse(
+      (await nativeSceneProjection(Buffer.from(bytes))).projectionJson ?? "null",
+    ) as unknown;
+    expect(native).toEqual(wasmSceneProjection(bytes));
+    expect(native).toMatchObject({ capability: { state: "absent" }, primitives: [] });
   });
 });

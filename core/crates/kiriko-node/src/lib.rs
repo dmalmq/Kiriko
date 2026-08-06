@@ -22,8 +22,8 @@ extern crate napi_derive;
 
 use kiriko_bundle::{
     BundleError, BundleMetadata, CompileError, CompiledBundle, ExportError,
-    compile_imdf_with_network, export_network as export_network_pure,
-    inspect_bundle as inspect_bundle_pure,
+    compile_imdf_with_network, decode_bundle, export_network as export_network_pure,
+    inspect_bundle as inspect_bundle_pure, scene_projection as scene_projection_pure,
 };
 use kiriko_model::model::ViewerWarning;
 use napi::bindgen_prelude::{AsyncTask, Buffer};
@@ -277,6 +277,73 @@ fn bundle_error_json(err: &BundleError) -> Value {
 #[napi]
 pub fn inspect_bundle(bundle: Buffer) -> AsyncTask<InspectTask> {
     AsyncTask::new(InspectTask {
+        bundle: bundle.to_vec(),
+    })
+}
+
+/// JS-facing discriminated scene-projection result. Success carries
+/// `projectionJson` (a serialized `kiriko_bundle::scene_projection`);
+/// failure carries `errorJson` (`{ code, message }`).
+#[napi(object)]
+pub struct NativeSceneProjectionResponse {
+    pub ok: bool,
+    pub projection_json: Option<String>,
+    pub error_json: Option<String>,
+}
+
+/// Outcome of the blocking scene-projection step, computed off the event
+/// loop; both variants carry pre-serialized JSON (see [`InspectOutcome`]).
+pub enum SceneProjectionOutcome {
+    Success(String),
+    Failure(String),
+}
+
+pub struct SceneProjectionTask {
+    bundle: Vec<u8>,
+}
+
+#[napi]
+impl Task for SceneProjectionTask {
+    type Output = SceneProjectionOutcome;
+    type JsValue = NativeSceneProjectionResponse;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(match decode_bundle(&self.bundle) {
+            Ok(document) => {
+                let projection = scene_projection_pure(&document);
+                let json = serde_json::to_string(&projection).map_err(|e| {
+                    napi::Error::from_reason(format!("serialize scene projection: {e}"))
+                })?;
+                SceneProjectionOutcome::Success(json)
+            }
+            Err(err) => SceneProjectionOutcome::Failure(bundle_error_json(&err).to_string()),
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(match output {
+            SceneProjectionOutcome::Success(projection_json) => NativeSceneProjectionResponse {
+                ok: true,
+                projection_json: Some(projection_json),
+                error_json: None,
+            },
+            SceneProjectionOutcome::Failure(error_json) => NativeSceneProjectionResponse {
+                ok: false,
+                projection_json: None,
+                error_json: Some(error_json),
+            },
+        })
+    }
+}
+
+/// Project the Generated scene source of immutable `kvb1` `bundle` bytes:
+/// the renderer-neutral typed projection (identity, frame, level groups,
+/// primitives, capability state), serialized to JSON. Runs off the event
+/// loop like [`inspect_bundle`]; the returned promise always resolves to a
+/// [`NativeSceneProjectionResponse`], never rejecting for domain failures.
+#[napi]
+pub fn scene_projection(bundle: Buffer) -> AsyncTask<SceneProjectionTask> {
+    AsyncTask::new(SceneProjectionTask {
         bundle: bundle.to_vec(),
     })
 }
