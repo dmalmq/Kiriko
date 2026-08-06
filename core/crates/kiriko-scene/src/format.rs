@@ -5,8 +5,10 @@ use crate::SceneError;
 /// Container magic. Bumped only when the byte layout changes incompatibly.
 pub const SCENE_MAGIC: &[u8; 4] = b"KSC1";
 
-/// Twelve semantic roles from the renderer-neutral visual language (issue #32).
-/// The renderer styles these; it never sees a source material.
+/// Semantic roles from the renderer-neutral visual language (issue #32). The
+/// renderer styles these; it never sees a source material. `Conveyance` is
+/// the honest form for a conveyance whose transport type is not evidenced —
+/// the never-guess rule (issue #19) forbids promoting it to a typed one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SemanticRole {
     Walkable,
@@ -21,6 +23,7 @@ pub enum SemanticRole {
     Stairs,
     Ramp,
     Context,
+    Conveyance,
 }
 
 /// Whether an object may occlude the route, selection, or a priority label.
@@ -54,7 +57,9 @@ pub struct SceneLevel {
     pub source_document: String,
     pub source_link_name: String,
     /// Source elevation retained as provenance, never placement authority.
-    pub source_elevation_meters: f32,
+    /// `None` when the source carries no elevation for this level — the
+    /// generated source never fabricates one for a nominally spaced floor.
+    pub source_elevation_meters: Option<f32>,
     /// Plane resolved from tile surfaces (issue #31).
     pub resolved_plane_z: f32,
     /// Elevation quantized to decimetres, part of the composite identity.

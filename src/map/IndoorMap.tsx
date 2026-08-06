@@ -5,6 +5,8 @@ import {
   useState,
   type ReactElement,
 } from "react";
+import { SceneLayer, SCENE_DIAGNOSTICS_KEY } from "./scene/sceneLayer";
+import type { SceneView } from "./scene/sceneFormat";
 import maplibregl, {
   type GeoJSONSource,
   type GeoJSONSourceDiff,
@@ -133,7 +135,18 @@ export interface IndoorMapProps {
   network?: ParsedNetwork | null;
   /** Active network-editing controller; null when not editing. */
   networkEditing?: NetworkEditingMapProps | null;
+  /**
+   * The venue's 3D scene, when one is loaded and 3D was chosen. `null` keeps
+   * the viewer exactly 2D — no layer is created and the camera stays flat.
+   */
+  scene?: SceneView | null;
 }
+
+/** The scene layer's id; also the handle the e2e harness reads stats through. */
+const SCENE_LAYER_ID = "kiriko-scene";
+
+/** #23 D7: MapLibre keeps the camera, and 60° stays its ceiling. */
+const SCENE_MAX_PITCH = 60;
 
 const FIT_PADDING = 48;
 const FIT_MAX_ZOOM = 20;
@@ -659,10 +672,12 @@ export function IndoorMap({
   onSelectFacility,
   network,
   networkEditing = null,
+  scene = null,
 }: IndoorMapProps): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const onSelectRef = useRef(onSelectFeature);
+  const sceneLayerRef = useRef<SceneLayer | null>(null);
   const venueRef = useRef(venue);
   const levelIdRef = useRef(levelId);
   const selectedIdRef = useRef(selectedFeatureId);
@@ -858,7 +873,10 @@ export function IndoorMap({
         container,
         style: buildIndoorStyle(theme),
         attributionControl: false,
-        pitchWithRotate: false,
+        // Pitch rides the rotate gesture, but `maxPitch: 0` clamps it away
+        // until a scene raises the ceiling: in 2D the handler is disabled and
+        // has no range, so this changes nothing until 3D is on.
+        pitchWithRotate: true,
         dragRotate: false,
         maxPitch: 0,
         center: [0, 0],
@@ -1283,6 +1301,79 @@ export function IndoorMap({
       }
     }, theme);
   }, [theme]);
+
+  // The 3D scene layer. Adding it is the only thing that changes how a venue
+  // renders, so it happens exactly when a scene is supplied and is fully undone
+  // when one is not: the 2D viewer below is untouched either way.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (map == null || scene == null) {
+      return;
+    }
+
+    let layer: SceneLayer | null = null;
+
+    const attach = (): void => {
+      if (layer != null || map.getLayer(SCENE_LAYER_ID) != null) {
+        return;
+      }
+      try {
+        layer = new SceneLayer(scene, {
+          id: SCENE_LAYER_ID,
+          activeLevelIndex: Math.max(
+            0,
+            scene.levels.findIndex((level) => level.canonicalId === levelIdRef.current),
+          ),
+        });
+        map.addLayer(layer);
+        // A 3D scene needs a camera that can look at it (#23 D7); MapLibre
+        // keeps owning the camera, this only lifts the 2D constraints.
+        map.setMaxPitch(SCENE_MAX_PITCH);
+        map.dragRotate.enable();
+        map.touchZoomRotate.enableRotation();
+        sceneLayerRef.current = layer;
+        Reflect.set(window, SCENE_DIAGNOSTICS_KEY, layer.diagnostics());
+      } catch {
+        // A context that cannot carry the layer leaves the 2D map exactly as
+        // it was; choosing the fallback deliberately is a later slice (#62).
+        layer = null;
+        sceneLayerRef.current = null;
+      }
+    };
+
+    if (map.isStyleLoaded()) {
+      attach();
+    } else {
+      map.once("load", attach);
+    }
+
+    return () => {
+      map.off("load", attach);
+      sceneLayerRef.current = null;
+      Reflect.deleteProperty(window, SCENE_DIAGNOSTICS_KEY);
+      if (map.getLayer(SCENE_LAYER_ID) != null) {
+        map.removeLayer(SCENE_LAYER_ID);
+      }
+      map.dragRotate.disable();
+      map.touchZoomRotate.disableRotation();
+      map.setPitch(0);
+      map.setBearing(0);
+      map.setMaxPitch(0);
+    };
+  }, [scene]);
+
+  // Floor changes drive which level the scene draws at full opacity.
+  useEffect(() => {
+    const layer = sceneLayerRef.current;
+    if (layer == null) {
+      return;
+    }
+    const index = layer.levelIndexOf(levelId);
+    if (index != null) {
+      layer.setActiveLevel(index);
+      mapRef.current?.triggerRepaint();
+    }
+  }, [levelId, scene]);
 
   return (
     <>

@@ -3,6 +3,7 @@
 
 mod derive;
 mod format;
+mod generated;
 mod glb;
 mod quantize;
 mod roles;
@@ -12,6 +13,7 @@ pub use format::{
     OcclusionClass, SCENE_MAGIC, SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel,
     SemanticRole, decode_scene, encode_scene,
 };
+pub use generated::compile_generated_scene;
 pub use glb::{GlbFeatureRow, GlbPrimitive, GlbScene, read_glb};
 pub use quantize::{decode_normal_oct, encode_normal_oct, quantize_positions};
 pub use roles::{occlusion_for_role, role_for_category};
@@ -28,4 +30,6 @@ pub enum SceneError {
     Glb(String),
     #[error("levels.json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("primitive {primitive} names level {level}, which the spatial context does not carry")]
+    UnplaceablePrimitive { primitive: String, level: String },
 }

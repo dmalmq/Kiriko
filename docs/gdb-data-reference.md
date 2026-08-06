@@ -188,6 +188,13 @@ polygons.
 - `build_facilities(geojson, graph)` → `Facilities`. Each `Facility` has `(lon, lat, ordinal, name, icon, anchor?)` — position is the **verbatim GDB coordinate**, `icon` is the `image` basename. `anchor` is that same position used as the **route-to-facility** destination (the A\* router snaps it to the nearest node at query time), set only when the facility's floor carries a route-graph node; `None` otherwise.
 - WASM: `facilities(bundle)` decodes §7; viewer renders a floor-filtered GL symbol layer (icon by `image` basename, pin fallback) and offers **Route here** on tap.
 
+**Rendering the scene (`kiriko-scene` + `src/map/scene/`):**
+- `compile_generated_scene(scene, spatial, features)` turns §9 primitives plus §8's resolved planes and confidence registry into the **KSC1 render document** — the same container the GLB deriver produces for a Tiles package (Stage 3), so one renderer serves both sources (#23 D4). Levels mirror §8 in order (that order is the document's level index space); features are pickable objects (`source_object_id` = the §9 primitive id); geometry is merged into one **batch per `(level, role)`** with `u16` positions quantized inside per-batch bounds, octahedral `i16` normals, and a `u32` feature index per vertex.
+- Semantic roles come from the canonical feature's **IMDF category** (a closed vocabulary, matched exactly), never a guess: an unevidenced conveyance stays the untyped `Conveyance` role, and a level slab is `Context` — the floor plate, not a navigability claim, and a distinct role because it is coplanar with the finishes on it.
+- WASM: `generatedScene(bundle)` compiles and describes the document (JSON meta + packed payload) in the **bundle worker**; `decodeScene(kscene)` is the Tiles entry. `readScene` builds typed array views without copying the payload.
+- The layer (`sceneLayer.ts`) is one WebGL2 `CustomLayerInterface` (`renderingMode: "3d"`). Quantization is folded into a model matrix composed in `f64` **relative to the venue anchor**; the mercator scale is per-axis from the WGS84 radii of curvature, because MapLibre's `meterInMercatorCoordinateUnits` is mean-radius spherical and drifts 2.26 m per kilometre against the venue's own 2D features. Paint order and depth bias (`scenePolicy.ts`) resolve coplanar indoor geometry: contextual mass first and biased back, openings biased forward of their walls.
+- The viewer opts in with `?scene` and raises `maxPitch` to 60 only while a scene is attached; the capability preflight and 2D fallback are #62, the rest of the visual language #63.
+
 ## Gotchas
 
 - **Total route weight is in `cost` units, not metres**, though the viewer currently labels it `m` (known follow-up).

@@ -21,6 +21,8 @@ import { ViewerErrorNotice } from "../components/ViewerNotice";
 import { WarningsPanel } from "../components/WarningsPanel";
 import { loadKirikoBundle } from "../bundle/loadKirikoBundle";
 import { routeKirikoBundle } from "../bundle/routeKirikoBundle";
+import { loadKirikoScene } from "../bundle/loadKirikoScene";
+import { readScene, type SceneView } from "../map/scene/sceneFormat";
 import type { FacilityDto, RouteEndpoint, RouteResultDto } from "../bundle/wasm";
 import { loadNetworkOverlay } from "../bundle/loadNetworkOverlay";
 import {
@@ -348,6 +350,9 @@ export function App() {
   );
   const [layerVisibility, setLayerVisibility] = useState(defaultLayerVisibility);
   const [mapControls, setMapControls] = useState<IndoorMapControls | null>(null);
+  // The venue's 3D scene, loaded only when `?scene` opts in. Null keeps the
+  // viewer exactly 2D.
+  const [scene, setScene] = useState<SceneView | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [bundleProvenance, setBundleProvenance] = useState<BundleProvenance | null>(null);
@@ -1371,6 +1376,40 @@ export function App() {
     }
   }, [runLoad, params]);
 
+  // 3D scene: fetched and compiled off-thread only when `?scene` opts in and a
+  // published dataset is being viewed. A venue with no scene resolves absent
+  // and the viewer stays 2D.
+  useEffect(() => {
+    if (!params.scene || params.dataset === null) {
+      setScene(null);
+      return;
+    }
+    const dataset = params.dataset;
+    const controller = new AbortController();
+    let cancelled = false;
+    void (async () => {
+      try {
+        const described = await loadKirikoScene(
+          datasetBundleUrl(dataset, params.version ?? undefined),
+          controller.signal,
+        );
+        if (!cancelled) {
+          setScene(described === null ? null : readScene(described));
+        }
+      } catch {
+        // The 2D venue is already usable; a scene that cannot load must not
+        // take it down with it.
+        if (!cancelled) {
+          setScene(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [params.scene, params.dataset, params.version]);
+
   useEffect(() => {
     loadFromParams();
   }, [loadFromParams]);
@@ -1579,6 +1618,7 @@ export function App() {
             facilities={bundleProvenance?.facilities ?? []}
             onSelectFacility={setSelectedFacility}
             network={reviewActive ? editedNetwork : null}
+            scene={scene}
             networkEditing={
               editor !== null && !networkSaveLocked
                 ? {

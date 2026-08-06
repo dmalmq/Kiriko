@@ -41,7 +41,7 @@ fn sample_document() -> SceneDocument {
             source_level_name: "B1F コンコース".to_string(),
             source_document: "TokyoSta.rvt".to_string(),
             source_link_name: String::new(),
-            source_elevation_meters: -6.5,
+            source_elevation_meters: Some(-6.5),
             resolved_plane_z: -6.4,
             quantized_elevation_dm: -64,
         }],

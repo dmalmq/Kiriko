@@ -14,6 +14,8 @@ import init, {
   exportNetwork as exportNetworkWasm,
   levelElevations as levelElevationsWasm,
   sceneProjection as sceneProjectionWasm,
+  generatedScene as generatedSceneWasm,
+  decodeScene as decodeSceneWasm,
 } from "@kiriko/wasm";
 // Vite emits a hashed, origin-relative asset path (e.g.
 // `/assets/kiriko_wasm_bg-[hash].wasm`) for this `?url` import. Resolving
@@ -375,6 +377,41 @@ export interface SceneProjectionDto {
  */
 export function sceneProjection(bytes: Uint8Array): SceneProjectionDto {
   return sceneProjectionWasm(bytes) as SceneProjectionDto;
+}
+
+/**
+ * A render document as the wasm hands it over: a JSON description plus one
+ * packed payload the caller builds typed-array views over. Both scene sources
+ * arrive in this shape — a bundle's generated §9 scene through
+ * `generatedScene`, a server-derived tile package through `decodeScene` —
+ * so the renderer never learns which produced it (#23 D4).
+ */
+export interface DescribedSceneDto {
+  /** JSON description: header, levels, features, and per-batch byte offsets. */
+  meta: string;
+  /** Concatenated batch geometry: positions (u16 x3), normals (i16 x2), feature indices (u32). */
+  payload: Uint8Array;
+}
+
+/**
+ * Compile a bundle's generated §9 scene into the shared render document. Must
+ * only be called after `initKirikoWasm` has resolved. Throws when the bundle
+ * carries no scene or no spatial context — a venue without 3D data is not an
+ * error state the renderer guesses around, it is the absent capability the
+ * scene projection already reports.
+ */
+export function generatedScene(bytes: Uint8Array): DescribedSceneDto {
+  const decoded = generatedSceneWasm(bytes);
+  return { meta: decoded.meta, payload: decoded.payload };
+}
+
+/**
+ * Read an already-derived `.kscene` package (the Tiles source's path, Stage
+ * 3). Must only be called after `initKirikoWasm` has resolved.
+ */
+export function decodeScene(bytes: Uint8Array): DescribedSceneDto {
+  const decoded = decodeSceneWasm(bytes);
+  return { meta: decoded.meta, payload: decoded.payload };
 }
 
 /** The two network feature classes as GeoJSON `FeatureCollection` text. */

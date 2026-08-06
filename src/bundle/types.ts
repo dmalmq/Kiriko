@@ -25,7 +25,21 @@ export interface BundleRouteRequest {
   destination: RouteEndpoint;
 }
 
-export type BundleWorkerRequest = BundleDecodeRequest | BundleRouteRequest;
+/**
+ * Compile the bundle's generated §9 scene into the shared render document.
+ * `buffer` is transferred (not cloned); the worker re-decodes statelessly, so
+ * the compile — the heaviest wasm call in the client — never runs on the main
+ * thread while the map is interactive.
+ */
+export interface BundleSceneRequest {
+  type: "scene";
+  buffer: ArrayBuffer;
+}
+
+export type BundleWorkerRequest =
+  | BundleDecodeRequest
+  | BundleRouteRequest
+  | BundleSceneRequest;
 
 export interface BundleDecodeSuccess {
   type: "loaded";
@@ -42,6 +56,16 @@ export interface BundleDecodeSuccess {
 export interface BundleRouteSuccess {
   type: "routed";
   route: RouteResultDto | null;
+}
+
+/**
+ * The compiled render document: a JSON description plus the packed geometry
+ * payload, whose buffer is transferred back to the caller.
+ */
+export interface BundleSceneSuccess {
+  type: "scene";
+  meta: string;
+  payload: Uint8Array;
 }
 
 /**
@@ -69,7 +93,11 @@ export interface BundleDecodeFailure {
   };
 }
 
-export type BundleWorkerResponse = BundleDecodeSuccess | BundleRouteSuccess | BundleDecodeFailure;
+export type BundleWorkerResponse =
+  | BundleDecodeSuccess
+  | BundleRouteSuccess
+  | BundleSceneSuccess
+  | BundleDecodeFailure;
 
 /**
  * Shared wire `message` for `worker_failed` bundle-worker failures (WASM
