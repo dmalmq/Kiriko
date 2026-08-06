@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { decodeBundle, initKirikoWasm, levelElevations } from "./wasm";
+import { decodeBundle, initKirikoWasm, levelElevations, sceneProjection } from "./wasm";
 
 const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../tests/fixtures");
 
@@ -220,5 +220,34 @@ describe("levelElevations", () => {
     expect(lowest.state).toBe("resolved");
     expect(lowest.resolvedSceneZMm).toBe(0);
     expect(lowest.method).toBe("nominal_spacing");
+  });
+});
+
+describe("sceneProjection", () => {
+  it("projects the Generated source of the §9 golden bundle", async () => {
+    const bytes = await readGoldenBundle();
+    const projection = sceneProjection(bytes);
+
+    expect(projection.identity.kind).toBe("generated");
+    expect(projection.capability).toEqual({ state: "ready" });
+    expect(projection.frame).not.toBeNull();
+    expect(projection.frame!.unit).toBe("millimetre");
+    expect(projection.levels).toHaveLength(3);
+    for (const level of projection.levels) {
+      expect(level.boundsMm).not.toBeNull();
+    }
+    expect(projection.primitives.length).toBeGreaterThan(0);
+    expect(projection.primitives.some((p) => p.role === "surface")).toBe(true);
+    expect(projection.primitives.some((p) => p.role === "wall")).toBe(true);
+    // Bilingual copy is renderable from the typed states, never prose.
+    expect(typeof projection.identity.provenance).toBe("string");
+  });
+
+  it("reports absent for a legacy bundle without a scene", async () => {
+    const bytes = await readLegacyBundle();
+    const projection = sceneProjection(bytes);
+    expect(projection.capability).toEqual({ state: "absent" });
+    expect(projection.primitives).toEqual([]);
+    expect(projection.levels).toEqual([]);
   });
 });

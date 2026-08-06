@@ -487,6 +487,22 @@ pub fn level_elevations_js(bundle: &[u8]) -> Result<JsValue, JsError> {
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
+// -- Scene projection (scene-source-adapter Task) --------------------------
+
+/// The full typed scene projection of the Generated source for a `kvb1`
+/// bundle: identity, frame, level groups, primitives with
+/// role/occlusion/confidence/associations/evidence, and the typed capability
+/// state — serialized with the same json-compatible serializer as
+/// [`facilities_js`]; bundle-format failures throw (unlike
+/// [`decode_bundle_js`], which reports them structurally).
+#[wasm_bindgen(js_name = "sceneProjection")]
+pub fn scene_projection_js(bundle: &[u8]) -> Result<JsValue, JsError> {
+    let document = decode_bundle(bundle).map_err(|e| JsError::new(&e.message))?;
+    kiriko_bundle::scene_projection(&document)
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
 /// Export the bundle's §5 routing graph as `{ junctions, paths }` — each a
 /// `net_junction` / `net_path` GeoJSON `FeatureCollection` string (see
 /// `kiriko_bundle::export_network`). Lets the viewer render the generated

@@ -13,6 +13,7 @@ import init, {
   facilities as facilitiesWasm,
   exportNetwork as exportNetworkWasm,
   levelElevations as levelElevationsWasm,
+  sceneProjection as sceneProjectionWasm,
 } from "@kiriko/wasm";
 // Vite emits a hashed, origin-relative asset path (e.g.
 // `/assets/kiriko_wasm_bg-[hash].wasm`) for this `?url` import. Resolving
@@ -290,6 +291,90 @@ export function facilities(bytes: Uint8Array): FacilityDto[] {
  */
 export function levelElevations(bytes: Uint8Array): LevelElevationDto[] {
   return levelElevationsWasm(bytes) as LevelElevationDto[];
+}
+
+// -- Scene projection (Stage 1: scene-source adapter) ----------------------
+
+/** Which scene source produced a projection. */
+export type SceneSourceKindDto = "generated" | "tiles";
+
+/** Immutable scene-source identity and provenance. */
+export interface SceneSourceIdentityDto {
+  kind: SceneSourceKindDto;
+  provenance: string;
+}
+
+/** The venue-local scene frame and world transform, from §8. */
+export interface SceneFrameProjectionDto {
+  anchor: [number, number];
+  ecefOrigin: [number, number, number];
+  enuBasisEcef: [[number, number, number], [number, number, number], [number, number, number]];
+  axes: string;
+  unit: string;
+  verticalNormalisationOffsetMm: number;
+}
+
+/** One canonical level group: resolved plane, scene bounds, source membership. */
+export interface SceneLevelProjectionDto {
+  levelId: string;
+  ordinal: number;
+  resolvedSceneZMm: number;
+  boundsMm: [number, number, number, number] | null;
+  sourceLevels: string[];
+}
+
+/** A primitive's confidence class and value. */
+export interface SceneConfidenceProjectionDto {
+  kind: string;
+  value: number;
+}
+
+/** A primitive's evidence summary. */
+export interface SceneEvidenceProjectionDto {
+  method: string;
+  detail: string;
+}
+
+/** One primitive as the renderer sees it. */
+export interface ScenePrimitiveProjectionDto {
+  id: string;
+  role: "surface" | "wall" | "ceiling" | "portal" | "conveyance";
+  levelId: string;
+  occlusion: "opaque" | "semi_transparent" | "transparent";
+  confidence: SceneConfidenceProjectionDto;
+  canonicalFeatureId: string | null;
+  sourceObjectIds: string[];
+  conveyanceKind: "neutral" | "source_evidenced" | null;
+  evidence: SceneEvidenceProjectionDto[];
+}
+
+/** Readiness, capability, and structured failure — typed, not prose. */
+export type SceneCapabilityStateDto =
+  | { state: "ready" }
+  | { state: "absent" }
+  | { state: "invalid"; reason: string }
+  | { state: "unsupportedVersion"; declared: number; supported: number }
+  | { state: "disabledByDependency"; requires: number };
+
+/** The full typed scene projection for one bundle. */
+export interface SceneProjectionDto {
+  identity: SceneSourceIdentityDto;
+  frame: SceneFrameProjectionDto | null;
+  levels: SceneLevelProjectionDto[];
+  primitives: ScenePrimitiveProjectionDto[];
+  capability: SceneCapabilityStateDto;
+}
+
+/**
+ * Projects the Generated scene source of a `kvb1` bundle: identity, frame,
+ * level groups, primitives with roles/occlusion/confidence/associations, and
+ * the typed capability state. TypeScript never decodes section bytes or
+ * resolves elevation — this is the renderer-neutral projection both Generated
+ * and Tiles (Stage 3) provide. Must only be called after `initKirikoWasm` has
+ * resolved. Throws when the bundle fails to decode.
+ */
+export function sceneProjection(bytes: Uint8Array): SceneProjectionDto {
+  return sceneProjectionWasm(bytes) as SceneProjectionDto;
 }
 
 /** The two network feature classes as GeoJSON `FeatureCollection` text. */
