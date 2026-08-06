@@ -346,7 +346,12 @@ pub fn wgs84_ecef(lon_deg: f64, lat_deg: f64, height_m: f64) -> [f64; 3] {
     let e2 = 2.0 / WGS84_INVERSE_FLATTENING
         - 1.0 / (WGS84_INVERSE_FLATTENING * WGS84_INVERSE_FLATTENING);
     let prime_vertical = WGS84_SEMI_MAJOR_M / (1.0 - e2 * lat.sin() * lat.sin()).sqrt();
-    let (cos_lon, sin_lon, cos_lat, sin_lat) = (libm::cos(lon), libm::sin(lon), libm::cos(lat), libm::sin(lat));
+    let (cos_lon, sin_lon, cos_lat, sin_lat) = (
+        libm::cos(lon),
+        libm::sin(lon),
+        libm::cos(lat),
+        libm::sin(lat),
+    );
     [
         (prime_vertical + height_m) * cos_lat * cos_lon,
         (prime_vertical + height_m) * cos_lat * sin_lon,
@@ -359,7 +364,12 @@ pub fn wgs84_ecef(lon_deg: f64, lat_deg: f64, height_m: f64) -> [f64; 3] {
 /// ENU metres to ECEF.
 pub fn enu_basis_ecef(lon_deg: f64, lat_deg: f64) -> [[f64; 3]; 3] {
     let (lon, lat) = (lon_deg.to_radians(), lat_deg.to_radians());
-    let (cos_lon, sin_lon, cos_lat, sin_lat) = (libm::cos(lon), libm::sin(lon), libm::cos(lat), libm::sin(lat));
+    let (cos_lon, sin_lon, cos_lat, sin_lat) = (
+        libm::cos(lon),
+        libm::sin(lon),
+        libm::cos(lat),
+        libm::sin(lat),
+    );
     [
         [-sin_lon, cos_lon, 0.0],
         [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat],
