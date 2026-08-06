@@ -2739,3 +2739,107 @@ fn a_bundle_without_a_scene_reports_absent_capability() {
     assert_eq!(projection.capability, SceneCapabilityState::Absent);
     assert!(projection.primitives.is_empty());
 }
+
+// -- Stage 1: frozen scene proof (#54) --------------------------------------
+
+/// The stage0 fixture minus its §9 row: the same bundle a reader predating
+/// the scene section would see, derived from the frozen bytes.
+fn stage0_stripped_of_scene() -> Vec<u8> {
+    let payload = decompress_payload(&stage0_bytes());
+    wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        sections.retain(|(id, _, _)| *id != 9);
+    }))
+}
+
+#[test]
+fn stage1_fixture_decodes_identically_without_the_scene_and_still_routes() {
+    use kiriko_route::Point3;
+
+    let with_9 = decode_bundle(&stage0_bytes()).expect("stage0 fixture decodes");
+    let without_9 = decode_bundle(&stage0_stripped_of_scene()).expect("stripped bundle decodes");
+
+    assert_eq!(
+        with_9.capabilities.scene_sources(),
+        SectionCapability::Available
+    );
+    assert_eq!(
+        without_9.capabilities.scene_sources(),
+        SectionCapability::Absent,
+        "a reader predating the scene section sees it absent, never invalid"
+    );
+    assert!(with_9.scene.is_some());
+    assert!(without_9.scene.is_none());
+
+    // Every field a legacy reader sees is identical; only §9 itself differs.
+    assert_eq!(with_9.manifest, without_9.manifest);
+    assert_eq!(with_9.levels, without_9.levels);
+    assert_eq!(with_9.features, without_9.features);
+    assert_eq!(with_9.bounds_by_level, without_9.bounds_by_level);
+    assert_eq!(with_9.warnings, without_9.warnings);
+    assert_eq!(with_9.stats, without_9.stats);
+    assert_eq!(
+        with_9.graph, without_9.graph,
+        "the routing graph decodes identically"
+    );
+    assert_eq!(with_9.facilities, without_9.facilities);
+    assert_eq!(
+        with_9.spatial_context, without_9.spatial_context,
+        "§8 is untouched by §9"
+    );
+    assert_eq!(with_9.capabilities.graph(), without_9.capabilities.graph());
+    assert_eq!(
+        with_9.capabilities.facilities(),
+        without_9.capabilities.facilities()
+    );
+    assert_eq!(
+        with_9.capabilities.spatial_context(),
+        without_9.capabilities.spatial_context()
+    );
+
+    // Routing over the scene-carrying fixture is identical to the §9-less
+    // equivalent (the scene never touches the routing graph's bytes).
+    let origin = Point3 {
+        lon: 139.0,
+        lat: 35.0,
+        ordinal: 0.0,
+    };
+    let dest = Point3 {
+        lon: 139.001,
+        lat: 35.0,
+        ordinal: 0.0,
+    };
+    let route_with = kiriko_route::route(with_9.graph.as_ref().expect("graph"), origin, dest);
+    let route_without = kiriko_route::route(without_9.graph.as_ref().expect("graph"), origin, dest);
+    assert_eq!(
+        route_with, route_without,
+        "routing over the §9 bundle and its §9-less equivalent must be identical"
+    );
+    assert!(route_with.is_some());
+}
+
+#[test]
+fn crafted_fixtures_report_the_scene_capability_outcome_per_bundle() {
+    // One representative frozen bundle per §9 capability outcome: the scene
+    // capability follows the report exactly as the §8 dependency allows.
+    let with_9 = decode_bundle(&stage0_bytes()).expect("decodes");
+    assert_eq!(
+        with_9.capabilities.scene_sources(),
+        SectionCapability::Available
+    );
+
+    let legacy = decode_bundle(&legacy_bundle_bytes()).expect("decodes");
+    assert_eq!(
+        legacy.capabilities.scene_sources(),
+        SectionCapability::Absent
+    );
+
+    for name in ["stage0-unsupported", "stage0-invalid", "stage0-disabled"] {
+        let document = decode_bundle(&crafted_fixture(name)).expect("venue still opens");
+        assert_eq!(
+            document.capabilities.scene_sources(),
+            SectionCapability::DisabledByDependency { requires: 8 },
+            "{name}: a real §9 whose §8 is unavailable is withheld, never interpreted"
+        );
+        assert!(document.scene.is_none());
+    }
+}
