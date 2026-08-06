@@ -21,6 +21,7 @@ mod error;
 mod export;
 mod format;
 mod resolve;
+mod scene_adapter;
 mod scene_compile;
 mod scene_section;
 mod sections;
@@ -37,4 +38,5 @@ pub use codec::{
 pub use error::{BundleError, BundleErrorCode, CompileError};
 pub use export::{ExportError, NetworkGeoJson, export_network, ordinal_to_floor_label};
 pub use resolve::{FloorOverride, ResolutionProfile};
+pub use scene_adapter::scene_projection;
 pub use scene_compile::SceneProfile;

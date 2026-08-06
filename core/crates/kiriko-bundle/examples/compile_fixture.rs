@@ -67,14 +67,18 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// Writes `bytes` to `tests/fixtures/<name>.kvb` and prints its sha256 line
 /// (to be written into `<name>.kvb.sha256`).
 fn write_fixture(name: &str, bytes: &[u8], note: &str) {
-    let out_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../../tests/fixtures/{name}.kvb"));
+    let out_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../../tests/fixtures/{name}.kvb"));
     fs::write(&out_path, bytes).unwrap_or_else(|e| panic!("write {out_path:?}: {e}"));
     println!(
         "{}  tests/fixtures/{name}.kvb",
         hex_lower(&Sha256::digest(bytes))
     );
-    eprintln!("wrote {} bytes to {} ({note})", bytes.len(), out_path.display());
+    eprintln!(
+        "wrote {} bytes to {} ({note})",
+        bytes.len(),
+        out_path.display()
+    );
 }
 
 /// The Stage 0 fixture's routing network and point facilities — the same
@@ -101,10 +105,14 @@ fn zstd_compress(payload: &[u8]) -> Vec<u8> {
     use zstd::stream::raw::{CParameter, Encoder as RawEncoder};
 
     let mut raw = RawEncoder::new(9).expect("zstd encoder init");
-    raw.set_parameter(CParameter::ChecksumFlag(true)).expect("checksum flag");
-    raw.set_parameter(CParameter::ContentSizeFlag(true)).expect("content-size flag");
-    raw.set_parameter(CParameter::NbWorkers(0)).expect("single-threaded");
-    raw.set_pledged_src_size(Some(payload.len() as u64)).expect("pledged size");
+    raw.set_parameter(CParameter::ChecksumFlag(true))
+        .expect("checksum flag");
+    raw.set_parameter(CParameter::ContentSizeFlag(true))
+        .expect("content-size flag");
+    raw.set_parameter(CParameter::NbWorkers(0))
+        .expect("single-threaded");
+    raw.set_pledged_src_size(Some(payload.len() as u64))
+        .expect("pledged size");
 
     let mut encoder = zstd::stream::write::Encoder::with_encoder(Vec::new(), raw);
     encoder.write_all(payload).expect("write payload");
@@ -133,7 +141,12 @@ fn wrap_payload(payload: &[u8]) -> Vec<u8> {
 /// `(id, version, bytes)` section list, rebuilds the directory (id-ascending)
 /// and envelope, and writes the result as a committed fixture. Mirrors
 /// `format.rs`'s `build_payload`/`encode_payload`.
-fn craft_fixture(name: &str, base: &[u8], mutate: impl FnOnce(&mut Vec<(u16, u16, Vec<u8>)>), note: &str) {
+fn craft_fixture(
+    name: &str,
+    base: &[u8],
+    mutate: impl FnOnce(&mut Vec<(u16, u16, Vec<u8>)>),
+    note: &str,
+) {
     let declared_len = u64::from_le_bytes(base[12..20].try_into().unwrap());
     let payload = zstd::stream::decode_all(&base[52..]).expect("base payload decompresses");
     assert_eq!(payload.len() as u64, declared_len);
@@ -176,7 +189,14 @@ fn main() {
         version: 1,
     };
     let compiled = compile_imdf(&source, metadata.clone()).expect("minimal fixture must compile");
-    write_fixture("minimal", &compiled.bytes, &format!("levels={}, features={}", compiled.stats.levels, compiled.stats.features));
+    write_fixture(
+        "minimal",
+        &compiled.bytes,
+        &format!(
+            "levels={}, features={}",
+            compiled.stats.levels, compiled.stats.features
+        ),
+    );
 
     // Stage 0's final-shape fixture: required sections + routing graph +
     // point facilities + spatial context, cut once against the final schema.
@@ -190,32 +210,58 @@ fn main() {
         false,
         None,
         &[],
+        None,
     )
     .expect("stage0 fixture must compile");
-    write_fixture("stage0", &stage0.bytes, "network + facilities + spatial context");
+    write_fixture(
+        "stage0",
+        &stage0.bytes,
+        "network + facilities + spatial context",
+    );
 
     // One crafted bundle per remaining capability outcome, frozen as bytes so
     // the cross-adapter parity test can feed identical bytes to both adapters.
-    craft_fixture("stage0-unsupported", &stage0.bytes, |sections| {
-        for (id, version, _) in sections.iter_mut() {
-            if *id == 8 {
-                *version = 2;
+    craft_fixture(
+        "stage0-unsupported",
+        &stage0.bytes,
+        |sections| {
+            for (id, version, _) in sections.iter_mut() {
+                if *id == 8 {
+                    *version = 2;
+                }
             }
-        }
-    }, "§8 at an unreadable version");
-    craft_fixture("stage0-invalid", &stage0.bytes, |sections| {
-        for (id, _, bytes) in sections.iter_mut() {
-            if *id == 8 {
-                *bytes = vec![0x00, 0xFF, 0x7F];
+        },
+        "§8 at an unreadable version",
+    );
+    craft_fixture(
+        "stage0-invalid",
+        &stage0.bytes,
+        |sections| {
+            for (id, _, bytes) in sections.iter_mut() {
+                if *id == 8 {
+                    *bytes = vec![0x00, 0xFF, 0x7F];
+                }
             }
-        }
-    }, "§8 with garbage bytes");
-    craft_fixture("stage0-disabled", &stage0.bytes, |sections| {
-        for (id, version, _) in sections.iter_mut() {
-            if *id == 8 {
-                *version = 2;
+        },
+        "§8 with garbage bytes",
+    );
+    craft_fixture(
+        "stage0-disabled",
+        &stage0.bytes,
+        |sections| {
+            for (id, version, _) in sections.iter_mut() {
+                if *id == 8 {
+                    *version = 2;
+                }
             }
-        }
-        sections.push((9, 1, vec![0xDE, 0xAD, 0xBE]));
-    }, "§8 unavailable + declared §9 present");
+            // The stage0 bundle now carries a real §9; its bytes are never
+            // interpreted while its required §8 is unavailable.
+            for (id, _, bytes) in sections.iter_mut() {
+                if *id == 9 {
+                    *bytes = vec![0xDE, 0xAD, 0xBE];
+                }
+            }
+        },
+        "§8 unavailable + real §9 present",
+    );
 }

@@ -20,11 +20,11 @@ use std::collections::BTreeMap;
 
 use kiriko_model::model::Bounds;
 use kiriko_model::spatial::{
-    Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid,
-    EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind, ManualProvenance, Registries,
-    RegistrationEvidence, ResolutionMethod, SourceArtifact, SourceLocator, SpatialContext,
-    Transform, TransformKind, MAX_VERTICAL_OFFSET_MM, WGS84_INVERSE_FLATTENING,
-    WGS84_SEMI_MAJOR_M, enu_basis_ecef, wgs84_ecef,
+    Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid, EvidenceMethod,
+    Frame, LengthUnit, LevelRecord, LocatorKind, MAX_VERTICAL_OFFSET_MM, ManualProvenance,
+    RegistrationEvidence, Registries, ResolutionMethod, SourceArtifact, SourceLocator,
+    SpatialContext, Transform, TransformKind, WGS84_INVERSE_FLATTENING, WGS84_SEMI_MAJOR_M,
+    enu_basis_ecef, wgs84_ecef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -477,7 +477,10 @@ fn level_record_from_dto(dto: &LevelRecordDto) -> Result<LevelRecord, BundleErro
 
 fn frame_to_dto(frame: &Frame) -> Result<FrameDto, BundleError> {
     Ok(FrameDto {
-        anchor: [canonical_f64(frame.anchor[0])?, canonical_f64(frame.anchor[1])?],
+        anchor: [
+            canonical_f64(frame.anchor[0])?,
+            canonical_f64(frame.anchor[1])?,
+        ],
         ecef_origin: [
             canonical_f64(frame.ecef_origin[0])?,
             canonical_f64(frame.ecef_origin[1])?,
@@ -570,7 +573,11 @@ fn registries_to_dto(registries: &Registries) -> Result<RegistriesDto, BundleErr
                 artifact_ref: l.artifact_ref,
             })
             .collect(),
-        datums: registries.datums.iter().map(datum_to_dto).collect::<Result<_, _>>()?,
+        datums: registries
+            .datums
+            .iter()
+            .map(datum_to_dto)
+            .collect::<Result<_, _>>()?,
         transforms: registries
             .transforms
             .iter()
@@ -629,7 +636,11 @@ fn registries_from_dto(dto: &RegistriesDto) -> Result<Registries, BundleError> {
                 artifact_ref: l.artifact_ref,
             })
             .collect(),
-        datums: dto.datums.iter().map(datum_from_dto).collect::<Result<_, _>>()?,
+        datums: dto
+            .datums
+            .iter()
+            .map(datum_from_dto)
+            .collect::<Result<_, _>>()?,
         transforms: dto
             .transforms
             .iter()
@@ -693,14 +704,19 @@ fn validate_spatial_context(context: &SpatialContext) -> Result<(), BundleError>
 
     let (lon, lat) = (frame.anchor[0], frame.anchor[1]);
     if !(-180.0..=180.0).contains(&lon) || !(-90.0..=90.0).contains(&lat) {
-        return Err(invalid("spatial context frame anchor is outside WGS84 bounds"));
+        return Err(invalid(
+            "spatial context frame anchor is outside WGS84 bounds",
+        ));
     }
     if frame.world_translation != frame.ecef_origin {
         return Err(invalid(
             "spatial context world transform translation must equal the ECEF origin",
         ));
     }
-    for (axis, column) in ["east", "north", "up"].iter().zip(frame.enu_basis_ecef.iter()) {
+    for (axis, column) in ["east", "north", "up"]
+        .iter()
+        .zip(frame.enu_basis_ecef.iter())
+    {
         let norm = (column[0] * column[0] + column[1] * column[1] + column[2] * column[2]).sqrt();
         if (norm - 1.0).abs() > BASIS_UNIT_TOLERANCE {
             return Err(invalid(format!(
@@ -716,7 +732,9 @@ fn validate_spatial_context(context: &SpatialContext) -> Result<(), BundleError>
 
     let bounds = |len: usize, what: &str| -> Result<(), BundleError> {
         if len > MAX_REGISTRY_LEN {
-            return Err(invalid(format!("{what} exceeds {MAX_REGISTRY_LEN} entries")));
+            return Err(invalid(format!(
+                "{what} exceeds {MAX_REGISTRY_LEN} entries"
+            )));
         }
         Ok(())
     };
@@ -724,10 +742,16 @@ fn validate_spatial_context(context: &SpatialContext) -> Result<(), BundleError>
     bounds(registries.locators.len(), "source locator registry")?;
     bounds(registries.datums.len(), "datum registry")?;
     bounds(registries.transforms.len(), "transform registry")?;
-    bounds(registries.registration_evidence.len(), "registration evidence registry")?;
+    bounds(
+        registries.registration_evidence.len(),
+        "registration evidence registry",
+    )?;
     bounds(registries.assumptions.len(), "assumption registry")?;
     bounds(registries.confidence.len(), "confidence registry")?;
-    bounds(registries.manual_provenance.len(), "manual provenance registry")?;
+    bounds(
+        registries.manual_provenance.len(),
+        "manual provenance registry",
+    )?;
 
     let reference = |index: u32, len: usize, what: &str| -> Result<(), BundleError> {
         if index as usize >= len {
@@ -777,7 +801,10 @@ fn validate_spatial_context(context: &SpatialContext) -> Result<(), BundleError>
                 &format!("registration evidence {i} assumption"),
             )?;
         }
-        bounded_string(&evidence.detail, &format!("registration evidence {i} detail"))?;
+        bounded_string(
+            &evidence.detail,
+            &format!("registration evidence {i} detail"),
+        )?;
     }
 
     for (i, confidence) in registries.confidence.iter().enumerate() {
@@ -1168,11 +1195,7 @@ pub(crate) fn build_spatial_context(
     })
 }
 
-fn push_confidence(
-    registries: &mut Registries,
-    kind: ConfidenceKind,
-    value: f64,
-) -> u32 {
+fn push_confidence(registries: &mut Registries, kind: ConfidenceKind, value: f64) -> u32 {
     registries.confidence.push(Confidence { kind, value });
     (registries.confidence.len() - 1) as u32
 }
@@ -1184,9 +1207,9 @@ mod tests {
     use kiriko_model::canonical::Value;
     use kiriko_model::spatial::{
         Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid,
-        EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind, ManualProvenance, Registries,
-        RegistrationEvidence, ResolutionMethod, SourceArtifact, SourceLocator, SpatialContext,
-        Transform, TransformKind, enu_basis_ecef, wgs84_ecef,
+        EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind, ManualProvenance,
+        RegistrationEvidence, Registries, ResolutionMethod, SourceArtifact, SourceLocator,
+        SpatialContext, Transform, TransformKind, enu_basis_ecef, wgs84_ecef,
     };
 
     use super::{decode_spatial_context, encode_spatial_context};
@@ -1308,14 +1331,20 @@ mod tests {
             source_properties: BTreeMap::new(),
         };
         let bytes = encode_spatial_context(&context).expect("valid context encodes");
-        assert_eq!(decode_spatial_context(&bytes).expect("bytes decode"), context);
+        assert_eq!(
+            decode_spatial_context(&bytes).expect("bytes decode"),
+            context
+        );
     }
 
     #[test]
     fn out_of_range_datum_ref_is_rejected() {
         let mut context = base_context();
         context.frame.datum_ref = 1;
-        assert!(encode_spatial_context(&context).is_err(), "empty datums: index 1 is out of range");
+        assert!(
+            encode_spatial_context(&context).is_err(),
+            "empty datums: index 1 is out of range"
+        );
         let bytes = encode_spatial_context(&base_context()).expect("base encodes");
         // Re-encode a modified DTO through bytes is covered by decode-side
         // validation below; encode-side rejection is the contract here.
@@ -1393,7 +1422,13 @@ mod tests {
     #[test]
     fn oversized_registry_is_rejected() {
         let mut context = base_context();
-        let overflow = vec![SourceArtifact { name: "x".into(), hash: [0u8; 32] }; 65_537];
+        let overflow = vec![
+            SourceArtifact {
+                name: "x".into(),
+                hash: [0u8; 32]
+            };
+            65_537
+        ];
         context.registries.artifacts = overflow;
         assert!(encode_spatial_context(&context).is_err());
     }
@@ -1424,7 +1459,7 @@ mod tests {
     #[test]
     fn oversize_source_property_key_is_rejected() {
         let mut context = base_context();
-        context.source_properties = BTreeMap::from([("x".repeat(257).into(), Value::Number(1.0))]);
+        context.source_properties = BTreeMap::from([("x".repeat(257), Value::Number(1.0))]);
         assert!(encode_spatial_context(&context).is_err());
     }
 

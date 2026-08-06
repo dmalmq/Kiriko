@@ -15,7 +15,9 @@
 
 use std::collections::BTreeMap;
 
-use kiriko_bundle::{BundleDocument, BundleError, CapabilityReport, LevelElevation, decode_bundle, level_elevations};
+use kiriko_bundle::{
+    BundleDocument, BundleError, CapabilityReport, LevelElevation, decode_bundle, level_elevations,
+};
 use kiriko_model::canonical::{Object as CanonicalObject, Value as CanonicalValue};
 use kiriko_model::model::{Bounds, ImdfManifest, VenueFeature, ViewerLevel, ViewerWarning};
 use kiriko_route::{Point3, Route};
@@ -483,6 +485,22 @@ fn level_elevations_in_document(document: &BundleDocument) -> Vec<LevelElevation
 pub fn level_elevations_js(bundle: &[u8]) -> Result<JsValue, JsError> {
     let document = decode_bundle(bundle).map_err(|e| JsError::new(&e.message))?;
     level_elevations_in_document(&document)
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
+// -- Scene projection (scene-source-adapter Task) --------------------------
+
+/// The full typed scene projection of the Generated source for a `kvb1`
+/// bundle: identity, frame, level groups, primitives with
+/// role/occlusion/confidence/associations/evidence, and the typed capability
+/// state — serialized with the same json-compatible serializer as
+/// [`facilities_js`]; bundle-format failures throw (unlike
+/// [`decode_bundle_js`], which reports them structurally).
+#[wasm_bindgen(js_name = "sceneProjection")]
+pub fn scene_projection_js(bundle: &[u8]) -> Result<JsValue, JsError> {
+    let document = decode_bundle(bundle).map_err(|e| JsError::new(&e.message))?;
+    kiriko_bundle::scene_projection(&document)
         .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
         .map_err(|e| JsError::new(&e.to_string()))
 }

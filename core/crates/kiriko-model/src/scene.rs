@@ -13,6 +13,20 @@
 //! Primitive evidence/confidence references therefore resolve into the §8
 //! registries of the same bundle.
 
+impl PrimitiveRole {
+    /// Stable string value (snake_case, never changes for an existing variant).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Surface => "surface",
+            Self::Wall => "wall",
+            Self::Ceiling => "ceiling",
+            Self::Portal => "portal",
+            Self::Conveyance => "conveyance",
+        }
+    }
+}
+
 /// Semantic role of a scene primitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimitiveRole {
@@ -30,12 +44,35 @@ pub enum PrimitiveRole {
     Conveyance,
 }
 
+impl OcclusionClass {
+    /// Stable string value (snake_case, never changes for an existing variant).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Opaque => "opaque",
+            Self::SemiTransparent => "semi_transparent",
+            Self::Transparent => "transparent",
+        }
+    }
+}
+
 /// How much a primitive blocks the view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OcclusionClass {
     Opaque,
     SemiTransparent,
     Transparent,
+}
+
+impl ConveyanceKind {
+    /// Stable string value (snake_case, never changes for an existing variant).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceEvidenced => "source_evidenced",
+            Self::Neutral => "neutral",
+        }
+    }
 }
 
 /// Whether a conveyance form is derived from source evidence or is the
@@ -60,14 +97,8 @@ pub struct Mesh {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrimitiveGeometry {
     Mesh(Mesh),
-    Portal {
-        connects: (u32, u32),
-        opening: Mesh,
-    },
-    Conveyance {
-        kind: ConveyanceKind,
-        mesh: Mesh,
-    },
+    Portal { connects: (u32, u32), opening: Mesh },
+    Conveyance { kind: ConveyanceKind, mesh: Mesh },
 }
 
 /// One compiled semantic scene primitive, referencing §8's registries for its
@@ -154,8 +185,7 @@ pub struct SceneSection {
 mod tests {
     use super::{
         ActivationState, ConveyanceKind, FloorMapping, Mesh, OcclusionClass, PrimitiveGeometry,
-        PrimitiveRole, ScenePrimitive, SceneSection, SourceObjectAssociation,
-        TilesDescriptor,
+        PrimitiveRole, ScenePrimitive, SceneSection, SourceObjectAssociation, TilesDescriptor,
     };
 
     #[test]
@@ -224,9 +254,7 @@ mod tests {
             registration_profile_id: "tokyo-v1".into(),
             floor_mappings: vec![FloorMapping {
                 canonical_level_id: "l1".into(),
-                composite_source_levels: vec![
-                    "asset-v1|doc.glb|link-a|L1|elev-100".into(),
-                ],
+                composite_source_levels: vec!["asset-v1|doc.glb|link-a|L1|elev-100".into()],
             }],
             source_object_associations: vec![SourceObjectAssociation {
                 source_object_id: "so-1".into(),
@@ -235,7 +263,10 @@ mod tests {
             contextual_classifications: Vec::new(),
         };
         assert_eq!(descriptor.activation_state, ActivationState::NotActivated);
-        assert_eq!(descriptor.floor_mappings[0].composite_source_levels.len(), 1);
+        assert_eq!(
+            descriptor.floor_mappings[0].composite_source_levels.len(),
+            1
+        );
     }
 
     #[test]

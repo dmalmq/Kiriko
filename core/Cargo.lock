@@ -782,6 +782,7 @@ name = "kiriko-model"
 version = "0.1.0"
 dependencies = [
  "geojson",
+ "libm",
  "serde",
  "serde_json",
  "thiserror",
