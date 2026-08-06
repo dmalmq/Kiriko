@@ -88,7 +88,7 @@ pub fn derive_scene_with_report(
             source_level_name: name,
             source_document: String::new(),
             source_link_name: String::new(),
-            source_elevation_meters: elevation,
+            source_elevation_meters: Some(elevation),
             resolved_plane_z: min_z,
             quantized_elevation_dm: (elevation * 10.0).round() as i32,
         });
@@ -110,7 +110,7 @@ pub fn derive_scene_with_report(
                     source_level_name: row.level_name.clone(),
                     source_document: row.source_document.clone(),
                     source_link_name: row.source_link_name.clone(),
-                    source_elevation_meters: row.level_elevation_meters,
+                    source_elevation_meters: Some(row.level_elevation_meters),
                     // No level record means no minZMeters; the feature's own
                     // surface min is the best placement evidence available.
                     resolved_plane_z: row.min_z,
