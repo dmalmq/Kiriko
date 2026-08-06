@@ -83,6 +83,7 @@ impl Task for CompileTask {
                 self.clip_to_venue.unwrap_or(false),
                 None,
                 &[],
+                None,
             ) {
                 Ok(compiled) => CompileOutcome::Success(compiled),
                 Err(err) => CompileOutcome::Failure(err),

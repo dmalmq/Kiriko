@@ -19,7 +19,7 @@ const LEVEL_1F = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_2F = "b1000003-0000-4000-8000-00000000002f";
 const VENUE_ID = "a1000001-0000-4000-8000-000000000001";
 const UNIT_B1 = "c1000001-0000-4000-8000-0000000000b1";
-const GOLDEN_BUNDLE_HASH = "70eb1a88ad66fa0e7e441fe701da63b2c268dd35dcca69e65e67acbcab207f77";
+const GOLDEN_BUNDLE_HASH = "b995c817f8817d2e5c4144536d208cb96011a2f556c0ac2ad62fff09114b8c6e";
 
 function syntheticUnitId(i: number): string {
   // 8-4-4-4-12 hex groups, exactly `is_valid_feature_id`'s 36-byte contract.
@@ -438,7 +438,7 @@ describe("@kiriko/node inspectBundle (raw native contract)", () => {
       graph: { state: "absent" },
       facilities: { state: "absent" },
       spatialContext: { state: "available" },
-      sceneSources: { state: "absent" },
+      sceneSources: { state: "available" },
       canonicalGraph: { state: "absent" },
       networkQa: { state: "absent" },
     });

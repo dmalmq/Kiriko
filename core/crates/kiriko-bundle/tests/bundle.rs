@@ -70,6 +70,7 @@ fn compile_with_network_embeds_graph_section() {
         false,
         None,
         &[],
+        None,
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -107,6 +108,7 @@ fn compile_with_malformed_network_is_a_route_error() {
         false,
         None,
         &[],
+        None,
     )
     .expect_err("malformed network GeoJSON must fail the compile");
     assert_eq!(err.code_str(), "route_build_failed");
@@ -116,7 +118,7 @@ fn compile_with_malformed_network_is_a_route_error() {
 #[test]
 fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, true, false, None, &[])
+    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, true, false, None, &[], None)
         .expect("fixture compiles with synthesis");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     let graph = document
@@ -129,7 +131,7 @@ fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
 #[test]
 fn compile_with_synthesis_disabled_and_no_network_has_no_graph() {
     let source = support::build_minimal_imdf_zip();
-    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None, &[])
+    let compiled = compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None, &[], None)
         .expect("fixture compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
     assert!(document.graph.is_none());
@@ -159,6 +161,7 @@ fn compile_with_facilities_embeds_facilities_section() {
         false,
         None,
         &[],
+        None,
     )
     .expect("fixture + network + facilities compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -218,6 +221,7 @@ fn compile_without_facilities_has_no_facilities_section() {
         false,
         None,
         &[],
+        None,
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -245,6 +249,7 @@ fn reports_optional_sections_as_available_or_absent() {
         false,
         None,
         &[],
+        None,
     )
     .expect("fixture + network + facilities compiles");
     let document = decode_bundle(&with_both.bytes).expect("bundle decodes");
@@ -260,7 +265,7 @@ fn reports_optional_sections_as_available_or_absent() {
     );
 
     let with_neither =
-        compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None, &[])
+        compile_imdf_with_network(&source, metadata(), None, None, None, false, false, None, &[], None)
             .expect("fixture alone compiles");
     let document = decode_bundle(&with_neither.bytes).expect("bundle decodes");
     assert_eq!(
@@ -288,6 +293,7 @@ fn inspection_carries_the_capability_report() {
         false,
         None,
         &[],
+        None,
     )
     .expect("fixture + network compiles");
 
@@ -318,6 +324,7 @@ fn compile_with_facilities_but_no_network_warns_once_and_leaves_anchors_unset() 
         false,
         None,
         &[],
+        None,
     )
     .expect("fixture + facilities compiles without a network");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -356,6 +363,7 @@ fn compile_with_malformed_facilities_is_a_facility_error() {
         false,
         None,
         &[],
+        None,
     )
     .expect_err("malformed facilities GeoJSON must fail the compile");
     assert_eq!(err.code_str(), "facility_build_failed");
@@ -409,6 +417,7 @@ fn clipping_drops_network_nodes_outside_the_venue() {
         false,
         None,
         &[],
+        None,
     )
     .expect("fixture + network compiles unclipped");
     let clipped = compile_imdf_with_network(
@@ -421,6 +430,7 @@ fn clipping_drops_network_nodes_outside_the_venue() {
         true,
         None,
         &[],
+        None,
     )
     .expect("fixture + network compiles clipped");
 
@@ -491,8 +501,8 @@ fn directory_is_sorted_fixed_width_and_emits_the_spatial_context_section() {
 
     let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
     assert_eq!(
-        count, 4,
-        "a compiled venue emits manifest, geometry, stores, and the spatial context section"
+        count, 5,
+        "a compiled venue emits manifest, geometry, stores, spatial context, and the scene sources section"
     );
 
     let mut ids = Vec::new();
@@ -514,8 +524,8 @@ fn directory_is_sorted_fixed_width_and_emits_the_spatial_context_section() {
     }
     assert_eq!(
         ids,
-        vec![1, 2, 3, 8],
-        "manifest(1), geometry(2), stores(3), and spatial context(8) are emitted"
+        vec![1, 2, 3, 8, 9],
+        "manifest(1), geometry(2), stores(3), spatial context(8), and scene sources(9) are emitted"
     );
     assert_eq!(
         cursor,
@@ -647,6 +657,7 @@ fn multi_floor_resolution_exercises_all_three_precedence_branches() {
         false,
         Some(&profile),
         &[],
+        None,
     )
     .expect("multi-floor fixture compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -750,6 +761,7 @@ fn a_producer_override_moves_the_plane_and_keeps_the_source_untouched() {
             actor: "alice".into(),
             reason: "survey corrected F2".into(),
         }],
+        None,
     )
     .expect("fixture compiles with an override");
     assert!(
@@ -807,6 +819,7 @@ fn an_override_naming_an_unknown_level_warns_and_compiles() {
             actor: "alice".into(),
             reason: "typo".into(),
         }],
+        None,
     )
     .expect("an unapplied override must not fail the compile");
     assert!(
@@ -1218,7 +1231,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "70eb1a88ad66fa0e7e441fe701da63b2c268dd35dcca69e65e67acbcab207f77";
+const GOLDEN_BUNDLE_HASH: &str = "b995c817f8817d2e5c4144536d208cb96011a2f556c0ac2ad62fff09114b8c6e";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -1612,7 +1625,11 @@ fn garbage_spatial_context_bytes_report_invalid_and_the_venue_opens() {
         "a section that fails validation is reported invalid, not trusted"
     );
     assert!(document.spatial_context.is_none());
-    assert_eq!(document.capabilities.scene_sources(), SectionCapability::Absent);
+    assert_eq!(
+        document.capabilities.scene_sources(),
+        SectionCapability::DisabledByDependency { requires: 8 },
+        "a compiled bundle now carries a real §9, which a broken §8 must disable"
+    );
 }
 
 #[test]
@@ -1628,6 +1645,7 @@ fn an_invalid_spatial_context_leaves_routing_untouched() {
         false,
         None,
         &[],
+        None,
     )
     .expect("fixture + network compiles");
     let payload = decompress_payload(&compiled.bytes);
@@ -1662,7 +1680,13 @@ fn a_section_whose_required_section_is_unavailable_is_disabled_end_to_end() {
                 *version = 2;
             }
         }
-        sections.push((9, 1, vec![0xDE, 0xAD, 0xBE]));
+        // The compiled bundle already carries a real §9; its bytes are never
+        // interpreted while its required §8 is unavailable.
+        for (id, _, bytes) in sections.iter_mut() {
+            if *id == 9 {
+                *bytes = vec![0xDE, 0xAD, 0xBE];
+            }
+        }
     }));
 
     let document = decode_bundle(&crafted).expect("the venue still opens");
@@ -1717,7 +1741,11 @@ fn a_present_scene_with_garbage_bytes_reports_invalid() {
     // venue still opens with routing intact.
     let payload = decompress_payload(&compile_minimal());
     let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
-        sections.push((9, 1, vec![0xDE, 0xAD]));
+        for (id, _, bytes) in sections.iter_mut() {
+            if *id == 9 {
+                *bytes = vec![0xDE, 0xAD];
+            }
+        }
     }));
 
     let document = decode_bundle(&crafted).expect("the venue still opens");
@@ -2163,4 +2191,253 @@ fn a_scene_whose_required_section_is_unavailable_is_disabled() {
         "a present §9 whose §8 is unavailable is withheld, naming the requirement"
     );
     assert!(decoded.scene.is_none());
+}
+
+// -- Stage 1: generated-scene compiler (#52) -------------------------------
+
+#[test]
+fn the_scene_compiler_emits_slabs_ceilings_and_surfaces() {
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    let source = support::build_multi_floor_imdf_zip();
+    let compiled = compile_imdf(&source, metadata()).expect("fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let scene = document.scene.expect("a venue with geometry carries a generated scene");
+    let spatial = document.spatial_context.expect("spatial context present");
+
+    // Resolved planes with the default profile: B1 0, F1 4000, F2 8000, F3 12000.
+    let plane_z = |level_id: &str| -> i64 {
+        spatial
+            .levels
+            .iter()
+            .find(|l| l.level_id == level_id)
+            .expect("level record")
+            .resolved_scene_z_mm
+    };
+    assert_eq!(plane_z("b1000004-0000-4000-8000-000000000004"), 0);
+
+    let by_role = |role: PrimitiveRole| scene.primitives.iter().filter(|p| p.role == role).count();
+    let by_id = |id: &str| scene.primitives.iter().find(|p| p.id == id);
+
+    // One slab per level (role Surface, associated with the level feature).
+    assert_eq!(by_role(PrimitiveRole::Surface), 4 + 3, "4 slabs + 3 unit surfaces");
+    for level_id in [
+        "b1000001-0000-4000-8000-000000000001",
+        "b1000002-0000-4000-8000-000000000002",
+        "b1000003-0000-4000-8000-000000000003",
+        "b1000004-0000-4000-8000-000000000004",
+    ] {
+        let slab = by_id(&format!("slab-{level_id}")).expect("slab per level");
+        let PrimitiveGeometry::Mesh(mesh) = &slab.geometry else {
+            panic!("slab must be a mesh");
+        };
+        assert_eq!(
+            mesh.faces.len(), 2,
+            "a rectangular level polygon triangulates into two triangles"
+        );
+        assert_eq!(
+            mesh.positions.iter().map(|p| p[2]).min(),
+            Some(plane_z(level_id)),
+            "the slab sits on the resolved plane"
+        );
+        assert!(slab.canonical_feature_id.as_deref() == Some(level_id));
+    }
+
+    // Three unit surfaces and three unit ceilings. The unit with a source
+    // height of 3.5 m has its ceiling at 3500 above the plane; the others
+    // use the nominal 3000.
+    let u1 = by_id("surface-c1000001-0000-4000-8000-000000000001").expect("u1 surface");
+    let u2 = by_id("surface-c1000002-0000-4000-8000-000000000002").expect("u2 surface");
+    let u3 = by_id("surface-c1000003-0000-4000-8000-000000000003").expect("u3 surface");
+    assert_eq!(u1.level_id, "b1000003-0000-4000-8000-000000000003");
+    assert_eq!(u2.level_id, "b1000003-0000-4000-8000-000000000003");
+    assert_eq!(u3.level_id, "b1000004-0000-4000-8000-000000000004");
+    assert_eq!(by_role(PrimitiveRole::Ceiling), 3);
+
+    let ceiling_z = |unit_id: &str| -> i64 {
+        let ceiling = scene
+            .primitives
+            .iter()
+            .find(|p| p.role == PrimitiveRole::Ceiling && p.id == format!("ceiling-{unit_id}"))
+            .expect("ceiling");
+        let PrimitiveGeometry::Mesh(mesh) = &ceiling.geometry else {
+            panic!("ceiling must be a mesh");
+        };
+        mesh.positions.iter().map(|p| p[2]).min().expect("positions")
+    };
+    assert_eq!(ceiling_z("c1000001-0000-4000-8000-000000000001"), 4000 + 3500, "source height 3.5 m wins");
+    assert_eq!(ceiling_z("c1000002-0000-4000-8000-000000000002"), 4000 + 3000, "nominal ceiling height");
+    assert_eq!(ceiling_z("c1000003-0000-4000-8000-000000000003"), 0 + 3000, "nominal on B1");
+
+    // Every primitive's references resolve into §8's registries.
+    for primitive in &scene.primitives {
+        assert!((primitive.confidence_ref as usize) < spatial.registries.confidence.len());
+        for locator in &primitive.source_locator_refs {
+            assert!((*locator as usize) < spatial.registries.locators.len());
+        }
+        for evidence in &primitive.evidence_refs {
+            assert!((*evidence as usize) < spatial.registries.registration_evidence.len());
+        }
+    }
+}
+
+#[test]
+fn debug_scene_units() {
+    let source = support::build_multi_floor_imdf_zip();
+    let compiled = compile_imdf(&source, metadata()).expect("compiles");
+    let document = decode_bundle(&compiled.bytes).expect("decodes");
+    let units: Vec<_> = document.features.iter().filter(|f| f.feature_type == kiriko_model::model::FeatureType::Unit).collect();
+    eprintln!("decoded unit count: {}", units.len());
+    for u in &units {
+        eprintln!("  {} level={:?} geometry_present={}", u.id, u.level_id, u.geometry.is_some());
+    }
+}
+
+#[test]
+fn the_scene_compiler_emits_neutral_conveyance_forms() {
+    use kiriko_model::scene::{ConveyanceKind, PrimitiveGeometry, PrimitiveRole};
+
+    let source = support::build_multi_floor_imdf_zip();
+    // The stage0 network carries a vertical F1→F2 edge; the fixture carries a
+    // stairs-category unit on B1.
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        Some(NETWORK_JUNCTIONS),
+        Some(NETWORK_PATHS),
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+    )
+    .expect("fixture + network compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let scene = document.scene.expect("a venue with geometry carries a generated scene");
+
+    let conveyances: Vec<_> = scene
+        .primitives
+        .iter()
+        .filter(|p| p.role == PrimitiveRole::Conveyance)
+        .collect();
+    assert_eq!(
+        conveyances.len(),
+        2,
+        "one from the vertical graph edge, one from the stairs footprint"
+    );
+    for conveyance in &conveyances {
+        let PrimitiveGeometry::Conveyance { kind, mesh } = &conveyance.geometry else {
+            panic!("conveyance geometry expected");
+        };
+        assert_eq!(
+            *kind,
+            ConveyanceKind::Neutral,
+            "the never-guess rule: a neutral form, never fabricated stairs"
+        );
+        assert!(!mesh.positions.is_empty());
+        assert_eq!(mesh.faces.len() * 3, mesh.positions.len() * 6 - 12, "closed box");
+    }
+
+    // The graph conveyance spans the F1 (z 4000) and F2 (z 8000) planes.
+    let graph_conveyance = conveyances
+        .iter()
+        .find(|c| c.id.starts_with("conveyance-0"))
+        .expect("graph conveyance first");
+    let PrimitiveGeometry::Conveyance { mesh, .. } = &graph_conveyance.geometry else {
+        unreachable!()
+    };
+    let zs: Vec<i64> = mesh.positions.iter().map(|p| p[2]).collect();
+    assert_eq!(*zs.iter().min().unwrap(), 4000, "bottom on the F1 plane");
+    assert_eq!(*zs.iter().max().unwrap(), 8000, "top on the F2 plane");
+
+    // The stairs footprint box sits on the B1 plane and rises by the nominal
+    // conveyance height.
+    let unit_conveyance = conveyances
+        .iter()
+        .find(|c| c.id.starts_with("conveyance-1"))
+        .expect("unit conveyance second");
+    let PrimitiveGeometry::Conveyance { mesh, .. } = &unit_conveyance.geometry else {
+        unreachable!()
+    };
+    let zs: Vec<i64> = mesh.positions.iter().map(|p| p[2]).collect();
+    assert_eq!(*zs.iter().min().unwrap(), 0, "bottom on the B1 plane");
+    assert_eq!(*zs.iter().max().unwrap(), 3000, "nominal conveyance height");
+}
+
+#[test]
+fn the_scene_compiles_byte_identically_with_the_network_pipeline() {
+    let forward = support::build_multi_floor_imdf_zip();
+    let reversed = support::build_multi_floor_imdf_zip_reversed();
+    let compile = |source: &[u8]| {
+        compile_imdf_with_network(
+            source,
+            metadata(),
+            Some(NETWORK_JUNCTIONS),
+            Some(NETWORK_PATHS),
+            None,
+            false,
+            false,
+            None,
+            &[],
+            None,
+        )
+        .expect("compiles")
+        .bytes
+    };
+    let a = compile(&forward);
+    let b = compile(&forward);
+    let c = compile(&reversed);
+    assert_eq!(a, b, "identical inputs compile byte-identically, scene included");
+    assert_eq!(
+        a, c,
+        "ZIP record order must not affect the compiled scene bytes"
+    );
+}
+
+#[test]
+fn the_scene_profile_drives_nominal_dimensions() {
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    let source = support::build_multi_floor_imdf_zip();
+    let profile = kiriko_bundle::SceneProfile {
+        wall_height_mm: 4000,
+        ..kiriko_bundle::SceneProfile::default()
+    };
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        Some(&profile),
+    )
+    .expect("compiles with a custom scene profile");
+    let document = decode_bundle(&compiled.bytes).expect("decodes");
+    let scene = document.scene.expect("scene present");
+
+    // u2 has no source height → its own boundary walls use the profile's
+    // 4000 mm (the shared u1/u2 edge stays at min(u1 3500, nominal 4000)).
+    let wall = scene
+        .primitives
+        .iter()
+        .find(|p| {
+            let PrimitiveGeometry::Mesh(mesh) = &p.geometry else { return false };
+            p.role == PrimitiveRole::Wall
+                && p.level_id == "b1000003-0000-4000-8000-000000000003"
+                && mesh.positions.iter().map(|p| p[2]).max() == Some(4000 + 4000)
+        })
+        .expect("a nominal-height wall on F1");
+    let PrimitiveGeometry::Mesh(mesh) = &wall.geometry else {
+        panic!("wall mesh expected");
+    };
+    assert_eq!(
+        mesh.positions.iter().map(|p| p[2]).max(),
+        Some(4000 + 4000),
+        "the nominal wall height comes from the versioned profile, not a constant"
+    );
 }

@@ -205,6 +205,7 @@ fn main() {
             false,
             None,
             &[],
+            None,
         )
         .expect("compile with synthesis");
         decode_bundle(&compiled.bytes).expect("decode")
