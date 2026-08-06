@@ -21,6 +21,7 @@ mod error;
 mod export;
 mod format;
 mod resolve;
+mod scene_section;
 mod sections;
 mod spatial_section;
 mod synth;

@@ -731,6 +731,7 @@ mod tests {
             graph: None,
             facilities: None,
             spatial_context: None,
+            scene: None,
             capabilities: crate::codec::CapabilityReport::default(),
         }
     }

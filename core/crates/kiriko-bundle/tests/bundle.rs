@@ -1090,6 +1090,7 @@ fn minimal_document(features: Vec<kiriko_model::model::VenueFeature>) -> BundleD
         graph: None,
         facilities: None,
         spatial_context: None,
+        scene: None,
         capabilities: CapabilityReport::default(),
     }
 }
@@ -1441,6 +1442,7 @@ fn bundle_with_graph(graph: kiriko_route::RouteGraph) -> Vec<u8> {
         graph: Some(graph),
         facilities: None,
         spatial_context: None,
+        scene: None,
         capabilities: CapabilityReport::default(),
     };
     encode_bundle(&doc).expect("bundle with graph encodes")
@@ -1682,22 +1684,49 @@ fn a_section_whose_required_section_is_unavailable_is_disabled_end_to_end() {
 }
 
 #[test]
-fn a_dependent_section_with_its_requirement_available_has_no_decoder_yet() {
+fn a_declared_section_without_a_decoder_still_reports_no_decoder() {
+    // §9 gained a real decoder; §10 (canonical graph) and §11 (network QA)
+    // are still declared-without-a-decoder and must not interpret their bytes.
+    for id in [10u16, 11u16] {
+        let payload = decompress_payload(&compile_minimal());
+        let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+            sections.push((id, 1, vec![0xDE, 0xAD]));
+        }));
+
+        let document = decode_bundle(&crafted).expect("the venue still opens");
+        let capability = if id == 10 {
+            document.capabilities.canonical_graph()
+        } else {
+            document.capabilities.network_qa()
+        };
+        match capability {
+            SectionCapability::Invalid { reason } => {
+                assert!(
+                    reason.contains("no decoder"),
+                    "section {id} has no decoder and must say so: {reason}"
+                );
+            }
+            other => panic!("expected no-decoder invalid for section {id}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_present_scene_with_garbage_bytes_reports_invalid() {
+    // §9 is decoded for real now: garbage bytes fail the decoder, and the
+    // venue still opens with routing intact.
     let payload = decompress_payload(&compile_minimal());
     let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
         sections.push((9, 1, vec![0xDE, 0xAD]));
     }));
 
     let document = decode_bundle(&crafted).expect("the venue still opens");
-    match document.capabilities.scene_sources() {
-        SectionCapability::Invalid { reason } => {
-            assert!(
-                reason.contains("no decoder"),
-                "the reason must say this build cannot read the section: {reason}"
-            );
-        }
-        other => panic!("expected no-decoder invalid, got {other:?}"),
-    }
+    assert!(
+        matches!(document.capabilities.scene_sources(), SectionCapability::Invalid { .. }),
+        "a malformed §9 is reported invalid, not trusted"
+    );
+    assert!(document.scene.is_none());
+    assert_eq!(document.capabilities.spatial_context(), SectionCapability::Available);
 }
 
 #[test]
@@ -2020,4 +2049,118 @@ fn crafted_fixtures_pin_every_remaining_capability_outcome() {
         SectionCapability::DisabledByDependency { requires: 8 }
     );
     assert_eq!(document.capabilities.spatial_context(), SectionCapability::UnsupportedVersion { declared: 2, supported: 1 });
+}
+
+// -- Stage 1: §9 scene sources (#51) ---------------------------------------
+
+fn minimal_scene() -> kiriko_model::scene::SceneSection {
+    use kiriko_model::scene::{
+        Mesh, OcclusionClass, PrimitiveGeometry, PrimitiveRole, ScenePrimitive, SceneSection,
+    };
+    SceneSection {
+        primitives: vec![ScenePrimitive {
+            id: "p-surface-1".into(),
+            role: PrimitiveRole::Surface,
+            // A real level of the minimal fixture (B1, ordinal −1).
+            level_id: "b1000001-0000-4000-8000-0000000000b1".into(),
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref: 0,
+            canonical_feature_id: None,
+            source_locator_refs: vec![1],
+            evidence_refs: vec![1],
+            geometry: PrimitiveGeometry::Mesh(Mesh {
+                positions: vec![[0, 0, 0], [1000, 0, 0], [1000, 1000, 0], [0, 1000, 0]],
+                faces: vec![[0, 1, 2], [0, 2, 3]],
+            }),
+        }],
+        descriptor: None,
+    }
+}
+
+#[test]
+fn a_scene_round_trips_through_the_bundle_with_capability_available() {
+    let mut document = decode_bundle(&compile_minimal()).expect("minimal decodes");
+    document.scene = Some(minimal_scene());
+
+    let bytes = encode_bundle(&document).expect("a scene with §8 encodes");
+    let decoded = decode_bundle(&bytes).expect("bundle decodes");
+    assert_eq!(
+        decoded.scene,
+        Some(minimal_scene()),
+        "the scene round-trips with its references intact"
+    );
+    assert_eq!(
+        decoded.capabilities.scene_sources(),
+        SectionCapability::Available,
+        "a valid §9 reports available"
+    );
+    assert_eq!(decoded.capabilities.spatial_context(), SectionCapability::Available);
+}
+
+#[test]
+fn encode_rejects_a_scene_without_spatial_context() {
+    let mut document = decode_bundle(&compile_minimal()).expect("minimal decodes");
+    document.scene = Some(minimal_scene());
+    document.spatial_context = None;
+
+    let err = encode_bundle(&document).expect_err("§9 without §8 must not encode");
+    assert_eq!(err.code, BundleErrorCode::InvalidBundle);
+}
+
+#[test]
+fn encode_rejects_a_scene_with_dangling_references() {
+    let mut document = decode_bundle(&compile_minimal()).expect("minimal decodes");
+    let mut scene = minimal_scene();
+    scene.primitives[0].confidence_ref = 99;
+    document.scene = Some(scene);
+
+    let err = encode_bundle(&document).expect_err("a dangling §9 reference must not encode");
+    assert_eq!(err.code, BundleErrorCode::InvalidBundle);
+}
+
+#[test]
+fn a_scene_at_an_unreadable_version_degrades_alone() {
+    let mut document = decode_bundle(&compile_minimal()).expect("minimal decodes");
+    document.scene = Some(minimal_scene());
+    let payload = decompress_payload(&encode_bundle(&document).expect("encodes"));
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, version, _) in sections.iter_mut() {
+            if *id == 9 {
+                *version = 2;
+            }
+        }
+    }));
+
+    let decoded = decode_bundle(&crafted).expect("the venue still opens");
+    assert_eq!(
+        decoded.capabilities.scene_sources(),
+        SectionCapability::UnsupportedVersion { declared: 2, supported: 1 }
+    );
+    assert!(decoded.scene.is_none());
+    assert_eq!(decoded.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(decoded.capabilities.graph(), SectionCapability::Absent);
+}
+
+#[test]
+fn a_scene_whose_required_section_is_unavailable_is_disabled() {
+    // Real §9 bytes, §8 at an unreadable version: the declared dependency
+    // edge is enforced by the decoder, and the scene bytes are never touched.
+    let mut document = decode_bundle(&compile_minimal()).expect("minimal decodes");
+    document.scene = Some(minimal_scene());
+    let payload = decompress_payload(&encode_bundle(&document).expect("encodes"));
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        for (id, version, _) in sections.iter_mut() {
+            if *id == 8 {
+                *version = 2;
+            }
+        }
+    }));
+
+    let decoded = decode_bundle(&crafted).expect("the venue still opens");
+    assert_eq!(
+        decoded.capabilities.scene_sources(),
+        SectionCapability::DisabledByDependency { requires: 8 },
+        "a present §9 whose §8 is unavailable is withheld, naming the requirement"
+    );
+    assert!(decoded.scene.is_none());
 }

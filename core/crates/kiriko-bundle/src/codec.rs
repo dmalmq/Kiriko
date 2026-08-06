@@ -150,10 +150,15 @@ pub struct BundleDocument {
     /// carries no spatial context (e.g. bundles published before this
     /// section existed).
     pub spatial_context: Option<kiriko_model::spatial::SpatialContext>,
+    /// Optional scene sources (section 9): the compiled Generated 3D
+    /// primitives plus the optional tiles descriptor. `None` when the bundle
+    /// carries no scene. Requires `spatial_context` — its references resolve
+    /// into §8's registries.
+    pub scene: Option<kiriko_model::scene::SceneSection>,
     /// Which optional-section capabilities this bundle offers, and why any
-    /// unavailable one is unavailable. `graph`/`facilities`/`spatial_context`
-    /// above say *whether* content is present; this says *why* when it is
-    /// not.
+    /// unavailable one is unavailable. `graph`/`facilities`/`spatial_context`/
+    /// `scene` above say *whether* content is present; this says *why* when
+    /// it is not.
     pub capabilities: CapabilityReport,
 }
 
@@ -251,6 +256,7 @@ pub fn compile_imdf_with_network(
         graph: None,
         facilities: None,
         spatial_context: None,
+        scene: None,
         capabilities: CapabilityReport::default(),
     };
 
@@ -576,6 +582,22 @@ pub fn encode_bundle(document: &BundleDocument) -> Result<Vec<u8>, BundleError> 
             crate::spatial_section::encode_spatial_context(spatial_context)?,
         ));
     }
+    // Section id 9 sorts after 8. §9 requires §8 (its declared dependency):
+    // a document carrying a scene must carry the spatial context its
+    // references resolve into.
+    if let Some(scene) = &document.scene {
+        let spatial_context = document.spatial_context.as_ref().ok_or_else(|| {
+            BundleError::new(
+                BundleErrorCode::InvalidBundle,
+                "a document with a scene sources section must carry spatial context (§8)",
+            )
+        })?;
+        section_list.push((
+            format::SECTION_SCENE_SOURCES,
+            format::SECTION_VERSION,
+            crate::scene_section::encode_scene_section(scene, spatial_context)?,
+        ));
+    }
 
     let payload = format::build_payload(&section_list);
 
@@ -642,29 +664,50 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<BundleDocument, BundleError> {
     document.facilities = facilities;
     document.spatial_context = spatial_context;
 
-    // The three declared future sections have no decoder yet; their outcomes
-    // come from the directory row and their declared §8 dependency edge. The
-    // dependency gate runs against the outcome of the spatial context section
-    // exactly as it will for a real dependent section once one ships.
+    // §9 (scene sources) now has a real decoder whose references resolve into
+    // the decoded §8 — the first cross-section validation. The dependency
+    // gate runs first: a present §9 whose §8 is unavailable (absent, at an
+    // unreadable version, or invalid) is withheld and never interpreted.
+    let (scene, scene_sources_capability) =
+        match (&document.spatial_context, directory.declared_version(format::SECTION_SCENE_SOURCES)) {
+            (Some(spatial), Some(_)) => classify_section(
+                &directory,
+                &payload,
+                format::SECTION_SCENE_SOURCES,
+                |bytes| crate::scene_section::decode_scene_section(bytes, spatial),
+            ),
+            (Some(_), None) => (None, SectionCapability::Absent),
+            (None, Some(_)) => (
+                None,
+                SectionCapability::DisabledByDependency {
+                    requires: format::SECTION_SPATIAL_CONTEXT,
+                },
+            ),
+            (None, None) => (None, SectionCapability::Absent),
+        };
+    document.scene = scene;
+
+    // §10 and §11 are still declared-without-a-decoder; their outcomes come
+    // from the directory row and their declared §8 dependency edge.
     let outcomes = BTreeMap::from([(format::SECTION_SPATIAL_CONTEXT, spatial_context_capability.clone())]);
     document.capabilities = CapabilityReport {
         graph: graph_capability,
         facilities: facilities_capability,
         spatial_context: spatial_context_capability,
-        scene_sources: classify_declared_section(&directory, format::SECTION_SCENE_SOURCES, &outcomes),
+        scene_sources: scene_sources_capability,
         canonical_graph: classify_declared_section(&directory, format::SECTION_CANONICAL_GRAPH, &outcomes),
         network_qa: classify_declared_section(&directory, format::SECTION_NETWORK_QA, &outcomes),
     };
     Ok(document)
 }
 
-/// Capability of a declared-but-not-yet-decodable section (9/10/11). Its
-/// bytes are never interpreted. `Absent` without a directory row; withheld
-/// with `disabledByDependency` when a section it requires is unavailable;
-/// otherwise unavailable with a diagnostic — this build has no decoder for
-/// the section. The last outcome is unreachable by any real bundle (no
-/// producer emits these ids yet); the arriving decoder (Stage 1/4/6)
-/// replaces it with real classification.
+/// Capability of a declared-but-not-yet-decodable section (10/11; §9 gained
+/// a real decoder). Its bytes are never interpreted. `Absent` without a
+/// directory row; withheld with `disabledByDependency` when a section it
+/// requires is unavailable; otherwise unavailable with a diagnostic — this
+/// build has no decoder for the section. The last outcome is unreachable by
+/// any real bundle (no producer emits these ids yet); the arriving decoder
+/// (Stage 4/6) replaces it with real classification.
 fn classify_declared_section(
     directory: &format::Directory,
     id: u16,
@@ -906,6 +949,7 @@ mod tests {
                 graph: None,
                 facilities: None,
                 spatial_context: None,
+                scene: None,
                 capabilities: CapabilityReport::default(),
             };
 
@@ -1009,6 +1053,7 @@ mod tests {
             graph: None,
             facilities: None,
             spatial_context: None,
+            scene: None,
             capabilities: CapabilityReport::default(),
         }
     }

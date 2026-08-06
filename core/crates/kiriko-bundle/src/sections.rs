@@ -562,6 +562,7 @@ pub(crate) fn manifest_into_document(
         graph: None,
         facilities: None,
         spatial_context: None,
+        scene: None,
         capabilities: CapabilityReport::default(),
     })
 }
@@ -981,6 +982,7 @@ mod tests {
             graph: None,
             facilities: None,
             spatial_context: None,
+            scene: None,
             capabilities: CapabilityReport::default(),
         }
     }
