@@ -1849,6 +1849,208 @@ fn modern_elevations_are_resolved() {
     );
 }
 
+// -- Stage 0: frozen final-shape fixture (#42) -----------------------------
+
+#[test]
+fn stage0_fixture_is_frozen_and_reproducible() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let committed = fs::read(repo_root.join("tests/fixtures/stage0.kvb")).expect(
+        "tests/fixtures/stage0.kvb must be committed (run `cargo run -p kiriko-bundle --example compile_fixture`)",
+    );
+    let checksum_file = fs::read_to_string(repo_root.join("tests/fixtures/stage0.kvb.sha256"))
+        .expect("tests/fixtures/stage0.kvb.sha256 must be committed");
+    let expected_hash = checksum_file
+        .split_whitespace()
+        .next()
+        .expect("sha256 line has a hash");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&committed)),
+        expected_hash,
+        "the committed sha256 must match the frozen bytes"
+    );
+
+    let source = support::build_minimal_imdf_zip();
+    let compiled = compile_imdf_with_network(
+        &source,
+        BundleMetadata {
+            dataset_id: "minimal".to_string(),
+            version: 1,
+        },
+        Some(NETWORK_JUNCTIONS),
+        Some(NETWORK_PATHS),
+        Some(FACILITIES),
+        false,
+        false,
+        None,
+        &[],
+    )
+    .expect("fixture inputs compile");
+    assert_eq!(
+        compiled.bytes, committed,
+        "compiling the fixture inputs must reproduce the committed stage0 bytes exactly"
+    );
+
+    let document = decode_bundle(&committed).expect("stage0 fixture decodes");
+    assert_eq!(document.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(document.capabilities.graph(), SectionCapability::Available);
+    assert_eq!(document.capabilities.facilities(), SectionCapability::Available);
+    assert_eq!(document.levels.len(), 3);
+    assert_eq!(document.features.len(), 27);
+    let graph = document.graph.as_ref().expect("stage0 fixture carries a graph");
+    assert_eq!(graph.nodes.len(), 3);
+    assert_eq!(graph.edges.len(), 2);
+    assert_eq!(
+        document.facilities.as_ref().expect("stage0 fixture carries facilities").items.len(),
+        2,
+        "the unmappable-floor facility is dropped, as at compile time"
+    );
+}
+
+fn stage0_bytes() -> Vec<u8> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    fs::read(repo_root.join("tests/fixtures/stage0.kvb"))
+        .expect("tests/fixtures/stage0.kvb must be committed")
+}
+
+/// The stage0 fixture minus its §8 row: the same bundle as a reader predating
+/// spatial context would see it, derived from the frozen bytes.
+fn stage0_stripped_of_spatial_context() -> Vec<u8> {
+    let payload = decompress_payload(&stage0_bytes());
+    wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        sections.retain(|(id, _, _)| *id != 8);
+    }))
+}
+
+#[test]
+fn stage0_sections_decode_identically_with_and_without_spatial_context() {
+    let with_8 = decode_bundle(&stage0_bytes()).expect("stage0 fixture decodes");
+    let without_8 =
+        decode_bundle(&stage0_stripped_of_spatial_context()).expect("stripped bundle decodes");
+
+    assert_eq!(with_8.capabilities.spatial_context(), SectionCapability::Available);
+    assert_eq!(
+        without_8.capabilities.spatial_context(),
+        SectionCapability::Absent,
+        "the stripped bundle is what a §8-less equivalent reports"
+    );
+    assert!(with_8.spatial_context.is_some());
+    assert!(without_8.spatial_context.is_none());
+
+    // Every field a legacy reader sees is identical; only §8 itself differs.
+    assert_eq!(with_8.manifest, without_8.manifest);
+    assert_eq!(with_8.levels, without_8.levels);
+    assert_eq!(with_8.features, without_8.features);
+    assert_eq!(with_8.bounds_by_level, without_8.bounds_by_level);
+    assert_eq!(with_8.warnings, without_8.warnings);
+    assert_eq!(with_8.stats, without_8.stats);
+    assert_eq!(with_8.graph, without_8.graph, "the routing graph decodes identically");
+    assert_eq!(with_8.facilities, without_8.facilities);
+    assert_eq!(with_8.capabilities.graph(), without_8.capabilities.graph());
+    assert_eq!(with_8.capabilities.facilities(), without_8.capabilities.facilities());
+}
+
+#[test]
+fn routing_over_the_fixture_matches_the_stripped_equivalent() {
+    use kiriko_route::Point3;
+
+    let with_8 = decode_bundle(&stage0_bytes()).expect("stage0 fixture decodes");
+    let without_8 =
+        decode_bundle(&stage0_stripped_of_spatial_context()).expect("stripped bundle decodes");
+    let origin = Point3 { lon: 139.0, lat: 35.0, ordinal: 0.0 };
+    let dest = Point3 { lon: 139.001, lat: 35.0, ordinal: 0.0 };
+
+    let route_with =
+        kiriko_route::route(with_8.graph.as_ref().expect("stage0 carries a graph"), origin, dest);
+    let route_without = kiriko_route::route(
+        without_8.graph.as_ref().expect("stripped bundle carries the same graph"),
+        origin,
+        dest,
+    );
+    let route_with = route_with.expect("the fixture routes");
+    assert_eq!(
+        route_with,
+        route_without.expect("the stripped equivalent routes"),
+        "routing over the §8 bundle and its §8-less equivalent must be identical"
+    );
+    assert!(route_with.total_weight > 0.0);
+}
+
+#[test]
+fn the_full_pipeline_compiles_byte_identically() {
+    let forward = support::build_minimal_imdf_zip();
+    let reversed = support::build_minimal_imdf_zip_reversed();
+    let compile = |source: &[u8]| {
+        compile_imdf_with_network(
+            source,
+            BundleMetadata {
+                dataset_id: "minimal".to_string(),
+                version: 1,
+            },
+            Some(NETWORK_JUNCTIONS),
+            Some(NETWORK_PATHS),
+            Some(FACILITIES),
+            false,
+            false,
+            None,
+            &[],
+        )
+        .expect("stage0 inputs compile")
+        .bytes
+    };
+    let a = compile(&forward);
+    let b = compile(&forward);
+    let c = compile(&reversed);
+    assert_eq!(a, b, "identical inputs compile byte-identically");
+    assert_eq!(
+        a, c,
+        "ZIP record order must not affect the compiled bytes — a regression here means \
+         the test would fail"
+    );
+}
+
+fn crafted_fixture(name: &str) -> Vec<u8> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let bytes = fs::read(repo_root.join(format!("tests/fixtures/{name}.kvb")))
+        .expect("crafted fixture must be committed");
+    let checksum = fs::read_to_string(repo_root.join(format!("tests/fixtures/{name}.kvb.sha256")))
+        .expect("crafted fixture sha256 must be committed");
+    let expected = checksum.split_whitespace().next().expect("hash line");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        expected,
+        "{name} must stay frozen"
+    );
+    bytes
+}
+
+#[test]
+fn crafted_fixtures_pin_every_remaining_capability_outcome() {
+    // Unsupported version: §8 declares version 2; the venue still opens.
+    let document =
+        decode_bundle(&crafted_fixture("stage0-unsupported")).expect("venue still opens");
+    assert_eq!(
+        document.capabilities.spatial_context(),
+        SectionCapability::UnsupportedVersion { declared: 2, supported: 1 }
+    );
+    assert!(document.spatial_context.is_none());
+
+    // Invalid: §8 bytes are garbage; the venue still opens and routes.
+    let document = decode_bundle(&crafted_fixture("stage0-invalid")).expect("venue still opens");
+    assert!(matches!(
+        document.capabilities.spatial_context(),
+        SectionCapability::Invalid { .. }
+    ));
+    assert_eq!(document.capabilities.graph(), SectionCapability::Available);
+
+    // Disabled by dependency: §8 unavailable and a declared §9 is present.
+    let document = decode_bundle(&crafted_fixture("stage0-disabled")).expect("venue still opens");
+    assert_eq!(
+        document.capabilities.scene_sources(),
+        SectionCapability::DisabledByDependency { requires: 8 }
+    );
+    assert_eq!(document.capabilities.spatial_context(), SectionCapability::UnsupportedVersion { declared: 2, supported: 1 });
+}
+
 // -- Stage 1: §9 scene sources (#51) ---------------------------------------
 
 fn minimal_scene() -> kiriko_model::scene::SceneSection {
