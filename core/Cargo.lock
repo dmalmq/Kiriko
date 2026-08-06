@@ -757,6 +757,7 @@ dependencies = [
  "kiriko-facilities",
  "kiriko-model",
  "kiriko-route",
+ "kiriko-scene",
  "postcard",
  "serde",
  "serde_json",
@@ -814,6 +815,7 @@ dependencies = [
 name = "kiriko-scene"
 version = "0.1.0"
 dependencies = [
+ "kiriko-model",
  "postcard",
  "serde",
  "serde_json",

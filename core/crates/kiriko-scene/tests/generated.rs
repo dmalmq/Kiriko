@@ -304,8 +304,9 @@ fn semantic_roles_come_from_the_canonical_category_never_a_guess() {
             .role
     };
 
-    // A level slab is the floor plate, not a navigability claim.
-    assert_eq!(role_of("slab-level-b1"), SemanticRole::Public);
+    // A level slab is contextual floor plate, not a navigability claim — and a
+    // distinct role from the finishes that sit coplanar on top of it.
+    assert_eq!(role_of("slab-level-b1"), SemanticRole::Context);
     assert_eq!(role_of("surface-unit-walkway"), SemanticRole::Walkable);
     assert_eq!(role_of("surface-unit-shop"), SemanticRole::Public);
     assert_eq!(role_of("wall-level-b1-0"), SemanticRole::Structure);
@@ -388,10 +389,10 @@ fn geometry_batches_merge_one_per_level_and_role() {
         .map(|batch| (batch.level_index, batch.role))
         .collect();
 
-    // Level 0 carries Public (slab + shop), Walkable, Structure, Ceiling,
-    // Opening, Escalator; level 1 carries Public and Conveyance. Every batch
-    // is a distinct (level, role) pair — the merge is what keeps a visible
-    // floor inside the draw-call budget.
+    // Level 0 carries Context (the slab), Public (the shop), Walkable,
+    // Structure, Ceiling, Opening, and Escalator; level 1 carries Context and
+    // Conveyance. Every batch is a distinct (level, role) pair — the merge is
+    // what keeps a visible floor inside the draw-call budget.
     let mut sorted = pairs.clone();
     sorted.sort_by_key(|(level, role)| (*level, format!("{role:?}")));
     sorted.dedup();
@@ -402,22 +403,22 @@ fn geometry_batches_merge_one_per_level_and_role() {
     );
 
     let level_0_batches = pairs.iter().filter(|(level, _)| *level == 0).count();
-    assert_eq!(level_0_batches, 6);
+    assert_eq!(level_0_batches, 7);
     assert!(
         level_0_batches <= 8,
         "a visible floor stays inside the 8 draw-call budget"
     );
 
+    // The shop's own 2-triangle square: 6 triangle-list vertices.
     let public = document
         .batches
         .iter()
         .find(|batch| batch.level_index == 0 && batch.role == SemanticRole::Public)
         .expect("public batch");
-    // Two 2-triangle squares merged: 12 triangle-list vertices.
-    assert_eq!(public.vertex_count, 12);
-    assert_eq!(public.positions.len(), 12);
-    assert_eq!(public.normals.len(), 12);
-    assert_eq!(public.feature_indices.len(), 12);
+    assert_eq!(public.vertex_count, 6);
+    assert_eq!(public.positions.len(), 6);
+    assert_eq!(public.normals.len(), 6);
+    assert_eq!(public.feature_indices.len(), 6);
 }
 
 #[test]
@@ -507,7 +508,7 @@ fn feature_indices_attribute_every_vertex_to_its_primitive() {
         .collect();
     attributed.sort_unstable();
     attributed.dedup();
-    assert_eq!(attributed, vec!["slab-level-b1", "surface-unit-shop"]);
+    assert_eq!(attributed, vec!["surface-unit-shop"]);
 
     // Every vertex resolves to a feature on this batch's own level and role.
     for index in &public.feature_indices {

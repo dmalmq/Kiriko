@@ -2,8 +2,13 @@
 
 import { venueLoadErrorCopy } from "../errors/VenueLoadError";
 import { BUNDLE_WORKER_FAILED_MESSAGE } from "./types";
-import type { BundleDecodeRequest, BundleRouteRequest, BundleWorkerResponse } from "./types";
-import { decodeBundle, facilities, initKirikoWasm, routeBundle } from "./wasm";
+import type {
+  BundleDecodeRequest,
+  BundleRouteRequest,
+  BundleSceneRequest,
+  BundleWorkerResponse,
+} from "./types";
+import { decodeBundle, facilities, generatedScene, initKirikoWasm, routeBundle } from "./wasm";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -72,15 +77,44 @@ export async function routeBundleMessage(
   }
 }
 
+/**
+ * Compiles one transferred bundle `ArrayBuffer` into the shared render
+ * document through `generatedScene` in `./wasm`. Stateless like the others.
+ * A bundle with no §9 scene or no §8 spatial context is not a failure of the
+ * worker but an absent capability: it resolves to `{type:"failed"}` with the
+ * shared code, and the caller decides from the scene projection whether 3D was
+ * ever on offer.
+ */
+export async function sceneBundleMessage(
+  request: BundleSceneRequest,
+): Promise<BundleWorkerResponse> {
+  try {
+    await initKirikoWasm();
+    const described = generatedScene(new Uint8Array(request.buffer));
+    return { type: "scene", meta: described.meta, payload: described.payload };
+  } catch {
+    return {
+      type: "failed",
+      error: { code: "worker_failed", message: BUNDLE_WORKER_FAILED_MESSAGE },
+    };
+  }
+}
+
 // Register the worker message handler only inside a real worker scope.
 // Importing this module under vitest/jsdom must not throw or register.
 // `WorkerGlobalScope` is defined in every worker scope (including module
 // workers) and undefined in window/jsdom.
 declare const WorkerGlobalScope: (new () => unknown) | undefined;
 if (typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope) {
-  self.onmessage = (event: MessageEvent<BundleDecodeRequest | BundleRouteRequest>): void => {
+  self.onmessage = (
+    event: MessageEvent<BundleDecodeRequest | BundleRouteRequest | BundleSceneRequest>,
+  ): void => {
     const data = event.data;
-    if (data === null || typeof data !== "object" || (data.type !== "decode" && data.type !== "route")) {
+    if (
+      data === null ||
+      typeof data !== "object" ||
+      (data.type !== "decode" && data.type !== "route" && data.type !== "scene")
+    ) {
       const response: BundleWorkerResponse = {
         type: "failed",
         error: { code: "worker_failed", message: BUNDLE_WORKER_FAILED_MESSAGE },
@@ -89,8 +123,18 @@ if (typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScop
       return;
     }
     const pending =
-      data.type === "decode" ? decodeBundleMessage(data) : routeBundleMessage(data);
+      data.type === "decode"
+        ? decodeBundleMessage(data)
+        : data.type === "route"
+          ? routeBundleMessage(data)
+          : sceneBundleMessage(data);
     void pending.then((response) => {
+      // The scene payload is large and freshly allocated: transfer it rather
+      // than cloning it across the boundary.
+      if (response.type === "scene") {
+        self.postMessage(response, [response.payload.buffer as ArrayBuffer]);
+        return;
+      }
       self.postMessage(response);
     });
   };

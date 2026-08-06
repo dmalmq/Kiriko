@@ -10,6 +10,13 @@ export interface ViewerParams {
   review: boolean;
   /** Optional 64-hex permanent public version identity that pins the viewer. */
   version: string | null;
+  /**
+   * Opt in to the 3D scene layer. The capability preflight that decides this
+   * automatically — and the 2D fallback it falls back to — is a later slice
+   * (#62); until then 3D is explicit, so no venue silently changes how it
+   * renders.
+   */
+  scene: boolean;
 }
 
 function safeSrc(raw: string | null, base?: string): string | null {
@@ -51,5 +58,18 @@ export function parseViewerParams(search: string, base?: string): ViewerParams {
   const versionRaw = params.get("version")?.trim() ?? "";
   const version = /^[0-9a-f]{64}$/.test(versionRaw) ? versionRaw : null;
 
-  return { src: safeSrc(params.get("src"), base), level, embed, locale, dataset, forceViewer, review, version };
+  const sceneRaw = params.get("scene");
+  const scene = sceneRaw !== null && (sceneRaw === "" || /^(1|true)$/i.test(sceneRaw));
+
+  return {
+    src: safeSrc(params.get("src"), base),
+    level,
+    embed,
+    locale,
+    dataset,
+    forceViewer,
+    review,
+    version,
+    scene,
+  };
 }

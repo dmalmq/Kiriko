@@ -205,9 +205,12 @@ fn semantic_role(
             None => SemanticRole::Conveyance,
         },
         PrimitiveRole::Surface => match canonical {
-            // A level slab is the floor plate of the whole level, not a claim
-            // that every square metre of it is navigable.
-            Some((FeatureType::Level, _)) => SemanticRole::Public,
+            // A level slab is the whole floor's plate: contextual mass, not a
+            // claim that every square metre of it is navigable. It is also
+            // coplanar with the unit finishes that sit on it, and the renderer
+            // resolves that by drawing contextual mass first and biased back —
+            // so the plate must not share a role with the finishes.
+            Some((FeatureType::Level, _)) => SemanticRole::Context,
             Some((_, Some(category))) => surface_role(category),
             // A surface with no category to read is contextual mass; it never
             // becomes navigable by default.
