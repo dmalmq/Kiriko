@@ -81,6 +81,10 @@ already uploaded. Notes worth keeping:
 - **The pass is scissored to one pixel.** Rendering the full framebuffer to read a single pixel
   measured 16.8 ms; confining the clear and the rasterizer to the picked pixel brought the median
   to ~2 ms, inside the 8 ms budget.
+- **The latency budget is a hardware number.** CI rasterizes in software (SwiftShader), where a
+  synchronous readback measured 151 ms — the rasterizer's cost, not the pick's. The browser spec
+  probes the renderer and asserts the 8 ms budget only on real hardware; every functional
+  assertion runs everywhere.
 - **The first pick of a session costs ~20 ms** of driver validation for the multi-target float
   path. It is warmed once during load, where nothing is waiting on it.
 - **Hover picking stands aside while the camera moves.** A synchronous readback mid-drag has to
