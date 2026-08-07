@@ -201,6 +201,12 @@ export interface SceneLayerStats {
    * pick has run.
    */
   lastPickMs: number | null;
+  /**
+   * Picks run since the layer was added. Counting them is how the suppression
+   * rule is observable: no pick may run while the camera moves, and exactly one
+   * runs when it settles.
+   */
+  pickCount: number;
 }
 
 /**
@@ -216,6 +222,10 @@ export interface SceneDiagnostics {
   pickAt(x: number, y: number): PickCandidate | null;
   /** Whether the float pick path — the only supported one — is available. */
   pickable(): boolean;
+  /** The feature index currently hovered, or `-1`. */
+  hoveredFeatureIndex(): number;
+  /** The camera's pitch ceiling while this layer is attached. */
+  maxPitch(): number;
   sourceHash: string;
   levelCount: number;
   /** Canonical level ids in the document's own index order. */
@@ -372,6 +382,7 @@ export class SceneLayer implements CustomLayerInterface {
       totalBatches: scene.batches.length,
       vertices: scene.batches.reduce((total, batch) => total + batch.vertexCount, 0),
       lastPickMs: null,
+      pickCount: 0,
     };
   }
 
@@ -611,7 +622,11 @@ export class SceneLayer implements CustomLayerInterface {
       gl.bindFramebuffer(gl.FRAMEBUFFER, previousFramebuffer);
       gl.drawBuffers([gl.BACK]);
       this._restore(gl, borrowed);
-      this._stats = { ...this._stats, lastPickMs: performance.now() - started };
+      this._stats = {
+        ...this._stats,
+        lastPickMs: performance.now() - started,
+        pickCount: this._stats.pickCount + 1,
+      };
     }
   }
 
@@ -732,6 +747,8 @@ export class SceneLayer implements CustomLayerInterface {
       stats: () => this.stats(),
       pickAt: (x, y) => this.pickAt(x, y),
       pickable: () => this._pickTargets !== null,
+      hoveredFeatureIndex: () => this._hoveredFeature - 1,
+      maxPitch: () => this._map?.getMaxPitch() ?? 0,
       sourceHash: this._scene.header.sourceHash,
       levelCount: this._scene.levels.length,
       levelIds: this._scene.levels.map((level) => level.canonicalId),

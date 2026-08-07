@@ -27,6 +27,7 @@ interface SceneStats {
   totalBatches: number;
   vertices: number;
   lastPickMs: number | null;
+  pickCount: number;
 }
 
 interface ScenePick {
@@ -63,6 +64,8 @@ async function sceneDiagnostics(page: Page): Promise<{
   levelCount: number;
   levelIds: string[];
   activeLevel: number;
+  hovered: number;
+  maxPitch: number;
 }> {
   return page.evaluate(() => {
     const handle = Reflect.get(window, "__kirikoScene") as
@@ -72,6 +75,8 @@ async function sceneDiagnostics(page: Page): Promise<{
           levelCount: number;
           levelIds: string[];
           activeLevelIndex: () => number;
+          hoveredFeatureIndex: () => number;
+          maxPitch: () => number;
         }
       | undefined;
     if (handle === undefined) {
@@ -83,6 +88,8 @@ async function sceneDiagnostics(page: Page): Promise<{
       levelCount: handle.levelCount,
       levelIds: handle.levelIds,
       activeLevel: handle.activeLevelIndex(),
+      hovered: handle.hoveredFeatureIndex(),
+      maxPitch: handle.maxPitch(),
     };
   });
 }
@@ -146,26 +153,6 @@ async function publishScene(
     await minimalImdfZipBuffer(),
   );
   return { slug: venue.slug, venueId: venue.venueId };
-}
-
-/**
- * Focus the map without clicking: a click would select a feature, and the
- * selection highlight would change pixels for a reason that is not the camera.
- * Focus itself paints a ring, so callers baseline *after* this.
- */
-async function focusMap(page: Page): Promise<void> {
-  await mapCanvas(page).focus();
-  await page.waitForTimeout(400);
-}
-
-/** Tilt through MapLibre's keyboard handler; a no-op when pitch is clamped. */
-async function tilt(page: Page): Promise<void> {
-  for (let press = 0; press < 6; press += 1) {
-    await page.keyboard.press("Shift+ArrowUp");
-    await page.waitForTimeout(80);
-  }
-  await waitForMapIdle(page);
-  await page.waitForTimeout(400);
 }
 
 test.describe("3D scene layer", () => {
@@ -248,25 +235,31 @@ test.describe("3D scene layer", () => {
     }
   });
 
-  test("lets the camera tilt only when a scene is present", async ({ page }, testInfo) => {
+  test("raises the camera's pitch ceiling only while a scene is attached", async ({
+    page,
+  }, testInfo) => {
     const { slug, venueId } = await publishScene(page, testInfo, "scene-camera");
     try {
-      // 2D: the pitch ceiling is zero, so the tilt gesture cannot move it.
+      // 2D: no layer, and nothing raised the ceiling — the viewer stays flat.
       await page.goto(`/?dataset=${encodeURIComponent(slug)}&lang=en`);
       await waitForMapIdle(page);
-      await focusMap(page);
-      const flatBefore = await canvasSignature(page);
-      await tilt(page);
-      expect(await canvasSignature(page)).toBe(flatBefore);
+      expect(await page.evaluate(() => Reflect.get(window, "__kirikoScene") === undefined)).toBe(
+        true,
+      );
 
-      // 3D: the same gesture pitches the camera, so the view changes.
+      // 3D: the ceiling is 60°, which is what makes a scene lookable at (#23 D7).
       await page.goto(`/?dataset=${encodeURIComponent(slug)}&lang=en&scene=1`);
       await waitForMapIdle(page);
       await waitForScene(page);
-      await focusMap(page);
-      const sceneBefore = await canvasSignature(page);
-      await tilt(page);
-      expect(await canvasSignature(page)).not.toBe(sceneBefore);
+      expect((await sceneDiagnostics(page)).maxPitch).toBe(60);
+
+      // And the ceiling goes back down when the scene goes away: the viewer
+      // must not be left tiltable with nothing to tilt.
+      await page.goto(`/?dataset=${encodeURIComponent(slug)}&lang=en`);
+      await waitForMapIdle(page);
+      expect(await page.evaluate(() => Reflect.get(window, "__kirikoScene") === undefined)).toBe(
+        true,
+      );
     } finally {
       await page.request.delete(`/api/venues/${venueId}`);
     }
@@ -367,7 +360,7 @@ test.describe("3D scene layer", () => {
     }
   });
 
-  test("hovers at rest, stays out of the way mid-drag, and re-hovers on settle", async ({
+  test("hovers what the pointer is over, and never picks while the camera moves", async ({
     page,
   }, testInfo) => {
     const { slug, venueId } = await publishScene(page, testInfo, "scene-hover");
@@ -377,37 +370,59 @@ test.describe("3D scene layer", () => {
       await waitForScene(page);
 
       const box = (await mapCanvas(page).boundingBox())!;
-      const pointer = { x: box.x + box.width * 0.45, y: box.y + box.height * 0.5 };
-      await page.mouse.move(pointer.x, pointer.y);
-      await page.waitForTimeout(400);
-      const atRest = await canvasSignature(page);
+      // A pixel over a selectable unit, and one over contextual mass.
+      let unit: { x: number; y: number; featureIndex: number } | null = null;
+      let plate: { x: number; y: number } | null = null;
+      for (const fraction of [0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.7, 0.8, 0.9]) {
+        const candidate = { x: Math.round(box.width * 0.5), y: Math.round(box.height * fraction) };
+        const hit = await scenePickAt(page, candidate.x, candidate.y);
+        if (hit === null) {
+          continue;
+        }
+        if (unit === null && hit.role !== "Context" && hit.canonicalFeatureId !== null) {
+          unit = { ...candidate, featureIndex: hit.featureIndex };
+        } else if (plate === null && hit.role === "Context") {
+          plate = candidate;
+        }
+      }
+      expect(unit, "a selectable unit is reachable").not.toBeNull();
+      expect(plate, "contextual floor plate is reachable").not.toBeNull();
+
+      // At rest the hovered surface is the one under the pointer.
+      await page.mouse.move(box.x + unit!.x, box.y + unit!.y);
+      await expect
+        .poll(async () => (await sceneDiagnostics(page)).hovered, { timeout: 5_000 })
+        .toBe(unit!.featureIndex);
+
       const software = await usesSoftwareRenderer(page);
-      const restStats = await sceneDiagnostics(page);
-      expect(restStats.stats.lastPickMs).not.toBeNull();
-      // At rest a pick is cheap on hardware: no frame in flight to wait out.
+      const atRest = await sceneDiagnostics(page);
       if (!software) {
-        expect(restStats.stats.lastPickMs!).toBeLessThanOrEqual(8);
+        // On hardware a pick at rest is cheap: no frame in flight to wait out.
+        expect(atRest.stats.lastPickMs!).toBeLessThanOrEqual(8);
       }
 
-      // Drag the venue under the stationary pointer. Hover picking steps aside
-      // while the camera moves, so the drag never waits on a readback.
+      // Contextual mass is not hoverable, so moving onto the plate clears it.
+      await page.mouse.move(box.x + plate!.x, box.y + plate!.y);
+      await expect
+        .poll(async () => (await sceneDiagnostics(page)).hovered, { timeout: 5_000 })
+        .toBe(-1);
+
+      // Drag the map under the pointer. No pick may run while the camera moves —
+      // a synchronous readback mid-drag waits out the frame already in flight —
+      // and exactly one runs when it settles.
+      const before = (await sceneDiagnostics(page)).stats.pickCount;
       await page.mouse.down();
-      for (let step = 1; step <= 8; step += 1) {
-        await page.mouse.move(pointer.x - step * 14, pointer.y - step * 8);
-        await page.waitForTimeout(40);
-      }
+      await page.mouse.move(box.x + plate!.x - 40, box.y + plate!.y - 24);
+      const during = (await sceneDiagnostics(page)).stats.pickCount;
+      expect(during).toBe(before);
+      await page.mouse.move(box.x + plate!.x - 90, box.y + plate!.y - 52);
+      expect((await sceneDiagnostics(page)).stats.pickCount).toBe(before);
       await page.mouse.up();
       await waitForMapIdle(page);
-      await page.waitForTimeout(400);
 
-      // Settled: the pick ran again for the pointer's current position, and it
-      // was cheap again.
-      const settled = await sceneDiagnostics(page);
-      expect(settled.stats.lastPickMs).not.toBeNull();
-      if (!software) {
-        expect(settled.stats.lastPickMs!).toBeLessThanOrEqual(8);
-      }
-      expect(await canvasSignature(page)).not.toBe(atRest);
+      await expect
+        .poll(async () => (await sceneDiagnostics(page)).stats.pickCount, { timeout: 5_000 })
+        .toBeGreaterThan(before);
     } finally {
       await page.request.delete(`/api/venues/${venueId}`);
     }
