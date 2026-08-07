@@ -278,6 +278,19 @@ function compileShader(gl: WebGL2RenderingContext, type: number, source: string)
   return shader;
 }
 
+/**
+ * The scissor box, defensively. A context that dies mid-frame answers
+ * `getParameter` with `null`, and spreading that throws from inside the
+ * renderer during teardown — the one moment nothing should be throwing.
+ */
+function readScissorBox(gl: WebGL2RenderingContext): [number, number, number, number] {
+  const box = gl.getParameter(gl.SCISSOR_BOX) as Int32Array | null;
+  if (box === null || box.length < 4) {
+    return [0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight];
+  }
+  return [box[0]!, box[1]!, box[2]!, box[3]!];
+}
+
 function linkProgram(
   gl: WebGL2RenderingContext,
   vertexSource: string,
@@ -407,7 +420,7 @@ export class SceneLayer implements CustomLayerInterface {
   }
 
   render(gl: WebGLRenderingContext | WebGL2RenderingContext, options: CustomRenderMethodInput): void {
-    if (!(gl instanceof WebGL2RenderingContext) || this._contextLost) {
+    if (!(gl instanceof WebGL2RenderingContext) || this._contextLost || gl.isContextLost()) {
       return;
     }
     const program = this._program;
@@ -507,6 +520,7 @@ export class SceneLayer implements CustomLayerInterface {
     if (
       this._contextLost ||
       gl === null ||
+      gl.isContextLost() ||
       targets === null ||
       program === null ||
       uniforms === null ||
@@ -992,12 +1006,7 @@ export class SceneLayer implements CustomLayerInterface {
       blendSrcRgb: gl.getParameter(gl.BLEND_SRC_RGB) as number,
       blendDstRgb: gl.getParameter(gl.BLEND_DST_RGB) as number,
       scissorTest: gl.getParameter(gl.SCISSOR_TEST) as boolean,
-      scissorBox: [...(gl.getParameter(gl.SCISSOR_BOX) as Int32Array)] as [
-        number,
-        number,
-        number,
-        number,
-      ],
+      scissorBox: readScissorBox(gl),
       polygonOffsetFill: gl.getParameter(gl.POLYGON_OFFSET_FILL) as boolean,
       polygonOffsetFactor: gl.getParameter(gl.POLYGON_OFFSET_FACTOR) as number,
       polygonOffsetUnits: gl.getParameter(gl.POLYGON_OFFSET_UNITS) as number,

@@ -23,6 +23,15 @@ import { loadKirikoBundle } from "../bundle/loadKirikoBundle";
 import { routeKirikoBundle } from "../bundle/routeKirikoBundle";
 import { loadKirikoScene } from "../bundle/loadKirikoScene";
 import { readScene, type SceneView } from "../map/scene/sceneFormat";
+import { probeSceneCapability } from "../map/scene/sceneCapability";
+import {
+  canRetry3d,
+  fallbackNotice,
+  initialSceneSource,
+  reduceSceneSource,
+  sourceProvenance,
+  type SceneSourceEvent,
+} from "../map/scene/sceneSource";
 import type { FacilityDto, RouteEndpoint, RouteResultDto } from "../bundle/wasm";
 import { loadNetworkOverlay } from "../bundle/loadNetworkOverlay";
 import {
@@ -123,6 +132,9 @@ const ui = {
     ja: "ネットワークデータを編集できるのはメンバーと管理者のみです。",
     en: "Only members and admins can edit network data.",
   },
+  sceneRetry3d: { ja: "3D表示を再試行", en: "Retry 3D" },
+  sceneUse2d: { ja: "2D表示に切り替え", en: "Switch to 2D" },
+  sceneSourceLabel: { ja: "表示ソース", en: "View source" },
   editDesktopOnly: {
     ja: "ネットワーク編集はデスクトップで利用できます。",
     en: "Network editing is available on desktop.",
@@ -353,6 +365,41 @@ export function App() {
   // The venue's 3D scene, loaded only when `?scene` opts in. Null keeps the
   // viewer exactly 2D.
   const [scene, setScene] = useState<SceneView | null>(null);
+  // The capability floor is probed once per session, before anything is
+  // fetched: a device that cannot render 3D must not pay for a scene download.
+  const sceneCapability = useMemo(() => probeSceneCapability(), []);
+  const reducedMotion = useMemo(
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true,
+    [],
+  );
+  const [sourceState, setSourceState] = useState(() =>
+    initialSceneSource({
+      requested: params.scene,
+      capabilitySupported: sceneCapability.supported,
+      reducedMotion,
+    }),
+  );
+  const dispatchSource = useCallback(
+    (event: SceneSourceEvent) => {
+      setSourceState((current) => reduceSceneSource(current, event, { reducedMotion }));
+    },
+    [reducedMotion],
+  );
+  // The veil is a brief cover over a source swap, never a crossfade. Clearing
+  // it on a timer is what keeps the swap from lingering as a visible state.
+  useEffect(() => {
+    if (!sourceState.veil) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      dispatchSource({ type: "veil_finished" });
+    }, 160);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [sourceState.veil, dispatchSource]);
   const [linkCopied, setLinkCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [bundleProvenance, setBundleProvenance] = useState<BundleProvenance | null>(null);
@@ -1380,7 +1427,7 @@ export function App() {
   // published dataset is being viewed. A venue with no scene resolves absent
   // and the viewer stays 2D.
   useEffect(() => {
-    if (!params.scene || params.dataset === null) {
+    if (!params.scene || params.dataset === null || sourceState.active !== "generated") {
       setScene(null);
       return;
     }
@@ -1393,14 +1440,24 @@ export function App() {
           datasetBundleUrl(dataset, params.version ?? undefined),
           controller.signal,
         );
-        if (!cancelled) {
-          setScene(described === null ? null : readScene(described));
+        if (cancelled) {
+          return;
         }
+        if (described === null) {
+          // The bundle carries no renderable scene: nothing failed, there is
+          // simply nothing to render, and the venue stays 2D.
+          setScene(null);
+          dispatchSource({ type: "load_failed" });
+          return;
+        }
+        setScene(readScene(described));
+        dispatchSource({ type: "scene_ready" });
       } catch {
         // The 2D venue is already usable; a scene that cannot load must not
         // take it down with it.
         if (!cancelled) {
           setScene(null);
+          dispatchSource({ type: "load_failed" });
         }
       }
     })();
@@ -1408,7 +1465,7 @@ export function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [params.scene, params.dataset, params.version]);
+  }, [params.scene, params.dataset, params.version, sourceState.active, dispatchSource]);
 
   useEffect(() => {
     loadFromParams();
@@ -1618,7 +1675,16 @@ export function App() {
             facilities={bundleProvenance?.facilities ?? []}
             onSelectFacility={setSelectedFacility}
             network={reviewActive ? editedNetwork : null}
-            scene={scene}
+            scene={sourceState.active === "generated" ? scene : null}
+            onSceneContextLost={() => {
+              dispatchSource({ type: "context_lost" });
+            }}
+            onSceneContextRestored={() => {
+              dispatchSource({ type: "context_restored" });
+            }}
+            onSceneAttachFailed={() => {
+              dispatchSource({ type: "load_failed" });
+            }}
             networkEditing={
               editor !== null && !networkSaveLocked
                 ? {
@@ -1631,6 +1697,50 @@ export function App() {
                 : null
             }
           />
+        ) : null}
+
+        {showMap && params.scene ? (
+          <>
+            {/* A quiet source badge plus one provenance line (#32): what is
+                rendering, and where its geometry came from. */}
+            <div className="scene-source" aria-label={ui.sceneSourceLabel[locale]}>
+              <span className="scene-source__badge">
+                {sourceProvenance(sourceState).badge[locale]}
+              </span>
+              <span className="scene-source__provenance">
+                {sourceProvenance(sourceState).provenance[locale]}
+              </span>
+            </div>
+            {fallbackNotice(sourceState) !== null ? (
+              <div className="scene-notice" role="status">
+                <span>{fallbackNotice(sourceState)![locale]}</span>
+                {canRetry3d(sourceState) ? (
+                  <button
+                    type="button"
+                    className="scene-notice__retry"
+                    onClick={() => {
+                      dispatchSource({ type: "retry_requested" });
+                    }}
+                  >
+                    {ui.sceneRetry3d[locale]}
+                  </button>
+                ) : null}
+              </div>
+            ) : sourceState.active === "generated" ? (
+              <button
+                type="button"
+                className="scene-notice__retry scene-source__switch"
+                onClick={() => {
+                  dispatchSource({ type: "user_chose_2d" });
+                }}
+              >
+                {ui.sceneUse2d[locale]}
+              </button>
+            ) : null}
+            {/* The swap veil: a brief canvas-coloured cover, never a crossfade
+                between two independently fitted sources. */}
+            {sourceState.veil ? <div className="scene-veil" aria-hidden="true" /> : null}
+          </>
         ) : null}
 
         {selectedFacility !== null ? (
