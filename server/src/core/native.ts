@@ -1,4 +1,9 @@
-import { compileImdf, exportNetwork, inspectBundle } from "@kiriko/node";
+import {
+  compileImdf,
+  exportNetwork,
+  ingestTilePackage as ingestTilePackageNative,
+  inspectBundle,
+} from "@kiriko/node";
 
 /** Bundle statistics, API-compatible with the existing `stats_json` shape. */
 export interface ImdfStats {
@@ -592,5 +597,182 @@ export async function exportVenueNetwork(
     }
     const message = error instanceof Error ? error.message : String(error);
     throw new CoreExportError("bridge_error", `native export bridge failed: ${message}`);
+  }
+}
+
+/**
+ * `@kiriko/node`'s raw tile-package ingestion bridge contract. Treated as
+ * untrusted FFI output — validated before use.
+ */
+export type NativeTilePackageFn = (packageBytes: Buffer) => Promise<unknown>;
+
+/** Kinds of member a package graph references. */
+export type TileMemberKind = "tileset" | "content";
+
+export interface TileMemberRecord {
+  path: string;
+  sha256: string;
+  byteSize: number;
+  contentType: string;
+  kind: TileMemberKind;
+}
+
+export interface TilePackageRecord {
+  sourceHash: string;
+  rootTileset: string;
+  assetVersions: string[];
+  extensions: string[];
+  members: TileMemberRecord[];
+  /** Entries the graph never references; reported, never stored. */
+  ignored: string[];
+  totalBytes: number;
+}
+
+/**
+ * A refused tile package. `code` is the stable `kiriko-scene` refusal code
+ * (`pathTraversal`, `externalReference`, `unresolvedMember`, …), or
+ * `"bridge_error"` when the native response itself was malformed. `details`
+ * carries the refusal's own fields so the producer UI can name the offending
+ * path without re-parsing the message.
+ */
+export class CoreTilePackageError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = "CoreTilePackageError";
+  }
+}
+
+function parseTilePackageError(errorJson: unknown): CoreTilePackageError {
+  if (typeof errorJson !== "string") {
+    return new CoreTilePackageError("bridge_error", "native ingest returned no error payload");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(errorJson);
+  } catch {
+    return new CoreTilePackageError("bridge_error", "native ingest error was not JSON");
+  }
+  if (parsed === null || typeof parsed !== "object" || !("code" in parsed)) {
+    return new CoreTilePackageError("bridge_error", "native ingest error had no code");
+  }
+  const { code, ...details } = parsed as { code: unknown } & Record<string, unknown>;
+  if (typeof code !== "string" || code === "") {
+    return new CoreTilePackageError("bridge_error", "native ingest error code was not a string");
+  }
+  return new CoreTilePackageError(code, `tile package refused: ${code}`, details);
+}
+
+function isMemberKind(value: unknown): value is TileMemberKind {
+  return value === "tileset" || value === "content";
+}
+
+function parseTilePackageReport(reportJson: unknown): TilePackageRecord {
+  if (typeof reportJson !== "string") {
+    throw new CoreTilePackageError("bridge_error", "native ingest returned no report");
+  }
+  const parsed: unknown = JSON.parse(reportJson);
+  if (parsed === null || typeof parsed !== "object") {
+    throw new CoreTilePackageError("bridge_error", "native ingest report was not an object");
+  }
+  const record = parsed as Record<string, unknown>;
+  const sourceHash = record["sourceHash"];
+  const rootTileset = record["rootTileset"];
+  const members = record["members"];
+  const totalBytes = record["totalBytes"];
+  if (
+    typeof sourceHash !== "string" ||
+    !SHA256_HEX.test(sourceHash) ||
+    typeof rootTileset !== "string" ||
+    rootTileset === "" ||
+    !Array.isArray(members) ||
+    members.length === 0 ||
+    typeof totalBytes !== "number" ||
+    !Number.isFinite(totalBytes)
+  ) {
+    throw new CoreTilePackageError("bridge_error", "native ingest report was malformed");
+  }
+
+  const parsedMembers: TileMemberRecord[] = members.map((entry) => {
+    if (entry === null || typeof entry !== "object") {
+      throw new CoreTilePackageError("bridge_error", "a member entry was not an object");
+    }
+    const member = entry as Record<string, unknown>;
+    const path = member["path"];
+    const sha256 = member["sha256"];
+    const byteSize = member["byteSize"];
+    const contentType = member["contentType"];
+    const kind = member["kind"];
+    if (
+      typeof path !== "string" ||
+      path === "" ||
+      typeof sha256 !== "string" ||
+      !SHA256_HEX.test(sha256) ||
+      typeof byteSize !== "number" ||
+      !Number.isInteger(byteSize) ||
+      byteSize < 0 ||
+      typeof contentType !== "string" ||
+      contentType === "" ||
+      !isMemberKind(kind)
+    ) {
+      throw new CoreTilePackageError("bridge_error", `member ${String(path)} was malformed`);
+    }
+    return { path, sha256, byteSize, contentType, kind };
+  });
+
+  const stringList = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+
+  return {
+    sourceHash,
+    rootTileset,
+    assetVersions: stringList(record["assetVersions"]),
+    extensions: stringList(record["extensions"]),
+    members: parsedMembers,
+    ignored: stringList(record["ignored"]),
+    totalBytes,
+  };
+}
+
+/**
+ * Validate an uploaded 3D Tiles package through the native bridge: the URI
+ * graph is resolved inside the archive, anything escaping it is refused, and
+ * every referenced member's content address is recorded.
+ *
+ * Throws `CoreTilePackageError` for a refused package (with the refusal's
+ * typed code) and for a malformed native response. Never performs network or
+ * filesystem access: the package bytes are the only input.
+ */
+export async function ingestTilePackage(
+  packageBytes: Buffer,
+  nativeIngest: NativeTilePackageFn = ingestTilePackageNative,
+): Promise<TilePackageRecord> {
+  let response: unknown;
+  try {
+    response = await nativeIngest(packageBytes);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CoreTilePackageError("bridge_error", `native ingest bridge failed: ${message}`);
+  }
+  if (response === null || typeof response !== "object" || !("ok" in response)) {
+    throw new CoreTilePackageError("bridge_error", "native ingest response was malformed");
+  }
+  const { ok } = response as { ok: unknown };
+  if (ok !== true) {
+    const errorJson = "errorJson" in response ? response.errorJson : undefined;
+    throw parseTilePackageError(errorJson);
+  }
+  const reportJson = "reportJson" in response ? response.reportJson : undefined;
+  try {
+    return parseTilePackageReport(reportJson);
+  } catch (error) {
+    if (error instanceof CoreTilePackageError) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CoreTilePackageError("bridge_error", `native ingest report failed: ${message}`);
   }
 }

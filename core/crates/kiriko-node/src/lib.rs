@@ -418,3 +418,75 @@ pub fn export_network(bundle: Buffer) -> AsyncTask<ExportTask> {
         bundle: bundle.to_vec(),
     })
 }
+
+/// JS-facing discriminated tile-package ingestion result. Success carries the
+/// serialized [`kiriko_scene::TilePackageReport`]; failure carries the typed
+/// refusal as `{ code, ... }` so the producer UI can explain it in either
+/// language without parsing prose.
+#[napi(object)]
+pub struct NativeTilePackageResponse {
+    pub ok: bool,
+    pub report_json: Option<String>,
+    pub error_json: Option<String>,
+}
+
+/// Outcome of the blocking package validation, computed off the event loop.
+pub enum TilePackageOutcome {
+    Success(String),
+    Failure(String),
+}
+
+pub struct TilePackageTask {
+    package: Vec<u8>,
+}
+
+#[napi]
+impl Task for TilePackageTask {
+    type Output = TilePackageOutcome;
+    type JsValue = NativeTilePackageResponse;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(match kiriko_scene::validate_tile_package(&self.package) {
+            Ok(report) => {
+                let json = serde_json::to_string(&report).map_err(|e| {
+                    napi::Error::from_reason(format!("serialize tile package report: {e}"))
+                })?;
+                TilePackageOutcome::Success(json)
+            }
+            Err(error) => {
+                let json = serde_json::to_string(&error).map_err(|e| {
+                    napi::Error::from_reason(format!("serialize tile package error: {e}"))
+                })?;
+                TilePackageOutcome::Failure(json)
+            }
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(match output {
+            TilePackageOutcome::Success(report_json) => NativeTilePackageResponse {
+                ok: true,
+                report_json: Some(report_json),
+                error_json: None,
+            },
+            TilePackageOutcome::Failure(error_json) => NativeTilePackageResponse {
+                ok: false,
+                report_json: None,
+                error_json: Some(error_json),
+            },
+        })
+    }
+}
+
+/// Validate an uploaded 3D Tiles package: resolve its URI graph inside the
+/// archive, refuse anything that escapes it or cannot be decoded, and record
+/// every referenced member's content address. Performs no network or filesystem
+/// access — the package's bytes are the only input. Runs off the Node.js event
+/// loop; the returned promise always resolves to a
+/// [`NativeTilePackageResponse`], never rejecting for a refused package.
+#[napi]
+pub fn ingest_tile_package(package: Buffer) -> AsyncTask<TilePackageTask> {
+    AsyncTask::new(TilePackageTask {
+        package: package.to_vec(),
+    })
+}

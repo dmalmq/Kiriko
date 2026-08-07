@@ -210,12 +210,21 @@ polygons.
 
 - **Context loss**: the canvas listeners live for the map's lifetime, not the layer's — the layer unmounts the instant the context dies, so a restore listener owned by the layer would never be heard. `webglcontextlost` is `preventDefault`ed (without it the browser never restores), the layer is torn down, and re-attachment happens when the machine puts the scene back in props. MapLibre drops custom layers itself on loss and nulls its style, so every call into it during that window is guarded (`styleReady`) — an unguarded `getLayer` in effect cleanup crashed the React tree.
 
+**Tile packages (`kiriko-scene::package` + `server/src/tiles/`):**
+- `validate_tile_package(zip)` resolves an uploaded package's tileset URI graph **inside the archive** and refuses everything else: `..` traversal (checked on both archive entry names and resolved references), absolute paths, `http(s)`/`file`/`//` references, dangling members, unsupported `asset.version` (1.0 and 1.1 are supported), extensions outside the allowlist (`3DTILES_content_gltf`, `EXT_mesh_features`, `EXT_structural_metadata`), `implicitTiling`, non-`.glb` content, content that fails to decode, and archive entries whose declared size disagrees with their bytes. Bounded at 10,000 members / 512 MiB per member / 2 GiB per package / 8 levels of tileset nesting.
+- The validator is a **pure function of the package bytes** — no network, no filesystem — so the same package always produces the same record, which is what lets a later version reuse content hashes. Members are the paths the graph references; unreferenced entries are reported as `ignored` and never stored.
+- `POST /api/venues/:venueId/tiles/inspect` (producer session) validates in Rust, then stores each accepted member in the shared content-addressed blob store and records it in `tile_packages` / `tile_package_members`. Ingestion **changes no published state**: no version is created or touched. Re-uploading identical bytes is idempotent (`UNIQUE (venue_id, source_hash)`), and a member already in the store reports `reused: true`.
+- Member bytes are extracted server-side rather than returned across the native boundary: the validator already reported which paths the graph references, and moving a 172 MiB package's bytes back through FFI to store them would double its peak memory for nothing.
+- **`NORMAL` is optional in glTF** and the deriver computes flat facet normals when a primitive omits it — refusing such a package would reject spec-valid content over an attribute Kiriko can derive. `_FEATURE_ID_0` is **not** optional: it is the source-object identity picking resolves against, so content without it cannot be a tiles source.
+- Producer-facing refusal copy lives in `src/gallery/tileErrors.ts`, mirroring `gdbErrorCopy`; a test pins every validator code to copy in both languages.
+
 ## Gotchas
 
 - **Total route weight is in `cost` units, not metres**, though the viewer currently labels it `m` (known follow-up).
 - **`cost` already models stairs/elevator penalty** — do not re-penalize passage types.
 - Reproject EPSG:3857 → 4326 on every GDB read (`-t_srs EPSG:4326`).
 - Network/facility floor labels must line up with the venue's converted levels; mismatches drop nodes/facilities with warnings surfaced in the review dialog.
+- **Rust changes need the addon rebuilt before server tests and the wasm rebuilt before browser checks** (`pnpm core:build:node`, `pnpm core:build:wasm`). A stale artifact fails in ways that look like product bugs — a deriver fix that "didn't take", a role mapping that "reverted". CI always rebuilds; local runs do not.
 - New Rust warning codes (e.g. `route_build`, `facility_build`) MUST be added to the TS bridge allowlist (`server/src/core/native.ts`) **and** the client type (`src/imdf/types.ts`) or publish fails with `bridge_error`.
 
 ## Known follow-ups

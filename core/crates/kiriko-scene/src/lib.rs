@@ -5,6 +5,7 @@ mod derive;
 mod format;
 mod generated;
 mod glb;
+mod package;
 mod quantize;
 mod roles;
 
@@ -15,6 +16,9 @@ pub use format::{
 };
 pub use generated::compile_generated_scene;
 pub use glb::{GlbFeatureRow, GlbPrimitive, GlbScene, read_glb};
+pub use package::{
+    TileMember, TileMemberKind, TilePackageError, TilePackageReport, validate_tile_package,
+};
 pub use quantize::{decode_normal_oct, encode_normal_oct, quantize_positions};
 pub use roles::{occlusion_for_role, role_for_category};
 

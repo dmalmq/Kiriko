@@ -257,17 +257,26 @@ fn read_primitives(root: &Value, bin: Option<&[u8]>) -> Result<Vec<GlbPrimitive>
                     .map(|i| i as usize)
             };
             let position_index = attribute("POSITION")?;
-            let normal_index = attribute("NORMAL")?;
+            // NORMAL is optional in glTF, and a renderer is expected to shade a
+            // primitive without one from its own winding. Refusing the package
+            // instead would reject a spec-valid export over an attribute Kiriko
+            // can derive, so an absent NORMAL is filled with flat facet normals.
+            let normal_index = attributes
+                .get("NORMAL")
+                .and_then(Value::as_u64)
+                .map(|index| index as usize);
             let feature_id_index = attribute("_FEATURE_ID_0")?;
 
             let position_accessor =
                 parse_accessor(accessors.get(position_index).ok_or_else(|| {
                     SceneError::Glb(format!("accessor {position_index} out of range"))
                 })?)?;
-            let normal_accessor =
-                parse_accessor(accessors.get(normal_index).ok_or_else(|| {
-                    SceneError::Glb(format!("accessor {normal_index} out of range"))
-                })?)?;
+            let normal_accessor = match normal_index {
+                Some(index) => Some(parse_accessor(accessors.get(index).ok_or_else(|| {
+                    SceneError::Glb(format!("accessor {index} out of range"))
+                })?)?),
+                None => None,
+            };
             let feature_id_accessor =
                 parse_accessor(accessors.get(feature_id_index).ok_or_else(|| {
                     SceneError::Glb(format!("accessor {feature_id_index} out of range"))
@@ -286,7 +295,10 @@ fn read_primitives(root: &Value, bin: Option<&[u8]>) -> Result<Vec<GlbPrimitive>
                             })?)?;
                         let indices = read_scalar_all(&index_accessor, root, bin)?;
                         let positions = read_vec3_f32(&position_accessor, root, bin)?;
-                        let normals = read_vec3_f32(&normal_accessor, root, bin)?;
+                        let normals = match &normal_accessor {
+                            Some(accessor) => read_vec3_f32(accessor, root, bin)?,
+                            None => flat_normals(&positions),
+                        };
                         let identity = indices.len() == positions.len()
                             && indices
                                 .iter()
@@ -314,7 +326,10 @@ fn read_primitives(root: &Value, bin: Option<&[u8]>) -> Result<Vec<GlbPrimitive>
                     }
                     None => {
                         let positions = read_vec3_f32(&position_accessor, root, bin)?;
-                        let normals = read_vec3_f32(&normal_accessor, root, bin)?;
+                        let normals = match &normal_accessor {
+                            Some(accessor) => read_vec3_f32(accessor, root, bin)?,
+                            None => flat_normals(&positions),
+                        };
                         (positions, normals, true)
                     }
                 };
@@ -342,6 +357,40 @@ fn check_constant_feature_id(accessor: &Accessor) -> Result<(), SceneError> {
         )));
     }
     Ok(())
+}
+
+/// Flat facet normals for triangle-list positions, for a primitive that omits
+/// `NORMAL`. A degenerate facet gets an up normal rather than a NaN one, so one
+/// bad triangle cannot poison a whole batch's shading.
+fn flat_normals(positions: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let mut normals = Vec::with_capacity(positions.len());
+    for facet in positions.chunks(3) {
+        let normal = match facet {
+            [a, b, c] => {
+                let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                let cross = [
+                    u[1] * v[2] - u[2] * v[1],
+                    u[2] * v[0] - u[0] * v[2],
+                    u[0] * v[1] - u[1] * v[0],
+                ];
+                let length =
+                    (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+                if length <= f32::EPSILON {
+                    [0.0, 0.0, 1.0]
+                } else {
+                    [cross[0] / length, cross[1] / length, cross[2] / length]
+                }
+            }
+            // A trailing partial facet is not a triangle; it shades as up rather
+            // than failing the whole primitive.
+            _ => [0.0, 0.0, 1.0],
+        };
+        for _ in facet {
+            normals.push(normal);
+        }
+    }
+    normals
 }
 
 /// Read a `VEC3` f32 accessor into triangle-list positions or normals.
