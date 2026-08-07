@@ -10,10 +10,12 @@ import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import {
   LEVEL_2F_SHORT,
   LEVEL_B1_SHORT,
+  OCCUPANT_EN,
   floorButton,
   mapCanvas,
   minimalImdfZipBuffer,
   publishVenue,
+  searchAndSelect,
   signIn,
   uniqueDatasetName,
   waitForMapIdle,
@@ -24,18 +26,51 @@ interface SceneStats {
   visibleBatches: number;
   totalBatches: number;
   vertices: number;
+  lastPickMs: number | null;
+}
+
+interface ScenePick {
+  featureIndex: number;
+  canonicalFeatureId: string | null;
+  levelId: string;
+  sourceObjectId: string;
+  role: string;
+  localPoint: [number, number, number];
+  featureMinZ: number;
+  featureMaxZ: number;
+}
+
+/** Pick through the renderer's diagnostics handle, in canvas CSS pixels. */
+async function scenePickAt(page: Page, x: number, y: number): Promise<ScenePick | null> {
+  return page.evaluate(
+    ([px, py]) => {
+      const handle = Reflect.get(window, "__kirikoScene") as
+        | { pickAt: (x: number, y: number) => ScenePick | null }
+        | undefined;
+      if (handle === undefined) {
+        throw new Error("scene diagnostics handle absent");
+      }
+      return handle.pickAt(px as number, py as number);
+    },
+    [x, y],
+  );
 }
 
 /** The renderer's diagnostics handle, once the layer is attached. */
-async function sceneDiagnostics(
-  page: Page,
-): Promise<{ stats: SceneStats; sourceHash: string; levelCount: number; activeLevel: number }> {
+async function sceneDiagnostics(page: Page): Promise<{
+  stats: SceneStats;
+  sourceHash: string;
+  levelCount: number;
+  levelIds: string[];
+  activeLevel: number;
+}> {
   return page.evaluate(() => {
     const handle = Reflect.get(window, "__kirikoScene") as
       | {
           stats: () => SceneStats;
           sourceHash: string;
           levelCount: number;
+          levelIds: string[];
           activeLevelIndex: () => number;
         }
       | undefined;
@@ -46,6 +81,7 @@ async function sceneDiagnostics(
       stats: handle.stats(),
       sourceHash: handle.sourceHash,
       levelCount: handle.levelCount,
+      levelIds: handle.levelIds,
       activeLevel: handle.activeLevelIndex(),
     };
   });
@@ -209,6 +245,207 @@ test.describe("3D scene layer", () => {
       const sceneBefore = await canvasSignature(page);
       await tilt(page);
       expect(await canvasSignature(page)).not.toBe(sceneBefore);
+    } finally {
+      await page.request.delete(`/api/venues/${venueId}`);
+    }
+  });
+
+  test("picks the surface the reviewer can see, on the floor they are on", async ({
+    page,
+  }, testInfo) => {
+    const { slug, venueId } = await publishScene(page, testInfo, "scene-pick");
+    try {
+      await page.goto(`/?dataset=${encodeURIComponent(slug)}&lang=en&scene=1`);
+      await waitForMapIdle(page);
+      await waitForScene(page);
+
+      const box = (await mapCanvas(page).boundingBox())!;
+      const centre = { x: Math.round(box.width / 2), y: Math.round(box.height / 2) };
+      const hit = await scenePickAt(page, centre.x, centre.y);
+      expect(hit).not.toBeNull();
+
+      const scene = await sceneDiagnostics(page);
+      // The pick lands on the floor the selector shows, not on a floor above or
+      // below it — the depth buffer is what resolved that, not a CPU ray.
+      expect(hit!.levelId).toBe(scene.levelIds[scene.activeLevel]);
+      expect(hit!.featureIndex).toBeGreaterThanOrEqual(0);
+
+      // Pick identity (#26): the position target reports venue-local metres,
+      // and the point it reports lies inside the picked surface's own vertical
+      // extent — proof the id and the position describe the same surface.
+      const [x, y, z] = hit!.localPoint;
+      for (const component of [x, y, z]) {
+        expect(Number.isFinite(component)).toBe(true);
+      }
+      expect(z).toBeGreaterThanOrEqual(hit!.featureMinZ - 0.01);
+      expect(z).toBeLessThanOrEqual(hit!.featureMaxZ + 0.01);
+
+      // Pick latency budget: pass render plus both synchronous readbacks.
+      const timings: number[] = [];
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        await scenePickAt(page, centre.x, centre.y);
+        const sample = (await sceneDiagnostics(page)).stats.lastPickMs;
+        expect(sample).not.toBeNull();
+        timings.push(sample!);
+      }
+      const median = [...timings].sort((a, b) => a - b)[Math.floor(timings.length / 2)]!;
+      expect(median, `pick timings: ${timings.map((t) => t.toFixed(1)).join(", ")}`)
+        .toBeLessThanOrEqual(8);
+
+      // Off-geometry: a corner of the viewport the venue does not reach picks
+      // nothing rather than the nearest thing.
+      const miss = await scenePickAt(page, 2, 2);
+      expect(miss).toBeNull();
+    } finally {
+      await page.request.delete(`/api/venues/${venueId}`);
+    }
+  });
+
+  test("clicking a surface selects its canonical feature and highlights it", async ({
+    page,
+  }, testInfo) => {
+    const { slug, venueId } = await publishScene(page, testInfo, "scene-select");
+    try {
+      await page.goto(`/?dataset=${encodeURIComponent(slug)}&lang=en&scene=1`);
+      await waitForMapIdle(page);
+      await waitForScene(page);
+
+      const box = (await mapCanvas(page).boundingBox())!;
+      // Find a pixel whose surface maps to a canonical venue feature.
+      let target: { x: number; y: number } | null = null;
+      for (const fraction of [0.5, 0.45, 0.55, 0.4, 0.6, 0.35, 0.65]) {
+        const candidate = {
+          x: Math.round(box.width * fraction),
+          y: Math.round(box.height * fraction),
+        };
+        const hit = await scenePickAt(page, candidate.x, candidate.y);
+        if (hit?.canonicalFeatureId != null) {
+          target = candidate;
+          break;
+        }
+      }
+      expect(target, "a canonical surface is reachable in the viewport").not.toBeNull();
+
+      const before = await canvasSignature(page);
+      await mapCanvas(page).click({ position: target! });
+      await waitForMapIdle(page);
+
+      // The inspector names the selected feature, and the scene repaints with
+      // the interaction colour on it.
+      await expect(page.locator(".inspector, .feature-inspector").first()).toBeVisible();
+      expect(await canvasSignature(page)).not.toBe(before);
+    } finally {
+      await page.request.delete(`/api/venues/${venueId}`);
+    }
+  });
+
+  test("hovers at rest, stays out of the way mid-drag, and re-hovers on settle", async ({
+    page,
+  }, testInfo) => {
+    const { slug, venueId } = await publishScene(page, testInfo, "scene-hover");
+    try {
+      await page.goto(`/?dataset=${encodeURIComponent(slug)}&lang=en&scene=1`);
+      await waitForMapIdle(page);
+      await waitForScene(page);
+
+      const box = (await mapCanvas(page).boundingBox())!;
+      const pointer = { x: box.x + box.width * 0.45, y: box.y + box.height * 0.5 };
+      await page.mouse.move(pointer.x, pointer.y);
+      await page.waitForTimeout(400);
+      const atRest = await canvasSignature(page);
+      const restStats = await sceneDiagnostics(page);
+      expect(restStats.stats.lastPickMs).not.toBeNull();
+      // At rest a pick is cheap: no frame in flight to wait out.
+      expect(restStats.stats.lastPickMs!).toBeLessThanOrEqual(8);
+
+      // Drag the venue under the stationary pointer. Hover picking steps aside
+      // while the camera moves, so the drag never waits on a readback.
+      await page.mouse.down();
+      for (let step = 1; step <= 8; step += 1) {
+        await page.mouse.move(pointer.x - step * 14, pointer.y - step * 8);
+        await page.waitForTimeout(40);
+      }
+      await page.mouse.up();
+      await waitForMapIdle(page);
+      await page.waitForTimeout(400);
+
+      // Settled: the pick ran again for the pointer's current position, and it
+      // was cheap again.
+      const settled = await sceneDiagnostics(page);
+      expect(settled.stats.lastPickMs).not.toBeNull();
+      expect(settled.stats.lastPickMs!).toBeLessThanOrEqual(8);
+      expect(await canvasSignature(page)).not.toBe(atRest);
+    } finally {
+      await page.request.delete(`/api/venues/${venueId}`);
+    }
+  });
+
+  test("selecting from the panel highlights the same surface in the scene", async ({
+    page,
+  }, testInfo) => {
+    const { slug, venueId } = await publishScene(page, testInfo, "scene-panel");
+    try {
+      await page.goto(`/?dataset=${encodeURIComponent(slug)}&lang=en&scene=1`);
+      await waitForMapIdle(page);
+      await waitForScene(page);
+      await page.waitForTimeout(400);
+      const before = await canvasSignature(page);
+
+      // The keyboard-operable equivalent of picking: search, then choose. No
+      // pointer ever touches the canvas.
+      await searchAndSelect(page, "Station Shop", OCCUPANT_EN);
+      await waitForMapIdle(page);
+      await page.waitForTimeout(400);
+
+      // The scene repaints with the interaction colour on the chosen feature,
+      // so canvas and panel are showing the same selection.
+      expect(await canvasSignature(page)).not.toBe(before);
+    } finally {
+      await page.request.delete(`/api/venues/${venueId}`);
+    }
+  });
+
+  test("clicking contextual floor plate clears the selection, as bare floor does in 2D", async ({
+    page,
+  }, testInfo) => {
+    const { slug, venueId } = await publishScene(page, testInfo, "scene-context");
+    try {
+      await page.goto(`/?dataset=${encodeURIComponent(slug)}&lang=en&scene=1`);
+      await waitForMapIdle(page);
+      await waitForScene(page);
+
+      const box = (await mapCanvas(page).boundingBox())!;
+      // Find a pixel over a selectable unit, and one over contextual mass.
+      let unit: { x: number; y: number } | null = null;
+      let plate: { x: number; y: number } | null = null;
+      for (const fraction of [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.8, 0.9]) {
+        const candidate = {
+          x: Math.round(box.width * 0.5),
+          y: Math.round(box.height * fraction),
+        };
+        const hit = await scenePickAt(page, candidate.x, candidate.y);
+        if (hit === null) {
+          continue;
+        }
+        if (unit === null && hit.role !== "Context" && hit.canonicalFeatureId !== null) {
+          unit = candidate;
+        } else if (plate === null && hit.role === "Context") {
+          plate = candidate;
+        }
+      }
+      expect(unit, "a selectable unit is reachable").not.toBeNull();
+      expect(plate, "contextual floor plate is reachable").not.toBeNull();
+
+      await mapCanvas(page).click({ position: unit! });
+      await waitForMapIdle(page);
+      const inspector = page.locator(".inspector, .feature-inspector").first();
+      await expect(inspector).toBeVisible();
+
+      // Contextual mass is not a feature: clicking it clears, rather than
+      // selecting the whole storey the plate belongs to.
+      await mapCanvas(page).click({ position: plate! });
+      await waitForMapIdle(page);
+      await expect(inspector).toBeHidden();
     } finally {
       await page.request.delete(`/api/venues/${venueId}`);
     }
