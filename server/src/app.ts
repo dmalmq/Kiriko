@@ -16,6 +16,7 @@ import { makePublishRunner } from "./jobs/publish";
 import { registerJobRoutes } from "./jobs/routes";
 import { registerUploadRoute } from "./venues/uploadRoute";
 import { GDB_MAX_UPLOAD_BYTES } from "./gdb/sourceValidation";
+import { registerTileRoutes } from "./tiles/routes";
 import { registerGdbRoutes } from "./gdb/routes";
 import { registerServeRoutes } from "./serve/routes";
 import { recompileLegacyPublished } from "./core/recompileLegacy";
@@ -114,6 +115,7 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
   registerVenueRoutes(app, issueHub);
   registerUploadRoute(app);
   registerGdbRoutes(app);
+  registerTileRoutes(app);
   registerJobRoutes(app);
   registerServeRoutes(app);
   await app.register(issueRoutes, {

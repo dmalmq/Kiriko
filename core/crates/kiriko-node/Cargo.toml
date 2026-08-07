@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 kiriko-model = { path = "../kiriko-model" }
 kiriko-bundle = { path = "../kiriko-bundle", features = ["netgen"] }
+kiriko-scene = { path = "../kiriko-scene" }
 napi = { workspace = true }
 napi-derive = { workspace = true }
 serde_json = { workspace = true }

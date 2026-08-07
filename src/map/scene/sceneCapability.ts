@@ -104,7 +104,10 @@ void main() { outA = vec4(1.0); outB = vec4(1.0); }
  * is loaded at all.
  */
 export function probeSceneCapability(): SceneCapabilityReport {
-  if (typeof document === "undefined") {
+  // No document, or no WebGL2 constructor at all: there is nothing to probe, and
+  // asking a DOM that cannot answer only produces noise (jsdom logs an
+  // unimplemented-method warning for every such call).
+  if (typeof document === "undefined" || typeof WebGL2RenderingContext === "undefined") {
     return { supported: false, missing: ["webgl2"] };
   }
   const canvas = document.createElement("canvas");
