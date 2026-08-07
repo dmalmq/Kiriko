@@ -210,6 +210,30 @@ polygons.
 
 - **Context loss**: the canvas listeners live for the map's lifetime, not the layer's — the layer unmounts the instant the context dies, so a restore listener owned by the layer would never be heard. `webglcontextlost` is `preventDefault`ed (without it the browser never restores), the layer is torn down, and re-attachment happens when the machine puts the scene back in props. MapLibre drops custom layers itself on loss and nulls its style, so every call into it during that window is guarded (`styleReady`) — an unguarded `getLayer` in effect cleanup crashed the React tree.
 
+**Tile serving (`server/src/serve/tiles.ts`, #73):**
+- `GET /v/:tenant/:venue/tiles` — latest scene descriptor: `{ versionId, seq,
+  baseUrl, rootTileset, totalBytes }`, revalidating (`must-revalidate`), ETag =
+  the package source hash. It answers "what should I load now?", so it must not
+  cache immutably.
+- `GET /v/:tenant/:venue/tiles@<versionPublicId>/<member path>` — pinned bytes:
+  hash ETag, `immutable` for a year, the member's recorded content type,
+  `Accept-Ranges: bytes`, and 206/416 range handling (`server/src/serve/range.ts`).
+- **Member URLs are paths, not hashes.** A tileset's `content.uri` values are
+  relative, so path-addressed members let Kiriko serve the producer's tileset
+  JSON byte-for-byte instead of rewriting URIs — which would break the hash its
+  own ETag promises.
+- **Access is inherited, not restated.** Both bundle and tile routes resolve
+  through `findPublishedVersion` (`server/src/serve/version.ts`); "private" today
+  means "not published". A member is reachable only through a version whose own
+  package contains that path, so a hash in the store is never a capability and no
+  URL reaches across versions or venues.
+- Ranges stream in place via `BlobStore.stream(hash, range)`; serving never
+  writes a derived copy, so a 200 MiB member costs no extra disk and a 1 MiB
+  resume reads 1 MiB.
+- Multi-range and malformed `Range` headers are answered whole (RFC 9110 permits
+  ignoring a range): a confident 206 of the wrong bytes is worse than a complete
+  response, because the client believes it.
+
 **Tile member lifecycle and collection (`server/src/tiles/storage.ts`, #72):**
 - Members live in the shared content-addressed store (`blobs/sha256/`), *not*
   inside the KVB — a 172 MiB package must not be copied into every bundle.

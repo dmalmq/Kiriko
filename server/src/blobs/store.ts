@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
+  createReadStream,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -10,6 +11,7 @@ import {
 } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 
 export class BlobStore {
   private readonly root: string;
@@ -24,6 +26,27 @@ export class BlobStore {
 
   has(hash: string): boolean {
     return existsSync(this.path(hash));
+  }
+
+  /** Byte length on disk, or `null` when the blob is absent. */
+  size(hash: string): number | null {
+    try {
+      return statSync(this.path(hash)).size;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Stream a blob, or an inclusive byte range of one.
+   *
+   * Tile members run to hundreds of megabytes, so serving one — or resuming
+   * 1 MiB of one — must not read the whole thing into memory, and must not copy
+   * it anywhere else to become streamable. The bytes are read in place from the
+   * single content-addressed copy.
+   */
+  stream(hash: string, range?: { start: number; end: number }): Readable {
+    return createReadStream(this.path(hash), range);
   }
 
   read(hash: string): Buffer {
