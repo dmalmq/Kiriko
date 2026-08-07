@@ -21,6 +21,7 @@ import { BlobReader, ZipReader, Uint8ArrayWriter } from "@zip.js/zip.js";
 import type { FastifyInstance } from "fastify";
 import { requireProducerSession } from "../auth/guard";
 import { CoreTilePackageError, ingestTilePackage, type TilePackageRecord } from "../core/native";
+import { collectTileBlobs, discardPackage, registerTileBlob } from "./storage";
 
 const ErrorSchema = Type.Object({
   error: Type.String(),
@@ -185,6 +186,15 @@ export function registerTileRoutes(app: FastifyInstance): void {
         .run(source.hash, source.size);
 
       const packageId = request.server.db.transaction(() => {
+        // Registration happens *here*, with the rows that reference it. A blob is
+        // marked as collectable tile content only in the same transaction that
+        // records what needs it, so no committed state ever says "tile content,
+        // referenced by nothing" — which a sweep in another process would read as
+        // garbage and delete out from under this upload.
+        for (const member of stored) {
+          registerTileBlob(request.server.db, member.hash, member.byteSize);
+        }
+        registerTileBlob(request.server.db, source.hash, source.size);
         const existing = request.server.db
           .prepare("SELECT id FROM tile_packages WHERE venue_id = ? AND source_hash = ?")
           .get(Number(venueId), record.sourceHash);
@@ -230,6 +240,43 @@ export function registerTileRoutes(app: FastifyInstance): void {
         totalBytes: record.totalBytes,
         members: stored,
       });
+    },
+  );
+
+  app.delete(
+    "/api/venues/:venueId/tiles/:packageId",
+    {
+      preHandler: requireProducerSession,
+      schema: {
+        params: Type.Object({ venueId: Type.String(), packageId: Type.String() }),
+        response: {
+          200: Type.Object({
+            /** Blobs released by the sweep this discard triggered. */
+            released: Type.Number(),
+            bytes: Type.Number(),
+          }),
+          403: ErrorSchema,
+          404: ErrorSchema,
+          409: ErrorSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { venueId, packageId } = request.params as { venueId: string; packageId: string };
+      const record = request.server.db
+        .prepare("SELECT id FROM tile_packages WHERE id = ? AND venue_id = ?")
+        .get(Number(packageId), Number(venueId));
+      if (record === undefined) {
+        return reply.code(404).send(errorBody("package_not_found", "package_not_found"));
+      }
+      // A version's scene is immutable, so a referenced package is not the
+      // producer's to drop — they would be deleting geometry a viewer is
+      // serving. Reported as a conflict rather than thrown.
+      if (!discardPackage(request.server.db, Number(packageId))) {
+        return reply.code(409).send(errorBody("package_in_use", "package_in_use"));
+      }
+      const collected = collectTileBlobs(request.server.db, request.server.blobs);
+      return reply.code(200).send({ released: collected.released, bytes: collected.bytes });
     },
   );
 }

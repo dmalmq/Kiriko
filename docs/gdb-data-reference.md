@@ -210,6 +210,32 @@ polygons.
 
 - **Context loss**: the canvas listeners live for the map's lifetime, not the layer's — the layer unmounts the instant the context dies, so a restore listener owned by the layer would never be heard. `webglcontextlost` is `preventDefault`ed (without it the browser never restores), the layer is torn down, and re-attachment happens when the machine puts the scene back in props. MapLibre drops custom layers itself on loss and nulls its style, so every call into it during that window is guarded (`styleReady`) — an unguarded `getLayer` in effect cleanup crashed the React tree.
 
+**Tile member lifecycle and collection (`server/src/tiles/storage.ts`, #72):**
+- Members live in the shared content-addressed store (`blobs/sha256/`), *not*
+  inside the KVB — a 172 MiB package must not be copied into every bundle.
+- Two tables, two jobs. `tile_blobs` is a **registry**: it records that a blob
+  holds tile content, and collection only ever considers blobs listed there. A
+  bundle, GDB source, or network export is therefore never a candidate, so a
+  reference class nobody remembered to check cannot be swept away.
+  `version_tile_packages` is a **reference**: it binds an immutable version to
+  the package it renders, so published and archived versions keep their scene.
+- **Registration is committed in the same transaction as the rows that
+  reference it.** No committed state ever reads "tile content, referenced by
+  nothing", which is what a sweep in another process would delete out from under
+  an in-flight upload. Bytes are written to disk before that transaction; an
+  unregistered file is not collectable, so the crash window leaks waste, never a
+  dangling reference.
+- Collection deletes rows in one transaction, then unlinks files. That order is
+  deliberate: a failed unlink leaves an unreferenced file (waste), while the
+  reverse could leave a row pointing at missing bytes (a venue serving 404s).
+- There is **no age heuristic**. Blobs are released when a package record is
+  discarded (`DELETE /api/venues/:id/tiles/:packageId`, refused with `409
+  package_in_use` while a version references it) or when a venue is deleted —
+  both sweep immediately. The hourly janitor pass is only a safety net for a
+  crash between those steps.
+- `BlobStore.remove` exists solely for collection; the store is otherwise
+  append-only because blobs are immutable and shared.
+
 **Tile packages (`kiriko-scene::package` + `server/src/tiles/`):**
 - `validate_tile_package(zip)` resolves an uploaded package's tileset URI graph **inside the archive** and refuses everything else: `..` traversal (checked on both archive entry names and resolved references), absolute paths, `http(s)`/`file`/`//` references, dangling members, unsupported `asset.version` (1.0 and 1.1 are supported), extensions outside the allowlist (`3DTILES_content_gltf`, `EXT_mesh_features`, `EXT_structural_metadata`), `implicitTiling`, non-`.glb` content, content that fails to decode, and archive entries whose declared size disagrees with their bytes. Bounded at 10,000 members / 512 MiB per member / 2 GiB per package / 8 levels of tileset nesting.
 - The validator is a **pure function of the package bytes** — no network, no filesystem — so the same package always produces the same record, which is what lets a later version reuse content hashes. Members are the paths the graph references; unreferenced entries are reported as `ignored` and never stored.
