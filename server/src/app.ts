@@ -22,6 +22,7 @@ import { registerServeRoutes } from "./serve/routes";
 import { recompileLegacyPublished } from "./core/recompileLegacy";
 import { AnchorIndexCache } from "./issues/anchorIndex";
 import { runIssueAttachmentJanitor } from "./issues/attachments/janitor";
+import { collectTileBlobs } from "./tiles/storage";
 import { issueAttachmentRoutes } from "./issues/attachments/routes";
 import { IssueAttachmentService } from "./issues/attachments/service";
 import { IssueAttachmentStore } from "./issues/attachments/store";
@@ -105,6 +106,20 @@ export async function buildApp(config: AppConfig): Promise<FastifyInstance> {
       runIssueAttachmentJanitor(db, issueAttachmentStore);
     } catch (error) {
       app.log.error(error, "issue attachment janitor failed");
+    }
+    try {
+      // Tile members are released the moment their last reference goes (venue
+      // deletion, package discard). This sweep is the safety net for the gap a
+      // crash between those two steps can leave, not the mechanism.
+      const collected = collectTileBlobs(db, blobs);
+      if (collected.released > 0) {
+        app.log.info(
+          { released: collected.released, bytes: collected.bytes },
+          "released unreferenced tile members",
+        );
+      }
+    } catch (error) {
+      app.log.error(error, "tile member collection failed");
     }
   }, config.issueAttachmentJanitorIntervalMs ?? 3_600_000);
   issueAttachmentJanitorTimer.unref();

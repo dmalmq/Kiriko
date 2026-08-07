@@ -2,6 +2,7 @@ import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
 import { requireSession } from "../auth/guard";
 import type { IssueEventHub } from "../issues/events";
+import { collectTileBlobs } from "../tiles/storage";
 import { createVenue, deleteVenue, listVenues } from "./service";
 
 const TENANT_ID = 1; // single tenant in phase 1
@@ -78,6 +79,15 @@ export function registerVenueRoutes(app: FastifyInstance, issueHub: IssueEventHu
       }
       for (const publicVersionId of result.publicVersionIds) {
         issueHub.closeVersion(publicVersionId);
+      }
+      // The venue's tile packages cascaded away with it; release the members no
+      // surviving venue references. Deletion is the moment the reference goes,
+      // so this is where the bytes go too — waiting for a timer would leave a
+      // deleted venue's geometry on disk for an hour.
+      try {
+        collectTileBlobs(request.server.db, request.server.blobs);
+      } catch (error) {
+        request.log.error({ err: error }, "tile member collection failed after venue delete");
       }
       return reply.code(204).send();
     },
