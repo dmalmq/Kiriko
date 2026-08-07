@@ -102,6 +102,32 @@ already uploaded. Notes worth keeping:
   degrades as precision does, so contextual mass is now separated in world space — one centimetre
   below the finishes it carries, while the pick still reports the true surface position.
 
+## Stage 2 proof (#64)
+
+The measured values, on this machine's RTX 4500 with the three-floor fixture:
+
+| Budget | #26 | Measured |
+| --- | --- | --- |
+| Decode (fetch + worker compile + reader) | ≤ 1,200 ms | 43 ms |
+| Upload (programs, buffers, VAOs, pick targets) | ≤ 200 ms | 5.1 ms |
+| Draw calls, active level | ≤ 8 | 4–6 |
+| Draw calls, all levels | ≤ 320 | 20 |
+| Pick latency, median | ≤ 8 ms | ~2 ms |
+| Stability camera | zoom 21 / pitch 55 | zoom 20.8 / pitch 60, identical bytes across reads |
+
+Two properties are deliberately asserted elsewhere:
+
+- **Primitive collapse ≥ 15×** is a station-scale property. The fixture has too few objects to
+  merge that far, so it is asserted against the registered Tokyo dataset in
+  `server/test/stage2Tokyo.test.ts`, which skips when the dataset is absent.
+- **Pick latency** is a hardware number. CI rasterizes in software, where a synchronous readback
+  measures the rasterizer; the spec probes the renderer and asserts the budget on real GPUs only.
+
+**Independent placement** — #26's criterion that two sources fitted independently must not be
+crossfaded — has no second source until Stage 3. It is encoded as the stronger invariant it
+derives from: the source machine admits exactly one active source (#62), so no frame can contain
+two.
+
 ## Verification
 
 - Rust: `cargo test --manifest-path core/Cargo.toml --workspace` (includes 12 producer tests and
