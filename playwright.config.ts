@@ -1,7 +1,12 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const VISUAL_SPEC = "**/viewer.visual.spec.ts";
-const PERFORMANCE_SPEC = "**/viewer.performance.spec.ts";
+// Both performance suites: the viewer's own budgets, and the scene renderer's
+// load budgets and stability criteria. Single worker, real GPU.
+const PERFORMANCE_SPEC = [
+  "**/viewer.performance.spec.ts",
+  "**/viewer.scene-performance.spec.ts",
+];
 
 export default defineConfig({
   testDir: "./e2e",
@@ -19,10 +24,18 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
-      testIgnore: [VISUAL_SPEC, PERFORMANCE_SPEC],
+      testIgnore: [VISUAL_SPEC, ...PERFORMANCE_SPEC],
     },
-    { name: "firefox", use: { ...devices["Desktop Firefox"] }, testIgnore: VISUAL_SPEC },
-    { name: "webkit", use: { ...devices["Desktop Safari"] }, testIgnore: VISUAL_SPEC },
+    {
+      name: "firefox",
+      use: { ...devices["Desktop Firefox"] },
+      testIgnore: [VISUAL_SPEC, ...PERFORMANCE_SPEC],
+    },
+    {
+      name: "webkit",
+      use: { ...devices["Desktop Safari"] },
+      testIgnore: [VISUAL_SPEC, ...PERFORMANCE_SPEC],
+    },
     {
       // Real-time thresholds (P95 upload/level-change latency, longtask
       // budget) are only meaningful when nothing else contends for the CPU.

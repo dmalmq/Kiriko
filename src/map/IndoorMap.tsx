@@ -148,6 +148,12 @@ export interface IndoorMapProps {
   onSceneContextRestored?: () => void;
   /** The layer could not be created on this context. */
   onSceneAttachFailed?: () => void;
+  /**
+   * Keep the WebGL drawing buffer readable after each frame, so a test can
+   * assert on the pixels the renderer produced (#26 section 5). Costs frame
+   * time, so it is opt-in and off for reviewers.
+   */
+  preserveDrawingBuffer?: boolean;
 }
 
 /**
@@ -697,6 +703,7 @@ export function IndoorMap({
   onSceneContextLost,
   onSceneContextRestored,
   onSceneAttachFailed,
+  preserveDrawingBuffer = false,
 }: IndoorMapProps): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -707,6 +714,8 @@ export function IndoorMap({
   const [sceneLabelLayer, setSceneLabelLayer] = useState<SceneLayer | null>(null);
   const scenePickPendingRef = useRef(false);
   const scenePointRef = useRef<{ x: number; y: number } | null>(null);
+  // Read through a ref: the map is created once, and this must not re-create it.
+  const preserveDrawingBufferRef = useRef(preserveDrawingBuffer);
   const onSceneAttachFailedRef = useRef(onSceneAttachFailed);
   const onSceneContextLostRef = useRef(onSceneContextLost);
   const onSceneContextRestoredRef = useRef(onSceneContextRestored);
@@ -925,6 +934,9 @@ export function IndoorMap({
       map = new maplibregl.Map({
         container,
         style: buildIndoorStyle(theme),
+        ...(preserveDrawingBufferRef.current
+          ? { canvasContextAttributes: { preserveDrawingBuffer: true } }
+          : {}),
         attributionControl: false,
         // Pitch rides the rotate gesture, but `maxPitch: 0` clamps it away
         // until a scene raises the ceiling: in 2D the handler is disabled and

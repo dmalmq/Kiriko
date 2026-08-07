@@ -17,6 +17,13 @@ export interface ViewerParams {
    * renders.
    */
   scene: boolean;
+  /**
+   * Preserve the WebGL drawing buffer so a test can read the pixels the
+   * renderer actually produced (#26 section 5's capture requirement). Off by
+   * default: preserving the buffer costs every frame, and a reviewer gains
+   * nothing from it.
+   */
+  capture: boolean;
 }
 
 function safeSrc(raw: string | null, base?: string): string | null {
@@ -61,6 +68,9 @@ export function parseViewerParams(search: string, base?: string): ViewerParams {
   const sceneRaw = params.get("scene");
   const scene = sceneRaw !== null && (sceneRaw === "" || /^(1|true)$/i.test(sceneRaw));
 
+  const captureRaw = params.get("capture");
+  const capture = captureRaw !== null && (captureRaw === "" || /^(1|true)$/i.test(captureRaw));
+
   return {
     src: safeSrc(params.get("src"), base),
     level,
@@ -71,5 +81,6 @@ export function parseViewerParams(search: string, base?: string): ViewerParams {
     review,
     version,
     scene,
+    capture,
   };
 }

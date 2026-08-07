@@ -209,6 +209,12 @@ export interface SceneLayerStats {
    * runs when it settles.
    */
   pickCount: number;
+  /**
+   * Wall time the scene's GPU resources took to create, milliseconds: programs,
+   * buffers, vertex arrays, and the pick targets. The budget is 200 ms (#26
+   * section 4); `null` before the layer is added.
+   */
+  uploadMs: number | null;
 }
 
 /**
@@ -228,6 +234,8 @@ export interface SceneDiagnostics {
   hoveredFeatureIndex(): number;
   /** The camera's pitch ceiling while this layer is attached. */
   maxPitch(): number;
+  /** The camera the last frame was drawn with. */
+  camera(): { zoom: number; pitch: number; bearing: number };
   sourceHash: string;
   levelCount: number;
   /** Canonical level ids in the document's own index order. */
@@ -399,6 +407,7 @@ export class SceneLayer implements CustomLayerInterface {
       vertices: scene.batches.reduce((total, batch) => total + batch.vertexCount, 0),
       lastPickMs: null,
       pickCount: 0,
+      uploadMs: null,
     };
   }
 
@@ -411,9 +420,13 @@ export class SceneLayer implements CustomLayerInterface {
     this._map = map;
     this._gl = gl;
     this._contextLost = false;
+    const started = performance.now();
     this._buildProgram(gl);
     this._buildBatches(gl);
     this._buildPick(gl);
+    // Upload is everything between having the scene and being able to draw it:
+    // programs, buffers, vertex arrays, pick targets.
+    this._stats = { ...this._stats, uploadMs: performance.now() - started };
   }
 
   onRemove(_map: MapLibreMap, _gl: WebGLRenderingContext | WebGL2RenderingContext): void {
@@ -836,6 +849,11 @@ export class SceneLayer implements CustomLayerInterface {
       pickable: () => this._pickTargets !== null,
       hoveredFeatureIndex: () => this._hoveredFeature - 1,
       maxPitch: () => this._map?.getMaxPitch() ?? 0,
+      camera: () => ({
+        zoom: this._map?.getZoom() ?? 0,
+        pitch: this._map?.getPitch() ?? 0,
+        bearing: this._map?.getBearing() ?? 0,
+      }),
       sourceHash: this._scene.header.sourceHash,
       levelCount: this._scene.levels.length,
       levelIds: this._scene.levels.map((level) => level.canonicalId),

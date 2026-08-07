@@ -24,6 +24,7 @@ import { routeKirikoBundle } from "../bundle/routeKirikoBundle";
 import { loadKirikoScene } from "../bundle/loadKirikoScene";
 import { readScene, type SceneView } from "../map/scene/sceneFormat";
 import { probeSceneCapability } from "../map/scene/sceneCapability";
+import { SCENE_DECODE_MEASURE, SCENE_DECODE_START } from "../map/scene/sceneMetrics";
 import {
   canRetry3d,
   fallbackNotice,
@@ -1435,6 +1436,11 @@ export function App() {
     const controller = new AbortController();
     let cancelled = false;
     void (async () => {
+      // Decode is everything between asking for the scene and holding typed
+      // views over it: fetch, the worker's compile, and the reader. Measured
+      // here because that is the span a reviewer waits through, and the
+      // performance harness asserts it (#26 section 4).
+      performance.mark(SCENE_DECODE_START);
       try {
         const described = await loadKirikoScene(
           datasetBundleUrl(dataset, params.version ?? undefined),
@@ -1451,6 +1457,7 @@ export function App() {
           return;
         }
         setScene(readScene(described));
+        performance.measure(SCENE_DECODE_MEASURE, SCENE_DECODE_START);
         dispatchSource({ type: "scene_ready" });
       } catch {
         // The 2D venue is already usable; a scene that cannot load must not
@@ -1676,6 +1683,7 @@ export function App() {
             onSelectFacility={setSelectedFacility}
             network={reviewActive ? editedNetwork : null}
             scene={sourceState.active === "generated" ? scene : null}
+            preserveDrawingBuffer={params.capture}
             onSceneContextLost={() => {
               dispatchSource({ type: "context_lost" });
             }}
