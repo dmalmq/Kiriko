@@ -6,6 +6,7 @@
 import { MercatorCoordinate } from "maplibre-gl";
 import { describe, expect, it } from "vitest";
 import {
+  wgs84Ecef as wgs84EcefUnderTest,
   composeModelMatrix,
   ecefToGeodetic,
   enuRotationMatrix,
@@ -89,6 +90,29 @@ describe("ecefToGeodetic", () => {
       expect((geodetic.latRad * 180) / Math.PI).toBeCloseTo(lat, 9);
       expect(geodetic.altitude).toBeCloseTo(height, 6);
     }
+  });
+});
+
+describe("wgs84Ecef", () => {
+  it("agrees with the test's own reference conversion", () => {
+    for (const [lon, lat] of [
+      [TOKYO_LON, TOKYO_LAT],
+      [0, 0],
+      [-74.006, 40.7128],
+      [151.2093, -33.8688],
+    ] as const) {
+      const reference = wgs84Ecef(lon, lat, 0);
+      const actual = wgs84EcefUnderTest(lon, lat);
+      for (const axis of [0, 1, 2]) {
+        expect(actual[axis]!).toBeCloseTo(reference[axis]!, 6);
+      }
+    }
+  });
+
+  it("round-trips through the geodetic inverse", () => {
+    const geodetic = ecefToGeodetic(wgs84EcefUnderTest(TOKYO_LON, TOKYO_LAT));
+    expect((geodetic.lonRad * 180) / Math.PI).toBeCloseTo(TOKYO_LON, 9);
+    expect((geodetic.latRad * 180) / Math.PI).toBeCloseTo(TOKYO_LAT, 9);
   });
 });
 

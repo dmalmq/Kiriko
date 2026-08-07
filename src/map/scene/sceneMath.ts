@@ -94,6 +94,23 @@ export function mat4Inverse(m: Float64Array): Float64Array {
 }
 
 /**
+ * WGS84 geodetic to ECEF metres at ellipsoid height zero — the forward of what
+ * `ecefToGeodetic` inverts, and the same conversion the scene compiler applies
+ * when it projects a feature into the venue's local frame.
+ */
+export function wgs84Ecef(lonDeg: number, latDeg: number): [number, number, number] {
+  const lon = (lonDeg * Math.PI) / 180;
+  const lat = (latDeg * Math.PI) / 180;
+  const primeVertical =
+    WGS84_SEMI_MAJOR / Math.sqrt(1 - WGS84_E2 * Math.sin(lat) * Math.sin(lat));
+  return [
+    primeVertical * Math.cos(lat) * Math.cos(lon),
+    primeVertical * Math.cos(lat) * Math.sin(lon),
+    primeVertical * (1 - WGS84_E2) * Math.sin(lat),
+  ];
+}
+
+/**
  * ECEF to WGS84 geodetic, iterated to convergence. The scene frame arrives as
  * an ECEF origin (both sources state one), and MapLibre needs a longitude and
  * latitude to anchor mercator, so this inverse is the bridge. Ten passes is

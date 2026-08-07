@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { SemanticRoleName } from "./sceneFormat";
 import {
+  CONTEXT_HANDOFF_MS,
   CONTEXT_LEVEL_OPACITY,
+  OCCLUDER_FADE_OPACITY,
   ROLE_COLORS,
   ROLE_DEPTH_BIAS,
   ROLE_PAINT_ORDER,
@@ -39,12 +41,38 @@ describe("batchOpacity", () => {
     expect(batchOpacity({ levelIndex: 0, role: "Structure" }, state)).toBe(1);
   });
 
+  it("fades a context floor's ceiling further than the floor itself", () => {
+    const state = { activeLevelIndex: 0, showContextLevels: true };
+    const floor = batchOpacity({ levelIndex: 1, role: "Walkable" }, state);
+    const ceiling = batchOpacity({ levelIndex: 1, role: "Ceiling" }, state);
+    // The ceiling is the protected-corridor occluder between the camera and the
+    // active floor; everything else on that floor keeps context opacity.
+    expect(ceiling).toBe(OCCLUDER_FADE_OPACITY);
+    expect(ceiling).toBeLessThan(floor);
+    expect(batchOpacity({ levelIndex: 1, role: "Structure" }, state)).toBe(floor);
+  });
+
+  it("dissolves nothing for the camera on the active floor beyond its ceilings", () => {
+    const state = { activeLevelIndex: 0, showContextLevels: true };
+    // A wall between the camera and the selection stays solid: #32 dissolves
+    // only protected-corridor occluders, and only on context floors.
+    expect(batchOpacity({ levelIndex: 0, role: "Structure" }, state)).toBe(1);
+    expect(batchOpacity({ levelIndex: 0, role: "Context" }, state)).toBe(1);
+  });
+
   it("shows other floors as quiet context when asked", () => {
     const state = { activeLevelIndex: 0, showContextLevels: true };
     expect(batchOpacity({ levelIndex: 1, role: "Walkable" }, state)).toBe(CONTEXT_LEVEL_OPACITY);
     expect(batchOpacity({ levelIndex: 0, role: "Walkable" }, state)).toBe(1);
     expect(CONTEXT_LEVEL_OPACITY).toBeGreaterThan(0);
     expect(CONTEXT_LEVEL_OPACITY).toBeLessThan(0.5);
+  });
+});
+
+describe("motion window", () => {
+  it("keeps the context handoff inside the 140-180 ms motion window (#32)", () => {
+    expect(CONTEXT_HANDOFF_MS).toBeGreaterThanOrEqual(140);
+    expect(CONTEXT_HANDOFF_MS).toBeLessThanOrEqual(180);
   });
 });
 

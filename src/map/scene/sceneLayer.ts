@@ -43,6 +43,8 @@ import {
   composeModelMatrix,
   ecefToGeodetic,
   foldQuantization,
+  mat4Inverse,
+  wgs84Ecef,
   lightDirectionLocal,
   sceneAnchor,
 } from "./sceneMath";
@@ -360,6 +362,7 @@ export class SceneLayer implements CustomLayerInterface {
   /** The frame's view-projection, kept so a pick can render the same camera. */
   private _viewProjection: Float64Array | null = null;
   private _pickWarmed = false;
+  private _worldInverseCache: Float64Array | null = null;
   private _selectedFeature = 0;
   private _hoveredFeature = 0;
   private _contextLost = false;
@@ -642,6 +645,76 @@ export class SceneLayer implements CustomLayerInterface {
         pickCount: this._stats.pickCount + 1,
       };
     }
+  }
+
+  /**
+   * A longitude and latitude as venue-local metres on a given floor — the exact
+   * inverse of `localToLngLat`, and the same projection the compiler used, so a
+   * 2D feature's centre lands on its own floor rather than near it.
+   */
+  localFromLngLat(lng: number, lat: number, levelIndex: number): [number, number, number] {
+    const ecef = wgs84Ecef(lng, lat);
+    const inverse = this._worldInverse();
+    const relative = [
+      ecef[0] - this._scene.header.worldTransform[12]!,
+      ecef[1] - this._scene.header.worldTransform[13]!,
+      ecef[2] - this._scene.header.worldTransform[14]!,
+    ];
+    return [
+      inverse[0]! * relative[0]! + inverse[4]! * relative[1]! + inverse[8]! * relative[2]!,
+      inverse[1]! * relative[0]! + inverse[5]! * relative[1]! + inverse[9]! * relative[2]!,
+      this.levelPlane(levelIndex),
+    ];
+  }
+
+  /** The world transform's inverse rotation, computed once. */
+  private _worldInverse(): Float64Array {
+    this._worldInverseCache ??= mat4Inverse(Float64Array.from(this._scene.header.worldTransform));
+    return this._worldInverseCache;
+  }
+
+  /**
+   * Where a venue-local point lands on screen, in canvas CSS pixels, or `null`
+   * when the camera cannot see it.
+   *
+   * Labels need this rather than MapLibre's `project`, which takes a longitude
+   * and latitude and answers for the map plane at zero elevation. A label for a
+   * surface twelve metres up would sit metres away from the thing it names.
+   */
+  projectLocal(local: readonly [number, number, number]): { x: number; y: number } | null {
+    const viewProjection = this._viewProjection;
+    const gl = this._gl;
+    if (viewProjection === null || gl === null) {
+      return null;
+    }
+    const matrix = this._multiply(viewProjection, this._model);
+    const clip = [0, 0, 0, 0];
+    for (let row = 0; row < 4; row += 1) {
+      clip[row] =
+        matrix[row]! * local[0] +
+        matrix[4 + row]! * local[1] +
+        matrix[8 + row]! * local[2] +
+        matrix[12 + row]!;
+    }
+    const w = clip[3]!;
+    if (!Number.isFinite(w) || w <= 0) {
+      // Behind the camera, or degenerate: there is no on-screen position.
+      return null;
+    }
+    const canvas = gl.canvas;
+    const width = canvas instanceof HTMLCanvasElement ? canvas.clientWidth : gl.drawingBufferWidth;
+    const height =
+      canvas instanceof HTMLCanvasElement ? canvas.clientHeight : gl.drawingBufferHeight;
+    return {
+      x: ((clip[0]! / w) * 0.5 + 0.5) * width,
+      // Clip space y grows upward; screen y grows downward.
+      y: (0.5 - (clip[1]! / w) * 0.5) * height,
+    };
+  }
+
+  /** The resolved plane of a level, in venue-local metres. */
+  levelPlane(levelIndex: number): number {
+    return this._scene.levels[levelIndex]?.resolvedPlaneZ ?? 0;
   }
 
   /**

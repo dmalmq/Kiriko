@@ -220,10 +220,17 @@ test.describe("3D scene layer", () => {
       await waitForMapIdle(page);
       const upper = await sceneDiagnostics(page);
       expect(upper.activeLevel).not.toBe(first.activeLevel);
-      // Only the active floor draws, so the call count stays inside the budget
-      // no matter how many floors the venue has.
-      expect(upper.stats.drawCalls).toBeLessThanOrEqual(8);
+      // A floor change briefly shows the floors it left as context (#32's
+      // handoff), so more than one floor draws during that window — which is the
+      // all-levels budget, not the per-level one.
+      expect(upper.stats.drawCalls).toBeLessThanOrEqual(320);
       expect(await canvasSignature(page)).not.toBe(firstPixels);
+
+      // Once the handoff settles, only the active floor draws again, inside the
+      // per-level budget.
+      await expect
+        .poll(async () => (await sceneDiagnostics(page)).stats.drawCalls, { timeout: 5_000 })
+        .toBeLessThanOrEqual(8);
 
       await floorButton(page, LEVEL_B1_SHORT).click();
       await waitForMapIdle(page);
