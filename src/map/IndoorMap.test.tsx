@@ -32,7 +32,28 @@ const mapState = vi.hoisted(() => {
     readonly container: HTMLElement;
     readonly handlers = new Map<string, Set<(event?: FakeMapEvent) => void>>();
     readonly onceHandlers = new Map<string, Set<(event?: FakeMapEvent) => void>>();
-    readonly canvas = { style: { cursor: "" } };
+    // The real canvas carries the WebGL context-loss events the viewer listens
+    // for; the double records the listeners so a test can fire them.
+    readonly canvasListeners = new Map<string, Set<(event: Event) => void>>();
+    readonly canvas = {
+      style: { cursor: "" },
+      addEventListener: (type: string, listener: (event: Event) => void): void => {
+        const listeners = this.canvasListeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.canvasListeners.set(type, listeners);
+      },
+      removeEventListener: (type: string, listener: (event: Event) => void): void => {
+        this.canvasListeners.get(type)?.delete(listener);
+      },
+    };
+
+    /** Fire a canvas event the way the browser would. */
+    emitCanvas(type: string): void {
+      const event = { type, preventDefault: () => {} } as unknown as Event;
+      for (const listener of this.canvasListeners.get(type) ?? []) {
+        listener(event);
+      }
+    }
     readonly touchZoomRotate = { disableRotation(): void {} };
     readonly featureStates: Array<{ id: string; state: Record<string, unknown> }> = [];
     readonly removedStates: Array<{ id: string; key: string }> = [];
@@ -101,7 +122,7 @@ const mapState = vi.hoisted(() => {
       return this.container;
     }
 
-    getCanvas(): { style: { cursor: string } } {
+    getCanvas(): typeof this.canvas {
       return this.canvas;
     }
 
@@ -1541,5 +1562,50 @@ describe("IndoorMap network editing", () => {
       map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 1 } });
     });
     expect(onSelectFeature).toHaveBeenCalledWith("unit-3");
+  });
+});
+
+describe("IndoorMap scene context loss", () => {
+  it("reports a lost context so the source machine can fall back", () => {
+    const onSceneContextLost = vi.fn();
+    const { map } = renderMap(baseProps({ onSceneContextLost }));
+
+    act(() => {
+      map.emitCanvas("webglcontextlost");
+    });
+
+    expect(onSceneContextLost).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a restored context, and keeps listening across the outage", () => {
+    const onSceneContextLost = vi.fn();
+    const onSceneContextRestored = vi.fn();
+    const { map } = renderMap(baseProps({ onSceneContextLost, onSceneContextRestored }));
+
+    // The listeners belong to the map, not to any one scene: a second outage
+    // after a recovery must still be heard.
+    act(() => {
+      map.emitCanvas("webglcontextlost");
+      map.emitCanvas("webglcontextrestored");
+      map.emitCanvas("webglcontextlost");
+      map.emitCanvas("webglcontextrestored");
+    });
+
+    expect(onSceneContextLost).toHaveBeenCalledTimes(2);
+    expect(onSceneContextRestored).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops listening once the map is gone", () => {
+    const onSceneContextLost = vi.fn();
+    const props = baseProps({ onSceneContextLost });
+    const utils = render(<IndoorMap {...props} />);
+    const map = lastMap();
+    utils.unmount();
+
+    act(() => {
+      map.emitCanvas("webglcontextlost");
+    });
+
+    expect(onSceneContextLost).not.toHaveBeenCalled();
   });
 });

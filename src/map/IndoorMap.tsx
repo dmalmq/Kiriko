@@ -140,6 +140,25 @@ export interface IndoorMapProps {
    * the viewer exactly 2D — no layer is created and the camera stays flat.
    */
   scene?: SceneView | null;
+  /** The GL context was lost; 3D is down until it returns. */
+  onSceneContextLost?: () => void;
+  /** The context came back and the scene layer was re-established. */
+  onSceneContextRestored?: () => void;
+  /** The layer could not be created on this context. */
+  onSceneAttachFailed?: () => void;
+}
+
+/**
+ * Whether the map's style can carry a layer right now. A context loss leaves
+ * MapLibre rebuilding its style, and calling into it during that window throws
+ * from inside the library rather than returning false.
+ */
+function styleReady(map: MapLibreMap): boolean {
+  try {
+    return map.isStyleLoaded() === true;
+  } catch {
+    return false;
+  }
 }
 
 /** The scene layer's id; also the handle the e2e harness reads stats through. */
@@ -673,6 +692,9 @@ export function IndoorMap({
   network,
   networkEditing = null,
   scene = null,
+  onSceneContextLost,
+  onSceneContextRestored,
+  onSceneAttachFailed,
 }: IndoorMapProps): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -680,6 +702,9 @@ export function IndoorMap({
   const sceneLayerRef = useRef<SceneLayer | null>(null);
   const scenePickPendingRef = useRef(false);
   const scenePointRef = useRef<{ x: number; y: number } | null>(null);
+  const onSceneAttachFailedRef = useRef(onSceneAttachFailed);
+  const onSceneContextLostRef = useRef(onSceneContextLost);
+  const onSceneContextRestoredRef = useRef(onSceneContextRestored);
   const selectedFeatureIdRef = useRef(selectedFeatureId);
   const venueRef = useRef(venue);
   const levelIdRef = useRef(levelId);
@@ -709,6 +734,9 @@ export function IndoorMap({
   venueRef.current = venue;
   levelIdRef.current = levelId;
   selectedFeatureIdRef.current = selectedFeatureId;
+  onSceneAttachFailedRef.current = onSceneAttachFailed;
+  onSceneContextLostRef.current = onSceneContextLost;
+  onSceneContextRestoredRef.current = onSceneContextRestored;
   selectedIdRef.current = selectedFeatureId;
   visibilityRef.current = layerVisibility;
   onControlsRef.current = onControls;
@@ -1416,7 +1444,7 @@ export function IndoorMap({
     let layer: SceneLayer | null = null;
 
     const attach = (): void => {
-      if (layer != null || map.getLayer(SCENE_LAYER_ID) != null) {
+      if (layer != null || !styleReady(map) || map.getLayer(SCENE_LAYER_ID) != null) {
         return;
       }
       try {
@@ -1436,25 +1464,38 @@ export function IndoorMap({
         layer.setSelectedCanonicalFeature(selectedFeatureIdRef.current);
         sceneLayerRef.current = layer;
         Reflect.set(window, SCENE_DIAGNOSTICS_KEY, layer.diagnostics());
-      } catch {
-        // A context that cannot carry the layer leaves the 2D map exactly as
-        // it was; choosing the fallback deliberately is a later slice (#62).
+      } catch (error) {
+        // A context that cannot carry the layer leaves the 2D map exactly as it
+        // was, and the source machine hears about it rather than the viewer
+        // silently rendering nothing.
         layer = null;
         sceneLayerRef.current = null;
+        if (import.meta.env.DEV) {
+          console.warn("scene layer attach failed", error);
+        }
+        onSceneAttachFailedRef.current?.();
       }
     };
 
-    if (map.isStyleLoaded()) {
+    if (styleReady(map)) {
       attach();
     } else {
+      // `load` fires once per map; after a context restore only `idle` comes
+      // again, so both are awaited and `attach` is idempotent.
       map.once("load", attach);
+      map.once("idle", attach);
     }
 
     return () => {
+      map.off("idle", attach);
       map.off("load", attach);
       sceneLayerRef.current = null;
       Reflect.deleteProperty(window, SCENE_DIAGNOSTICS_KEY);
-      if (map.getLayer(SCENE_LAYER_ID) != null) {
+      // A context loss leaves MapLibre with no style, and reaching into it then
+      // throws from inside the library — during an effect cleanup, which React
+      // treats as a failed commit and unmounts the tree over. The layer is
+      // already gone in that case; MapLibre drops custom layers itself.
+      if (styleReady(map) && map.getLayer(SCENE_LAYER_ID) != null) {
         map.removeLayer(SCENE_LAYER_ID);
       }
       map.dragRotate.disable();
@@ -1464,6 +1505,42 @@ export function IndoorMap({
       map.setMaxPitch(0);
     };
   }, [scene]);
+
+  // Context loss and recovery (#26). These listeners belong to the map, not to
+  // any one scene: the layer is torn down the moment the context dies, and the
+  // effect that owns the layer unmounts with it — so if the restore listener
+  // lived there, the event that matters would arrive with nobody listening.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (map == null) {
+      return;
+    }
+    const canvas = map.getCanvas();
+
+    const onContextLost = (event: Event): void => {
+      // Without preventDefault the browser will never restore this context.
+      event.preventDefault();
+      sceneLayerRef.current?.markContextLost();
+      sceneLayerRef.current = null;
+      Reflect.deleteProperty(window, SCENE_DIAGNOSTICS_KEY);
+      onSceneContextLostRef.current?.();
+    };
+
+    const onContextRestored = (): void => {
+      // Recovery has exactly one driver: this reports the event, the source
+      // machine decides whether to spend a retry, and the scene arriving back
+      // in props is what re-attaches the layer — which also restores the active
+      // level and the selection, because attaching seeds both from props.
+      onSceneContextRestoredRef.current?.();
+    };
+
+    canvas.addEventListener("webglcontextlost", onContextLost, false);
+    canvas.addEventListener("webglcontextrestored", onContextRestored, false);
+    return () => {
+      canvas.removeEventListener("webglcontextlost", onContextLost, false);
+      canvas.removeEventListener("webglcontextrestored", onContextRestored, false);
+    };
+  }, []);
 
   // Selection is one thing whether it arrived from the canvas, a panel row, or
   // the keyboard: the scene highlights whatever the app considers selected.
