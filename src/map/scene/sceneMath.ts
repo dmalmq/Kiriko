@@ -234,6 +234,7 @@ export function foldQuantization(
   model: Float64Array,
   quantizationOrigin: readonly [number, number, number],
   quantizationScale: readonly [number, number, number],
+  verticalNudgeMetres = 0,
 ): Float64Array {
   const dequantize = new Float64Array([
     quantizationScale[0],
@@ -250,7 +251,7 @@ export function foldQuantization(
     0,
     quantizationOrigin[0],
     quantizationOrigin[1],
-    quantizationOrigin[2],
+    quantizationOrigin[2] + verticalNudgeMetres,
     1,
   ]);
   return mat4Multiply(model, dequantize);

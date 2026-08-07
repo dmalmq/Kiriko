@@ -54,6 +54,35 @@ export const ROLE_PAINT_ORDER: Record<SemanticRoleName, number> = {
   Ceiling: 6,
 };
 
+/**
+ * Vertical separation in millimetres, applied at render time to coplanar
+ * geometry that a depth bias alone cannot separate.
+ *
+ * A depth-buffer bias is measured in depth units, so its effect shrinks as the
+ * camera pulls back and precision degrades — at venue-wide zoom the floor plate
+ * and the unit finishes on it start trading pixels again. A separation in world
+ * space does not care about the camera: one centimetre is far more than the
+ * depth buffer's resolution at indoor distances, and far less than anything a
+ * reviewer can see. The pick pass keeps reporting the surface's true position,
+ * so this never becomes a coordinate anyone reads.
+ */
+export const ROLE_VERTICAL_NUDGE_MM: Record<SemanticRoleName, number> = {
+  // The plate sits a centimetre under the finishes it carries.
+  Context: -10,
+  Public: 0,
+  Service: 0,
+  Restricted: 0,
+  Walkable: 0,
+  Elevator: 0,
+  Escalator: 0,
+  Stairs: 0,
+  Ramp: 0,
+  Conveyance: 0,
+  Structure: 0,
+  Opening: 0,
+  Ceiling: 0,
+};
+
 /** Depth-buffer bias in units: positive pushes away from the camera. */
 export const ROLE_DEPTH_BIAS: Record<SemanticRoleName, number> = {
   Context: 4,

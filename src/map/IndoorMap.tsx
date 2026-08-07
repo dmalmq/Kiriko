@@ -678,6 +678,9 @@ export function IndoorMap({
   const mapRef = useRef<MapLibreMap | null>(null);
   const onSelectRef = useRef(onSelectFeature);
   const sceneLayerRef = useRef<SceneLayer | null>(null);
+  const scenePickPendingRef = useRef(false);
+  const scenePointRef = useRef<{ x: number; y: number } | null>(null);
+  const selectedFeatureIdRef = useRef(selectedFeatureId);
   const venueRef = useRef(venue);
   const levelIdRef = useRef(levelId);
   const selectedIdRef = useRef(selectedFeatureId);
@@ -705,6 +708,7 @@ export function IndoorMap({
   networkEditingRef.current = networkEditing;
   venueRef.current = venue;
   levelIdRef.current = levelId;
+  selectedFeatureIdRef.current = selectedFeatureId;
   selectedIdRef.current = selectedFeatureId;
   visibilityRef.current = layerVisibility;
   onControlsRef.current = onControls;
@@ -909,6 +913,17 @@ export function IndoorMap({
         layers: [...CLICKABLE_LAYER_IDS],
       });
       const featureId = readFeatureId(features[0]?.properties);
+      const sceneLayer = sceneLayerRef.current;
+      const scenePick = sceneLayer?.pickAt(event.point.x, event.point.y) ?? null;
+      // Where the click landed. MapLibre unprojects a pointer onto the map plane
+      // at zero elevation, which is the right answer in 2D and the wrong one on
+      // a pitched 3D camera — a click on an upper floor reports a position
+      // metres from the surface actually clicked. The pick pass measured that
+      // surface, so when it hit, its position is the truth.
+      const clicked =
+        scenePick !== null && sceneLayer != null
+          ? sceneLayer.localToLngLat(scenePick.localPoint)
+          : { lng: event.lngLat.lng, lat: event.lngLat.lat };
       const review = issueReviewRef.current;
       if (review?.placementMode === true) {
         // Placement captures the clicked point (plus any feature under it) and
@@ -916,10 +931,11 @@ export function IndoorMap({
         review.onPlaceIssue({
           // The clicked feature's own level (grouped same-ordinal levels all
           // render) beats the representative level; bare clicks use representative.
-          levelId: readLevelId(features[0]?.properties) ?? levelIdRef.current,
-          longitude: event.lngLat.lng,
-          latitude: event.lngLat.lat,
-          featureId,
+          levelId:
+            scenePick?.levelId ?? readLevelId(features[0]?.properties) ?? levelIdRef.current,
+          longitude: clicked.lng,
+          latitude: clicked.lat,
+          featureId: scenePick === null ? featureId : scenePick.canonicalFeatureId,
         });
         return;
       }
@@ -927,7 +943,7 @@ export function IndoorMap({
       if (dirs?.active === true) {
         // Directions captures the raw point (snapping happens in wasm) and
         // suppresses ordinary feature selection.
-        dirs.onPickPoint({ longitude: event.lngLat.lng, latitude: event.lngLat.lat });
+        dirs.onPickPoint({ longitude: clicked.lng, latitude: clicked.lat });
         return;
       }
 
@@ -935,7 +951,11 @@ export function IndoorMap({
       if (editing != null) {
         // Editing suppresses ordinary feature/facility selection and reports a
         // semantic pick (junction/connection/coordinate) to the App reducer.
-        editing.onPick(networkPickAt(map, event.point, event.lngLat, editing.tool));
+        // The graph's own wide hit targets keep their tolerances and their
+        // precedence — junction before path — and only a click that misses both
+        // falls through to a coordinate, which the scene pick makes accurate on
+        // a pitched camera.
+        editing.onPick(networkPickAt(map, event.point, clicked, editing.tool));
         return;
       }
       const facilityHit = map.queryRenderedFeatures(event.point, {
@@ -949,6 +969,22 @@ export function IndoorMap({
           return;
         }
       }
+      if (scenePick !== null) {
+        // The scene is what the reviewer can see, and its depth buffer already
+        // resolved which floor and which surface that is — so it decides,
+        // rather than the 2D fills hidden behind it.
+        //
+        // Two surfaces select nothing. One is a surface with no canonical
+        // feature — a wall, an opening — which must never stand in for the
+        // feature it happens to sit beside. The other is contextual mass: a
+        // level's floor plate carries the level as its canonical feature, and
+        // clicking bare floor clears the selection in 2D, so it means the same
+        // thing here rather than selecting a whole storey.
+        onSelectRef.current(
+          scenePick.role === "Context" ? null : scenePick.canonicalFeatureId,
+        );
+        return;
+      }
       onSelectRef.current(featureId);
     };
 
@@ -956,6 +992,43 @@ export function IndoorMap({
       const editing = networkEditingRef.current;
       if (editing != null) {
         updateNetworkCursor(map, event.point, editing.tool);
+        return;
+      }
+      const sceneLayer = sceneLayerRef.current;
+      if (sceneLayer != null) {
+        scenePointRef.current = { x: event.point.x, y: event.point.y };
+        // While the camera moves, the pointer is dragging the map rather than
+        // hovering its contents, and a synchronous readback would have to wait
+        // out the frame already in flight — measured at 30 ms mid-drag against
+        // 2 ms at rest. Hover is re-evaluated when the camera settles.
+        if (map.isMoving()) {
+          sceneLayer.setHoveredFeature(-1);
+          return;
+        }
+        // One pick per frame at most: each one is a GPU readback that stalls
+        // the pipeline, and a drag fires mousemove far faster than that.
+        if (scenePickPendingRef.current) {
+          return;
+        }
+        scenePickPendingRef.current = true;
+        requestAnimationFrame(() => {
+          scenePickPendingRef.current = false;
+          const hit = sceneLayer.pickAt(event.point.x, event.point.y);
+          const hoverable = hit !== null && hit.role !== "Context";
+          sceneLayer.setHoveredFeature(hoverable ? hit.featureIndex : -1);
+          const canonical = hoverable ? hit.canonicalFeatureId : null;
+          const previous = hoverIdRef.current;
+          if (previous !== canonical) {
+            if (previous != null) {
+              clearFeatureState(map, previous, "hover");
+            }
+            if (canonical != null) {
+              applyFeatureState(map, canonical, { hover: true });
+            }
+            hoverIdRef.current = canonical;
+          }
+          map.getCanvas().style.cursor = canonical != null ? "pointer" : "";
+        });
         return;
       }
       const features = map.queryRenderedFeatures(event.point, {
@@ -979,7 +1052,34 @@ export function IndoorMap({
       hoverIdRef.current = nextId;
     };
 
+    // The camera settled: whatever is under the pointer now is what the
+    // reviewer is hovering, even though the pointer never moved.
+    const onMoveEnd = (): void => {
+      const sceneLayer = sceneLayerRef.current;
+      const point = scenePointRef.current;
+      if (sceneLayer == null || point == null) {
+        return;
+      }
+      const hit = sceneLayer.pickAt(point.x, point.y);
+      const hoverable = hit !== null && hit.role !== "Context";
+      sceneLayer.setHoveredFeature(hoverable ? hit.featureIndex : -1);
+      const canonical = hoverable ? hit.canonicalFeatureId : null;
+      const previous = hoverIdRef.current;
+      if (previous !== canonical) {
+        if (previous != null) {
+          clearFeatureState(map, previous, "hover");
+        }
+        if (canonical != null) {
+          applyFeatureState(map, canonical, { hover: true });
+        }
+        hoverIdRef.current = canonical;
+      }
+      map.getCanvas().style.cursor = canonical != null ? "pointer" : "";
+    };
+
     const onMouseLeave = (): void => {
+      scenePointRef.current = null;
+      sceneLayerRef.current?.setHoveredFeature(-1);
       if (hoverIdRef.current != null) {
         clearFeatureState(map, hoverIdRef.current, "hover");
         hoverIdRef.current = null;
@@ -1026,6 +1126,7 @@ export function IndoorMap({
     map.on("load", onLoad);
     map.on("click", onClick);
     map.on("mousemove", onMouseMove);
+    map.on("moveend", onMoveEnd);
     map.on("mouseout", onMouseLeave);
 
     const markIdle = (): void => {
@@ -1068,6 +1169,7 @@ export function IndoorMap({
       map.off("load", onLoad);
       map.off("click", onClick);
       map.off("mousemove", onMouseMove);
+      map.off("moveend", onMoveEnd);
       map.off("mouseout", onMouseLeave);
       map.off("idle", markIdle);
       map.off("render", markLoadedRenderIdle);
@@ -1331,6 +1433,7 @@ export function IndoorMap({
         map.setMaxPitch(SCENE_MAX_PITCH);
         map.dragRotate.enable();
         map.touchZoomRotate.enableRotation();
+        layer.setSelectedCanonicalFeature(selectedFeatureIdRef.current);
         sceneLayerRef.current = layer;
         Reflect.set(window, SCENE_DIAGNOSTICS_KEY, layer.diagnostics());
       } catch {
@@ -1361,6 +1464,12 @@ export function IndoorMap({
       map.setMaxPitch(0);
     };
   }, [scene]);
+
+  // Selection is one thing whether it arrived from the canvas, a panel row, or
+  // the keyboard: the scene highlights whatever the app considers selected.
+  useEffect(() => {
+    sceneLayerRef.current?.setSelectedCanonicalFeature(selectedFeatureId);
+  }, [selectedFeatureId, scene]);
 
   // Floor changes drive which level the scene draws at full opacity.
   useEffect(() => {

@@ -73,6 +73,35 @@ fallback state machine, and automatic selection are [#62](https://github.com/dma
    was corrected — a wall turned from the key rendered near-black instead of 12% below cool stone
    ([#32](https://github.com/dmalmq/imdf-map-application/issues/32) section 5).
 
+## Follow-on: picking (#61)
+
+Picking landed on this layer without changing the format, because the per-vertex feature index was
+already uploaded. Notes worth keeping:
+
+- **The pass is scissored to one pixel.** Rendering the full framebuffer to read a single pixel
+  measured 16.8 ms; confining the clear and the rasterizer to the picked pixel brought the median
+  to ~2 ms, inside the 8 ms budget.
+- **The latency budget is a hardware number.** CI rasterizes in software (SwiftShader), where a
+  synchronous readback measured 151 ms — the rasterizer's cost, not the pick's. The browser spec
+  probes the renderer and asserts the 8 ms budget only on real hardware; every functional
+  assertion runs everywhere.
+- **The first pick of a session costs ~20 ms** of driver validation for the multi-target float
+  path. It is warmed once during load, where nothing is waiting on it.
+- **Hover picking stands aside while the camera moves.** A synchronous readback mid-drag has to
+  wait out the frame already in flight — 30 ms measured — so hover is suppressed during motion and
+  re-evaluated on `moveend`.
+- **A pick is the placement authority in 3D.** MapLibre's pointer `lngLat` unprojects onto the map
+  plane at zero elevation, so with pitch enabled a click on an upper floor reported a position
+  metres from the surface clicked. Issue placement, directions picking, and network-edit
+  coordinates now use the pick's measured position.
+- **Contextual mass is not selectable.** A level's floor plate carries the level as its canonical
+  feature; clicking it clears the selection, as bare floor does in 2D, rather than selecting a
+  whole storey.
+- **A selection tint made a latent z-fight visible.** The plate and the finishes on it were
+  trading pixels at venue-wide zoom, invisible while both were near-white. Depth bias alone
+  degrades as precision does, so contextual mass is now separated in world space — one centimetre
+  below the finishes it carries, while the pick still reports the true surface position.
+
 ## Verification
 
 - Rust: `cargo test --manifest-path core/Cargo.toml --workspace` (includes 12 producer tests and
