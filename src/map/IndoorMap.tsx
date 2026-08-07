@@ -6,6 +6,8 @@ import {
   type ReactElement,
 } from "react";
 import { SceneLayer, SCENE_DIAGNOSTICS_KEY } from "./scene/sceneLayer";
+import { useSceneLabels } from "./scene/useSceneLabels";
+import { CONTEXT_HANDOFF_MS } from "./scene/scenePolicy";
 import type { SceneView } from "./scene/sceneFormat";
 import maplibregl, {
   type GeoJSONSource,
@@ -700,6 +702,9 @@ export function IndoorMap({
   const mapRef = useRef<MapLibreMap | null>(null);
   const onSelectRef = useRef(onSelectFeature);
   const sceneLayerRef = useRef<SceneLayer | null>(null);
+  // The attached layer as state, so the label overlay re-runs when it appears
+  // or goes away; the ref stays for the event handlers that fire per frame.
+  const [sceneLabelLayer, setSceneLabelLayer] = useState<SceneLayer | null>(null);
   const scenePickPendingRef = useRef(false);
   const scenePointRef = useRef<{ x: number; y: number } | null>(null);
   const onSceneAttachFailedRef = useRef(onSceneAttachFailed);
@@ -872,12 +877,28 @@ export function IndoorMap({
     editing.onPick(networkPickAt(map, map.project([center.lng, center.lat]), center, editing.tool));
   }, []);
 
+  // One label system at a time. The flat overlay shows up to two hundred
+  // markers on the map plane; the scene overlay shows a capped, prioritized set
+  // placed on each feature's own floor. Both at once would double every name.
   useFeatureMarkers({
     map: mapInstance,
     venue,
     levelId,
     locale,
     selectedFeatureId,
+    enabled: layerVisibility.labels && sceneLabelLayer === null,
+    onSelect: onMarkerSelect,
+  });
+
+  useSceneLabels({
+    map: mapInstance,
+    layer: sceneLabelLayer,
+    venue,
+    levelId,
+    locale,
+    selectedFeatureId,
+    // Guidance is a tighter frame than review: four labels against six (#32).
+    mode: directions?.active === true ? "navigation" : "overview",
     enabled: layerVisibility.labels,
     onSelect: onMarkerSelect,
   });
@@ -1463,6 +1484,7 @@ export function IndoorMap({
         map.touchZoomRotate.enableRotation();
         layer.setSelectedCanonicalFeature(selectedFeatureIdRef.current);
         sceneLayerRef.current = layer;
+        setSceneLabelLayer(layer);
         Reflect.set(window, SCENE_DIAGNOSTICS_KEY, layer.diagnostics());
       } catch (error) {
         // A context that cannot carry the layer leaves the 2D map exactly as it
@@ -1490,6 +1512,7 @@ export function IndoorMap({
       map.off("idle", attach);
       map.off("load", attach);
       sceneLayerRef.current = null;
+      setSceneLabelLayer(null);
       Reflect.deleteProperty(window, SCENE_DIAGNOSTICS_KEY);
       // A context loss leaves MapLibre with no style, and reaching into it then
       // throws from inside the library — during an effect cleanup, which React
@@ -1522,6 +1545,7 @@ export function IndoorMap({
       event.preventDefault();
       sceneLayerRef.current?.markContextLost();
       sceneLayerRef.current = null;
+      setSceneLabelLayer(null);
       Reflect.deleteProperty(window, SCENE_DIAGNOSTICS_KEY);
       onSceneContextLostRef.current?.();
     };
@@ -1548,17 +1572,36 @@ export function IndoorMap({
     sceneLayerRef.current?.setSelectedCanonicalFeature(selectedFeatureId);
   }, [selectedFeatureId, scene]);
 
-  // Floor changes drive which level the scene draws at full opacity.
+  // Floor changes drive which level the scene draws at full opacity. The floors
+  // the reviewer left enter briefly as low-opacity context — #32's handoff rule
+  // — so a floor change reads as movement through a building rather than as a
+  // cut between two unrelated plans. Reduced motion skips the context pass
+  // entirely: same floor states, in the same order, with nothing interpolated.
   useEffect(() => {
     const layer = sceneLayerRef.current;
+    const map = mapRef.current;
     if (layer == null) {
       return;
     }
     const index = layer.levelIndexOf(levelId);
-    if (index != null) {
-      layer.setActiveLevel(index);
-      mapRef.current?.triggerRepaint();
+    if (index == null) {
+      return;
     }
+    layer.setActiveLevel(index);
+    if (prefersReducedMotion()) {
+      map?.triggerRepaint();
+      return;
+    }
+    layer.setShowContextLevels(true);
+    map?.triggerRepaint();
+    const timer = window.setTimeout(() => {
+      sceneLayerRef.current?.setShowContextLevels(false);
+      mapRef.current?.triggerRepaint();
+    }, CONTEXT_HANDOFF_MS);
+    return () => {
+      window.clearTimeout(timer);
+      sceneLayerRef.current?.setShowContextLevels(false);
+    };
   }, [levelId, scene]);
 
   return (

@@ -2858,3 +2858,100 @@ button {
     animation: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Scene labels: the 3D view's own overlay. Same visual language as the flat
+   markers (white halo, product type, JIS bubbles) placed from the renderer's
+   projection instead of the map plane, capped and prioritized (#32), with a
+   leader line for a label that collision pushed off its resting place.
+   --------------------------------------------------------------------------- */
+
+.scene-labels {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.scene-labels__leaders {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.scene-labels__leader {
+  stroke: var(--color-muted);
+  stroke-width: 1;
+  opacity: 0.55;
+}
+
+.scene-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-panel);
+  color: var(--color-text);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  appearance: none;
+  cursor: pointer;
+  pointer-events: auto;
+  /* A white halo keeps a label legible over any surface beneath it. */
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 65%);
+  /* #32 limits normal motion to 140–180 ms opacity and transform. */
+  transition:
+    opacity 160ms ease-out,
+    border-color 160ms ease-out;
+}
+
+.scene-label:hover {
+  border-color: var(--color-accent);
+}
+
+.scene-label:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 1px;
+}
+
+/* Screen-facing conveyance badge carrying a JIS pictogram, or the neutral
+   inclined plane when the set has none. */
+.scene-label--badge {
+  --marker-bg: var(--color-panel);
+  padding: 0;
+  border-radius: 50%;
+  color: var(--color-accent);
+  z-index: 1;
+}
+
+.scene-label--badge svg {
+  display: block;
+}
+
+.scene-label--selection {
+  --marker-bg: var(--color-selected);
+  border-color: var(--color-selected);
+  background: var(--color-selected);
+  color: #ffffff;
+  z-index: 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scene-label {
+    transition: none;
+  }
+}

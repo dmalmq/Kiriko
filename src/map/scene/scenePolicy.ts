@@ -111,6 +111,23 @@ const HIDDEN_ROLES_ON_ACTIVE_LEVEL: Record<string, true> = { Ceiling: true };
 /** Adjacent floors, when shown as context, stay quiet enough to read past. */
 export const CONTEXT_LEVEL_OPACITY = 0.22;
 
+/**
+ * A protected-corridor occluder fades to this when it would obstruct what the
+ * reviewer is looking at (#32 section 6). Nothing else in the scene is
+ * dissolved for the camera: a wall stays a wall.
+ */
+export const OCCLUDER_FADE_OPACITY = 0.15;
+
+/**
+ * How long adjacent floors stay visible as context when the floor changes —
+ * inside #32's 140–180 ms motion window. Long enough to see where the floor
+ * you left went, short enough that it is not a state you sit in.
+ */
+export const CONTEXT_HANDOFF_MS = 160;
+
+/** Roles classified as protected-corridor occluders (#32's fade set). */
+const PROTECTED_CORRIDOR_ROLES: Record<string, true> = { Ceiling: true };
+
 export interface BatchVisibility {
   levelIndex: number;
   role: SemanticRoleName;
@@ -130,5 +147,13 @@ export function batchOpacity(batch: BatchVisibility, state: VisibilityState): nu
   if (batch.levelIndex === state.activeLevelIndex) {
     return Object.hasOwn(HIDDEN_ROLES_ON_ACTIVE_LEVEL, batch.role) ? 0 : 1;
   }
-  return state.showContextLevels ? CONTEXT_LEVEL_OPACITY : 0;
+  if (!state.showContextLevels) {
+    return 0;
+  }
+  // A context floor's ceiling is the one thing standing between the camera and
+  // the floor the reviewer is on, so it fades further than the rest of that
+  // floor — the only geometry in the scene that fades for the camera at all.
+  return Object.hasOwn(PROTECTED_CORRIDOR_ROLES, batch.role)
+    ? OCCLUDER_FADE_OPACITY
+    : CONTEXT_LEVEL_OPACITY;
 }
