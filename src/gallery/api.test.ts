@@ -30,7 +30,7 @@ describe("gallery api client", () => {
   it("builds a locale-tagged viewer link that pins a valid public version id", () => {
     const id = "a".repeat(64);
     expect(viewerHref("tokyo-station", id, "ja")).toBe(`/?dataset=tokyo-station&lang=ja&version=${id}`);
-    expect(viewerHref("tokyo-station", id, "en", true)).toBe(
+    expect(viewerHref("tokyo-station", id, "en", { review: true })).toBe(
       `/?dataset=tokyo-station&lang=en&version=${id}&review=1`,
     );
   });
@@ -39,8 +39,23 @@ describe("gallery api client", () => {
     expect(viewerHref("tokyo-station", null, "en")).toBe("/?dataset=tokyo-station&lang=en");
     expect(viewerHref("tokyo-station", "4", "ja")).toBe("/?dataset=tokyo-station&lang=ja");
     expect(viewerHref("tokyo-station", "A".repeat(64), "ja")).toBe("/?dataset=tokyo-station&lang=ja");
-    expect(viewerHref("tokyo-station", null, "ja", true)).toBe(
+    expect(viewerHref("tokyo-station", null, "ja", { review: true })).toBe(
       "/?dataset=tokyo-station&lang=ja&review=1",
+    );
+  });
+
+  it("opts the viewer into 3D with the same parameter the viewer parses", () => {
+    // A gallery link is the only discoverable way into the scene, so the
+    // spelling here has to be the one `parseViewerParams` accepts.
+    expect(viewerHref("tokyo-station", null, "en", { scene: true })).toBe(
+      "/?dataset=tokyo-station&lang=en&scene=1",
+    );
+    const id = "a".repeat(64);
+    expect(viewerHref("tokyo-station", id, "ja", { scene: true, review: true })).toBe(
+      `/?dataset=tokyo-station&lang=ja&version=${id}&review=1&scene=1`,
+    );
+    expect(viewerHref("tokyo-station", null, "en", { scene: false })).toBe(
+      "/?dataset=tokyo-station&lang=en",
     );
   });
 

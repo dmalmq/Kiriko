@@ -81,6 +81,8 @@ export type SceneSourceEvent =
   | { type: "context_lost" }
   | { type: "context_restored" }
   | { type: "user_chose_2d" }
+  /** The reviewer asked for 3D — from the toggle, not a recovery. */
+  | { type: "user_chose_3d" }
   | { type: "retry_requested" }
   | { type: "veil_finished" };
 
@@ -170,6 +172,31 @@ export function reduceSceneSource(
 
     case "user_chose_2d":
       return fallBack(state, "user_choice", options);
+
+    case "user_chose_3d": {
+      // A deliberate ask, so it spends no retry budget: that budget bounds
+      // *automatic* recoveries, and a toggle that stopped working after two
+      // uses would be a bug. `requested` latches on, which is what turns the
+      // provenance badge and any later fallback notice back on.
+      if (!state.capable) {
+        // Answer honestly rather than entering a state nothing can draw. The
+        // toggle is hidden on such a device, so this is the defensive path.
+        return { ...state, requested: true, active: "fallback2d", reason: "capability_unmet" };
+      }
+      if (state.active !== "fallback2d") {
+        return state.requested ? state : { ...state, requested: true };
+      }
+      // The generated scene is the rung every published version retains, so an
+      // explicit ask lands there; the tile document climbs from it when the
+      // version has one and it has not already been given up this session.
+      return {
+        ...state,
+        requested: true,
+        active: "generated",
+        reason: null,
+        veil: !options.reducedMotion,
+      };
+    }
 
     case "retry_requested": {
       if (state.active === "generated" || !state.capable || state.retriesLeft <= 0) {
@@ -289,7 +316,10 @@ export function fallbackNotice(state: SceneSourceState): { ja: string; en: strin
         en: "3D rendering was interrupted. Continuing in 2D.",
       };
     case "user_choice":
-      return { ja: "2D表示で続けます。", en: "Continuing in 2D." };
+      // Nothing was given up: the reviewer asked for this, the badge already
+      // says 2D, and the toggle offers the way back. Narrating a choice back at
+      // the person who made it, beside a control that undoes it, is noise.
+      return null;
   }
 }
 

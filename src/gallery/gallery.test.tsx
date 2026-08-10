@@ -144,7 +144,7 @@ describe("GalleryPage", () => {
     await user.click(screen.getByRole("button", { name: "EN" }));
 
     await user.click(screen.getByRole("button", { name: "Review network" }));
-    expect(viewerHrefSpy).toHaveBeenCalledWith("tokyo-station", PUBLIC_ID, "en", true);
+    expect(viewerHrefSpy).toHaveBeenCalledWith("tokyo-station", PUBLIC_ID, "en", { review: true });
   });
 
   it("opens IMDF version upload for the selected venue", async () => {

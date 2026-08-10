@@ -157,7 +157,7 @@ test.describe("3D capability and fallback", () => {
       expect(floorBefore).not.toBeNull();
 
       // The reviewer chooses 2D.
-      await page.locator(".scene-source__switch").click();
+      await page.locator(".scene-toggle").click();
       await expect.poll(async () => sceneAttached(page), { timeout: 10_000 }).toBe(false);
 
       // Floor and selection survived the swap: the source changed, the state did
@@ -168,10 +168,13 @@ test.describe("3D capability and fallback", () => {
         "Universal 2D fallback",
       );
 
+      // A chosen 2D is not a loss, so nothing narrates it back.
+      await expect(page.locator(".scene-notice")).toHaveCount(0);
+
       // And 3D is offered back, because this device can render it.
-      const retry = page.locator(".scene-notice__retry");
-      await expect(retry).toBeVisible();
-      await retry.click();
+      const toggle = page.locator(".scene-toggle");
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      await toggle.click();
       await waitForScene(page);
       await expect(page.locator(".scene-source__badge")).toHaveText("Generated 3D");
       await expect(pressedFloor).toHaveText(floorBefore!);
@@ -266,7 +269,7 @@ test.describe("3D capability and fallback", () => {
 
       // Reduced motion produces the same states in the same order with no
       // interpolation and no source veil (#32): the source is replaced at once.
-      await page.locator(".scene-source__switch").click();
+      await page.locator(".scene-toggle").click();
       await expect.poll(async () => sceneAttached(page), { timeout: 10_000 }).toBe(false);
       await expect(page.locator(".scene-veil")).toHaveCount(0);
       await expect(page.locator(".scene-source__provenance")).toHaveText(
@@ -287,6 +290,50 @@ test.describe("3D capability and fallback", () => {
       await expect(page.locator(".scene-source")).toHaveCount(0);
       await expect(page.locator(".scene-notice")).toHaveCount(0);
       await expect(mapCanvas(page)).toBeVisible();
+
+      // The one piece of 3D chrome a 2D session does carry: the way in. It
+      // reports the view it is offering, not the one showing.
+      const toggle = page.locator(".scene-toggle");
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      await expect(toggle).toHaveText("Switch to 3D");
+    } finally {
+      await page.request.delete(`/api/venues/${venueId}`);
+    }
+  });
+
+  test("the toggle is the way into 3D, and the URL keeps the choice", async ({
+    page,
+  }, testInfo) => {
+    // Before this control, `?scene=1` typed by hand was the only way in and
+    // nothing in the app offered it. The URL still has to agree with the canvas,
+    // or a copied link and a refresh would land somewhere else.
+    const { slug, venueId } = await publishScene(page, testInfo, "cap-toggle");
+    try {
+      await page.goto(`/?dataset=${encodeURIComponent(slug)}&lang=en`);
+      await waitForMapIdle(page);
+      expect(await sceneAttached(page)).toBe(false);
+
+      const toggle = page.locator(".scene-toggle");
+      await toggle.click();
+      await waitForScene(page);
+      await expect(page.locator(".scene-source__badge")).toHaveText("Generated 3D");
+      await expect(toggle).toHaveAttribute("aria-pressed", "true");
+      expect(new URL(page.url()).searchParams.get("scene")).toBe("1");
+
+      // A reload proves the URL is the record and not a decoration.
+      await page.reload();
+      await waitForMapIdle(page);
+      await waitForScene(page);
+      await expect(page.locator(".scene-source__badge")).toHaveText("Generated 3D");
+
+      // And back out: the parameter goes, so the reload after it stays 2D.
+      await page.locator(".scene-toggle").click();
+      await expect.poll(async () => sceneAttached(page), { timeout: 10_000 }).toBe(false);
+      expect(new URL(page.url()).searchParams.has("scene")).toBe(false);
+      await page.reload();
+      await waitForMapIdle(page);
+      expect(await sceneAttached(page)).toBe(false);
+      await expect(page.locator(".scene-source")).toHaveCount(0);
     } finally {
       await page.request.delete(`/api/venues/${venueId}`);
     }

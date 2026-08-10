@@ -60,23 +60,35 @@ export function datasetSceneUrl(slug: string, publicVersionId?: string): string 
     : base;
 }
 
+/** What a viewer link opts into beyond viewing the venue. */
+export interface ViewerHrefOptions {
+  /** Network review mode. */
+  review?: boolean;
+  /** The 3D scene layer; the gallery's only entry point into it. */
+  scene?: boolean;
+}
+
 /**
  * Canonical viewer deep-link for a published venue. Pins to `?version=<publicVersionId>`
  * (the permanent 64-hex identity, never the reusable seq) when it is valid,
- * always tags the current locale, and appends `review=1` for network review.
+ * always tags the current locale, and appends the opted-in modes.
  */
 export function viewerHref(
   slug: string,
   publicVersionId: string | null | undefined,
   locale: LocaleCode,
-  review = false,
+  options: ViewerHrefOptions = {},
 ): string {
   const query = new URLSearchParams({ dataset: slug, lang: locale });
   if (publicVersionId != null && PUBLIC_VERSION_ID.test(publicVersionId)) {
     query.set("version", publicVersionId);
   }
-  if (review) {
+  if (options.review === true) {
     query.set("review", "1");
+  }
+  if (options.scene === true) {
+    // The spelling `parseViewerParams` accepts; `sceneSearch` writes the same.
+    query.set("scene", "1");
   }
   return `/?${query.toString()}`;
 }

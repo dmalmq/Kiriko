@@ -3,6 +3,7 @@ import type { VenueSummary } from "./api";
 
 const ui = {
   open: { ja: "開く", en: "Open" },
+  view3d: { ja: "3D で開く", en: "Open in 3D" },
   delete: { ja: "削除", en: "Delete" },
   uploadImdf: { ja: "IMDF をアップロード", en: "Upload IMDF" },
   importGdb: { ja: "GDB を取り込む", en: "Import GDB" },
@@ -21,6 +22,8 @@ export interface DatasetCardProps {
   venue: VenueSummary;
   locale: LocaleCode;
   onOpen: () => void;
+  /** Absent when this device is below the 3D floor, or the venue is unpublished. */
+  onView3d?: () => void;
   onDelete: () => void;
   onImportGdb?: () => void;
   onAddData?: () => void;
@@ -37,6 +40,7 @@ export function DatasetCard({
   venue,
   locale,
   onOpen,
+  onView3d,
   onDelete,
   onImportGdb,
   onAddData,
@@ -103,6 +107,11 @@ export function DatasetCard({
         {onReviewNetwork ? (
           <button type="button" className="btn-ghost" onClick={onReviewNetwork} disabled={actionsDisabled}>
             {ui.reviewNetwork[locale]}
+          </button>
+        ) : null}
+        {onView3d ? (
+          <button type="button" className="btn-ghost" onClick={onView3d} disabled={actionsDisabled}>
+            {ui.view3d[locale]}
           </button>
         ) : null}
         <button type="button" className="btn-primary" onClick={onOpen} disabled={actionsDisabled}>

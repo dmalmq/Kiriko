@@ -209,6 +209,9 @@ button {
   min-height: 0;
   background: var(--color-canvas);
   overflow: hidden;
+  /* Shared by the 2D/3D toggle and the room made for it above; see
+     `.scene-toggle`. One declaration so the two cannot disagree. */
+  --scene-toggle-height: 32px;
 }
 
 .map-stage .indoor-map,
@@ -2755,7 +2758,7 @@ button {
   /* Clears the attribution line, which owns the bottom-left corner. */
   bottom: 36px;
   left: 12px;
-  z-index: 20;
+  z-index: var(--z-chrome);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -2786,7 +2789,7 @@ button {
   bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 20;
+  z-index: var(--z-chrome);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2823,14 +2826,61 @@ button {
   outline-offset: 2px;
 }
 
-.scene-source__switch {
+/* The 2D/3D toggle: the bottom-right corner, with the map's zoom cluster
+   stacked above it. Both read one height variable, so the room made for the
+   toggle cannot drift from the toggle itself. `border-box` is what makes that
+   variable the real outer height rather than 2px less than it.
+
+   All the scene chrome is `--z-chrome` — map furniture, under the panels. It is
+   NOT the literal 20 the toasts and modals use: at phone width a panel fills
+   the viewport, and chrome floating over it silently eats clicks on whatever it
+   covers (it swallowed the issue composer's own buttons until this was fixed). */
+.scene-toggle {
   position: absolute;
-  bottom: 36px;
-  right: calc(12px + 56px);
-  z-index: 20;
-  font-size: 11px;
-  min-height: 30px;
-  padding: 5px 10px;
+  bottom: 12px;
+  right: 12px;
+  z-index: var(--z-chrome);
+  box-sizing: border-box;
+  appearance: none;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  /* Fixed rather than `min-height`: the variable is what the zoom cluster above
+     budgets for, so the box must be exactly it and not the taller of it and an
+     inherited line box. One line in both languages, centred. */
+  display: inline-flex;
+  align-items: center;
+  height: var(--scene-toggle-height);
+  padding: 0 12px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-floating);
+  cursor: pointer;
+}
+
+/* Only the stages that show the toggle give up the corner. An embed or a local
+   file has no toggle, and its zoom cluster must not move to make room for one. */
+.map-stage--scene-toggle .zoom-cluster {
+  bottom: calc(12px + var(--scene-toggle-height) + var(--space-2));
+}
+
+.scene-toggle:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.scene-toggle:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Pressed is the 3D state, and it is worth showing plainly: the label already
+   says what the button will do, so the accent says what the view currently is. */
+.scene-toggle[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
 }
 
 /* Canvas-coloured, so a swap reads as the view catching its breath rather than
@@ -2838,7 +2888,7 @@ button {
 .scene-veil {
   position: absolute;
   inset: 0;
-  z-index: 20;
+  z-index: var(--z-chrome);
   background: var(--color-canvas);
   pointer-events: none;
   animation: scene-veil-fade 160ms ease-out;

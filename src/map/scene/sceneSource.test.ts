@@ -159,6 +159,76 @@ describe("reduceSceneSource", () => {
       expect(["generated", "fallback2d"]).toContain(state.active);
     }
   });
+
+  it("climbs to 3D when the reviewer asks for it, and says it was asked for", () => {
+    // The only way into 3D after a 2D-only start: the toggle. The generated
+    // scene is the rung every published version retains, so that is where an
+    // explicit ask lands; the tile document climbs from there when it answers.
+    const off = initialSceneSource({ requested: false, capabilitySupported: true, ...MOTION });
+    const on = reduceSceneSource(off, { type: "user_chose_3d" }, MOTION);
+    expect(on.active).toBe("generated");
+    expect(on.reason).toBeNull();
+    expect(on.requested).toBe(true);
+  });
+
+  it("does not spend the recovery budget on a deliberate choice", () => {
+    // `retriesLeft` bounds *automatic* recoveries so a failing GPU cannot loop.
+    // A reviewer toggling the view is not a recovery, and a toggle that stops
+    // working after two uses would be a bug rather than a budget.
+    let state = initialSceneSource({ requested: false, capabilitySupported: true, ...MOTION });
+    for (let i = 0; i < MAX_3D_RETRIES + 2; i += 1) {
+      state = reduceSceneSource(state, { type: "user_chose_3d" }, MOTION);
+      expect(state.active).toBe("generated");
+      state = reduceSceneSource(state, { type: "user_chose_2d" }, MOTION);
+      expect(state.active).toBe("fallback2d");
+    }
+    expect(state.retriesLeft).toBe(MAX_3D_RETRIES);
+  });
+
+  it("refuses 3D on a device below the floor, naming the reason", () => {
+    // The toggle is hidden on such a device, so this is the defensive path:
+    // answer with the honest reason rather than a 3D state nothing can draw.
+    const off = initialSceneSource({ requested: false, capabilitySupported: false, ...MOTION });
+    const asked = reduceSceneSource(off, { type: "user_chose_3d" }, MOTION);
+    expect(asked.active).toBe("fallback2d");
+    expect(asked.reason).toBe("capability_unmet");
+    expect(asked.requested).toBe(true);
+  });
+
+  it("does not resurrect a tile scene already given up this session", () => {
+    // #30 section 5: a source given up stays given up for the session. Leaving
+    // and re-entering 3D must not re-ask for a package that would not start.
+    const dropped = reduceSceneSource(renderingTiles(), { type: "load_failed" }, MOTION);
+    expect(dropped.droppedFrom).toBe("tiles");
+    const off = reduceSceneSource(dropped, { type: "user_chose_2d" }, MOTION);
+    const back = reduceSceneSource(off, { type: "user_chose_3d" }, MOTION);
+    expect(back.active).toBe("generated");
+    expect(back.droppedFrom).toBe("tiles");
+    expect(reduceSceneSource(back, { type: "tiles_ready" }, MOTION).active).toBe("generated");
+  });
+
+  it("veils the climb into 3D, and never under reduced motion", () => {
+    const off = initialSceneSource({ requested: false, capabilitySupported: true, ...MOTION });
+    expect(reduceSceneSource(off, { type: "user_chose_3d" }, MOTION).veil).toBe(true);
+    expect(reduceSceneSource(off, { type: "user_chose_3d" }, REDUCED).veil).toBe(false);
+  });
+
+  it("says nothing when the reviewer chose 2D, and speaks up when it was taken", () => {
+    // The notice explains losses. A choice is not one, and the toggle beside it
+    // already offers the way back; the three involuntary reasons still explain
+    // themselves, which is the distinction worth keeping.
+    const chose = reduceSceneSource(rendering(), { type: "user_chose_2d" }, MOTION);
+    expect(chose.active).toBe("fallback2d");
+    expect(fallbackNotice(chose)).toBeNull();
+    for (const event of [{ type: "load_failed" }, { type: "context_lost" }] as const) {
+      expect(fallbackNotice(reduceSceneSource(rendering(), event, MOTION))).not.toBeNull();
+    }
+    expect(
+      fallbackNotice(
+        initialSceneSource({ requested: true, capabilitySupported: false, ...MOTION }),
+      ),
+    ).not.toBeNull();
+  });
 });
 
 describe("sourceProvenance", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseViewerParams } from "./viewerParams";
+import { parseViewerParams, sceneSearch } from "./viewerParams";
 
 const BASE = "https://viewer.test/";
 
@@ -83,5 +83,40 @@ describe("parseViewerParams", () => {
     expect(parseViewerParams("?version=3", BASE).version).toBeNull(); // legacy numeric seq
     expect(parseViewerParams("?version=", BASE).version).toBeNull();
     expect(parseViewerParams("", BASE).version).toBeNull();
+  });
+});
+
+describe("sceneSearch", () => {
+  it("round-trips through the parser it is the counterpart to", () => {
+    // The toggle writes what the parser reads; anything else and a reload
+    // silently disagrees with what the viewer is showing.
+    expect(parseViewerParams(sceneSearch("?dataset=tokyo", true), BASE).scene).toBe(true);
+    expect(parseViewerParams(sceneSearch("?dataset=tokyo&scene=1", false), BASE).scene).toBe(false);
+  });
+
+  it("keeps every other parameter, and their order", () => {
+    const on = sceneSearch("?dataset=tokyo&lang=ja&version=abc", true);
+    expect(on).toBe("?dataset=tokyo&lang=ja&version=abc&scene=1");
+    expect(sceneSearch(on, false)).toBe("?dataset=tokyo&lang=ja&version=abc");
+  });
+
+  it("never writes the parameter twice", () => {
+    expect(sceneSearch("?scene=1&dataset=tokyo", true)).toBe("?scene=1&dataset=tokyo");
+    expect(sceneSearch("?scene&dataset=tokyo", true)).toBe("?scene=1&dataset=tokyo");
+  });
+
+  it("drops every spelling when 3D is turned off", () => {
+    // `?scene`, `?scene=1`, and `?scene=true` all opt in, so all three have to
+    // go — leaving one behind would re-enable 3D on the next reload.
+    expect(sceneSearch("?scene=true&dataset=tokyo", false)).toBe("?dataset=tokyo");
+    expect(sceneSearch("?scene&dataset=tokyo", false)).toBe("?dataset=tokyo");
+    expect(sceneSearch("?dataset=tokyo&scene=1&scene=true", false)).toBe("?dataset=tokyo");
+  });
+
+  it("yields an empty string rather than a bare question mark", () => {
+    // `replaceState` with "?" leaves a trailing marker in the address bar.
+    expect(sceneSearch("?scene=1", false)).toBe("");
+    expect(sceneSearch("", false)).toBe("");
+    expect(sceneSearch("", true)).toBe("?scene=1");
   });
 });

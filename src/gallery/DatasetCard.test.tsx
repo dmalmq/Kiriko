@@ -191,4 +191,39 @@ describe("DatasetCard", () => {
     render(<DatasetCard venue={venue} locale="en" onOpen={() => {}} onDelete={() => {}} />);
     expect(screen.queryByRole("button", { name: "Review network" })).toBeNull();
   });
+
+  it("shows Open in 3D and calls onView3d when provided", () => {
+    const onView3d = vi.fn();
+    render(
+      <DatasetCard
+        venue={venue}
+        locale="en"
+        onOpen={() => {}}
+        onDelete={() => {}}
+        onView3d={onView3d}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open in 3D" }));
+    expect(onView3d).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides Open in 3D when onView3d is omitted", () => {
+    // Omitted covers both refusals: a device below the 3D floor, and a venue
+    // with no published version to render.
+    render(<DatasetCard venue={venue} locale="en" onOpen={() => {}} onDelete={() => {}} />);
+    expect(screen.queryByRole("button", { name: "Open in 3D" })).toBeNull();
+  });
+
+  it("labels the 3D action in Japanese when locale is ja", () => {
+    render(
+      <DatasetCard
+        venue={venue}
+        locale="ja"
+        onOpen={() => {}}
+        onDelete={() => {}}
+        onView3d={() => {}}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "3D で開く" })).toBeTruthy();
+  });
 });
