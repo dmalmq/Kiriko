@@ -7,6 +7,7 @@ mod generated;
 mod glb;
 mod package;
 mod quantize;
+mod registration;
 mod roles;
 
 pub use derive::{DeriveReport, derive_scene, derive_scene_with_report};
@@ -20,6 +21,7 @@ pub use package::{
     TileMember, TileMemberKind, TilePackageError, TilePackageReport, validate_tile_package,
 };
 pub use quantize::{decode_normal_oct, encode_normal_oct, quantize_positions};
+pub use registration::{FrameTransform, TileLevel, composite_level_id, resolve_tile_levels};
 pub use roles::{occlusion_for_role, role_for_category};
 
 #[derive(Debug, thiserror::Error)]
