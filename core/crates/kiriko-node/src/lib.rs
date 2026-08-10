@@ -776,3 +776,185 @@ pub fn evaluate_tile_activation(
         request_json,
     })
 }
+
+/// JS-facing discriminated tile-scene result. Success carries the encoded
+/// `KSC1` document as a `Buffer`; failure carries `{ code, message }`.
+#[napi(object)]
+pub struct NativeTileSceneResponse {
+    pub ok: bool,
+    pub scene: Option<Buffer>,
+    pub error_json: Option<String>,
+}
+
+/// What the server sends to derive an activated package's render document.
+/// The mappings come from the activation that produced them, so the document
+/// describes exactly the levels and associations the gates judged.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TileSceneRequest {
+    asset_version: String,
+    root_transform: [f64; 16],
+    /// Identity of the derived document — the package's own content address.
+    source_hash: String,
+    /// Composite level identity → canonical floor id.
+    #[serde(default)]
+    floor_mappings: std::collections::BTreeMap<String, String>,
+    /// Source object id → canonical venue feature id.
+    #[serde(default)]
+    source_object_associations: std::collections::BTreeMap<String, String>,
+    /// Source object id → the producer's occlusion policy for it.
+    #[serde(default)]
+    contextual_classifications: std::collections::BTreeMap<String, String>,
+}
+
+pub enum TileSceneOutcome {
+    Success(Vec<u8>),
+    Failure(String),
+}
+
+pub struct TileSceneTask {
+    bundle: Vec<u8>,
+    contents: Vec<Vec<u8>>,
+    request_json: String,
+}
+
+#[napi]
+impl Task for TileSceneTask {
+    type Output = TileSceneOutcome;
+    type JsValue = NativeTileSceneResponse;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let request: TileSceneRequest = match serde_json::from_str(&self.request_json) {
+            Ok(request) => request,
+            Err(error) => {
+                return Ok(TileSceneOutcome::Failure(
+                    json!({ "code": "malformed_request", "message": error.to_string() })
+                        .to_string(),
+                ));
+            }
+        };
+        let mut contextual = std::collections::BTreeMap::new();
+        for (source_object_id, occlusion) in &request.contextual_classifications {
+            let class = match occlusion.as_str() {
+                "never" => kiriko_scene::OcclusionClass::Never,
+                "protected_corridor" => kiriko_scene::OcclusionClass::ProtectedCorridor,
+                "context" => kiriko_scene::OcclusionClass::Context,
+                other => {
+                    return Ok(TileSceneOutcome::Failure(
+                        json!({
+                            "code": "malformed_request",
+                            "message": format!("unknown occlusion {other:?}")
+                        })
+                        .to_string(),
+                    ));
+                }
+            };
+            contextual.insert(source_object_id.clone(), class);
+        }
+
+        let mut scenes = Vec::with_capacity(self.contents.len());
+        for content in &self.contents {
+            match kiriko_scene::read_glb(content) {
+                Ok(scene) => scenes.push(scene),
+                Err(error) => {
+                    return Ok(TileSceneOutcome::Failure(
+                        json!({ "code": "undecodable_content", "message": error.to_string() })
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        // The venue's own §8 frame — the same one registration measured in, and
+        // the one the generated source states. Read from the bundle rather than
+        // sent, so the two sources cannot be told different frames.
+        let document = match decode_bundle(&self.bundle) {
+            Ok(document) => document,
+            Err(error) => {
+                return Ok(TileSceneOutcome::Failure(
+                    bundle_error_json(&error).to_string(),
+                ));
+            }
+        };
+        let Some(spatial) = document.spatial_context.as_ref() else {
+            return Ok(TileSceneOutcome::Failure(
+                json!({
+                    "code": "no_spatial_context",
+                    "message": "the venue version carries no §8 spatial context to place tiles in"
+                })
+                .to_string(),
+            ));
+        };
+        let frame = kiriko_scene::VenueFrame {
+            ecef_origin: spatial.frame.ecef_origin,
+            enu_basis_ecef: spatial.frame.enu_basis_ecef,
+        };
+        // Placement: the package's own coordinates into that frame, through the
+        // published root transform applied unchanged (#31).
+        let placement = kiriko_scene::FrameTransform::from_tileset(
+            &request.root_transform,
+            &frame.ecef_origin,
+            &frame.enu_basis_ecef,
+        );
+        let levels = kiriko_scene::resolve_tile_levels(&scenes, &request.asset_version, &placement);
+        let derived = match kiriko_scene::derive_package_scene(
+            &scenes,
+            &levels,
+            &placement,
+            &frame,
+            &request.source_hash,
+            &kiriko_scene::PackageIdentity {
+                floor_mappings: request.floor_mappings.clone(),
+                associations: request.source_object_associations.clone(),
+                contextual,
+            },
+        ) {
+            Ok(derived) => derived,
+            Err(error) => {
+                return Ok(TileSceneOutcome::Failure(
+                    json!({ "code": "underivable_package", "message": error.to_string() })
+                        .to_string(),
+                ));
+            }
+        };
+        match kiriko_scene::encode_scene(&derived.document) {
+            Ok(bytes) => Ok(TileSceneOutcome::Success(bytes)),
+            Err(error) => Ok(TileSceneOutcome::Failure(
+                json!({ "code": "unencodable_scene", "message": error.to_string() }).to_string(),
+            )),
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(match output {
+            TileSceneOutcome::Success(bytes) => NativeTileSceneResponse {
+                ok: true,
+                scene: Some(bytes.into()),
+                error_json: None,
+            },
+            TileSceneOutcome::Failure(error_json) => NativeTileSceneResponse {
+                ok: false,
+                scene: None,
+                error_json: Some(error_json),
+            },
+        })
+    }
+}
+
+/// Derive an activated tile package's `KSC1` render document — the same format
+/// the generated scene compiles to, so the renderer consumes both unchanged.
+///
+/// Derived once, at activation: a 172 MiB package cannot be re-derived per
+/// request, and the bytes belong to the version the activation produced, so a
+/// pinned URL can promise they never change. Runs off the Node.js event loop.
+#[napi]
+pub fn derive_tile_scene(
+    bundle: Buffer,
+    contents: Vec<Buffer>,
+    request_json: String,
+) -> AsyncTask<TileSceneTask> {
+    AsyncTask::new(TileSceneTask {
+        bundle: bundle.to_vec(),
+        contents: contents.iter().map(|buffer| buffer.to_vec()).collect(),
+        request_json,
+    })
+}

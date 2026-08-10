@@ -23,6 +23,8 @@ import { requireProducerSession } from "../auth/guard";
 import {
   CoreTileActivationError,
   CoreTilePackageError,
+  CoreTileSceneError,
+  deriveTileScene,
   evaluateTileActivation,
   ingestTilePackage,
   type RegistrationProfileInput,
@@ -405,9 +407,11 @@ export function registerTileRoutes(app: FastifyInstance): void {
             versionId: Type.Number(),
             seq: Type.Number(),
           }),
+          400: ErrorSchema,
           403: ErrorSchema,
           404: ErrorSchema,
           409: ErrorSchema,
+          500: ErrorSchema,
         },
       },
     },
@@ -445,6 +449,40 @@ export function registerTileRoutes(app: FastifyInstance): void {
           );
       }
 
+      // Derive the render document now, from exactly the mappings this
+      // activation was judged on. Doing it here rather than per request is
+      // what makes the bytes belong to the version being published, and so
+      // what lets the pinned URL promise they never change.
+      let scene: Buffer;
+      try {
+        scene = await deriveTileScene(
+          request.server.blobs.read(target.bundleHash),
+          pkg.contents.map((member) => request.server.blobs.read(member.hash)),
+          {
+            assetVersion: pkg.sourceHash,
+            rootTransform: readRootTransform(request.server.blobs.read(pkg.rootTilesetHash)),
+            sourceHash: pkg.sourceHash,
+            floorMappings: Object.fromEntries(
+              evaluation.evaluation.floorMappings.flatMap(([canonical, composites]) =>
+                composites.map((composite) => [composite, canonical] as const),
+              ),
+            ),
+          },
+        );
+      } catch (error) {
+        if (error instanceof CoreTileSceneError) {
+          const status = error.code === "bridge_error" ? 500 : 400;
+          return reply.code(status).send(errorBody(error.code, error.message));
+        }
+        request.log.error({ err: error }, "tile scene derivation failed");
+        return reply.code(500).send(errorBody("internal_error", "internal_error"));
+      }
+      const stored = request.server.blobs.put(scene);
+      request.server.db
+        .prepare("INSERT OR IGNORE INTO blobs (hash, size) VALUES (?, ?)")
+        .run(stored.hash, stored.size);
+      registerTileBlob(request.server.db, stored.hash, stored.size);
+
       const nextSeq = target.seq + 1;
       const accepted = request.server.queue.enqueuePublication(
         "publish_imdf",
@@ -474,7 +512,13 @@ export function registerTileRoutes(app: FastifyInstance): void {
           tilePackageId: Number(packageId),
         },
       );
-      markActivated(request.server.db, evaluation.id, accepted.versionId, request.user.id);
+      markActivated(
+        request.server.db,
+        evaluation.id,
+        accepted.versionId,
+        request.user.id,
+        stored.hash,
+      );
       return reply
         .code(202)
         .send({ jobId: accepted.jobId, versionId: accepted.versionId, seq: nextSeq });

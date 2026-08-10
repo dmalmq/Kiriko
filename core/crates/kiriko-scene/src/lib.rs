@@ -10,7 +10,8 @@ mod quantize;
 mod registration;
 mod roles;
 pub use derive::{
-    DeriveReport, PackageScene, derive_package_scene, derive_scene, derive_scene_with_report,
+    DeriveReport, PackageIdentity, PackageScene, VenueFrame, derive_package_scene, derive_scene,
+    derive_scene_with_report,
 };
 pub use format::{
     OcclusionClass, SCENE_MAGIC, SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel,

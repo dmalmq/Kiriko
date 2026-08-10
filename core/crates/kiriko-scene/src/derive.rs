@@ -248,6 +248,52 @@ pub struct PackageScene {
     pub unmapped_levels: Vec<String>,
 }
 
+/// The venue-local frame a derived document is expressed in: §8's ENU frame.
+///
+/// Separate from the tile-to-venue placement transform on purpose. Placement is
+/// how a package's own coordinates reach this frame; the frame is what the
+/// renderer uses to put the scene on the globe, and both sources must state the
+/// same one or they would draw in different places.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VenueFrame {
+    pub ecef_origin: [f64; 3],
+    /// East, north, up as ECEF unit vectors.
+    pub enu_basis_ecef: [[f64; 3]; 3],
+}
+
+impl VenueFrame {
+    /// Column-major 4x4: the ENU basis as columns, the ECEF origin last —
+    /// `p_ecef = origin + basis · p_local`.
+    #[must_use]
+    pub fn world_transform(&self) -> [f64; 16] {
+        let b = self.enu_basis_ecef;
+        let t = self.ecef_origin;
+        [
+            b[0][0], b[0][1], b[0][2], 0.0, //
+            b[1][0], b[1][1], b[1][2], 0.0, //
+            b[2][0], b[2][1], b[2][2], 0.0, //
+            t[0], t[1], t[2], 1.0,
+        ]
+    }
+}
+
+/// What the activation decided about a package's identity: which canonical
+/// floor each composite level renders as, which canonical feature each source
+/// object represents, and what a producer classified as context.
+///
+/// Grouped because they arrive together, from one activation's descriptor, and
+/// separating them at a call site would let a document be derived from one
+/// activation's mappings and another's associations.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PackageIdentity {
+    /// Composite level identity → canonical floor id.
+    pub floor_mappings: BTreeMap<String, String>,
+    /// Source object id → canonical venue feature id.
+    pub associations: BTreeMap<String, String>,
+    /// Source object id → the producer's occlusion policy for it.
+    pub contextual: BTreeMap<String, OcclusionClass>,
+}
+
 /// Derive the render document for an activated tile package.
 ///
 /// Produces the *same* KSC1 the generated source compiles to — that is what
@@ -269,11 +315,10 @@ pub struct PackageScene {
 pub fn derive_package_scene(
     scenes: &[GlbScene],
     levels: &[TileLevel],
-    transform: &FrameTransform,
+    placement: &FrameTransform,
+    frame: &VenueFrame,
     source_hash: &str,
-    floor_mappings: &BTreeMap<String, String>,
-    associations: &BTreeMap<String, String>,
-    contextual: &BTreeMap<String, OcclusionClass>,
+    identity: &PackageIdentity,
 ) -> Result<PackageScene, SceneError> {
     // Keyed on the composite identity minus its asset-version component, which
     // is constant within one package.
@@ -293,7 +338,7 @@ pub fn derive_package_scene(
                 ),
                 index as u32,
             );
-            let canonical_id = floor_mappings.get(&level.composite_id).cloned();
+            let canonical_id = identity.floor_mappings.get(&level.composite_id).cloned();
             if canonical_id.is_none() {
                 unmapped_levels.push(level.composite_id.clone());
             }
@@ -326,7 +371,7 @@ pub fn derive_package_scene(
             // component, which is constant within one package: recomputing the
             // full string here would mean two places spelling identity, and
             // that is how they stop agreeing.
-            let identity = (
+            let level_identity = (
                 row.source_document.as_str(),
                 row.source_link_name.as_str(),
                 row.level_key.as_str(),
@@ -335,10 +380,11 @@ pub fn derive_package_scene(
             let role = role_for_category(&row.category);
             features.push(SceneFeature {
                 source_object_id: row.revit_unique_id.clone(),
-                canonical_id: associations.get(&row.revit_unique_id).cloned(),
-                level_index: level_index_of.get(&identity).copied().unwrap_or(0),
+                canonical_id: identity.associations.get(&row.revit_unique_id).cloned(),
+                level_index: level_index_of.get(&level_identity).copied().unwrap_or(0),
                 role,
-                occlusion: contextual
+                occlusion: identity
+                    .contextual
                     .get(&row.revit_unique_id)
                     .copied()
                     .unwrap_or_else(|| occlusion_for_role(role)),
@@ -350,7 +396,7 @@ pub fn derive_package_scene(
         }
     }
 
-    let geometry = batch_geometry(scenes, &feature_base, &features, transform)?;
+    let geometry = batch_geometry(scenes, &feature_base, &features, placement)?;
 
     Ok(PackageScene {
         document: SceneDocument {
@@ -358,12 +404,12 @@ pub fn derive_package_scene(
                 format_version: 1,
                 deriver_version: 1,
                 source_hash: source_hash.to_string(),
-                frame_origin_ecef: [
-                    transform.matrix()[12],
-                    transform.matrix()[13],
-                    transform.matrix()[14],
-                ],
-                world_transform: *transform.matrix(),
+                // The venue's own frame, identical to what the generated
+                // source emits. Geometry is already placed into it above, so
+                // the renderer positions both sources with one matrix and never
+                // learns which one it is drawing.
+                frame_origin_ecef: frame.ecef_origin,
+                world_transform: frame.world_transform(),
                 bounds_min: geometry.bounds_min,
                 bounds_max: geometry.bounds_max,
             },

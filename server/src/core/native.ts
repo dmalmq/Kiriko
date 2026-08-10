@@ -1,5 +1,6 @@
 import {
   compileImdf,
+  deriveTileScene as deriveTileSceneNative,
   evaluateTileActivation as evaluateTileActivationNative,
   exportNetwork,
   ingestTilePackage as ingestTilePackageNative,
@@ -1020,4 +1021,98 @@ export async function evaluateTileActivation(
     );
   }
   return parseActivationEvaluation("evaluationJson" in response ? response.evaluationJson : undefined);
+}
+
+/**
+ * `@kiriko/node`'s raw tile-scene bridge contract. Treated as untrusted FFI
+ * output — validated before use.
+ */
+export type NativeTileSceneFn = (
+  bundle: Buffer,
+  contents: Buffer[],
+  requestJson: string,
+) => Promise<unknown>;
+
+/** How a producer classified an unassigned source object (#32 section 6). */
+export type SceneOcclusionClass = "never" | "protected_corridor" | "context";
+
+export interface TileSceneRequest {
+  assetVersion: string;
+  /** The published tileset root transform, column-major, applied unchanged. */
+  rootTransform: number[];
+  /** Identity of the derived document — the package's own content address. */
+  sourceHash: string;
+  /** Composite level identity → canonical floor id. */
+  floorMappings: Record<string, string>;
+  /** Source object id → canonical venue feature id. */
+  sourceObjectAssociations?: Record<string, string>;
+  /** Source object id → the producer's occlusion policy for it. */
+  contextualClassifications?: Record<string, SceneOcclusionClass>;
+}
+
+/** A render document that could not be derived. */
+export class CoreTileSceneError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CoreTileSceneError";
+  }
+}
+
+/** The `KSC1` container magic every derived document starts with. */
+const SCENE_MAGIC = Buffer.from("KSC1", "ascii");
+
+/**
+ * Derive an activated package's render document: the same `KSC1` format the
+ * generated scene compiles to, so the renderer consumes both unchanged.
+ *
+ * Called once, at activation. A 172 MiB package cannot be re-derived per
+ * request, and the bytes belong to the version the activation produced — which
+ * is what lets a pinned URL promise they never change.
+ */
+export async function deriveTileScene(
+  bundle: Buffer,
+  contents: Buffer[],
+  request: TileSceneRequest,
+  nativeDerive: NativeTileSceneFn = deriveTileSceneNative,
+): Promise<Buffer> {
+  let response: unknown;
+  try {
+    response = await nativeDerive(bundle, contents, JSON.stringify(request));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CoreTileSceneError("bridge_error", `native derive bridge failed: ${message}`);
+  }
+  if (response === null || typeof response !== "object" || !("ok" in response)) {
+    throw new CoreTileSceneError("bridge_error", "native derive response was malformed");
+  }
+  if (response.ok !== true) {
+    const errorJson = "errorJson" in response ? response.errorJson : undefined;
+    if (typeof errorJson !== "string") {
+      throw new CoreTileSceneError("bridge_error", "native derive returned no reason");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(errorJson);
+    } catch {
+      throw new CoreTileSceneError("bridge_error", "native derive reason was not JSON");
+    }
+    const reason = parsed as { code?: unknown; message?: unknown };
+    if (typeof reason.code !== "string" || reason.code === "") {
+      throw new CoreTileSceneError("bridge_error", "native derive reason had no code");
+    }
+    throw new CoreTileSceneError(
+      reason.code,
+      typeof reason.message === "string" ? reason.message : `derive refused: ${reason.code}`,
+    );
+  }
+  const scene = "scene" in response ? response.scene : undefined;
+  if (!Buffer.isBuffer(scene) || !scene.subarray(0, 4).equals(SCENE_MAGIC)) {
+    // The bytes go straight into the blob store and out to viewers; a
+    // container that is not KSC1 would be served as one.
+    throw new CoreTileSceneError("bridge_error", "native derive returned no KSC1 document");
+  }
+  return scene;
 }

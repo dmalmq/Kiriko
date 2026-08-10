@@ -100,9 +100,15 @@ function referencedHashes(db: Database): Set<string> {
     }
   };
 
-  // Tile references: the package record itself, and its members.
+  // Tile references: the package record itself, its members, and the render
+  // document an activation derived from it. The derived scene is tile content
+  // like any other member — a sweep that did not know about it would delete the
+  // geometry a published version is rendering.
   collect("SELECT source_hash AS hash FROM tile_packages");
   collect("SELECT hash FROM tile_package_members");
+  collect(
+    "SELECT scene_blob_hash AS hash FROM tile_activations WHERE scene_blob_hash IS NOT NULL",
+  );
 
   // Everything else the shared store holds for a version. A tile sweep must not
   // delete a bundle that happens to hash the same as some member.

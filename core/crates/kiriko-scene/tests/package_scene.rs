@@ -12,9 +12,18 @@ mod support;
 use std::collections::BTreeMap;
 
 use kiriko_scene::{
-    FrameTransform, OcclusionClass, PackageScene, RegistrationProfile, SemanticRole,
-    derive_package_scene, read_glb, resolve_tile_levels,
+    FrameTransform, OcclusionClass, PackageIdentity, PackageScene, RegistrationProfile,
+    SemanticRole, VenueFrame, derive_package_scene, read_glb, resolve_tile_levels,
 };
+
+/// A venue frame at the WGS84 origin: the identity ENU basis keeps the fixtures
+/// about identity and batching rather than about geodesy.
+fn venue_frame() -> VenueFrame {
+    VenueFrame {
+        ecef_origin: [6_378_137.0, 0.0, 0.0],
+        enu_basis_ecef: [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+    }
+}
 use support::{FeatureSpec, glb_with_features, quad};
 
 /// A package with one floor on `b1fl` and one wall beside it.
@@ -48,10 +57,12 @@ fn package_scene(glb: &[u8], mappings: &BTreeMap<String, String>) -> PackageScen
         std::slice::from_ref(&scene),
         &levels,
         &FrameTransform::identity(),
+        &venue_frame(),
         "package-hash",
-        mappings,
-        &BTreeMap::new(),
-        &BTreeMap::new(),
+        &PackageIdentity {
+            floor_mappings: mappings.clone(),
+            ..PackageIdentity::default()
+        },
     )
     .expect("the package derives")
 }
@@ -154,10 +165,13 @@ fn an_associated_source_object_carries_its_canonical_feature() {
         std::slice::from_ref(&scene),
         &levels,
         &FrameTransform::identity(),
+        &venue_frame(),
         "package-hash",
-        &mapped("asset-v1|station.rvt||b1fl|-31", "level-b1"),
-        &BTreeMap::from([("floor-b1".to_string(), "unit-corridor".to_string())]),
-        &BTreeMap::new(),
+        &PackageIdentity {
+            floor_mappings: mapped("asset-v1|station.rvt||b1fl|-31", "level-b1"),
+            associations: BTreeMap::from([("floor-b1".to_string(), "unit-corridor".to_string())]),
+            ..PackageIdentity::default()
+        },
     )
     .expect("the package derives");
 
@@ -194,10 +208,13 @@ fn producer_classified_context_renders_under_its_own_occlusion_policy() {
         std::slice::from_ref(&scene),
         &levels,
         &FrameTransform::identity(),
+        &venue_frame(),
         "package-hash",
-        &mapped("asset-v1|station.rvt||b1fl|-31", "level-b1"),
-        &BTreeMap::new(),
-        &BTreeMap::from([("wall-b1".to_string(), OcclusionClass::Never)]),
+        &PackageIdentity {
+            floor_mappings: mapped("asset-v1|station.rvt||b1fl|-31", "level-b1"),
+            contextual: BTreeMap::from([("wall-b1".to_string(), OcclusionClass::Never)]),
+            ..PackageIdentity::default()
+        },
     )
     .expect("the package derives");
 
@@ -231,38 +248,42 @@ fn geometry_is_batched_per_level_and_role_exactly_as_the_generated_source_is() {
 }
 
 #[test]
-fn the_world_transform_is_the_one_the_package_was_registered_with() {
-    // The renderer places the scene with this matrix. If derivation invented
-    // its own, a package that passed registration would draw somewhere else.
+fn the_header_states_the_venue_frame_not_the_packages_own_placement() {
+    // Placement is how a package's coordinates reach the venue frame; the frame
+    // is how the renderer puts the scene on the globe. Emitting the placement
+    // matrix here would draw tiles somewhere the generated scene is not.
     let scene = read_glb(&station_package()).expect("fixture glb reads");
-    let transform = FrameTransform::from_tileset(
+    let placement = FrameTransform::from_tileset(
         &[
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 100.0, 200.0, 300.0, 1.0,
         ],
-        &[0.0, 0.0, 0.0],
-        &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        &venue_frame().ecef_origin,
+        &venue_frame().enu_basis_ecef,
     );
-    let levels = resolve_tile_levels(std::slice::from_ref(&scene), "asset-v1", &transform);
+    let levels = resolve_tile_levels(std::slice::from_ref(&scene), "asset-v1", &placement);
 
     let derived = derive_package_scene(
         std::slice::from_ref(&scene),
         &levels,
-        &transform,
+        &placement,
+        &venue_frame(),
         "package-hash",
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-        &BTreeMap::new(),
+        &PackageIdentity::default(),
     )
     .expect("the package derives");
 
-    assert_eq!(&derived.document.header.world_transform, transform.matrix());
     assert_eq!(
         derived.document.header.frame_origin_ecef,
-        [
-            transform.matrix()[12],
-            transform.matrix()[13],
-            transform.matrix()[14]
-        ]
+        venue_frame().ecef_origin
+    );
+    assert_eq!(
+        derived.document.header.world_transform,
+        venue_frame().world_transform()
+    );
+    assert_ne!(
+        &derived.document.header.world_transform,
+        placement.matrix(),
+        "the placement transform is not the world transform"
     );
 }
 

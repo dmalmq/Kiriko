@@ -209,19 +209,26 @@ export function findEvaluation(db: Database, packageId: number): StoredEvaluatio
   };
 }
 
-/** Bind an evaluation to the immutable version its activation produced. */
+/**
+ * Bind an evaluation to the immutable version its activation produced, and to
+ * the render document derived for it.
+ *
+ * One statement, because a version bound to a package with no derived scene
+ * would serve tiles nothing can draw.
+ */
 export function markActivated(
   db: Database,
   evaluationId: number,
   activatedVersionId: number,
   activatedBy: number,
+  sceneBlobHash: string,
 ): void {
   db.prepare(
     `UPDATE tile_activations
      SET state = 'activated', activated_at = datetime('now'),
-         activated_by = ?, activated_version_id = ?
+         activated_by = ?, activated_version_id = ?, scene_blob_hash = ?
      WHERE id = ?`,
-  ).run(activatedBy, activatedVersionId, evaluationId);
+  ).run(activatedBy, activatedVersionId, sceneBlobHash, evaluationId);
 }
 
 /**
