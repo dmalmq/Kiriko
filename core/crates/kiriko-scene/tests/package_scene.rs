@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 
 use kiriko_scene::{
     FrameTransform, OcclusionClass, PackageIdentity, PackageScene, RegistrationProfile,
-    SemanticRole, VenueFrame, derive_package_scene, read_glb, resolve_tile_levels,
+    SemanticRole, VenueFrame, decode_scene, derive_package_scene, encode_scene, read_glb,
+    resolve_tile_levels,
 };
 
 /// A venue frame at the WGS84 origin: the identity ENU basis keeps the fixtures
@@ -310,4 +311,20 @@ fn a_default_profile_registration_and_a_derivation_agree_on_levels() {
         derived.document.levels[0].source_level_key,
         levels[0].level_key
     );
+}
+
+#[test]
+fn the_derived_document_round_trips_through_the_container_the_client_reads() {
+    // The client decodes these bytes with this codec through wasm. A document
+    // that derived correctly but would not decode is a scene nobody can draw.
+    let derived = package_scene(
+        &station_package(),
+        &mapped("asset-v1|station.rvt||b1fl|-31", "level-b1"),
+    );
+
+    let bytes = encode_scene(&derived.document).expect("the document encodes");
+    assert_eq!(&bytes[0..4], b"KSC1");
+    let decoded = decode_scene(&bytes).expect("the document decodes");
+
+    assert_eq!(decoded, derived.document);
 }
