@@ -49,6 +49,18 @@ export function datasetBundleUrl(slug: string, publicVersionId?: string): string
 }
 
 /**
+ * The activated tile package's render document for a venue version, or the
+ * latest one. A venue with no activated package answers 404, which is the
+ * absence of a source rather than a failure.
+ */
+export function datasetSceneUrl(slug: string, publicVersionId?: string): string {
+  const base = `/v/default/${slug}/scene`;
+  return publicVersionId !== undefined && PUBLIC_VERSION_ID.test(publicVersionId)
+    ? `${base}@${publicVersionId}`
+    : base;
+}
+
+/**
  * Canonical viewer deep-link for a published venue. Pins to `?version=<publicVersionId>`
  * (the permanent 64-hex identity, never the reusable seq) when it is valid,
  * always tags the current locale, and appends `review=1` for network review.

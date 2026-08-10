@@ -34,6 +34,13 @@ export interface BundleRouteRequest {
 export interface BundleSceneRequest {
   type: "scene";
   buffer: ArrayBuffer;
+  /**
+   * Which producer wrote the bytes. A bundle needs its §9 compiled; an
+   * activated package's document was derived server-side and only needs
+   * decoding. Both end as the same render document, which is why one request
+   * carries both rather than the client growing a second scene path.
+   */
+  source?: "generated" | "package";
 }
 
 export type BundleWorkerRequest =

@@ -196,6 +196,24 @@ function renderingTiles(): SceneSourceState {
 }
 
 describe("the tiles rung", () => {
+  it("climbs to tiles when the version turns out to have a package", () => {
+    // Availability is learned by asking for the document, so the first state
+    // is generated and the answer arrives a moment later.
+    const state = reduceSceneSource(rendering(), { type: "tiles_ready" }, MOTION);
+    expect(state.active).toBe("tiles");
+    expect(state.reason).toBeNull();
+  });
+
+  it("does not climb back to tiles after the tile scene was given up", () => {
+    const fell = reduceSceneSource(renderingTiles(), { type: "load_failed" }, MOTION);
+    expect(reduceSceneSource(fell, { type: "tiles_ready" }, MOTION).active).toBe("generated");
+  });
+
+  it("does not climb to tiles from 2D", () => {
+    const twoD = reduceSceneSource(rendering(), { type: "user_chose_2d" }, MOTION);
+    expect(reduceSceneSource(twoD, { type: "tiles_ready" }, MOTION).active).toBe("fallback2d");
+  });
+
   it("starts on tiles when the version has an activated package", () => {
     const state = renderingTiles();
     expect(state.active).toBe("tiles");

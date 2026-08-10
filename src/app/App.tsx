@@ -82,7 +82,15 @@ import {
   type ViewerState,
 } from "../state/viewerReducer";
 import { kirikoTheme } from "../theme/presets";
-import { api, datasetBundleUrl, gdbErrorMessage, viewerHref, type ApiUser, type GdbError } from "../gallery/api";
+import {
+  api,
+  datasetBundleUrl,
+  datasetSceneUrl,
+  gdbErrorMessage,
+  viewerHref,
+  type ApiUser,
+  type GdbError,
+} from "../gallery/api";
 import { parseViewerParams } from "./viewerParams";
 
 const ui = {
@@ -1427,8 +1435,12 @@ export function App() {
   // 3D scene: fetched and compiled off-thread only when `?scene` opts in and a
   // published dataset is being viewed. A venue with no scene resolves absent
   // and the viewer stays 2D.
+  // Which 3D source is active is the *result* of this effect, not an input to
+  // it: depending on `active` would re-run the load when the ladder settles on
+  // tiles and download the document a second time.
+  const render3d = params.scene && sourceState.active !== "fallback2d";
   useEffect(() => {
-    if (!params.scene || params.dataset === null || sourceState.active !== "generated") {
+    if (!render3d || params.dataset === null) {
       setScene(null);
       return;
     }
@@ -1442,6 +1454,24 @@ export function App() {
       // performance harness asserts it (#26 section 4).
       performance.mark(SCENE_DECODE_START);
       try {
+        // The activated package first: it is the top of the ladder, and asking
+        // for it is also how the viewer learns whether this version has one —
+        // a venue without a package answers 404, which is an absent source
+        // rather than a failure.
+        const tiles = await loadKirikoScene(
+          datasetSceneUrl(dataset, params.version ?? undefined),
+          controller.signal,
+          "package",
+        );
+        if (cancelled) {
+          return;
+        }
+        if (tiles !== null) {
+          setScene(readScene(tiles));
+          performance.measure(SCENE_DECODE_MEASURE, SCENE_DECODE_START);
+          dispatchSource({ type: "tiles_ready" });
+          return;
+        }
         const described = await loadKirikoScene(
           datasetBundleUrl(dataset, params.version ?? undefined),
           controller.signal,
@@ -1472,7 +1502,7 @@ export function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [params.scene, params.dataset, params.version, sourceState.active, dispatchSource]);
+  }, [render3d, params.dataset, params.version, dispatchSource]);
 
   useEffect(() => {
     loadFromParams();
@@ -1682,7 +1712,7 @@ export function App() {
             facilities={bundleProvenance?.facilities ?? []}
             onSelectFacility={setSelectedFacility}
             network={reviewActive ? editedNetwork : null}
-            scene={sourceState.active === "generated" ? scene : null}
+            scene={sourceState.active === "fallback2d" ? null : scene}
             preserveDrawingBuffer={params.capture}
             onSceneContextLost={() => {
               dispatchSource({ type: "context_lost" });

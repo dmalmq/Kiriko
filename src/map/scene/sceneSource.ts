@@ -74,6 +74,8 @@ export interface SceneSourceState {
 
 export type SceneSourceEvent =
   | { type: "scene_ready" }
+  /** The version's activated package answered: its document is loadable. */
+  | { type: "tiles_ready" }
   | { type: "capability_unmet" }
   | { type: "load_failed" }
   | { type: "context_lost" }
@@ -126,6 +128,15 @@ export function reduceSceneSource(
     case "scene_ready":
       // Confirmation, not a transition: a source already fell back stays there.
       return state;
+
+    case "tiles_ready":
+      // Availability is learned by asking for the document, so this arrives
+      // after the machine has already settled on the generated scene. It only
+      // climbs from there, and never back over a tile scene already given up.
+      if (state.active !== "generated" || state.droppedFrom !== null) {
+        return state;
+      }
+      return { ...state, active: "tiles", reason: null };
 
     case "veil_finished":
       return state.veil ? { ...state, veil: false } : state;
