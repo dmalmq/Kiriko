@@ -21,7 +21,11 @@ pub use package::{
     TileMember, TileMemberKind, TilePackageError, TilePackageReport, validate_tile_package,
 };
 pub use quantize::{decode_normal_oct, encode_normal_oct, quantize_positions};
-pub use registration::{FrameTransform, TileLevel, composite_level_id, resolve_tile_levels};
+pub use registration::{
+    CoherentCluster, FloorRegistration, FrameTransform, RegistrationProfile, RegistrationReport,
+    ResidualStats, TileLevel, VenueFloor, composite_level_id, measure_registration,
+    resolve_tile_levels,
+};
 pub use roles::{occlusion_for_role, role_for_category};
 
 #[derive(Debug, thiserror::Error)]

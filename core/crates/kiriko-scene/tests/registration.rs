@@ -3,8 +3,26 @@
 
 mod support;
 
-use kiriko_scene::{FrameTransform, read_glb, resolve_tile_levels};
+use kiriko_scene::{
+    FrameTransform, RegistrationProfile, VenueFloor, measure_registration, read_glb,
+    resolve_tile_levels,
+};
 use support::{FeatureSpec, glb_with_features, quad};
+
+/// A venue floor whose only unit is the rectangle `min..max`, on plane 0.
+fn venue_floor(level_id: &str, min: [f64; 2], max: [f64; 2]) -> VenueFloor {
+    VenueFloor {
+        level_id: level_id.to_string(),
+        ordinal: 0.0,
+        plane_z_m: 0.0,
+        rings: vec![vec![
+            [min[0], min[1]],
+            [max[0], min[1]],
+            [max[0], max[1]],
+            [min[0], max[1]],
+        ]],
+    }
+}
 
 #[test]
 fn a_level_plane_resolves_from_its_walkable_surfaces_not_its_metadata() {
@@ -104,4 +122,163 @@ fn a_levels_plane_is_the_dominant_surface_height_not_an_average() {
     let levels = resolve_tile_levels(&scene, "asset-v1", &FrameTransform::identity());
 
     assert_eq!(levels[0].resolved_plane_m, Some(4.0));
+}
+
+#[test]
+fn a_tile_floor_on_the_venue_outline_registers_at_zero() {
+    let glb = glb_with_features(&[FeatureSpec::new(
+        "floor-a",
+        "Floors",
+        "l1",
+        0.0,
+        quad([0.0, 0.0], [40.0, 20.0], 0.0),
+    )]);
+    let scene = read_glb(&glb).expect("fixture glb reads");
+    let venue = [venue_floor("level-1", [0.0, 0.0], [40.0, 20.0])];
+
+    let report = measure_registration(
+        &scene,
+        "asset-v1",
+        &FrameTransform::identity(),
+        &venue,
+        &RegistrationProfile::default(),
+    );
+
+    assert_eq!(report.floors.len(), 1);
+    let floor = &report.floors[0];
+    assert_eq!(floor.canonical_level_id, "level-1");
+    assert!(floor.stats.samples > 100, "the outline is sampled densely");
+    assert!(floor.stats.p90_m < 1e-9, "p90 was {}", floor.stats.p90_m);
+    assert!(floor.median_shift_m < 1e-9);
+    assert!(floor.coherent_clusters.is_empty());
+    assert!(report.unmapped_levels.is_empty());
+}
+
+#[test]
+fn a_floor_offset_from_the_venue_reports_a_coherent_shift() {
+    // The tile floor abuts the venue 0.2 m away along one edge. Only that edge
+    // is close enough to be a correspondence; the rest is coverage difference.
+    let glb = glb_with_features(&[FeatureSpec::new(
+        "floor-a",
+        "Floors",
+        "l1",
+        0.0,
+        quad([10.2, 0.0], [20.2, 20.0], 0.0),
+    )]);
+    let scene = read_glb(&glb).expect("fixture glb reads");
+    let venue = [venue_floor("level-1", [0.0, 0.0], [10.0, 20.0])];
+
+    let report = measure_registration(
+        &scene,
+        "asset-v1",
+        &FrameTransform::identity(),
+        &venue,
+        &RegistrationProfile::default(),
+    );
+
+    let floor = &report.floors[0];
+    assert!(
+        (floor.median_offset_m[0] - 0.2).abs() < 1e-6,
+        "east offset was {}",
+        floor.median_offset_m[0]
+    );
+    assert!((floor.median_offset_m[1]).abs() < 1e-6);
+    assert!((floor.median_shift_m - 0.2).abs() < 1e-6);
+    assert!((floor.stats.p90_m - 0.2).abs() < 1e-6);
+}
+
+#[test]
+fn geometry_the_venue_does_not_model_is_carved_out_not_counted() {
+    // #31's rule: a boundary sample more than a metre from every unit edge and
+    // inside no unit is a model-coverage difference, not misregistration.
+    let glb = glb_with_features(&[FeatureSpec::new(
+        "floor-a",
+        "Floors",
+        "l1",
+        0.0,
+        quad([10.2, 0.0], [20.2, 20.0], 0.0),
+    )]);
+    let scene = read_glb(&glb).expect("fixture glb reads");
+    let venue = [venue_floor("level-1", [0.0, 0.0], [10.0, 20.0])];
+
+    let report = measure_registration(
+        &scene,
+        "asset-v1",
+        &FrameTransform::identity(),
+        &venue,
+        &RegistrationProfile::default(),
+    );
+
+    let floor = &report.floors[0];
+    assert!(
+        floor.carved_out > 0,
+        "the overhanging three quarters of the tile floor is carved out"
+    );
+    assert!(
+        floor.stats.max_m < 1.0,
+        "nothing beyond the carve-out band survives, but max was {}",
+        floor.stats.max_m
+    );
+    assert_eq!(floor.sampled, floor.stats.samples + floor.carved_out);
+}
+
+#[test]
+fn a_spatially_separated_pocket_of_large_residuals_is_a_coherent_cluster() {
+    // An island of tile surface inside the venue with no venue edge near it:
+    // the two Yaesu clusters (#31) in miniature, and the falsifier the gate
+    // names as blocking.
+    let mut triangles = quad([0.0, 0.0], [100.0, 40.0], 0.0);
+    triangles.extend(quad([50.0, 20.0], [54.0, 24.0], 0.0));
+    let glb = glb_with_features(&[FeatureSpec::new("floor-a", "Floors", "l1", 0.0, triangles)]);
+    let scene = read_glb(&glb).expect("fixture glb reads");
+    let venue = [venue_floor("level-1", [0.0, 0.0], [100.0, 40.0])];
+
+    let report = measure_registration(
+        &scene,
+        "asset-v1",
+        &FrameTransform::identity(),
+        &venue,
+        &RegistrationProfile::default(),
+    );
+
+    let floor = &report.floors[0];
+    assert_eq!(
+        floor.coherent_clusters.len(),
+        1,
+        "one pocket, not one cluster per sample"
+    );
+    let cluster = &floor.coherent_clusters[0];
+    assert!(cluster.samples >= 5);
+    assert!(
+        cluster.distance_m > 1.0,
+        "cluster residual was {}",
+        cluster.distance_m
+    );
+}
+
+#[test]
+fn a_level_whose_plane_matches_no_canonical_floor_is_reported_unmapped() {
+    // Altitude resolves level identity first (#33). A tile level 8 m above
+    // every canonical plane belongs to none of them, and guessing the nearest
+    // is how a mezzanine ends up rendered as a concourse.
+    let glb = glb_with_features(&[FeatureSpec::new(
+        "floor-a",
+        "Floors",
+        "l9",
+        8.0,
+        quad([0.0, 0.0], [40.0, 20.0], 8.0),
+    )]);
+    let scene = read_glb(&glb).expect("fixture glb reads");
+    let venue = [venue_floor("level-1", [0.0, 0.0], [40.0, 20.0])];
+
+    let report = measure_registration(
+        &scene,
+        "asset-v1",
+        &FrameTransform::identity(),
+        &venue,
+        &RegistrationProfile::default(),
+    );
+
+    assert_eq!(report.unmapped_levels, vec!["asset-v1|station.rvt||l9|80"]);
+    assert!(report.floors.is_empty(), "no floor was registered");
 }

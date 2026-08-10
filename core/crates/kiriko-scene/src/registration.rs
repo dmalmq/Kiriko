@@ -313,6 +313,466 @@ pub fn composite_level_id(
     )
 }
 
+/// One canonical venue floor's own geometry, in venue-local ENU metres: what
+/// the tiles are measured against. Rings are unit polygon outlines, open or
+/// closed; the caller projects them through the §8 frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VenueFloor {
+    pub level_id: String,
+    pub ordinal: f64,
+    /// The §8 resolved floor plane, venue-local metres. Level identity is
+    /// resolved by altitude before distance (#33).
+    pub plane_z_m: f64,
+    pub rings: Vec<Vec<[f64; 2]>>,
+}
+
+/// The versioned thresholds and sampling parameters every registration
+/// judgement comes from. Stored with an activation so a later profile change
+/// cannot retroactively re-judge a published version.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegistrationProfile {
+    pub id: String,
+    pub version: u32,
+    /// Spacing between boundary samples, metres.
+    pub sample_spacing_m: f64,
+    /// A boundary sample further than this from every unit edge *and* inside
+    /// no unit is a coverage difference, not a residual (#31).
+    pub carve_out_distance_m: f64,
+    /// Trusted p90 residual band, metres.
+    pub p90_max_m: f64,
+    /// Per-canonical-floor p90 overrides. No single number describes an asset:
+    /// Tokyo's floors measured 0.433 to 0.608 m carved.
+    pub floor_p90_max_m: BTreeMap<String, f64>,
+    /// Median coherent shift band, metres.
+    pub median_shift_max_m: f64,
+    /// A spatially separated coherent residual above this blocks activation.
+    pub coherent_residual_max_m: f64,
+    /// Cell size for the spatial separation test, metres.
+    pub cluster_cell_m: f64,
+    /// Offending samples a cell needs before it counts as a cluster rather
+    /// than noise.
+    pub cluster_min_samples: usize,
+    /// How far a tile level's resolved plane may sit from a canonical floor's
+    /// plane and still be that floor.
+    pub level_match_tolerance_m: f64,
+}
+
+impl Default for RegistrationProfile {
+    /// The versioned default profile: #31's certified bands, and the sampling
+    /// parameters its measurement used.
+    fn default() -> Self {
+        Self {
+            id: "default".to_string(),
+            version: 1,
+            sample_spacing_m: 0.5,
+            carve_out_distance_m: 1.0,
+            p90_max_m: 0.50,
+            floor_p90_max_m: BTreeMap::new(),
+            median_shift_max_m: 0.15,
+            coherent_residual_max_m: 1.0,
+            cluster_cell_m: 40.0,
+            cluster_min_samples: 5,
+            level_match_tolerance_m: 1.5,
+        }
+    }
+}
+
+impl RegistrationProfile {
+    /// The p90 band this floor is held to: its own measured band when the
+    /// profile carries one, the venue-wide band otherwise.
+    #[must_use]
+    pub fn p90_band_for(&self, canonical_level_id: &str) -> f64 {
+        self.floor_p90_max_m
+            .get(canonical_level_id)
+            .copied()
+            .unwrap_or(self.p90_max_m)
+    }
+}
+
+/// Residual distribution over a set of samples, metres.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ResidualStats {
+    pub samples: usize,
+    pub p50_m: f64,
+    pub p90_m: f64,
+    pub max_m: f64,
+}
+
+/// A spatially separated group of offending samples that agree on a direction:
+/// the shape of a real misregistration, as opposed to scattered noise.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoherentCluster {
+    /// Cell centre, venue-local metres.
+    pub east_m: f64,
+    pub north_m: f64,
+    pub samples: usize,
+    pub offset_m: [f64; 2],
+    pub distance_m: f64,
+}
+
+/// One canonical floor's registration against the tile levels mapped to it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FloorRegistration {
+    pub canonical_level_id: String,
+    /// The composite tile levels this floor renders — a set, because the
+    /// mapping is many-to-many on both sides (#31).
+    pub composite_source_levels: Vec<String>,
+    /// Boundary samples taken, before the coverage carve-out.
+    pub sampled: usize,
+    /// Samples excluded as model-coverage differences.
+    pub carved_out: usize,
+    pub stats: ResidualStats,
+    /// Componentwise median offset, tile minus venue.
+    pub median_offset_m: [f64; 2],
+    pub median_shift_m: f64,
+    pub coherent_clusters: Vec<CoherentCluster>,
+}
+
+/// What a package looks like against a venue's own geometry: where its levels
+/// are, which canonical floor each one is, and how far off they sit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegistrationReport {
+    pub profile_id: String,
+    pub profile_version: u32,
+    pub levels: Vec<TileLevel>,
+    pub floors: Vec<FloorRegistration>,
+    /// Composite levels no canonical floor claims. Reported, never guessed at.
+    pub unmapped_levels: Vec<String>,
+    /// Every surviving sample across every floor.
+    pub venue_wide: ResidualStats,
+}
+
+/// Measure a package's registration against the venue's own geometry, the way
+/// #31 measured it: sample the tile surfaces' boundaries, take the distance to
+/// the nearest venue unit edge on the floor that level maps to, and carve out
+/// the samples that are model-coverage differences rather than residuals.
+///
+/// Reports numbers; judges nothing. The profile's bands are applied by
+/// [`evaluate_activation`](crate::evaluate_activation).
+#[must_use]
+pub fn measure_registration(
+    scene: &GlbScene,
+    asset_version: &str,
+    transform: &FrameTransform,
+    venue: &[VenueFloor],
+    profile: &RegistrationProfile,
+) -> RegistrationReport {
+    let levels = resolve_tile_levels(scene, asset_version, transform);
+
+    // Altitude first: a level belongs to the canonical floor whose resolved
+    // plane it sits on, not to whichever floor happens to be closest in plan.
+    let mut floor_of_level: BTreeMap<&str, &VenueFloor> = BTreeMap::new();
+    let mut unmapped_levels: Vec<String> = Vec::new();
+    for level in &levels {
+        let Some(plane) = level.resolved_plane_m else {
+            // No plane is its own gate failure; it cannot also be a mapping.
+            unmapped_levels.push(level.composite_id.clone());
+            continue;
+        };
+        let nearest = venue
+            .iter()
+            .filter(|floor| (floor.plane_z_m - plane).abs() <= profile.level_match_tolerance_m)
+            .min_by(|a, b| {
+                (a.plane_z_m - plane)
+                    .abs()
+                    .total_cmp(&(b.plane_z_m - plane).abs())
+            });
+        match nearest {
+            Some(floor) => {
+                floor_of_level.insert(level.composite_id.as_str(), floor);
+            }
+            None => unmapped_levels.push(level.composite_id.clone()),
+        }
+    }
+
+    // Boundary samples per mapped level, in one pass over the walkable
+    // geometry: an edge shared by two triangles is interior and never sampled.
+    let mut samples_by_level: BTreeMap<&str, Vec<[f64; 2]>> = BTreeMap::new();
+    let mut edges_by_level: BTreeMap<&str, BTreeMap<(WeldedPoint, WeldedPoint), i32>> =
+        BTreeMap::new();
+    for primitive in &scene.primitives {
+        let Some(row) = scene.features.get(primitive.feature_id as usize) else {
+            continue;
+        };
+        if role_for_category(&row.category) != SemanticRole::Walkable {
+            continue;
+        }
+        let composite = composite_level_id(
+            asset_version,
+            &row.source_document,
+            &row.source_link_name,
+            &row.level_key,
+            (f64::from(row.level_elevation_meters) * 10.0).round() as i32,
+        );
+        let Some((key, _)) = floor_of_level.get_key_value(composite.as_str()) else {
+            continue;
+        };
+        let edges = edges_by_level.entry(key).or_default();
+        for triangle in primitive.positions.chunks_exact(3) {
+            let corners = [
+                weld(transform.apply(triangle[0])),
+                weld(transform.apply(triangle[1])),
+                weld(transform.apply(triangle[2])),
+            ];
+            for i in 0..3 {
+                let (a, b) = (corners[i], corners[(i + 1) % 3]);
+                if a == b {
+                    continue;
+                }
+                // Undirected: a shared edge arrives once from each triangle,
+                // with opposite winding.
+                let key = if a <= b { (a, b) } else { (b, a) };
+                *edges.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+    for (level, edges) in &edges_by_level {
+        let samples = samples_by_level.entry(level).or_default();
+        for ((a, b), count) in edges {
+            if *count != 1 {
+                continue;
+            }
+            sample_edge(unweld(*a), unweld(*b), profile.sample_spacing_m, samples);
+        }
+    }
+
+    // Per canonical floor: measure every sample of every level mapped to it.
+    let mut floors: Vec<FloorRegistration> = Vec::new();
+    let mut venue_wide: Vec<f64> = Vec::new();
+    for floor in venue {
+        let mut composite_source_levels: Vec<String> = floor_of_level
+            .iter()
+            .filter(|(_, mapped)| mapped.level_id == floor.level_id)
+            .map(|(composite, _)| (*composite).to_string())
+            .collect();
+        composite_source_levels.sort();
+        if composite_source_levels.is_empty() {
+            continue;
+        }
+        let segments = ring_segments(&floor.rings);
+        let mut distances: Vec<f64> = Vec::new();
+        let mut offsets: Vec<[f64; 2]> = Vec::new();
+        let mut offending: Vec<([f64; 2], [f64; 2], f64)> = Vec::new();
+        let mut sampled = 0usize;
+        let mut carved_out = 0usize;
+        let band = profile.p90_band_for(&floor.level_id);
+        for composite in &composite_source_levels {
+            let Some(samples) = samples_by_level.get(composite.as_str()) else {
+                continue;
+            };
+            for sample in samples {
+                sampled += 1;
+                let Some((closest, distance)) = nearest_on_segments(*sample, &segments) else {
+                    // A floor with no unit geometry cannot measure anything;
+                    // the sample is neither a residual nor a carve-out.
+                    carved_out += 1;
+                    continue;
+                };
+                if distance > profile.carve_out_distance_m && !point_in_rings(*sample, &floor.rings)
+                {
+                    carved_out += 1;
+                    continue;
+                }
+                let offset = [sample[0] - closest[0], sample[1] - closest[1]];
+                distances.push(distance);
+                offsets.push(offset);
+                if distance > band {
+                    offending.push((*sample, offset, distance));
+                }
+            }
+        }
+        venue_wide.extend(distances.iter().copied());
+        floors.push(FloorRegistration {
+            canonical_level_id: floor.level_id.clone(),
+            composite_source_levels,
+            sampled,
+            carved_out,
+            stats: stats_of(&mut distances),
+            median_offset_m: median_offset(&offsets),
+            median_shift_m: magnitude(median_offset(&offsets)),
+            coherent_clusters: cluster(&offending, profile),
+        });
+    }
+
+    RegistrationReport {
+        profile_id: profile.id.clone(),
+        profile_version: profile.version,
+        levels,
+        floors,
+        unmapped_levels,
+        venue_wide: stats_of(&mut venue_wide),
+    }
+}
+
+/// A position welded to the millimetre, so a shared edge between two triangles
+/// is recognised as shared despite float tessellation noise.
+type WeldedPoint = (i64, i64);
+
+fn weld(position: [f64; 3]) -> WeldedPoint {
+    (
+        (position[0] * 1000.0).round() as i64,
+        (position[1] * 1000.0).round() as i64,
+    )
+}
+
+fn unweld(point: WeldedPoint) -> [f64; 2] {
+    [point.0 as f64 / 1000.0, point.1 as f64 / 1000.0]
+}
+
+/// Sample an edge at fixed spacing, at least once. Samples sit at cell centres
+/// so the same edge traversed from either end yields the same points.
+fn sample_edge(a: [f64; 2], b: [f64; 2], spacing_m: f64, out: &mut Vec<[f64; 2]>) {
+    let length = magnitude([b[0] - a[0], b[1] - a[1]]);
+    if length <= 0.0 {
+        return;
+    }
+    let count = ((length / spacing_m).floor() as usize).max(1);
+    for index in 0..count {
+        let t = (index as f64 + 0.5) / count as f64;
+        out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+    }
+}
+
+/// Every ring's segments, closing each ring.
+fn ring_segments(rings: &[Vec<[f64; 2]>]) -> Vec<([f64; 2], [f64; 2])> {
+    let mut segments = Vec::new();
+    for ring in rings {
+        if ring.len() < 2 {
+            continue;
+        }
+        for index in 0..ring.len() {
+            let a = ring[index];
+            let b = ring[(index + 1) % ring.len()];
+            if a != b {
+                segments.push((a, b));
+            }
+        }
+    }
+    segments
+}
+
+/// The closest point on any segment, and its distance.
+fn nearest_on_segments(
+    point: [f64; 2],
+    segments: &[([f64; 2], [f64; 2])],
+) -> Option<([f64; 2], f64)> {
+    let mut best: Option<([f64; 2], f64)> = None;
+    for (a, b) in segments {
+        let candidate = closest_on_segment(point, *a, *b);
+        let distance = magnitude([point[0] - candidate[0], point[1] - candidate[1]]);
+        if best.is_none_or(|(_, best_distance)| distance < best_distance) {
+            best = Some((candidate, distance));
+        }
+    }
+    best
+}
+
+fn closest_on_segment(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let length_squared = dx * dx + dy * dy;
+    if length_squared <= 0.0 {
+        return a;
+    }
+    let t = (((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / length_squared).clamp(0.0, 1.0);
+    [a[0] + dx * t, a[1] + dy * t]
+}
+
+/// Even-odd containment across every ring.
+fn point_in_rings(point: [f64; 2], rings: &[Vec<[f64; 2]>]) -> bool {
+    let mut inside = false;
+    for ring in rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        for index in 0..ring.len() {
+            let a = ring[index];
+            let b = ring[(index + 1) % ring.len()];
+            if (a[1] > point[1]) != (b[1] > point[1]) {
+                let x = (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0];
+                if point[0] < x {
+                    inside = !inside;
+                }
+            }
+        }
+    }
+    inside
+}
+
+/// Offending samples grouped into cells; a cell holding enough of them whose
+/// median offset is beyond the band is a coherent residual, not scatter.
+fn cluster(
+    offending: &[([f64; 2], [f64; 2], f64)],
+    profile: &RegistrationProfile,
+) -> Vec<CoherentCluster> {
+    let mut cells: BTreeMap<(i64, i64), Vec<[f64; 2]>> = BTreeMap::new();
+    for (sample, offset, _) in offending {
+        let cell = (
+            (sample[0] / profile.cluster_cell_m).floor() as i64,
+            (sample[1] / profile.cluster_cell_m).floor() as i64,
+        );
+        cells.entry(cell).or_default().push(*offset);
+    }
+    cells
+        .into_iter()
+        .filter(|(_, offsets)| offsets.len() >= profile.cluster_min_samples)
+        .filter_map(|((cx, cy), offsets)| {
+            let offset = median_offset(&offsets);
+            let distance = magnitude(offset);
+            (distance > profile.coherent_residual_max_m).then_some(CoherentCluster {
+                east_m: (cx as f64 + 0.5) * profile.cluster_cell_m,
+                north_m: (cy as f64 + 0.5) * profile.cluster_cell_m,
+                samples: offsets.len(),
+                offset_m: offset,
+                distance_m: distance,
+            })
+        })
+        .collect()
+}
+
+fn stats_of(distances: &mut [f64]) -> ResidualStats {
+    if distances.is_empty() {
+        return ResidualStats::default();
+    }
+    distances.sort_by(f64::total_cmp);
+    ResidualStats {
+        samples: distances.len(),
+        p50_m: percentile(distances, 0.50),
+        p90_m: percentile(distances, 0.90),
+        max_m: distances[distances.len() - 1],
+    }
+}
+
+/// Nearest-rank percentile over sorted values: an actual measured sample, never
+/// an interpolation between two of them.
+fn percentile(sorted: &[f64], fraction: f64) -> f64 {
+    let rank = (fraction * sorted.len() as f64).ceil() as usize;
+    sorted[rank.clamp(1, sorted.len()) - 1]
+}
+
+fn median_offset(offsets: &[[f64; 2]]) -> [f64; 2] {
+    if offsets.is_empty() {
+        return [0.0, 0.0];
+    }
+    let mut east: Vec<f64> = offsets.iter().map(|o| o[0]).collect();
+    let mut north: Vec<f64> = offsets.iter().map(|o| o[1]).collect();
+    east.sort_by(f64::total_cmp);
+    north.sort_by(f64::total_cmp);
+    [median(&east), median(&north)]
+}
+
+fn median(sorted: &[f64]) -> f64 {
+    let middle = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[middle - 1] + sorted[middle]) / 2.0
+    } else {
+        sorted[middle]
+    }
+}
+
+fn magnitude(vector: [f64; 2]) -> f64 {
+    vector[0].hypot(vector[1])
+}
+
 /// Whether a role's geometry blocks the view, and so has to be either placed on
 /// a floor or explicitly classified as context before it can render (#30
 /// section 3, #32 section 6).
