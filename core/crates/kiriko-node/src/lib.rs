@@ -26,6 +26,10 @@ use kiriko_bundle::{
     inspect_bundle as inspect_bundle_pure, scene_projection as scene_projection_pure,
 };
 use kiriko_model::model::ViewerWarning;
+use kiriko_model::scene::{
+    ActivationState, ContextualClassification, FloorMapping, OcclusionClass,
+    SourceObjectAssociation, TilesDescriptor,
+};
 use napi::bindgen_prelude::{AsyncTask, Buffer};
 use napi::{Env, Result, Task};
 use serde_json::{Map, Value, json};
@@ -43,12 +47,15 @@ pub struct NativeCompileResponse {
     pub error_json: Option<String>,
 }
 
-/// Outcome of the blocking compile step, computed off the event loop. Both
-/// variants are `Ok` from `Task::compute`'s perspective: a rejected IMDF
+/// Outcome of the blocking compile step, computed off the event loop. Every
+/// variant is `Ok` from `Task::compute`'s perspective: a rejected IMDF
 /// archive is domain data, not a bridge failure.
 pub enum CompileOutcome {
     Success(CompiledBundle),
     Failure(CompileError),
+    /// The request itself could not be read — a malformed tiles descriptor,
+    /// which is the caller's bug rather than the archive's.
+    Rejected(String),
 }
 
 pub struct CompileTask {
@@ -60,6 +67,7 @@ pub struct CompileTask {
     facilities_geojson: Option<String>,
     synthesize_network: Option<bool>,
     clip_to_venue: Option<bool>,
+    tiles_descriptor_json: Option<String>,
 }
 
 #[napi]
@@ -71,6 +79,15 @@ impl Task for CompileTask {
         let metadata = BundleMetadata {
             dataset_id: self.dataset_id.clone(),
             version: self.version,
+        };
+        let descriptor = match self.tiles_descriptor_json.as_deref().map(parse_descriptor) {
+            Some(Ok(descriptor)) => Some(descriptor),
+            Some(Err(message)) => {
+                return Ok(CompileOutcome::Rejected(
+                    json!({ "code": "malformed_tiles_descriptor", "message": message }).to_string(),
+                ));
+            }
+            None => None,
         };
         Ok(
             match compile_imdf_with_network(
@@ -84,6 +101,7 @@ impl Task for CompileTask {
                 None,
                 &[],
                 None,
+                descriptor.as_ref(),
             ) {
                 Ok(compiled) => CompileOutcome::Success(compiled),
                 Err(err) => CompileOutcome::Failure(err),
@@ -95,6 +113,13 @@ impl Task for CompileTask {
         Ok(match output {
             CompileOutcome::Success(compiled) => success_response(compiled),
             CompileOutcome::Failure(err) => failure_response(&err),
+            CompileOutcome::Rejected(error_json) => NativeCompileResponse {
+                ok: false,
+                bundle: None,
+                stats_json: None,
+                warnings_json: None,
+                error_json: Some(error_json),
+            },
         })
     }
 }
@@ -168,6 +193,103 @@ fn error_json(err: &CompileError) -> Value {
     Value::Object(obj)
 }
 
+/// The activated tile package's §9 descriptor as the server stores it: hashes
+/// as lowercase hex, activation state as a stable string. `kiriko-model`'s
+/// canonical types carry no serde derives by design, so the JSON shape is
+/// spelled out here rather than leaking a wire format into the domain.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TilesDescriptorDto {
+    package_hash: String,
+    manifest_hash: String,
+    activation_state: String,
+    registration_profile_id: String,
+    #[serde(default)]
+    floor_mappings: Vec<FloorMappingDto>,
+    #[serde(default)]
+    source_object_associations: Vec<SourceObjectAssociationDto>,
+    #[serde(default)]
+    contextual_classifications: Vec<ContextualClassificationDto>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FloorMappingDto {
+    canonical_level_id: String,
+    composite_source_levels: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceObjectAssociationDto {
+    source_object_id: String,
+    canonical_feature_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextualClassificationDto {
+    source_object_id: String,
+    occlusion: String,
+}
+
+fn parse_descriptor(json: &str) -> std::result::Result<TilesDescriptor, String> {
+    let dto: TilesDescriptorDto = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    Ok(TilesDescriptor {
+        package_hash: parse_hash(&dto.package_hash, "packageHash")?,
+        manifest_hash: parse_hash(&dto.manifest_hash, "manifestHash")?,
+        activation_state: match dto.activation_state.as_str() {
+            "activated" => ActivationState::Activated,
+            "notActivated" => ActivationState::NotActivated,
+            other => return Err(format!("unknown activationState {other:?}")),
+        },
+        registration_profile_id: dto.registration_profile_id,
+        floor_mappings: dto
+            .floor_mappings
+            .into_iter()
+            .map(|mapping| FloorMapping {
+                canonical_level_id: mapping.canonical_level_id,
+                composite_source_levels: mapping.composite_source_levels,
+            })
+            .collect(),
+        source_object_associations: dto
+            .source_object_associations
+            .into_iter()
+            .map(|association| SourceObjectAssociation {
+                source_object_id: association.source_object_id,
+                canonical_feature_id: association.canonical_feature_id,
+            })
+            .collect(),
+        contextual_classifications: dto
+            .contextual_classifications
+            .into_iter()
+            .map(|classification| {
+                Ok(ContextualClassification {
+                    source_object_id: classification.source_object_id,
+                    occlusion: match classification.occlusion.as_str() {
+                        "opaque" => OcclusionClass::Opaque,
+                        "semi_transparent" => OcclusionClass::SemiTransparent,
+                        "transparent" => OcclusionClass::Transparent,
+                        other => return Err(format!("unknown occlusion {other:?}")),
+                    },
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, String>>()?,
+    })
+}
+
+fn parse_hash(hex: &str, what: &str) -> std::result::Result<[u8; 32], String> {
+    if hex.len() != 64 {
+        return Err(format!("{what} must be 64 hex characters"));
+    }
+    let mut out = [0u8; 32];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
+            .map_err(|_| format!("{what} is not hexadecimal"))?;
+    }
+    Ok(out)
+}
+
 /// Compile raw IMDF ZIP `source` bytes into a `kvb1` bundle identified by
 /// `dataset_id`/`version`. When both optional network GeoJSON strings are
 /// provided, a route graph is built and embedded as bundle section 5; a
@@ -190,6 +312,7 @@ pub fn compile_imdf(
     facilities_geojson: Option<String>,
     synthesize_network: Option<bool>,
     clip_to_venue: Option<bool>,
+    tiles_descriptor_json: Option<String>,
 ) -> AsyncTask<CompileTask> {
     AsyncTask::new(CompileTask {
         source: source.to_vec(),
@@ -200,6 +323,7 @@ pub fn compile_imdf(
         facilities_geojson,
         synthesize_network,
         clip_to_venue,
+        tiles_descriptor_json,
     })
 }
 
@@ -488,5 +612,162 @@ impl Task for TilePackageTask {
 pub fn ingest_tile_package(package: Buffer) -> AsyncTask<TilePackageTask> {
     AsyncTask::new(TilePackageTask {
         package: package.to_vec(),
+    })
+}
+
+/// JS-facing discriminated tile-activation result. Success carries the
+/// serialized `kiriko_scene::ActivationEvaluation` — the measurements, the
+/// registration table, and every gate that blocks; failure carries
+/// `{ code, message }` for the inputs that could not be read at all.
+#[napi(object)]
+pub struct NativeTileActivationResponse {
+    pub ok: bool,
+    pub evaluation_json: Option<String>,
+    pub error_json: Option<String>,
+}
+
+/// What the server sends with an activation evaluation. Deserialized here
+/// rather than crossing as a dozen positional arguments: the profile alone has
+/// eleven fields, and a positional bridge for it would be unreadable at both
+/// ends.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TileActivationRequest {
+    asset_version: String,
+    /// The published tileset root transform, column-major, applied unchanged.
+    root_transform: [f64; 16],
+    integrity_verified: bool,
+    capability_profile: Option<String>,
+    #[serde(default)]
+    contextual_source_objects: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    profile: kiriko_scene::RegistrationProfile,
+}
+
+pub enum TileActivationOutcome {
+    Success(String),
+    Failure(String),
+}
+
+pub struct TileActivationTask {
+    bundle: Vec<u8>,
+    content: Vec<u8>,
+    request_json: String,
+}
+
+#[napi]
+impl Task for TileActivationTask {
+    type Output = TileActivationOutcome;
+    type JsValue = NativeTileActivationResponse;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let request: TileActivationRequest = match serde_json::from_str(&self.request_json) {
+            Ok(request) => request,
+            Err(error) => {
+                return Ok(TileActivationOutcome::Failure(
+                    json!({ "code": "malformed_request", "message": error.to_string() })
+                        .to_string(),
+                ));
+            }
+        };
+        let document = match decode_bundle(&self.bundle) {
+            Ok(document) => document,
+            Err(error) => {
+                return Ok(TileActivationOutcome::Failure(
+                    bundle_error_json(&error).to_string(),
+                ));
+            }
+        };
+        let Some(spatial) = document.spatial_context.as_ref() else {
+            // Without §8 there is no frame to measure in. A venue published
+            // before spatial context existed cannot register tiles until it is
+            // recompiled, and saying so is better than measuring in a frame
+            // that does not exist.
+            return Ok(TileActivationOutcome::Failure(
+                json!({
+                    "code": "no_spatial_context",
+                    "message": "the venue version carries no §8 spatial context to register against"
+                })
+                .to_string(),
+            ));
+        };
+        let transform = kiriko_scene::FrameTransform::from_tileset(
+            &request.root_transform,
+            &spatial.frame.ecef_origin,
+            &spatial.frame.enu_basis_ecef,
+        );
+        let scene = match kiriko_scene::read_glb(&self.content) {
+            Ok(scene) => scene,
+            Err(error) => {
+                return Ok(TileActivationOutcome::Failure(
+                    json!({ "code": "undecodable_content", "message": error.to_string() })
+                        .to_string(),
+                ));
+            }
+        };
+        let venue: Vec<kiriko_scene::VenueFloor> = kiriko_bundle::venue_floor_geometry(&document)
+            .into_iter()
+            .map(|floor| kiriko_scene::VenueFloor {
+                level_id: floor.level_id,
+                ordinal: floor.ordinal,
+                plane_z_m: floor.plane_z_m,
+                rings: floor.rings,
+            })
+            .collect();
+        let evaluation = kiriko_scene::evaluate_activation(
+            &scene,
+            &venue,
+            &request.profile,
+            &kiriko_scene::ActivationInput {
+                asset_version: &request.asset_version,
+                integrity_verified: request.integrity_verified,
+                capability_profile: request.capability_profile.as_deref(),
+                contextual_source_objects: &request.contextual_source_objects,
+            },
+            &transform,
+        );
+        let json = serde_json::to_string(&evaluation).map_err(|e| {
+            napi::Error::from_reason(format!("serialize tile activation evaluation: {e}"))
+        })?;
+        Ok(TileActivationOutcome::Success(json))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(match output {
+            TileActivationOutcome::Success(evaluation_json) => NativeTileActivationResponse {
+                ok: true,
+                evaluation_json: Some(evaluation_json),
+                error_json: None,
+            },
+            TileActivationOutcome::Failure(error_json) => NativeTileActivationResponse {
+                ok: false,
+                evaluation_json: None,
+                error_json: Some(error_json),
+            },
+        })
+    }
+}
+
+/// Measure an ingested tile package against a venue version's own geometry and
+/// apply the versioned profile's bands: where each tile level's floor plane
+/// resolves to, which canonical floor it maps to, how far off it sits, and
+/// every gate that blocks activation.
+///
+/// `bundle` is the version's compiled `kvb1` bytes — the canonical venue data
+/// registration is measured against — and `content` is the package's decoded
+/// tile content. Runs off the Node.js event loop; the returned promise always
+/// resolves to a [`NativeTileActivationResponse`], never rejecting for a
+/// package that fails its gates: a blocked activation is the answer, not an
+/// error.
+#[napi]
+pub fn evaluate_tile_activation(
+    bundle: Buffer,
+    content: Buffer,
+    request_json: String,
+) -> AsyncTask<TileActivationTask> {
+    AsyncTask::new(TileActivationTask {
+        bundle: bundle.to_vec(),
+        content: content.to_vec(),
+        request_json,
     })
 }

@@ -298,8 +298,10 @@ fn the_profiles_vertical_offset_is_what_reconciles_two_datums() {
     )]);
     let scene = read_glb(&glb).expect("fixture glb reads");
     let venue = [venue_floor("level-1", [0.0, 0.0], [40.0, 20.0])];
-    let mut profile = RegistrationProfile::default();
-    profile.vertical_offset_m = -123.4;
+    let profile = RegistrationProfile {
+        vertical_offset_m: -123.4,
+        ..RegistrationProfile::default()
+    };
 
     let report = measure_registration(
         &scene,

@@ -21,6 +21,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::format::SemanticRole;
 use crate::glb::GlbScene;
 use crate::roles::role_for_category;
@@ -147,7 +149,8 @@ fn multiply(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
 
 /// One composite tile level: its identity, where its surfaces actually are,
 /// and what its metadata claimed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TileLevel {
     /// `asset version | source document | source link | level key | quantized
     /// elevation (decimetres)`.
@@ -316,7 +319,8 @@ pub fn composite_level_id(
 /// One canonical venue floor's own geometry, in venue-local ENU metres: what
 /// the tiles are measured against. Rings are unit polygon outlines, open or
 /// closed; the caller projects them through the §8 frame.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VenueFloor {
     pub level_id: String,
     pub ordinal: f64,
@@ -329,7 +333,11 @@ pub struct VenueFloor {
 /// The versioned thresholds and sampling parameters every registration
 /// judgement comes from. Stored with an activation so a later profile change
 /// cannot retroactively re-judge a published version.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+// Every field defaults, so a profile stored before a field existed still loads
+// as the value that field's absence used to mean.
+#[serde(default)]
 pub struct RegistrationProfile {
     pub id: String,
     pub version: u32,
@@ -400,7 +408,8 @@ impl RegistrationProfile {
 }
 
 /// Residual distribution over a set of samples, metres.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ResidualStats {
     pub samples: usize,
     pub p50_m: f64,
@@ -410,7 +419,8 @@ pub struct ResidualStats {
 
 /// A spatially separated group of offending samples that agree on a direction:
 /// the shape of a real misregistration, as opposed to scattered noise.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CoherentCluster {
     /// Cell centre, venue-local metres.
     pub east_m: f64,
@@ -421,7 +431,8 @@ pub struct CoherentCluster {
 }
 
 /// One canonical floor's registration against the tile levels mapped to it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FloorRegistration {
     pub canonical_level_id: String,
     /// The composite tile levels this floor renders — a set, because the
@@ -440,7 +451,8 @@ pub struct FloorRegistration {
 
 /// What a package looks like against a venue's own geometry: where its levels
 /// are, which canonical floor each one is, and how far off they sit.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RegistrationReport {
     pub profile_id: String,
     pub profile_version: u32,
@@ -791,7 +803,8 @@ fn magnitude(vector: [f64; 2]) -> f64 {
 
 /// Why an activation is blocked. Typed, because a producer UI has to say which
 /// part of their export to look at without parsing prose, in either language.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Eq)]
+#[serde(rename_all = "camelCase")]
 pub enum GateCode {
     /// A member failed integrity or did not resolve.
     IntegrityUnresolved,
@@ -831,7 +844,8 @@ impl GateCode {
 }
 
 /// One blocked gate: what failed, on what, and against which number.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GateFailure {
     pub code: GateCode,
     /// The canonical floor, composite level, or source object at fault.
@@ -860,7 +874,8 @@ pub struct ActivationInput<'a> {
 
 /// The whole activation decision: the measurements, the registration table
 /// they produced, and every gate that blocks.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActivationEvaluation {
     pub report: RegistrationReport,
     /// Canonical floor → the composite tile levels it renders. This is the

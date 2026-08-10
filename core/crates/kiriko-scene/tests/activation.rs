@@ -346,3 +346,51 @@ fn opaque_content_belonging_to_no_level_blocks_until_it_is_classified() {
     );
     assert_eq!(codes(&allowed.gates), Vec::<GateCode>::new());
 }
+
+#[test]
+fn an_evaluation_serialises_with_the_names_the_bridge_reads() {
+    // The server stores this JSON with the activation and the producer UI keys
+    // its copy off the gate code, so the names are contract, not detail.
+    let glb = glb_with_features(&[FeatureSpec::new(
+        "floor-a",
+        "Floors",
+        "l1",
+        0.0,
+        quad([0.8, 0.8], [39.2, 19.2], 0.0),
+    )]);
+    let scene = read_glb(&glb).expect("fixture glb reads");
+    let venue = [venue_floor("level-1", 0.0, [0.0, 0.0], [40.0, 20.0])];
+    let contextual = BTreeSet::new();
+
+    let evaluation = evaluate_activation(
+        &scene,
+        &venue,
+        &RegistrationProfile::default(),
+        &input(&contextual),
+        &FrameTransform::identity(),
+    );
+    let value: serde_json::Value =
+        serde_json::to_value(&evaluation).expect("an evaluation serialises");
+
+    assert_eq!(value["gates"][0]["code"], "registrationOutOfBand");
+    assert_eq!(value["gates"][0]["subject"], "level-1");
+    assert_eq!(value["gates"][0]["band"], 0.5);
+    assert_eq!(value["report"]["profileId"], "default");
+    assert_eq!(value["report"]["profileVersion"], 1);
+    assert_eq!(value["report"]["floors"][0]["canonicalLevelId"], "level-1");
+    assert_eq!(
+        value["report"]["levels"][0]["compositeId"],
+        "asset-v1|station.rvt||l1|0"
+    );
+    assert!(value["report"]["floors"][0]["stats"]["p90M"].is_number());
+    assert_eq!(value["floorMappings"][0][0], "level-1");
+
+    // And the profile the activation is stored against round-trips, so a
+    // published version can be re-read under the profile it was judged by.
+    let profile = serde_json::to_value(RegistrationProfile::default()).expect("profile serialises");
+    assert_eq!(profile["p90MaxM"], 0.5);
+    assert_eq!(profile["verticalOffsetM"], 0.0);
+    let restored: RegistrationProfile =
+        serde_json::from_value(profile).expect("profile round-trips");
+    assert_eq!(restored, RegistrationProfile::default());
+}
