@@ -3040,9 +3040,10 @@ button {
   color: var(--color-text);
 }
 
-/* Wide enough for "0.95", no wider: the column sits beside the measurement it
-   is being weighed against, and a full-width input would separate them. */
-.tile-dialog__band {
+/* Every metre-valued input: a per-floor band and the vertical offset. Wide
+   enough for "-54.00", no wider — a band belongs beside the measurement it is
+   weighed against, and a full-width input separates them. */
+.tile-dialog__metres {
   width: 5.5rem;
 }
 

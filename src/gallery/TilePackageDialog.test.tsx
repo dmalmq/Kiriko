@@ -351,6 +351,56 @@ describe("TilePackageDialog", () => {
     );
   });
 
+  it("never prints an unmeasured registration as a clean one", async () => {
+    // Zero samples renders as a row of 0.00 m, which reads exactly like perfect
+    // agreement. Nothing mapped, so nothing was measured, and the gate says why.
+    evaluateTilePackage.mockResolvedValue({
+      state: "evaluated",
+      report: report({
+        venueWide: { samples: 0, p50M: 0, p90M: 0, maxM: 0 },
+        floors: [],
+        unmappedLevels: ["asset#doc#link#B1#-30"],
+      }),
+      floorMappings: [],
+      gates: [
+        { code: "levelNotMapped", subject: "asset#doc#link#B1#-30", measured: null, band: null },
+      ],
+    });
+    open();
+    await waitFor(() => expect(listTilePackages).toHaveBeenCalled());
+    await uploadAPackage();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Measure registration" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/No floor was mapped, so no residuals/)).toBeTruthy(),
+    );
+    expect(screen.queryByRole("table", { name: "Venue-wide" })).toBeNull();
+    // The gate already names the level in a sentence that says what to do, so
+    // the bare id list above it would be the same fact in two voices.
+    expect(screen.queryByText(/^Levels no venue floor corresponds to/)).toBeNull();
+  });
+
+  it("confirms the offset the profile actually applied", async () => {
+    evaluateTilePackage.mockResolvedValue({
+      state: "evaluated",
+      report: report({ appliedVerticalOffsetM: -54 }),
+      floorMappings: [],
+      gates: [],
+    });
+    open();
+    await waitFor(() => expect(listTilePackages).toHaveBeenCalled());
+    await uploadAPackage();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Measure registration" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Applied vertical offset: -54\.00 m/)).toBeTruthy(),
+    );
+  });
+
   it("explains an unpublished venue instead of offering a retry", async () => {
     // Registration measures against the venue's own canonical geometry, and
     // there is none yet. Retrying cannot change that.

@@ -63,6 +63,11 @@ const ui = {
     ja: "対応するフロアがないレベル",
     en: "Levels no venue floor corresponds to",
   },
+  nothingSampled: {
+    ja: "対応付けられた階がないため、残差は測定できていません。",
+    en: "No floor was mapped, so no residuals could be measured.",
+  },
+  appliedOffset: { ja: "適用された垂直オフセット", en: "Applied vertical offset" },
   levers: { ja: "プロファイル", en: "Profile" },
   verticalOffset: { ja: "垂直オフセット（m）", en: "Vertical offset (m)" },
   verticalOffsetHint: {
@@ -338,31 +343,45 @@ export function TilePackageDialog({
 
           {report !== null ? (
             <>
-              <table
-                className="gdb-dialog__table tile-dialog__venue-wide"
-                aria-label={ui.venueWide[locale]}
-              >
-                <thead>
-                  <tr>
-                    <th>{ui.samples[locale]}</th>
-                    <th>p50</th>
-                    <th>p90</th>
-                    <th>max</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>
-                      {report.venueWide.samples.toLocaleString(
-                        locale === "ja" ? "ja-JP" : "en-US",
-                      )}
-                    </td>
-                    <td>{metres(report.venueWide.p50M)}</td>
-                    <td>{metres(report.venueWide.p90M)}</td>
-                    <td>{metres(report.venueWide.maxM)}</td>
-                  </tr>
-                </tbody>
-              </table>
+              {/* Zero samples is not a clean measurement, and a row of 0.00 m
+                  reads exactly like one. Nothing mapped, so nothing was
+                  measured, and the gates below say why. */}
+              {report.venueWide.samples === 0 ? (
+                <p className="gdb-dialog__summary tile-dialog__unmapped">
+                  {ui.nothingSampled[locale]}
+                </p>
+              ) : (
+                <table
+                  className="gdb-dialog__table tile-dialog__venue-wide"
+                  aria-label={ui.venueWide[locale]}
+                >
+                  <thead>
+                    <tr>
+                      <th>{ui.samples[locale]}</th>
+                      <th>p50</th>
+                      <th>p90</th>
+                      <th>max</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        {report.venueWide.samples.toLocaleString(
+                          locale === "ja" ? "ja-JP" : "en-US",
+                        )}
+                      </td>
+                      <td>{metres(report.venueWide.p50M)}</td>
+                      <td>{metres(report.venueWide.p90M)}</td>
+                      <td>{metres(report.venueWide.maxM)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              )}
+              {report.appliedVerticalOffsetM !== 0 ? (
+                <p className="gdb-dialog__summary">
+                  {ui.appliedOffset[locale]}: {metres(report.appliedVerticalOffsetM)} m
+                </p>
+              ) : null}
               <FloorTable
                 floors={report.floors}
                 locale={locale}
@@ -372,7 +391,11 @@ export function TilePackageDialog({
                 }}
               />
               <LevelTable levels={report.levels} locale={locale} />
-              {report.unmappedLevels.length > 0 ? (
+              {/* A `levelNotMapped` gate already names these, in a sentence that
+                  says what to do about it. Printing the same ids again above it
+                  is the same fact twice in two voices. */}
+              {report.unmappedLevels.length > 0
+              && !gates.some((gate) => gate.code === "levelNotMapped") ? (
                 <p className="gdb-dialog__summary tile-dialog__unmapped">
                   {ui.unmapped[locale]}: {report.unmappedLevels.join(", ")}
                 </p>
@@ -426,7 +449,7 @@ export function TilePackageDialog({
               <label className="gdb-dialog__field">
                 {ui.verticalOffset[locale]}
                 <input
-                  className="gdb-dialog__input"
+                  className="gdb-dialog__input tile-dialog__metres"
                   type="text"
                   inputMode="decimal"
                   aria-label={ui.verticalOffset[locale]}
@@ -580,7 +603,7 @@ function FloorTable({
             <td>{floor.coherentClusters.length}</td>
             <td>
               <input
-                className="gdb-dialog__input tile-dialog__band"
+                className="gdb-dialog__input tile-dialog__metres"
                 type="text"
                 inputMode="decimal"
                 aria-label={ui.bandFor[locale](floor.canonicalLevelId)}
