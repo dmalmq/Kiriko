@@ -112,6 +112,42 @@ const TILE_ERROR_COPY: Record<string, { ja: string; en: string } | undefined> = 
     ja: "パッケージを取り込めませんでした。もう一度試してください。",
     en: "The package could not be ingested. Try again.",
   },
+  package_not_found: {
+    ja: "そのパッケージはこの会場にありません。",
+    en: "That package does not belong to this venue.",
+  },
+  package_in_use: {
+    ja: "公開済みのバージョンが使用しているため削除できません。",
+    en: "A published version renders this package, so it cannot be discarded.",
+  },
+  no_published_version: {
+    ja: "先に会場データを公開してください。位置合わせは会場自身の形状に対して測ります。",
+    en: "Publish the venue first: registration is measured against its own geometry.",
+  },
+  not_evaluated: {
+    ja: "先に位置合わせを実行してください。",
+    en: "Run registration before activating.",
+  },
+  activation_blocked: {
+    ja: "有効化を妨げる項目が残っています。",
+    en: "Something still blocks activation.",
+  },
+  evaluation_stale: {
+    ja: "会場データが更新されました。位置合わせをやり直してください。",
+    en: "The venue has published since this was measured. Run registration again.",
+  },
+  no_spatial_context: {
+    ja: "このバージョンには空間基準がありません。会場を再公開してください。",
+    en: "This version carries no spatial frame to register against. Republish the venue.",
+  },
+  undecodable_content: {
+    ja: "タイルの内容を読み取れませんでした。書き出しが完了しているか確認してください。",
+    en: "The tile content could not be read. Check that the export completed.",
+  },
+  malformed_request: {
+    ja: "位置合わせの設定を読み取れませんでした。",
+    en: "The registration settings could not be read.",
+  },
 };
 
 /** Every refusal code the copy table answers for. */
