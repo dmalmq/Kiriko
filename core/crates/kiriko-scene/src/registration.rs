@@ -355,6 +355,15 @@ pub struct RegistrationProfile {
     /// How far a tile level's resolved plane may sit from a canonical floor's
     /// plane and still be that floor.
     pub level_match_tolerance_m: f64,
+    /// Added to every tile plane before it is matched to a canonical floor.
+    ///
+    /// The venue GDB proves no floor elevation — every exported Z was 0 (#31) —
+    /// so the two sides can sit on different vertical datums. Reconciling them
+    /// is a recorded producer decision carried by the versioned profile, never
+    /// an alignment inferred from the data: inferring it would map every level
+    /// somewhere, which is exactly the guess the activation gate exists to
+    /// refuse.
+    pub vertical_offset_m: f64,
 }
 
 impl Default for RegistrationProfile {
@@ -373,6 +382,7 @@ impl Default for RegistrationProfile {
             cluster_cell_m: 40.0,
             cluster_min_samples: 5,
             level_match_tolerance_m: 1.5,
+            vertical_offset_m: 0.0,
         }
     }
 }
@@ -438,6 +448,10 @@ pub struct RegistrationReport {
     pub floors: Vec<FloorRegistration>,
     /// Composite levels no canonical floor claims. Reported, never guessed at.
     pub unmapped_levels: Vec<String>,
+    /// The vertical offset the profile applied to tile planes before matching.
+    /// Recorded so a producer can see which datum reconciliation produced this
+    /// registration table.
+    pub applied_vertical_offset_m: f64,
     /// Every surviving sample across every floor.
     pub venue_wide: ResidualStats,
 }
@@ -464,11 +478,12 @@ pub fn measure_registration(
     let mut floor_of_level: BTreeMap<&str, &VenueFloor> = BTreeMap::new();
     let mut unmapped_levels: Vec<String> = Vec::new();
     for level in &levels {
-        let Some(plane) = level.resolved_plane_m else {
+        let Some(measured) = level.resolved_plane_m else {
             // No plane is its own gate failure; it cannot also be a mapping.
             unmapped_levels.push(level.composite_id.clone());
             continue;
         };
+        let plane = measured + profile.vertical_offset_m;
         let nearest = venue
             .iter()
             .filter(|floor| (floor.plane_z_m - plane).abs() <= profile.level_match_tolerance_m)
@@ -600,6 +615,7 @@ pub fn measure_registration(
         levels,
         floors,
         unmapped_levels,
+        applied_vertical_offset_m: profile.vertical_offset_m,
         venue_wide: stats_of(&mut venue_wide),
     }
 }

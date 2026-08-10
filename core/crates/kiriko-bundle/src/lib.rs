@@ -39,4 +39,4 @@ pub use error::{BundleError, BundleErrorCode, CompileError};
 pub use export::{ExportError, NetworkGeoJson, export_network, ordinal_to_floor_label};
 pub use resolve::{FloorOverride, ResolutionProfile};
 pub use scene_adapter::scene_projection;
-pub use scene_compile::SceneProfile;
+pub use scene_compile::{SceneProfile, VenueFloorGeometry, venue_floor_geometry};

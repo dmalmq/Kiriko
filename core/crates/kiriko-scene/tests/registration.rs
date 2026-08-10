@@ -282,3 +282,39 @@ fn a_level_whose_plane_matches_no_canonical_floor_is_reported_unmapped() {
     assert_eq!(report.unmapped_levels, vec!["asset-v1|station.rvt||l9|80"]);
     assert!(report.floors.is_empty(), "no floor was registered");
 }
+
+#[test]
+fn the_profiles_vertical_offset_is_what_reconciles_two_datums() {
+    // The venue GDB proves no floor elevation (#31: every exported Z was 0), so
+    // tile heights and canonical planes can sit on different datums. The offset
+    // is a recorded, versioned producer decision — never inferred, because
+    // inferring it is how a mezzanine silently becomes a concourse.
+    let glb = glb_with_features(&[FeatureSpec::new(
+        "floor-a",
+        "Floors",
+        "l1",
+        0.0,
+        quad([0.0, 0.0], [40.0, 20.0], 123.4),
+    )]);
+    let scene = read_glb(&glb).expect("fixture glb reads");
+    let venue = [venue_floor("level-1", [0.0, 0.0], [40.0, 20.0])];
+    let mut profile = RegistrationProfile::default();
+    profile.vertical_offset_m = -123.4;
+
+    let report = measure_registration(
+        &scene,
+        "asset-v1",
+        &FrameTransform::identity(),
+        &venue,
+        &profile,
+    );
+
+    assert!(report.unmapped_levels.is_empty(), "the offset places it");
+    assert_eq!(report.floors.len(), 1);
+    assert_eq!(report.applied_vertical_offset_m, -123.4);
+    assert_eq!(
+        report.levels[0].resolved_plane_m,
+        Some(123.4),
+        "the level's own measured plane is reported untouched"
+    );
+}

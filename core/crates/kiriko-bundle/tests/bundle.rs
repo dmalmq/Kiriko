@@ -2961,3 +2961,65 @@ fn a_descriptor_naming_a_level_the_venue_does_not_have_is_rejected() {
         "the error names the level: {error:?}"
     );
 }
+
+#[test]
+fn venue_floor_geometry_is_the_units_in_venue_local_metres_on_each_plane() {
+    // What registration measures against: the venue's own unit polygons, in the
+    // §8 frame, on the source-elevation plane rather than the normalised scene
+    // Z — a tile package's heights are not normalised, so comparing against a
+    // normalised ladder would compare two different datums by construction.
+    let document = decode_bundle(&compile_minimal()).expect("minimal decodes");
+    let spatial = document
+        .spatial_context
+        .as_ref()
+        .expect("the fixture carries §8");
+
+    let floors = kiriko_bundle::venue_floor_geometry(&document);
+
+    assert_eq!(floors.len(), 3, "one entry per level with unit geometry");
+    let b1 = floors
+        .iter()
+        .find(|floor| floor.level_id == "b1000001-0000-4000-8000-0000000000b1")
+        .expect("B1 is a floor");
+    assert_eq!(b1.ordinal, -1.0);
+    assert_eq!(b1.rings.len(), 6, "B1's six units");
+
+    let record = spatial
+        .levels
+        .iter()
+        .find(|level| level.level_id == b1.level_id)
+        .expect("B1 has a §8 record");
+    let expected = (record.resolved_scene_z_mm - spatial.frame.vertical_normalisation_offset_mm)
+        as f64
+        / 1000.0;
+    assert!(
+        (b1.plane_z_m - expected).abs() < 1e-9,
+        "plane {} is not the de-normalised scene Z {expected}",
+        b1.plane_z_m
+    );
+
+    // The fixture's B1 corridor spans 139.7662..139.7678 by 35.6806..35.6814,
+    // around an anchor at the venue bounds centre (139.7670, 35.6810): roughly
+    // ±72 m east and ±44 m north.
+    let corridor = b1
+        .rings
+        .iter()
+        .find(|ring| ring.iter().any(|point| point[0] < -70.0))
+        .expect("the corridor reaches the west edge");
+    let east: Vec<f64> = corridor.iter().map(|point| point[0]).collect();
+    let north: Vec<f64> = corridor.iter().map(|point| point[1]).collect();
+    let min = |values: &[f64]| values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = |values: &[f64]| values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    assert!((min(&east) + 72.4).abs() < 1.0, "west edge {}", min(&east));
+    assert!((max(&east) - 72.4).abs() < 1.0, "east edge {}", max(&east));
+    assert!(
+        (min(&north) + 44.5).abs() < 1.0,
+        "south edge {}",
+        min(&north)
+    );
+    assert!(
+        (max(&north) - 44.5).abs() < 1.0,
+        "north edge {}",
+        max(&north)
+    );
+}
