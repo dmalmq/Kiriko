@@ -19,7 +19,7 @@
 //! geometry the way #31 measured them, and the numbers are reported rather than
 //! judged here; judging is the profile's job.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::format::SemanticRole;
 use crate::glb::GlbScene;
@@ -771,6 +771,224 @@ fn median(sorted: &[f64]) -> f64 {
 
 fn magnitude(vector: [f64; 2]) -> f64 {
     vector[0].hypot(vector[1])
+}
+
+/// Why an activation is blocked. Typed, because a producer UI has to say which
+/// part of their export to look at without parsing prose, in either language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateCode {
+    /// A member failed integrity or did not resolve.
+    IntegrityUnresolved,
+    /// No capability profile was recorded for this activation.
+    CapabilityProfileMissing,
+    /// A floor's p90 residual is beyond its band.
+    RegistrationOutOfBand,
+    /// A floor's correspondences agree on one direction beyond the band —
+    /// displacement rather than noise.
+    CoherentShiftOutOfBand,
+    /// A spatially separated group of residuals agrees beyond the band.
+    CoherentResidual,
+    /// A rendered level exposes no surface to resolve a floor plane from.
+    LevelPlaneUnresolved,
+    /// A rendered level maps to no canonical floor.
+    LevelNotMapped,
+    /// Opaque content belongs to no level and has no contextual class.
+    UnclassifiedOpaqueContent,
+}
+
+impl GateCode {
+    /// Stable string value (camelCase, never changes for an existing variant):
+    /// the key the producer-facing copy table answers for.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IntegrityUnresolved => "integrityUnresolved",
+            Self::CapabilityProfileMissing => "capabilityProfileMissing",
+            Self::RegistrationOutOfBand => "registrationOutOfBand",
+            Self::CoherentShiftOutOfBand => "coherentShiftOutOfBand",
+            Self::CoherentResidual => "coherentResidual",
+            Self::LevelPlaneUnresolved => "levelPlaneUnresolved",
+            Self::LevelNotMapped => "levelNotMapped",
+            Self::UnclassifiedOpaqueContent => "unclassifiedOpaqueContent",
+        }
+    }
+}
+
+/// One blocked gate: what failed, on what, and against which number.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateFailure {
+    pub code: GateCode,
+    /// The canonical floor, composite level, or source object at fault.
+    pub subject: String,
+    /// What was measured, when the gate is numeric.
+    pub measured: Option<f64>,
+    /// The band it was measured against.
+    pub band: Option<f64>,
+}
+
+/// What a producer's activation request carries beyond the package itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivationInput<'a> {
+    /// The immutable asset version, the first component of composite level
+    /// identity.
+    pub asset_version: &'a str,
+    /// Whether every declared member resolved and hashed as recorded. Proven
+    /// by the caller that holds the store, never assumed here.
+    pub integrity_verified: bool,
+    /// The capability profile this activation is recorded against.
+    pub capability_profile: Option<&'a str>,
+    /// Source objects the producer classified as contextual, with an explicit
+    /// occlusion policy.
+    pub contextual_source_objects: &'a BTreeSet<String>,
+}
+
+/// The whole activation decision: the measurements, the registration table
+/// they produced, and every gate that blocks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivationEvaluation {
+    pub report: RegistrationReport,
+    /// Canonical floor → the composite tile levels it renders. This is the
+    /// registration table that lands in §9's `TilesDescriptor`.
+    pub floor_mappings: Vec<(String, Vec<String>)>,
+    pub gates: Vec<GateFailure>,
+}
+
+impl ActivationEvaluation {
+    /// Whether a producer may activate this package.
+    #[must_use]
+    pub fn passes(&self) -> bool {
+        self.gates.is_empty()
+    }
+}
+
+/// Measure a package against a venue and apply the profile's bands: the
+/// complete answer to "may this become the primary view, and if not, why not".
+///
+/// Gates are evaluated in a fixed order — package-wide, then per level, then
+/// per floor — so the same package always reports the same list, and a producer
+/// fixing the first failure sees a shorter list rather than a different one.
+#[must_use]
+pub fn evaluate_activation(
+    scene: &GlbScene,
+    venue: &[VenueFloor],
+    profile: &RegistrationProfile,
+    input: &ActivationInput<'_>,
+    transform: &FrameTransform,
+) -> ActivationEvaluation {
+    let report = measure_registration(scene, input.asset_version, transform, venue, profile);
+    let mut gates: Vec<GateFailure> = Vec::new();
+
+    if !input.integrity_verified {
+        gates.push(GateFailure {
+            code: GateCode::IntegrityUnresolved,
+            subject: input.asset_version.to_string(),
+            measured: None,
+            band: None,
+        });
+    }
+    if input.capability_profile.is_none() {
+        gates.push(GateFailure {
+            code: GateCode::CapabilityProfileMissing,
+            subject: input.asset_version.to_string(),
+            measured: None,
+            band: None,
+        });
+    }
+
+    let mapped: BTreeSet<&str> = report
+        .floors
+        .iter()
+        .flat_map(|floor| floor.composite_source_levels.iter().map(String::as_str))
+        .collect();
+
+    for level in &report.levels {
+        let contextual = |id: &String| input.contextual_source_objects.contains(id);
+        // A level with no level key was never a floor: it is site or context
+        // mass, and the only question is whether the producer said so.
+        if level.level_key.is_empty() {
+            for source_object_id in &level.opaque_source_object_ids {
+                if !contextual(source_object_id) {
+                    gates.push(GateFailure {
+                        code: GateCode::UnclassifiedOpaqueContent,
+                        subject: source_object_id.clone(),
+                        measured: None,
+                        band: None,
+                    });
+                }
+            }
+            continue;
+        }
+        // A level whose every object is classified context is context, however
+        // it is keyed; it renders under its own policy and needs no floor.
+        if level.source_object_ids.iter().all(contextual) {
+            continue;
+        }
+        if level.resolved_plane_m.is_none() {
+            gates.push(GateFailure {
+                code: GateCode::LevelPlaneUnresolved,
+                subject: level.composite_id.clone(),
+                measured: None,
+                band: None,
+            });
+            continue;
+        }
+        if !mapped.contains(level.composite_id.as_str()) {
+            gates.push(GateFailure {
+                code: GateCode::LevelNotMapped,
+                subject: level.composite_id.clone(),
+                measured: None,
+                band: None,
+            });
+        }
+    }
+
+    for floor in &report.floors {
+        let band = profile.p90_band_for(&floor.canonical_level_id);
+        if floor.stats.p90_m > band {
+            gates.push(GateFailure {
+                code: GateCode::RegistrationOutOfBand,
+                subject: floor.canonical_level_id.clone(),
+                measured: Some(floor.stats.p90_m),
+                band: Some(band),
+            });
+        }
+        if floor.median_shift_m > profile.median_shift_max_m {
+            gates.push(GateFailure {
+                code: GateCode::CoherentShiftOutOfBand,
+                subject: floor.canonical_level_id.clone(),
+                measured: Some(floor.median_shift_m),
+                band: Some(profile.median_shift_max_m),
+            });
+        }
+        for cluster in &floor.coherent_clusters {
+            gates.push(GateFailure {
+                code: GateCode::CoherentResidual,
+                subject: format!(
+                    "{} @ {:.0},{:.0}",
+                    floor.canonical_level_id, cluster.east_m, cluster.north_m
+                ),
+                measured: Some(cluster.distance_m),
+                band: Some(profile.coherent_residual_max_m),
+            });
+        }
+    }
+
+    let floor_mappings = report
+        .floors
+        .iter()
+        .map(|floor| {
+            (
+                floor.canonical_level_id.clone(),
+                floor.composite_source_levels.clone(),
+            )
+        })
+        .collect();
+
+    ActivationEvaluation {
+        report,
+        floor_mappings,
+        gates,
+    }
 }
 
 /// Whether a role's geometry blocks the view, and so has to be either placed on
