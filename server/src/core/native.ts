@@ -1,5 +1,6 @@
 import {
   compileImdf,
+  evaluateTileActivation as evaluateTileActivationNative,
   exportNetwork,
   ingestTilePackage as ingestTilePackageNative,
   inspectBundle,
@@ -775,4 +776,238 @@ export async function ingestTilePackage(
     const message = error instanceof Error ? error.message : String(error);
     throw new CoreTilePackageError("bridge_error", `native ingest report failed: ${message}`);
   }
+}
+
+/**
+ * `@kiriko/node`'s raw tile-activation bridge contract. Treated as untrusted
+ * FFI output — validated before use.
+ */
+export type NativeTileActivationFn = (
+  bundle: Buffer,
+  content: Buffer,
+  requestJson: string,
+) => Promise<unknown>;
+
+/**
+ * The versioned registration profile. Every field is optional over the bridge:
+ * the native default profile carries #31's certified bands, and a stored
+ * profile written before a field existed still loads as that field's old
+ * meaning.
+ */
+export interface RegistrationProfileInput {
+  id?: string;
+  version?: number;
+  sampleSpacingM?: number;
+  carveOutDistanceM?: number;
+  p90MaxM?: number;
+  /** Per-canonical-floor p90 bands: no single number describes an asset. */
+  floorP90MaxM?: Record<string, number>;
+  medianShiftMaxM?: number;
+  coherentResidualMaxM?: number;
+  clusterCellM?: number;
+  clusterMinSamples?: number;
+  levelMatchToleranceM?: number;
+  /** Added to tile planes before matching — a producer decision, never inferred. */
+  verticalOffsetM?: number;
+}
+
+export interface TileActivationRequest {
+  /** The immutable asset version: the first component of composite level identity. */
+  assetVersion: string;
+  /** The published tileset root transform, column-major, applied unchanged (#31). */
+  rootTransform: number[];
+  /** Whether every declared member resolved and hashed as recorded. */
+  integrityVerified: boolean;
+  capabilityProfile: string | null;
+  contextualSourceObjects?: string[];
+  profile?: RegistrationProfileInput;
+}
+
+export interface ResidualStats {
+  samples: number;
+  p50M: number;
+  p90M: number;
+  maxM: number;
+}
+
+export interface TileLevelRegistration {
+  compositeId: string;
+  sourceDocument: string;
+  sourceLinkName: string;
+  levelKey: string;
+  levelName: string;
+  quantizedElevationDm: number;
+  metadataElevationM: number;
+  /** The dominant walkable-surface height; `null` when the level exposes none. */
+  resolvedPlaneM: number | null;
+  /** Metadata minus resolved: provenance, and the disagreement finding's input. */
+  metadataDifferenceM: number | null;
+  surfaceTriangles: number;
+  sourceObjectIds: string[];
+  opaqueSourceObjectIds: string[];
+}
+
+export interface CoherentCluster {
+  eastM: number;
+  northM: number;
+  samples: number;
+  offsetM: [number, number];
+  distanceM: number;
+}
+
+export interface FloorRegistration {
+  canonicalLevelId: string;
+  compositeSourceLevels: string[];
+  sampled: number;
+  carvedOut: number;
+  stats: ResidualStats;
+  medianOffsetM: [number, number];
+  medianShiftM: number;
+  coherentClusters: CoherentCluster[];
+}
+
+export interface TileRegistrationReport {
+  profileId: string;
+  profileVersion: number;
+  levels: TileLevelRegistration[];
+  floors: FloorRegistration[];
+  unmappedLevels: string[];
+  appliedVerticalOffsetM: number;
+  venueWide: ResidualStats;
+}
+
+/** One blocked gate: what failed, on what, and against which number. */
+export interface TileActivationGate {
+  code: string;
+  subject: string;
+  measured: number | null;
+  band: number | null;
+}
+
+export interface TileActivationEvaluation {
+  report: TileRegistrationReport;
+  /** Canonical floor → the composite tile levels it renders. */
+  floorMappings: [string, string[]][];
+  /** Empty exactly when the package may be activated. */
+  gates: TileActivationGate[];
+}
+
+/**
+ * An activation evaluation that could not be produced at all — a bundle or
+ * content that would not decode, a venue with no §8 frame to measure in, or a
+ * malformed native response. A package that fails its *gates* is not an error:
+ * that is the evaluation's answer, and it comes back in `gates`.
+ */
+export class CoreTileActivationError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CoreTileActivationError";
+  }
+}
+
+function parseActivationEvaluation(evaluationJson: unknown): TileActivationEvaluation {
+  if (typeof evaluationJson !== "string") {
+    throw new CoreTileActivationError("bridge_error", "native activation returned no evaluation");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(evaluationJson);
+  } catch {
+    throw new CoreTileActivationError("bridge_error", "native activation evaluation was not JSON");
+  }
+  if (parsed === null || typeof parsed !== "object") {
+    throw new CoreTileActivationError(
+      "bridge_error",
+      "native activation evaluation was not an object",
+    );
+  }
+  const value = parsed as Record<string, unknown>;
+  const report = value["report"];
+  const gates = value["gates"];
+  const floorMappings = value["floorMappings"];
+  if (
+    report === null ||
+    typeof report !== "object" ||
+    !Array.isArray(gates) ||
+    !Array.isArray(floorMappings)
+  ) {
+    throw new CoreTileActivationError(
+      "bridge_error",
+      "native activation evaluation was malformed",
+    );
+  }
+  const record = report as Record<string, unknown>;
+  if (
+    typeof record["profileId"] !== "string" ||
+    typeof record["profileVersion"] !== "number" ||
+    !Array.isArray(record["levels"]) ||
+    !Array.isArray(record["floors"]) ||
+    !Array.isArray(record["unmappedLevels"])
+  ) {
+    throw new CoreTileActivationError("bridge_error", "native activation report was malformed");
+  }
+  for (const gate of gates) {
+    if (
+      gate === null ||
+      typeof gate !== "object" ||
+      typeof (gate as Record<string, unknown>)["code"] !== "string" ||
+      typeof (gate as Record<string, unknown>)["subject"] !== "string"
+    ) {
+      throw new CoreTileActivationError("bridge_error", "an activation gate was malformed");
+    }
+  }
+  return parsed as TileActivationEvaluation;
+}
+
+/**
+ * Measure an ingested tile package against a venue version's own compiled
+ * bundle and apply the versioned profile's bands.
+ *
+ * Resolves with the evaluation whether or not the package may be activated —
+ * `gates` is empty exactly when it may. Throws `CoreTileActivationError` only
+ * when no evaluation could be produced.
+ */
+export async function evaluateTileActivation(
+  bundle: Buffer,
+  content: Buffer,
+  request: TileActivationRequest,
+  nativeEvaluate: NativeTileActivationFn = evaluateTileActivationNative,
+): Promise<TileActivationEvaluation> {
+  let response: unknown;
+  try {
+    response = await nativeEvaluate(bundle, content, JSON.stringify(request));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CoreTileActivationError(
+      "bridge_error",
+      `native activation bridge failed: ${message}`,
+    );
+  }
+  if (response === null || typeof response !== "object" || !("ok" in response)) {
+    throw new CoreTileActivationError("bridge_error", "native activation response was malformed");
+  }
+  if (response.ok !== true) {
+    const errorJson = "errorJson" in response ? response.errorJson : undefined;
+    if (typeof errorJson !== "string") {
+      throw new CoreTileActivationError("bridge_error", "native activation returned no reason");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(errorJson);
+    } catch {
+      throw new CoreTileActivationError("bridge_error", "native activation reason was not JSON");
+    }
+    const reason = parsed as { code?: unknown; message?: unknown };
+    if (typeof reason.code !== "string" || reason.code === "") {
+      throw new CoreTileActivationError("bridge_error", "native activation reason had no code");
+    }
+    throw new CoreTileActivationError(
+      reason.code,
+      typeof reason.message === "string" ? reason.message : `activation refused: ${reason.code}`,
+    );
+  }
+  return parseActivationEvaluation("evaluationJson" in response ? response.evaluationJson : undefined);
 }
