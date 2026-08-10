@@ -2995,7 +2995,10 @@ fn venue_floor_geometry_is_the_units_in_venue_local_metres_on_each_plane() {
         .iter()
         .find(|level| level.level_id == b1.level_id)
         .expect("B1 has a §8 record");
-    assert_eq!(record.resolved_scene_z_mm, 0, "the lowest plane is scene Z 0");
+    assert_eq!(
+        record.resolved_scene_z_mm, 0,
+        "the lowest plane is scene Z 0"
+    );
 
     // The fixture's B1 corridor spans 139.7662..139.7678 by 35.6806..35.6814,
     // around an anchor at the venue bounds centre (139.7670, 35.6810): roughly
