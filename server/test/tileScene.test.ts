@@ -13,12 +13,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildMinimalImdfZip } from "../../tests/fixtures/buildMinimalImdfZip";
 import { collectTileBlobs } from "../src/tiles/storage";
 import { cleanupTestApps, loginCookie, makeTestApp } from "./helpers";
-import { tilesetFixture } from "./tileFixtures";
-import {
-  corridorPackageGlb,
-  rootTransform,
-  venuePlaneFromBundle,
-} from "./tileRegistrationFixtures";
+import { tilesetFixture } from "../../tests/fixtures/tileFixtures";
+import { corridorPackageGlb, rootTransform } from "../../tests/fixtures/tileRegistration";
+import { venuePlaneFromBundle } from "./tileRegistrationFixtures";
 
 afterEach(cleanupTestApps);
 

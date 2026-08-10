@@ -15,8 +15,9 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildMinimalImdfZip } from "../../tests/fixtures/buildMinimalImdfZip";
 import { cleanupTestApps, loginCookie, makeTestApp } from "./helpers";
-import { corridorPackageGlb, rootTransform, venuePlaneFromBundle } from "./tileRegistrationFixtures";
-import { tilesetFixture } from "./tileFixtures";
+import { corridorPackageGlb, rootTransform } from "../../tests/fixtures/tileRegistration";
+import { venuePlaneFromBundle } from "./tileRegistrationFixtures";
+import { tilesetFixture } from "../../tests/fixtures/tileFixtures";
 
 afterEach(cleanupTestApps);
 

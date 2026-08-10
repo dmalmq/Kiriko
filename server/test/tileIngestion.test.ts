@@ -10,7 +10,7 @@ import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanupTestApps, loginCookie, makeTestApp } from "./helpers";
-import { glbFixture as glb, tilesetFixture as tileset } from "./tileFixtures";
+import { glbFixture as glb, tilesetFixture as tileset } from "../../tests/fixtures/tileFixtures";
 
 afterEach(cleanupTestApps);
 

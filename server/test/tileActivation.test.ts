@@ -18,7 +18,8 @@ import {
   evaluateTileActivation,
   type TileActivationRequest,
 } from "../src/core/native";
-import { corridorPackageGlb, rootTransform, venuePlaneFromBundle } from "./tileRegistrationFixtures";
+import { corridorPackageGlb, rootTransform } from "../../tests/fixtures/tileRegistration";
+import { venuePlaneFromBundle } from "./tileRegistrationFixtures";
 
 const LEVEL_B1 = "b1000001-0000-4000-8000-0000000000b1";
 
