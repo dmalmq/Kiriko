@@ -188,6 +188,7 @@ pub fn compile_imdf(
         None,
         &[],
         None,
+        None,
     )
 }
 
@@ -219,6 +220,13 @@ pub fn compile_imdf(
 /// automatic resolution; each carries manual provenance, and one naming a
 /// level the venue does not have warns with code `floor_override` instead of
 /// failing the compile.
+///
+/// `tiles_descriptor` is the activated tile package's §9 descriptor: its
+/// identity, activation state, versioned registration profile, and the floor
+/// mapping the renderer filters by. `None` for a venue with no activated
+/// package, which compiles byte-identically to before this argument existed.
+/// A mapping naming a level the venue does not have fails the compile — a
+/// registration table the renderer cannot resolve is not a table.
 /// Deliberately wide: the immutable-bundle compile surface.
 #[allow(clippy::too_many_arguments)]
 pub fn compile_imdf_with_network(
@@ -232,6 +240,7 @@ pub fn compile_imdf_with_network(
     resolution_profile: Option<&ResolutionProfile>,
     overrides: &[FloorOverride],
     scene_profile: Option<&crate::scene_compile::SceneProfile>,
+    tiles_descriptor: Option<&kiriko_model::scene::TilesDescriptor>,
 ) -> Result<CompiledBundle, CompileError> {
     let venue = import_imdf(source)?;
     // Built before `document` consumes `venue`. `None` when clipping is off, so
@@ -416,6 +425,12 @@ pub fn compile_imdf_with_network(
     // append into §8's registries (records reference, never duplicate).
     if let Some(spatial) = spatial_context.as_mut() {
         document.scene = crate::scene_compile::compile_scene(&document, spatial, scene_profile);
+        // The activated package's descriptor rides on the same section: one
+        // place the renderer reads what this version's scene is, whichever
+        // source draws it.
+        if let (Some(scene), Some(descriptor)) = (document.scene.as_mut(), tiles_descriptor) {
+            scene.descriptor = Some(descriptor.clone());
+        }
     }
     document.spatial_context = spatial_context;
 
