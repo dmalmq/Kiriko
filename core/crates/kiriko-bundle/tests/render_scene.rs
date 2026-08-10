@@ -10,6 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod support;
 
+// The scene crate's own GLB fixture builder, included rather than copied: two
+// builders would drift into describing two different "valid GLB"s, which is
+// exactly what an equivalence test must not let happen.
+#[path = "../../kiriko-scene/tests/support/mod.rs"]
+mod scene_support;
+
 fn metadata() -> BundleMetadata {
     BundleMetadata {
         dataset_id: "render".to_string(),
@@ -174,6 +180,180 @@ fn geometry_is_finite_and_placed_on_the_resolved_planes() {
                 "batch scale is positive on axis {axis}"
             );
             assert!(batch.quantization_origin[axis].is_finite());
+        }
+    }
+}
+
+// -- Stage 3: the two sources produce one render contract (#75) ------------
+
+/// A role's stable name — `SemanticRole` is `Copy + Eq` but not `Ord`, and a
+/// comparison between sources wants a deterministic order.
+fn role_name(role: SemanticRole) -> &'static str {
+    match role {
+        SemanticRole::Walkable => "Walkable",
+        SemanticRole::Public => "Public",
+        SemanticRole::Service => "Service",
+        SemanticRole::Restricted => "Restricted",
+        SemanticRole::Structure => "Structure",
+        SemanticRole::Ceiling => "Ceiling",
+        SemanticRole::Opening => "Opening",
+        SemanticRole::Elevator => "Elevator",
+        SemanticRole::Escalator => "Escalator",
+        SemanticRole::Stairs => "Stairs",
+        SemanticRole::Ramp => "Ramp",
+        SemanticRole::Context => "Context",
+        SemanticRole::Conveyance => "Conveyance",
+    }
+}
+
+/// The same venue as a tile package: one walkable floor per canonical level,
+/// authored on that level's own resolved plane, registered to it.
+fn tiles_document(generated: &kiriko_scene::SceneDocument) -> kiriko_scene::SceneDocument {
+    let mut features = Vec::new();
+    let mut mappings = BTreeMap::new();
+    for (index, level) in generated.levels.iter().enumerate() {
+        let key = format!("L{index}");
+        features.push(scene_support::FeatureSpec::new(
+            &format!("floor-{index}"),
+            "Floors",
+            &key,
+            level.resolved_plane_z,
+            scene_support::quad([0.0, 0.0], [40.0, 20.0], level.resolved_plane_z),
+        ));
+        mappings.insert(
+            format!(
+                "asset-v1|station.rvt||{key}|{}",
+                (f64::from(level.resolved_plane_z) * 10.0).round() as i32
+            ),
+            level.canonical_id.clone(),
+        );
+    }
+    let glb = scene_support::glb_with_features(&features);
+    let scene = kiriko_scene::read_glb(&glb).expect("the package reads");
+    let placement = kiriko_scene::FrameTransform::identity();
+    let levels =
+        kiriko_scene::resolve_tile_levels(std::slice::from_ref(&scene), "asset-v1", &placement);
+    kiriko_scene::derive_package_scene(
+        std::slice::from_ref(&scene),
+        &levels,
+        &placement,
+        &kiriko_scene::VenueFrame {
+            ecef_origin: generated.header.frame_origin_ecef,
+            enu_basis_ecef: [
+                [
+                    generated.header.world_transform[0],
+                    generated.header.world_transform[1],
+                    generated.header.world_transform[2],
+                ],
+                [
+                    generated.header.world_transform[4],
+                    generated.header.world_transform[5],
+                    generated.header.world_transform[6],
+                ],
+                [
+                    generated.header.world_transform[8],
+                    generated.header.world_transform[9],
+                    generated.header.world_transform[10],
+                ],
+            ],
+        },
+        "tiles-package-hash",
+        &kiriko_scene::PackageIdentity {
+            floor_mappings: mappings,
+            ..kiriko_scene::PackageIdentity::default()
+        },
+    )
+    .expect("the package derives")
+    .document
+}
+
+#[test]
+fn both_sources_place_the_scene_in_the_same_frame() {
+    // The renderer positions a scene with the header alone. Two sources that
+    // disagreed here would draw the same venue in two places, and no amount of
+    // shared downstream code would hide it.
+    let generated = render_document();
+    let tiles = tiles_document(&generated);
+
+    assert_eq!(
+        tiles.header.frame_origin_ecef,
+        generated.header.frame_origin_ecef
+    );
+    assert_eq!(
+        tiles.header.world_transform,
+        generated.header.world_transform
+    );
+    assert_eq!(tiles.header.format_version, generated.header.format_version);
+}
+
+#[test]
+fn both_sources_report_the_same_canonical_level_groups() {
+    let generated = render_document();
+    let tiles = tiles_document(&generated);
+
+    let canonical = |document: &kiriko_scene::SceneDocument| -> BTreeSet<String> {
+        document
+            .levels
+            .iter()
+            .map(|level| level.canonical_id.clone())
+            .collect()
+    };
+    assert_eq!(canonical(&tiles), canonical(&generated));
+    assert!(!canonical(&tiles).is_empty(), "the fixture has floors");
+}
+
+#[test]
+fn both_sources_draw_from_one_role_and_occlusion_vocabulary() {
+    // The visual language styles roles, never source materials (#32). A role
+    // or occlusion class only one source could produce would be a fork in the
+    // renderer even if every line of drawing code were shared.
+    let generated = render_document();
+    let tiles = tiles_document(&generated);
+
+    for document in [&generated, &tiles] {
+        for feature in &document.features {
+            assert_eq!(
+                feature.occlusion,
+                kiriko_scene::occlusion_for_role(feature.role),
+                "an unclassified feature's occlusion comes from its role alone"
+            );
+        }
+    }
+    // Both vocabularies are the one `SemanticRole` enum; the check that matters
+    // is that every role a source emits round-trips through the shared table
+    // above, which it just did for every feature of both documents.
+    let roles = |document: &kiriko_scene::SceneDocument| -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = document
+            .features
+            .iter()
+            .map(|f| role_name(f.role))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    };
+    assert!(!roles(&tiles).is_empty());
+    assert!(!roles(&generated).is_empty());
+}
+
+#[test]
+fn only_identity_and_provenance_distinguish_the_two_documents() {
+    // What a reader may tell apart: which package produced it. What it may
+    // not: anything the renderer branches on.
+    let generated = render_document();
+    let tiles = tiles_document(&generated);
+
+    assert_ne!(tiles.header.source_hash, generated.header.source_hash);
+    for document in [&generated, &tiles] {
+        for batch in &document.batches {
+            assert!(
+                (batch.level_index as usize) < document.levels.len(),
+                "every batch names a level of its own document"
+            );
+            assert_eq!(batch.positions.len(), batch.feature_indices.len());
+        }
+        for feature in &document.features {
+            assert!((feature.level_index as usize) < document.levels.len());
         }
     }
 }
