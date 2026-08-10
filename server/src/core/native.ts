@@ -60,6 +60,13 @@ export interface CompileVenueMetadata {
    * facility GDBs still describe the whole site.
    */
   clipToVenue?: boolean;
+  /**
+   * The activated tile package's §9 descriptor, JSON. When present the
+   * compiled bundle's §9 carries it, which is where the renderer reads
+   * activation state and floor mappings from (#74). Absent for a venue with no
+   * activated package, and then the compile is byte-identical to before.
+   */
+  tilesDescriptorJson?: string;
 }
 
 /**
@@ -91,6 +98,7 @@ export type NativeCompileFn = (
   facilitiesGeoJson?: string,
   synthesizeNetwork?: boolean,
   clipToVenue?: boolean,
+  tilesDescriptorJson?: string,
 ) => Promise<unknown>;
 
 const WARNING_CODES: Record<ViewerWarningCode, true> = {
@@ -275,6 +283,7 @@ export async function compileVenueBundle(
         metadata.facilitiesGeoJson,
         metadata.synthesizeNetwork,
         metadata.clipToVenue,
+        metadata.tilesDescriptorJson,
       ),
     );
     if (response.ok) {

@@ -137,7 +137,8 @@ pub fn venue_floor_geometry(document: &BundleDocument) -> Vec<VenueFloorGeometry
         floors.push(VenueFloorGeometry {
             level_id: record.level_id.clone(),
             ordinal: record.ordinal,
-            plane_z_m: (record.resolved_scene_z_mm - frame.vertical_normalisation_offset_mm) as f64
+            // `scene_z = source − offset`, so the source plane adds it back.
+            plane_z_m: (record.resolved_scene_z_mm + frame.vertical_normalisation_offset_mm) as f64
                 / 1000.0,
             rings,
         });

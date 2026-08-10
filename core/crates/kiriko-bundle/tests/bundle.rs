@@ -2984,19 +2984,18 @@ fn venue_floor_geometry_is_the_units_in_venue_local_metres_on_each_plane() {
     assert_eq!(b1.ordinal, -1.0);
     assert_eq!(b1.rings.len(), 6, "B1's six units");
 
+    // B1 is ordinal −1 and the fixture declares no elevations, so the default
+    // profile's 4 m nominal spacing puts its source plane at −4 m. Stated
+    // outright rather than recomputed from the frame: the de-normalisation is
+    // the thing under test, and `scene_z = source − offset` is easy to invert
+    // the wrong way round.
+    assert_eq!(b1.plane_z_m, -4.0);
     let record = spatial
         .levels
         .iter()
         .find(|level| level.level_id == b1.level_id)
         .expect("B1 has a §8 record");
-    let expected = (record.resolved_scene_z_mm - spatial.frame.vertical_normalisation_offset_mm)
-        as f64
-        / 1000.0;
-    assert!(
-        (b1.plane_z_m - expected).abs() < 1e-9,
-        "plane {} is not the de-normalised scene Z {expected}",
-        b1.plane_z_m
-    );
+    assert_eq!(record.resolved_scene_z_mm, 0, "the lowest plane is scene Z 0");
 
     // The fixture's B1 corridor spans 139.7662..139.7678 by 35.6806..35.6814,
     // around an anchor at the venue bounds centre (139.7670, 35.6810): roughly

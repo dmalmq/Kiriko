@@ -295,7 +295,12 @@ export function glbFixture(marker: number): Uint8Array {
   return out;
 }
 
-export function tilesetFixture(contentUri: string): Uint8Array {
+/**
+ * A minimal root tileset. `transform` is the georeferencing a real export
+ * carries — an ENU-to-ECEF matrix at the tileset origin, column-major — and is
+ * omitted for packages whose placement is not what the test is about.
+ */
+export function tilesetFixture(contentUri: string, transform?: number[]): Uint8Array {
   return new TextEncoder().encode(
     JSON.stringify({
       asset: { version: "1.1" },
@@ -304,6 +309,7 @@ export function tilesetFixture(contentUri: string): Uint8Array {
         boundingVolume: { box: [0, 0, 0, 10, 0, 0, 0, 10, 0, 0, 0, 10] },
         geometricError: 0,
         refine: "ADD",
+        ...(transform === undefined ? {} : { transform }),
         content: { uri: contentUri },
       },
     }),

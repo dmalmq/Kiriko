@@ -20,7 +20,24 @@ import { Type } from "@sinclair/typebox";
 import { BlobReader, ZipReader, Uint8ArrayWriter } from "@zip.js/zip.js";
 import type { FastifyInstance } from "fastify";
 import { requireProducerSession } from "../auth/guard";
-import { CoreTilePackageError, ingestTilePackage, type TilePackageRecord } from "../core/native";
+import {
+  CoreTileActivationError,
+  CoreTilePackageError,
+  evaluateTileActivation,
+  ingestTilePackage,
+  type RegistrationProfileInput,
+  type TileActivationEvaluation,
+  type TilePackageRecord,
+} from "../core/native";
+import { storedPlanClipsToSelection } from "../gdb/plan";
+import { newPublicVersionId } from "../venues/uploadRoute";
+import {
+  descriptorFor,
+  evaluationTarget,
+  findEvaluation,
+  markActivated,
+  storeEvaluation,
+} from "./activation";
 import { collectTileBlobs, discardPackage, registerTileBlob } from "./storage";
 
 const ErrorSchema = Type.Object({
@@ -279,6 +296,269 @@ export function registerTileRoutes(app: FastifyInstance): void {
       return reply.code(200).send({ released: collected.released, bytes: collected.bytes });
     },
   );
+
+  app.post(
+    "/api/venues/:venueId/tiles/:packageId/registration",
+    {
+      preHandler: requireProducerSession,
+      schema: {
+        params: Type.Object({ venueId: Type.String(), packageId: Type.String() }),
+        body: Type.Object({
+          /** The device/renderer capability profile this activation is judged against (#26). */
+          capabilityProfile: Type.Optional(Type.String()),
+          /** Source objects the producer classified as contextual, with an occlusion policy. */
+          contextualSourceObjects: Type.Optional(Type.Array(Type.String())),
+          /** Versioned registration profile; omitted fields keep the default profile's bands. */
+          profile: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+        }),
+        response: {
+          200: Type.Object({
+            state: Type.String(),
+            report: Type.Unknown(),
+            floorMappings: Type.Array(Type.Unknown()),
+            gates: Type.Array(
+              Type.Object({
+                code: Type.String(),
+                subject: Type.String(),
+                measured: Type.Union([Type.Number(), Type.Null()]),
+                band: Type.Union([Type.Number(), Type.Null()]),
+              }),
+            ),
+          }),
+          400: ErrorSchema,
+          403: ErrorSchema,
+          404: ErrorSchema,
+          409: ErrorSchema,
+          500: ErrorSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { venueId, packageId } = request.params as { venueId: string; packageId: string };
+      const body = request.body as {
+        capabilityProfile?: string;
+        contextualSourceObjects?: string[];
+        profile?: RegistrationProfileInput;
+      };
+      const pkg = findPackage(request.server, Number(venueId), Number(packageId));
+      if (pkg === null) {
+        return reply.code(404).send(errorBody("package_not_found", "package_not_found"));
+      }
+      const target = evaluationTarget(request.server.db, Number(venueId));
+      if (target === null) {
+        // Registration is measured against the venue's own canonical data.
+        // There is none to measure against until something is published.
+        return reply.code(409).send(errorBody("no_published_version", "no_published_version"));
+      }
+
+      const profile = body.profile ?? {};
+      let evaluation: TileActivationEvaluation;
+      try {
+        evaluation = await evaluateTileActivation(
+          request.server.blobs.read(target.bundleHash),
+          pkg.contents.map((member) => request.server.blobs.read(member.hash)),
+          {
+            assetVersion: pkg.sourceHash,
+            rootTransform: readRootTransform(request.server.blobs.read(pkg.rootTilesetHash)),
+            integrityVerified: pkg.integrityVerified,
+            capabilityProfile: body.capabilityProfile ?? null,
+            contextualSourceObjects: body.contextualSourceObjects ?? [],
+            profile,
+          },
+        );
+      } catch (error) {
+        if (error instanceof CoreTileActivationError) {
+          const status = error.code === "bridge_error" ? 500 : 400;
+          return reply.code(status).send(errorBody(error.code, error.message));
+        }
+        request.log.error({ err: error }, "tile registration failed");
+        return reply.code(500).send(errorBody("internal_error", "internal_error"));
+      }
+
+      storeEvaluation(request.server.db, {
+        packageId: Number(packageId),
+        target,
+        profile,
+        capabilityProfile: body.capabilityProfile ?? null,
+        evaluation,
+        evaluatedBy: request.user.id,
+      });
+
+      return reply.code(200).send({
+        state: "evaluated",
+        report: evaluation.report,
+        floorMappings: evaluation.floorMappings,
+        gates: evaluation.gates,
+      });
+    },
+  );
+
+  app.post(
+    "/api/venues/:venueId/tiles/:packageId/activate",
+    {
+      preHandler: requireProducerSession,
+      schema: {
+        params: Type.Object({ venueId: Type.String(), packageId: Type.String() }),
+        response: {
+          202: Type.Object({
+            jobId: Type.String(),
+            versionId: Type.Number(),
+            seq: Type.Number(),
+          }),
+          403: ErrorSchema,
+          404: ErrorSchema,
+          409: ErrorSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { venueId, packageId } = request.params as { venueId: string; packageId: string };
+      const pkg = findPackage(request.server, Number(venueId), Number(packageId));
+      if (pkg === null) {
+        return reply.code(404).send(errorBody("package_not_found", "package_not_found"));
+      }
+      const evaluation = findEvaluation(request.server.db, Number(packageId));
+      if (evaluation === null) {
+        // Activation is a decision about measurements. Without them there is
+        // nothing to decide on, and gating would be a formality.
+        return reply.code(409).send(errorBody("not_evaluated", "not_evaluated"));
+      }
+      const target = evaluationTarget(request.server.db, Number(venueId));
+      if (target === null) {
+        return reply.code(409).send(errorBody("no_published_version", "no_published_version"));
+      }
+      if (
+        evaluation.evaluatedVersionId !== target.versionId ||
+        evaluation.evaluatedBundleHash !== target.bundleHash
+      ) {
+        // The venue has published since. The stored numbers describe geometry
+        // this activation would not be applied to.
+        return reply.code(409).send(errorBody("evaluation_stale", "evaluation_stale"));
+      }
+      if (evaluation.evaluation.gates.length > 0) {
+        return reply
+          .code(409)
+          .send(
+            errorBody("activation_blocked", "activation_blocked", {
+              gates: evaluation.evaluation.gates,
+            }),
+          );
+      }
+
+      const nextSeq = target.seq + 1;
+      const accepted = request.server.queue.enqueuePublication(
+        "publish_imdf",
+        {
+          venueId: Number(venueId),
+          seq: nextSeq,
+          publicId: newPublicVersionId(),
+          sourceBlobHash: target.sourceBlobHash,
+          sourceKind: target.sourceKind,
+          gdbSourceBlobHash: target.gdbSourceBlobHash,
+          gdbPlanJson: target.gdbPlanJson,
+          networkJunctionsBlobHash: target.networkJunctionsBlobHash,
+          networkPathsBlobHash: target.networkPathsBlobHash,
+          facilitiesBlobHash: target.facilitiesBlobHash,
+          synthesized: target.synthesized,
+        },
+        {
+          // Every input is the published version's own, so the new version
+          // differs by exactly the descriptor. Anything reconstructed
+          // differently here would silently recompile the venue.
+          networkJunctionsHash: target.networkJunctionsBlobHash ?? undefined,
+          networkPathsHash: target.networkPathsBlobHash ?? undefined,
+          facilitiesGeoJsonHash: target.facilitiesBlobHash ?? undefined,
+          synthesizeNetwork: target.synthesized,
+          clipToSelection: storedPlanClipsToSelection(target.gdbPlanJson),
+          tilesDescriptorJson: descriptorFor(evaluation, pkg.sourceHash, pkg.rootTilesetHash),
+          tilePackageId: Number(packageId),
+        },
+      );
+      markActivated(request.server.db, evaluation.id, accepted.versionId, request.user.id);
+      return reply
+        .code(202)
+        .send({ jobId: accepted.jobId, versionId: accepted.versionId, seq: nextSeq });
+    },
+  );
+}
+
+interface PackageForRegistration {
+  sourceHash: string;
+  rootTilesetHash: string;
+  contents: { path: string; hash: string }[];
+  /** Whether every recorded member is still present in the store. */
+  integrityVerified: boolean;
+}
+
+/**
+ * The package's stored members, and whether the store still holds all of them.
+ *
+ * Integrity is proven here rather than assumed by the evaluator: the store is
+ * content-addressed, so a member that is present is a member whose bytes hash
+ * to what ingestion recorded, and a member that is missing is exactly the
+ * "unresolved member" the activation gate refuses on.
+ */
+function findPackage(
+  server: FastifyInstance,
+  venueId: number,
+  packageId: number,
+): PackageForRegistration | null {
+  const record = server.db
+    .prepare(
+      "SELECT source_hash AS sourceHash, root_tileset AS rootTileset FROM tile_packages WHERE id = ? AND venue_id = ?",
+    )
+    .get(packageId, venueId) as { sourceHash: string; rootTileset: string } | undefined;
+  if (record === undefined) {
+    return null;
+  }
+  const members = server.db
+    .prepare(
+      "SELECT path, hash, kind FROM tile_package_members WHERE package_id = ? ORDER BY path",
+    )
+    .all(packageId) as { path: string; hash: string; kind: string }[];
+  const root = members.find((member) => member.path === record.rootTileset);
+  if (root === undefined) {
+    return null;
+  }
+  return {
+    sourceHash: record.sourceHash,
+    rootTilesetHash: root.hash,
+    contents: members.filter((member) => member.kind === "content"),
+    integrityVerified: members.every((member) => server.blobs.has(member.hash)),
+  };
+}
+
+/**
+ * The root tileset's `root.transform`, applied unchanged (#31).
+ *
+ * A tileset without one places its content at the ENU origin of the venue
+ * frame, which is the glTF identity case; refusing it here would reject a
+ * legitimate local-origin export.
+ */
+function readRootTransform(tileset: Buffer): number[] {
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(tileset.toString("utf8"));
+  } catch {
+    return identity;
+  }
+  if (parsed === null || typeof parsed !== "object" || !("root" in parsed)) {
+    return identity;
+  }
+  const { root } = parsed;
+  if (root === null || typeof root !== "object" || !("transform" in root)) {
+    return identity;
+  }
+  const { transform } = root;
+  if (
+    !Array.isArray(transform) ||
+    transform.length !== 16 ||
+    !transform.every((value): value is number => typeof value === "number" && Number.isFinite(value))
+  ) {
+    return identity;
+  }
+  return transform;
 }
 
 function insertMembers(
