@@ -24,7 +24,7 @@ describe("SignInModal", () => {
     const user = userEvent.setup();
     render(<SignInModal locale="en" onSignedIn={onSignedIn} />);
 
-    await user.type(screen.getByLabelText("Username"), "daniel");
+    await user.type(screen.getByLabelText("Email"), "daniel");
     await user.type(screen.getByLabelText("Password"), "secret");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
 
@@ -39,11 +39,11 @@ describe("SignInModal", () => {
     const user = userEvent.setup();
     render(<SignInModal locale="en" onSignedIn={() => {}} />);
 
-    await user.type(screen.getByLabelText("Username"), "daniel");
+    await user.type(screen.getByLabelText("Email"), "daniel");
     await user.type(screen.getByLabelText("Password"), "wrong");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
 
-    expect(await screen.findByText("Wrong username or password.")).toBeTruthy();
+    expect(await screen.findByText("Wrong email or password.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
   });
 
@@ -74,7 +74,7 @@ describe("SignInModal", () => {
     const dialog = screen.getByRole("dialog", { name: "Sign in to Kiriko" });
     expect(dialog.getAttribute("aria-modal")).toBe("true");
     await waitFor(() => {
-      expect(document.activeElement).toBe(screen.getByLabelText("Username"));
+      expect(document.activeElement).toBe(screen.getByLabelText("Email"));
     });
 
     await user.keyboard("{Escape}");

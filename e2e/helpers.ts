@@ -193,7 +193,7 @@ export const E2E_USER = "e2e";
 export const E2E_PASSWORD = "e2e-password";
 
 export async function signIn(page: Page): Promise<void> {
-  await page.getByLabel(/Username|ユーザー名/).fill(E2E_USER);
+  await page.getByLabel(/Email|メールアドレス/).fill(E2E_USER);
   await page.getByLabel(/Password|パスワード/).fill(E2E_PASSWORD);
   await page.getByRole("button", { name: /Sign in|サインイン/ }).click();
   await expect(page.locator(".gallery__title")).toBeVisible();

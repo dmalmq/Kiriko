@@ -5,13 +5,16 @@ import { api, ApiError, type ApiUser } from "./api";
 
 const ui = {
   title: { ja: "Kiriko にサインイン", en: "Sign in to Kiriko" },
-  username: { ja: "ユーザー名", en: "Username" },
+  // The identifier is an email address in practice. The field stays a plain
+  // text input rather than `type="email"`, because short account names still
+  // sign in and browser validation would reject them.
+  email: { ja: "メールアドレス", en: "Email" },
   password: { ja: "パスワード", en: "Password" },
   submit: { ja: "サインイン", en: "Sign in" },
   cancel: { ja: "キャンセル", en: "Cancel" },
   wrong: {
-    ja: "ユーザー名またはパスワードが違います",
-    en: "Wrong username or password.",
+    ja: "メールアドレスまたはパスワードが違います",
+    en: "Wrong email or password.",
   },
   failed: { ja: "サインインに失敗しました", en: "Sign-in failed" },
 } as const;
@@ -93,8 +96,8 @@ export function SignInModal({ locale, onSignedIn, onCancel }: SignInModalProps) 
         <div className="kiriko-input">
           <input
             ref={usernameRef}
-            aria-label={ui.username[locale]}
-            placeholder={ui.username[locale]}
+            aria-label={ui.email[locale]}
+            placeholder={ui.email[locale]}
             autoComplete="username"
             value={username}
             onChange={(event) => {
