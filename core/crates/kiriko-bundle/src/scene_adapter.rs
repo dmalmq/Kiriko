@@ -5,11 +5,11 @@
 
 use std::collections::HashMap;
 
-use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+use kiriko_model::scene::{ActivationState, PrimitiveGeometry, PrimitiveRole};
 use kiriko_model::scene_projection::{
     SceneCapabilityState, SceneConfidenceProjection, SceneEvidenceProjection, SceneFrameProjection,
     SceneLevelProjection, ScenePickProjection, ScenePrimitiveProjection, SceneProjection,
-    SceneSource, SceneSourceIdentity, SceneSourceKind,
+    SceneSource, SceneSourceIdentity, SceneSourceKind, TilesDescriptorProjection,
 };
 use kiriko_model::spatial::{Axes, LengthUnit};
 
@@ -33,8 +33,34 @@ impl<'a> GeneratedSceneSource<'a> {
             levels: self.levels(),
             primitives: self.primitives(),
             capability: self.capability(),
+            tiles: self.tiles(),
         }
     }
+
+    /// The activated package §9 records, if any. Hashes render as lowercase
+    /// hex: the projection is what TypeScript reads, and a byte array there is
+    /// an identity nobody can compare against a URL or a store key.
+    fn tiles(&self) -> Option<TilesDescriptorProjection> {
+        let descriptor = self.document.scene.as_ref()?.descriptor.as_ref()?;
+        Some(TilesDescriptorProjection {
+            activation_state: match descriptor.activation_state {
+                ActivationState::Activated => "activated",
+                ActivationState::NotActivated => "not_activated",
+            }
+            .to_string(),
+            registration_profile_id: descriptor.registration_profile_id.clone(),
+            package_hash: hex(&descriptor.package_hash),
+            manifest_hash: hex(&descriptor.manifest_hash),
+        })
+    }
+}
+
+fn hex(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 /// The full typed projection of the Generated scene source for a decoded
@@ -97,6 +123,19 @@ impl SceneSource for GeneratedSceneSource<'_> {
                 slab_bounds.insert(primitive.level_id.as_str(), [min_x, min_y, max_x, max_y]);
             }
         }
+        // Floor filtering uses the canonical floor's registered set of
+        // composite source levels, never a raw level key (#30 section 3).
+        let mapped = |level_id: &str| -> Vec<String> {
+            self.document
+                .scene
+                .as_ref()
+                .and_then(|scene| scene.descriptor.as_ref())
+                .into_iter()
+                .flat_map(|descriptor| descriptor.floor_mappings.iter())
+                .filter(|mapping| mapping.canonical_level_id == level_id)
+                .flat_map(|mapping| mapping.composite_source_levels.iter().cloned())
+                .collect()
+        };
         spatial
             .levels
             .iter()
@@ -105,7 +144,7 @@ impl SceneSource for GeneratedSceneSource<'_> {
                 ordinal: level.ordinal,
                 resolved_scene_z_mm: level.resolved_scene_z_mm,
                 bounds_mm: slab_bounds.get(level.level_id.as_str()).copied(),
-                source_levels: Vec::new(),
+                source_levels: mapped(&level.level_id),
             })
             .collect()
     }

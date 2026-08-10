@@ -3023,3 +3023,67 @@ fn venue_floor_geometry_is_the_units_in_venue_local_metres_on_each_plane() {
         max(&north)
     );
 }
+
+#[test]
+fn the_projection_reports_an_activated_package_and_its_floor_mapping() {
+    // The renderer learns what this version's scene is from §9 alone. Anything
+    // it had to be told separately could disagree with the bundle it is drawing.
+    let source = support::build_minimal_imdf_zip();
+    let mut descriptor = activated_descriptor();
+    descriptor.floor_mappings[0].composite_source_levels = vec![
+        "asset-v1|station.rvt||b1fl|-31".into(),
+        "asset-v1|kitte.rvt|link|b1fl|-30".into(),
+    ];
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+        Some(&descriptor),
+    )
+    .expect("fixture compiles with a descriptor");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+
+    let projection = kiriko_bundle::scene_projection(&document);
+
+    let tiles = projection
+        .tiles
+        .expect("the projection reports the package");
+    assert_eq!(tiles.activation_state, "activated");
+    assert_eq!(tiles.registration_profile_id, "default@1");
+    assert_eq!(tiles.package_hash, "03".repeat(32));
+    let b1 = projection
+        .levels
+        .iter()
+        .find(|level| level.level_id == "b1000001-0000-4000-8000-0000000000b1")
+        .expect("B1 is projected");
+    assert_eq!(
+        b1.source_levels,
+        vec![
+            "asset-v1|station.rvt||b1fl|-31".to_string(),
+            "asset-v1|kitte.rvt|link|b1fl|-30".to_string()
+        ],
+        "floor filtering uses the canonical floor's registered composite levels"
+    );
+}
+
+#[test]
+fn a_venue_with_no_package_projects_no_tiles_and_no_source_levels() {
+    let document = decode_bundle(&compile_minimal()).expect("minimal decodes");
+
+    let projection = kiriko_bundle::scene_projection(&document);
+
+    assert_eq!(projection.tiles, None);
+    assert!(
+        projection
+            .levels
+            .iter()
+            .all(|level| level.source_levels.is_empty())
+    );
+}
