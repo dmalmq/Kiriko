@@ -1,5 +1,13 @@
 import type { GdbInspection, GdbInspectResponse, GdbMappingPlan, NetworkInspectResponse, FacilitiesInspectResponse } from "../gdb/types";
 import type { LocaleCode } from "../imdf/types";
+import type { TileActivationGate } from "./tileGates";
+import type {
+  RegistrationProfileInput,
+  TileActivationAccepted,
+  TileEvaluationResult,
+  TilePackageAccepted,
+  TilePackageListEntry,
+} from "./tileTypes";
 
 export type ApiUserRole = "viewer" | "member" | "admin";
 
@@ -27,6 +35,11 @@ export interface VenueSummary extends VenueRow {
   editableMapping?: boolean;
   hasNetwork?: boolean;
   hasGraph?: boolean;
+  /**
+   * How many tile packages the venue holds, and whether the version a viewer
+   * would open renders one. Independent, because activation is explicit (#74).
+   */
+  tiles?: { packages: number; activeOnLatest: boolean };
 }
 
 export class ApiError extends Error {
@@ -36,6 +49,26 @@ export class ApiError extends Error {
   ) {
     super(message);
     this.name = "ApiError";
+  }
+}
+
+/**
+ * A tile route's refusal, with the pieces a producer surface needs: the stable
+ * code that selects copy, and the gates a blocked activation reports.
+ *
+ * Separate from `ApiError` because that one keeps only a message, and a message
+ * is the one thing here that must never reach a producer — server strings are
+ * internal.
+ */
+export class TileApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    /** Empty unless `code` is `activation_blocked`. */
+    public readonly gates: TileActivationGate[] = [],
+  ) {
+    super(code);
+    this.name = "TileApiError";
   }
 }
 /** Permanent public version identity: a lowercase 64-hex string. */
@@ -289,6 +322,46 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       // non-JSON error body
     }
     throw new ApiError(res.status, message);
+  }
+  return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
+}
+
+/**
+ * A tile route's error body, reduced to the code that selects copy and the gates
+ * a blocked activation carries. Narrowed rather than cast: the body is the one
+ * thing here that comes from outside, and a shape nobody checked would be
+ * trusted for exactly one read.
+ */
+function tileFailure(status: number, body: string): TileApiError {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    // A proxy's HTML, or an empty body. There is no code to report.
+    return new TileApiError(status, `http_${status}`);
+  }
+  if (parsed === null || typeof parsed !== "object") {
+    return new TileApiError(status, `http_${status}`);
+  }
+  const code =
+    "code" in parsed && typeof parsed.code === "string" ? parsed.code : `http_${status}`;
+  const details = "details" in parsed ? parsed.details : null;
+  const raw =
+    details !== null && typeof details === "object" && "gates" in details
+      ? details.gates
+      : null;
+  const gates = Array.isArray(raw) ? (raw as TileActivationGate[]) : [];
+  return new TileApiError(status, code, gates);
+}
+
+async function tileRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, {
+    credentials: "same-origin",
+    headers: init?.body !== undefined ? { "content-type": "application/json" } : {},
+    ...init,
+  });
+  if (!res.ok) {
+    throw tileFailure(res.status, await res.text());
   }
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
 }
@@ -595,5 +668,77 @@ export const api = {
     return request<{ blobHash: string; inspection: GdbInspection; plan: GdbMappingPlan }>(
       `/api/venues/${venueId}/gdb-mapping`,
     );
+  },
+
+  async listTilePackages(venueId: number): Promise<TilePackageListEntry[]> {
+    return (
+      await tileRequest<{ packages: TilePackageListEntry[] }>(`/api/venues/${venueId}/tiles`)
+    ).packages;
+  },
+
+  /**
+   * Upload a 3D Tiles archive for validation and storage.
+   *
+   * XHR rather than `fetch` for the same reason `uploadVersion` is: a package can
+   * be 172 MiB, which over a LAN is a minute of silence unless progress is
+   * reported. `fetch` cannot report upload progress.
+   */
+  uploadTilePackage(
+    venueId: number,
+    file: File,
+    onProgress: (fraction: number) => void,
+  ): Promise<TilePackageAccepted> {
+    // Executor form required: tsconfig lib predates Promise.withResolvers (es2024).
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/venues/${venueId}/tiles/inspect`);
+      xhr.upload.addEventListener("progress", (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          onProgress(event.loaded / event.total);
+        }
+      });
+      xhr.addEventListener("load", () => {
+        if (xhr.status === 201) {
+          resolve(JSON.parse(xhr.responseText) as TilePackageAccepted);
+          return;
+        }
+        reject(tileFailure(xhr.status, xhr.responseText));
+      });
+      xhr.addEventListener("error", () => {
+        reject(new TileApiError(0, "network_error"));
+      });
+      const form = new FormData();
+      form.append("file", file);
+      xhr.send(form);
+    });
+  },
+
+  async evaluateTilePackage(
+    venueId: number,
+    packageId: number,
+    body: {
+      capabilityProfile?: string;
+      contextualSourceObjects?: string[];
+      profile?: RegistrationProfileInput;
+    },
+  ): Promise<TileEvaluationResult> {
+    return tileRequest<TileEvaluationResult>(
+      `/api/venues/${venueId}/tiles/${packageId}/registration`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
+  },
+
+  async activateTilePackage(
+    venueId: number,
+    packageId: number,
+  ): Promise<TileActivationAccepted> {
+    return tileRequest<TileActivationAccepted>(
+      `/api/venues/${venueId}/tiles/${packageId}/activate`,
+      { method: "POST", body: "{}" },
+    );
+  },
+
+  async discardTilePackage(venueId: number, packageId: number): Promise<void> {
+    await tileRequest<void>(`/api/venues/${venueId}/tiles/${packageId}`, { method: "DELETE" });
   },
 };

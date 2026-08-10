@@ -3005,3 +3005,65 @@ button {
     transition: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Tile producer dialog (#80). Reuses the `gdb-dialog` vocabulary — panel,
+   section, table, field, error — and adds only what the registration report
+   needs: a gate list, a narrow numeric cell for a per-floor band, and a record
+   block whose ignored-entry line reads as a warning rather than a statistic.
+   --------------------------------------------------------------------------- */
+
+.tile-dialog__record {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.tile-dialog__ignored {
+  color: var(--color-warning, #a15c07);
+}
+
+.tile-dialog__gates ul {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.tile-dialog__context {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--color-text);
+}
+
+/* Wide enough for "0.95", no wider: the column sits beside the measurement it
+   is being weighed against, and a full-width input would separate them. */
+.tile-dialog__band {
+  width: 5.5rem;
+}
+
+.tile-dialog__levers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.tile-dialog__serving,
+.tile-dialog__activated {
+  color: var(--color-accent);
+}
+
+.tile-dialog__unmapped {
+  color: var(--color-warning, #a15c07);
+}
+
+/* The report is wide: two tables of numbers side by side in a fixed panel. */
+.tile-dialog .gdb-dialog__table {
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
+}

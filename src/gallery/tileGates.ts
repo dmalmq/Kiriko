@@ -77,3 +77,67 @@ export function tileGateMessage(gate: TileActivationGate, locale: LocaleCode): s
         : ` (${gate.subject})`;
   return `${base}${measurement}`;
 }
+
+/**
+ * Producer-facing copy for the tile routes' own refusals, as distinct from a
+ * gate: a gate is a measurement about the package, these are about the request.
+ *
+ * `no_published_version` is the one that is not a failure. Registration measures
+ * against the venue's own canonical geometry, and there is none until something
+ * is published — so the copy says what to do rather than offering a retry.
+ */
+const TILE_ERROR_COPY: Record<string, { ja: string; en: string } | undefined> = {
+  file_required: {
+    ja: "アップロードするファイルを選択してください。",
+    en: "Choose a file to upload.",
+  },
+  venue_not_found: {
+    ja: "この会場は見つかりません。",
+    en: "This venue no longer exists.",
+  },
+  package_not_found: {
+    ja: "このパッケージは見つかりません。削除された可能性があります。",
+    en: "This package no longer exists. It may have been discarded.",
+  },
+  package_in_use: {
+    ja: "公開済みのバージョンが使用中のため削除できません。",
+    en: "A published version serves this package, so it cannot be discarded.",
+  },
+  no_published_version: {
+    ja: "位置合わせは会場自身のデータに対して測ります。先に IMDF か GDB を公開してください。",
+    en: "Registration is measured against the venue's own data. Publish IMDF or GDB first.",
+  },
+  not_evaluated: {
+    ja: "先に位置合わせを実行してください。",
+    en: "Run registration before activating.",
+  },
+  evaluation_stale: {
+    ja: "この会場はその後公開されています。現在のジオメトリに対して測り直してください。",
+    en: "The venue has published since. Measure again against its current geometry.",
+  },
+  activation_blocked: {
+    ja: "ゲートにより有効化できません。",
+    en: "A gate blocks activation.",
+  },
+  unsafe_archive_path: {
+    ja: "パッケージの外を参照する項目が含まれています。",
+    en: "The package contains an entry that points outside itself.",
+  },
+  invalid_archive: {
+    ja: "この ZIP は暗号化・破損しているか、記録が矛盾しています。",
+    en: "This ZIP is encrypted, damaged, or has conflicting archive records.",
+  },
+};
+
+/**
+ * The message for a route refusal. An unknown code never leaks a server string:
+ * internal messages are not producer copy, and a raw code is not either.
+ */
+export function tileErrorMessage(code: string, locale: LocaleCode): string {
+  return (
+    TILE_ERROR_COPY[code]?.[locale] ??
+    (locale === "ja"
+      ? "処理できませんでした。もう一度お試しください。"
+      : "That could not be completed. Try again.")
+  );
+}

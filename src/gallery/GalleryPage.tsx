@@ -9,6 +9,7 @@ import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 import { DatasetCard } from "./DatasetCard";
 import { GdbImportDialog } from "./GdbImportDialog";
 import { SignInModal } from "./SignInModal";
+import { TilePackageDialog } from "./TilePackageDialog";
 import { UploadModal, type UploadModalTarget } from "./UploadModal";
 
 const ui = {
@@ -113,6 +114,7 @@ export function GalleryPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadTarget, setUploadTarget] = useState<UploadModalTarget | null>(null);
   const [deleting, setDeleting] = useState<VenueSummary | null>(null);
+  const [tilesVenue, setTilesVenue] = useState<VenueSummary | null>(null);
   const [gdbFlow, setGdbFlow] = useState<GdbFlow>({ phase: "idle" });
   const [gdbNotice, setGdbNotice] = useState<string | null>(null);
   const [addData, setAddData] = useState<AddDataFlow>({ phase: "idle" });
@@ -908,6 +910,10 @@ export function GalleryPage() {
                       },
                     }
                   : {})}
+                onManageTiles={() => {
+                  if (acceptedOwner !== null) return;
+                  setTilesVenue(venue);
+                }}
                 onDelete={() => {
                   if (acceptedOwner !== null) return;
                   setDeleting(venue);
@@ -961,6 +967,21 @@ export function GalleryPage() {
           {...(uploadTarget !== null ? { target: uploadTarget } : {})}
           onClose={closeUpload}
           onPublished={() => {
+            void reload();
+          }}
+        />
+      ) : null}
+      {tilesVenue !== null ? (
+        <TilePackageDialog
+          locale={locale}
+          venueId={tilesVenue.id}
+          venueName={tilesVenue.name}
+          onClose={() => {
+            setTilesVenue(null);
+          }}
+          onActivated={() => {
+            // Activation published a version, so the card's chip, its latest
+            // version, and its stats are all stale.
             void reload();
           }}
         />
