@@ -651,7 +651,7 @@ pub enum TileActivationOutcome {
 
 pub struct TileActivationTask {
     bundle: Vec<u8>,
-    content: Vec<u8>,
+    contents: Vec<Vec<u8>>,
     request_json: String,
 }
 
@@ -696,15 +696,18 @@ impl Task for TileActivationTask {
             &spatial.frame.ecef_origin,
             &spatial.frame.enu_basis_ecef,
         );
-        let scene = match kiriko_scene::read_glb(&self.content) {
-            Ok(scene) => scene,
-            Err(error) => {
-                return Ok(TileActivationOutcome::Failure(
-                    json!({ "code": "undecodable_content", "message": error.to_string() })
-                        .to_string(),
-                ));
+        let mut scenes = Vec::with_capacity(self.contents.len());
+        for content in &self.contents {
+            match kiriko_scene::read_glb(content) {
+                Ok(scene) => scenes.push(scene),
+                Err(error) => {
+                    return Ok(TileActivationOutcome::Failure(
+                        json!({ "code": "undecodable_content", "message": error.to_string() })
+                            .to_string(),
+                    ));
+                }
             }
-        };
+        }
         let venue: Vec<kiriko_scene::VenueFloor> = kiriko_bundle::venue_floor_geometry(&document)
             .into_iter()
             .map(|floor| kiriko_scene::VenueFloor {
@@ -715,7 +718,7 @@ impl Task for TileActivationTask {
             })
             .collect();
         let evaluation = kiriko_scene::evaluate_activation(
-            &scene,
+            &scenes,
             &venue,
             &request.profile,
             &kiriko_scene::ActivationInput {
@@ -754,20 +757,22 @@ impl Task for TileActivationTask {
 /// every gate that blocks activation.
 ///
 /// `bundle` is the version's compiled `kvb1` bytes — the canonical venue data
-/// registration is measured against — and `content` is the package's decoded
-/// tile content. Runs off the Node.js event loop; the returned promise always
+/// registration is measured against — and `contents` is every content member
+/// of the package's tileset graph. They are evaluated as one asset: feature
+/// tables are member-local, so evaluating members separately would report the
+/// same canonical floor several times with a fraction of its evidence each. Runs off the Node.js event loop; the returned promise always
 /// resolves to a [`NativeTileActivationResponse`], never rejecting for a
 /// package that fails its gates: a blocked activation is the answer, not an
 /// error.
 #[napi]
 pub fn evaluate_tile_activation(
     bundle: Buffer,
-    content: Buffer,
+    contents: Vec<Buffer>,
     request_json: String,
 ) -> AsyncTask<TileActivationTask> {
     AsyncTask::new(TileActivationTask {
         bundle: bundle.to_vec(),
-        content: content.to_vec(),
+        contents: contents.iter().map(|buffer| buffer.to_vec()).collect(),
         request_json,
     })
 }

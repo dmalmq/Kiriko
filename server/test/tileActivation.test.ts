@@ -170,7 +170,7 @@ describe("tile activation evaluation", () => {
 
     const evaluation = await evaluateTileActivation(
       bundle,
-      Buffer.from(corridorPackage(0, plane)),
+      [Buffer.from(corridorPackage(0, plane))],
       request(),
     );
 
@@ -189,7 +189,7 @@ describe("tile activation evaluation", () => {
 
     const evaluation = await evaluateTileActivation(
       bundle,
-      Buffer.from(corridorPackage(0.8, plane)),
+      [Buffer.from(corridorPackage(0.8, plane))],
       request(),
     );
 
@@ -204,7 +204,7 @@ describe("tile activation evaluation", () => {
 
     const evaluation = await evaluateTileActivation(
       bundle,
-      Buffer.from(corridorPackage(0, 40)),
+      [Buffer.from(corridorPackage(0, 40))],
       request(),
     );
 
@@ -218,7 +218,7 @@ describe("tile activation evaluation", () => {
 
     const evaluation = await evaluateTileActivation(
       bundle,
-      Buffer.from(corridorPackage(0.8, plane)),
+      [Buffer.from(corridorPackage(0.8, plane))],
       request({ profile: { floorP90MaxM: { [LEVEL_B1]: 0.9 } } }),
     );
 
@@ -230,13 +230,13 @@ describe("tile activation evaluation", () => {
     const bundle = await fixtureBundle();
 
     await expect(
-      evaluateTileActivation(bundle, Buffer.from("not a glb"), request()),
+      evaluateTileActivation(bundle, [Buffer.from("not a glb")], request()),
     ).rejects.toMatchObject({ code: "undecodable_content" });
   });
 
   it("refuses a bundle it cannot decode, by name", async () => {
     await expect(
-      evaluateTileActivation(Buffer.from("not a bundle"), Buffer.from(corridorPackage()), request()),
+      evaluateTileActivation(Buffer.from("not a bundle"), [Buffer.from(corridorPackage())], request()),
     ).rejects.toBeInstanceOf(CoreTileActivationError);
   });
 
@@ -244,7 +244,7 @@ describe("tile activation evaluation", () => {
     const bundle = await fixtureBundle();
 
     await expect(
-      evaluateTileActivation(bundle, Buffer.from(corridorPackage()), request(), async () => ({
+      evaluateTileActivation(bundle, [Buffer.from(corridorPackage())], request(), async () => ({
         ok: true,
         evaluationJson: "{}",
       })),

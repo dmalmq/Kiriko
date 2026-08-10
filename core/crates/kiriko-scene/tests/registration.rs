@@ -37,7 +37,11 @@ fn a_level_plane_resolves_from_its_walkable_surfaces_not_its_metadata() {
     )]);
     let scene = read_glb(&glb).expect("fixture glb reads");
 
-    let levels = resolve_tile_levels(&scene, "asset-v1", &FrameTransform::identity());
+    let levels = resolve_tile_levels(
+        std::slice::from_ref(&scene),
+        "asset-v1",
+        &FrameTransform::identity(),
+    );
 
     assert_eq!(levels.len(), 1);
     let level = &levels[0];
@@ -65,7 +69,11 @@ fn a_level_without_surface_geometry_resolves_no_plane() {
     )]);
     let scene = read_glb(&glb).expect("fixture glb reads");
 
-    let levels = resolve_tile_levels(&scene, "asset-v1", &FrameTransform::identity());
+    let levels = resolve_tile_levels(
+        std::slice::from_ref(&scene),
+        "asset-v1",
+        &FrameTransform::identity(),
+    );
 
     assert_eq!(levels.len(), 1);
     assert_eq!(levels[0].resolved_plane_m, None);
@@ -96,7 +104,11 @@ fn one_level_key_at_two_elevations_is_two_composite_levels() {
     ]);
     let scene = read_glb(&glb).expect("fixture glb reads");
 
-    let levels = resolve_tile_levels(&scene, "asset-v1", &FrameTransform::identity());
+    let levels = resolve_tile_levels(
+        std::slice::from_ref(&scene),
+        "asset-v1",
+        &FrameTransform::identity(),
+    );
 
     assert_eq!(levels.len(), 2);
     let ids: Vec<&str> = levels.iter().map(|l| l.composite_id.as_str()).collect();
@@ -119,7 +131,11 @@ fn a_levels_plane_is_the_dominant_surface_height_not_an_average() {
     let glb = glb_with_features(&[FeatureSpec::new("floor-a", "Floors", "l1", 4.0, triangles)]);
     let scene = read_glb(&glb).expect("fixture glb reads");
 
-    let levels = resolve_tile_levels(&scene, "asset-v1", &FrameTransform::identity());
+    let levels = resolve_tile_levels(
+        std::slice::from_ref(&scene),
+        "asset-v1",
+        &FrameTransform::identity(),
+    );
 
     assert_eq!(levels[0].resolved_plane_m, Some(4.0));
 }
@@ -137,7 +153,7 @@ fn a_tile_floor_on_the_venue_outline_registers_at_zero() {
     let venue = [venue_floor("level-1", [0.0, 0.0], [40.0, 20.0])];
 
     let report = measure_registration(
-        &scene,
+        std::slice::from_ref(&scene),
         "asset-v1",
         &FrameTransform::identity(),
         &venue,
@@ -169,7 +185,7 @@ fn a_floor_offset_from_the_venue_reports_a_coherent_shift() {
     let venue = [venue_floor("level-1", [0.0, 0.0], [10.0, 20.0])];
 
     let report = measure_registration(
-        &scene,
+        std::slice::from_ref(&scene),
         "asset-v1",
         &FrameTransform::identity(),
         &venue,
@@ -202,7 +218,7 @@ fn geometry_the_venue_does_not_model_is_carved_out_not_counted() {
     let venue = [venue_floor("level-1", [0.0, 0.0], [10.0, 20.0])];
 
     let report = measure_registration(
-        &scene,
+        std::slice::from_ref(&scene),
         "asset-v1",
         &FrameTransform::identity(),
         &venue,
@@ -234,7 +250,7 @@ fn a_spatially_separated_pocket_of_large_residuals_is_a_coherent_cluster() {
     let venue = [venue_floor("level-1", [0.0, 0.0], [100.0, 40.0])];
 
     let report = measure_registration(
-        &scene,
+        std::slice::from_ref(&scene),
         "asset-v1",
         &FrameTransform::identity(),
         &venue,
@@ -272,7 +288,7 @@ fn a_level_whose_plane_matches_no_canonical_floor_is_reported_unmapped() {
     let venue = [venue_floor("level-1", [0.0, 0.0], [40.0, 20.0])];
 
     let report = measure_registration(
-        &scene,
+        std::slice::from_ref(&scene),
         "asset-v1",
         &FrameTransform::identity(),
         &venue,
@@ -304,7 +320,7 @@ fn the_profiles_vertical_offset_is_what_reconciles_two_datums() {
     };
 
     let report = measure_registration(
-        &scene,
+        std::slice::from_ref(&scene),
         "asset-v1",
         &FrameTransform::identity(),
         &venue,
@@ -318,5 +334,55 @@ fn the_profiles_vertical_offset_is_what_reconciles_two_datums() {
         report.levels[0].resolved_plane_m,
         Some(123.4),
         "the level's own measured plane is reported untouched"
+    );
+}
+
+#[test]
+fn content_split_across_several_members_registers_as_one_asset() {
+    // A tileset graph normally references several content files. Each carries
+    // its own feature table, so a per-member evaluation would report the same
+    // canonical floor several times with a fraction of its evidence each.
+    let west = glb_with_features(&[FeatureSpec::new(
+        "floor-west",
+        "Floors",
+        "l1",
+        0.0,
+        quad([0.0, 0.0], [20.0, 20.0], 0.0),
+    )]);
+    let east = glb_with_features(&[FeatureSpec::new(
+        "floor-east",
+        "Floors",
+        "l1",
+        0.0,
+        quad([20.0, 0.0], [40.0, 20.0], 0.0),
+    )]);
+    let scenes = [
+        read_glb(&west).expect("west reads"),
+        read_glb(&east).expect("east reads"),
+    ];
+    let venue = [venue_floor("level-1", [0.0, 0.0], [40.0, 20.0])];
+
+    let report = measure_registration(
+        &scenes,
+        "asset-v1",
+        &FrameTransform::identity(),
+        &venue,
+        &RegistrationProfile::default(),
+    );
+
+    assert_eq!(
+        report.levels.len(),
+        1,
+        "one composite level, not one per file"
+    );
+    assert_eq!(
+        report.levels[0].source_object_ids,
+        ["floor-west", "floor-east"]
+    );
+    assert_eq!(report.floors.len(), 1);
+    assert!(
+        report.floors[0].stats.p90_m < 1e-9,
+        "the seam where two members meet is interior geometry, not a boundary: p90 was {}",
+        report.floors[0].stats.p90_m
     );
 }

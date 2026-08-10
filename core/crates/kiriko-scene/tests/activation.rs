@@ -60,7 +60,7 @@ fn a_registered_package_passes_every_gate() {
     let contextual = BTreeSet::new();
 
     let evaluation = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &RegistrationProfile::default(),
         &input(&contextual),
@@ -88,7 +88,7 @@ fn unverified_package_integrity_blocks_activation() {
     request.integrity_verified = false;
 
     let evaluation = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &RegistrationProfile::default(),
         &request,
@@ -110,7 +110,7 @@ fn a_missing_capability_profile_blocks_activation() {
     request.capability_profile = None;
 
     let evaluation = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &RegistrationProfile::default(),
         &request,
@@ -140,7 +140,7 @@ fn a_p90_beyond_the_floors_band_blocks_activation() {
     let contextual = BTreeSet::new();
 
     let evaluation = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &RegistrationProfile::default(),
         &input(&contextual),
@@ -179,7 +179,7 @@ fn a_floors_own_measured_band_is_what_it_is_held_to() {
     profile.floor_p90_max_m.insert("level-1".into(), 0.65);
 
     let evaluation = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &profile,
         &input(&contextual),
@@ -205,7 +205,7 @@ fn a_coherent_shift_beyond_the_band_blocks_activation() {
     let contextual = BTreeSet::new();
 
     let evaluation = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &RegistrationProfile::default(),
         &input(&contextual),
@@ -229,7 +229,7 @@ fn a_spatially_separated_coherent_residual_blocks_activation() {
     let contextual = BTreeSet::new();
 
     let evaluation = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &RegistrationProfile::default(),
         &input(&contextual),
@@ -257,7 +257,7 @@ fn a_rendered_level_without_a_resolved_plane_blocks_activation() {
     let contextual = BTreeSet::new();
 
     let evaluation = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &RegistrationProfile::default(),
         &input(&contextual),
@@ -285,7 +285,7 @@ fn a_rendered_level_with_no_canonical_mapping_blocks_activation() {
     let contextual = BTreeSet::new();
 
     let evaluation = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &RegistrationProfile::default(),
         &input(&contextual),
@@ -324,7 +324,7 @@ fn opaque_content_belonging_to_no_level_blocks_until_it_is_classified() {
 
     let unclassified = BTreeSet::new();
     let blocked = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &RegistrationProfile::default(),
         &input(&unclassified),
@@ -338,7 +338,7 @@ fn opaque_content_belonging_to_no_level_blocks_until_it_is_classified() {
 
     let classified = BTreeSet::from(["mass-a".to_string()]);
     let allowed = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &RegistrationProfile::default(),
         &input(&classified),
@@ -363,7 +363,7 @@ fn an_evaluation_serialises_with_the_names_the_bridge_reads() {
     let contextual = BTreeSet::new();
 
     let evaluation = evaluate_activation(
-        &scene,
+        std::slice::from_ref(&scene),
         &venue,
         &RegistrationProfile::default(),
         &input(&contextual),

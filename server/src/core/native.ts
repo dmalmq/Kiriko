@@ -784,7 +784,7 @@ export async function ingestTilePackage(
  */
 export type NativeTileActivationFn = (
   bundle: Buffer,
-  content: Buffer,
+  contents: Buffer[],
   requestJson: string,
 ) => Promise<unknown>;
 
@@ -964,7 +964,8 @@ function parseActivationEvaluation(evaluationJson: unknown): TileActivationEvalu
 
 /**
  * Measure an ingested tile package against a venue version's own compiled
- * bundle and apply the versioned profile's bands.
+ * bundle and apply the versioned profile's bands. `contents` is every content
+ * member of the package's tileset graph, evaluated as one asset.
  *
  * Resolves with the evaluation whether or not the package may be activated —
  * `gates` is empty exactly when it may. Throws `CoreTileActivationError` only
@@ -972,13 +973,13 @@ function parseActivationEvaluation(evaluationJson: unknown): TileActivationEvalu
  */
 export async function evaluateTileActivation(
   bundle: Buffer,
-  content: Buffer,
+  contents: Buffer[],
   request: TileActivationRequest,
   nativeEvaluate: NativeTileActivationFn = evaluateTileActivationNative,
 ): Promise<TileActivationEvaluation> {
   let response: unknown;
   try {
-    response = await nativeEvaluate(bundle, content, JSON.stringify(request));
+    response = await nativeEvaluate(bundle, contents, JSON.stringify(request));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new CoreTileActivationError(

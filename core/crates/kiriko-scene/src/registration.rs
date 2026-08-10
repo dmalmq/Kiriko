@@ -185,7 +185,7 @@ pub struct TileLevel {
 /// produces the same registration table.
 #[must_use]
 pub fn resolve_tile_levels(
-    scene: &GlbScene,
+    scenes: &[GlbScene],
     asset_version: &str,
     transform: &FrameTransform,
 ) -> Vec<TileLevel> {
@@ -203,69 +203,79 @@ pub fn resolve_tile_levels(
     }
 
     let mut by_identity: BTreeMap<String, Accum> = BTreeMap::new();
-    let mut identity_by_feature: Vec<Option<String>> = Vec::with_capacity(scene.features.len());
+    // Feature ids are table-local, so identity is resolved per member.
+    let mut identity_by_feature: Vec<Vec<String>> = Vec::with_capacity(scenes.len());
 
-    for row in &scene.features {
-        let quantized = (f64::from(row.level_elevation_meters) * 10.0).round() as i32;
-        let identity = composite_level_id(
-            asset_version,
-            &row.source_document,
-            &row.source_link_name,
-            &row.level_key,
-            quantized,
-        );
-        let entry = by_identity
-            .entry(identity.clone())
-            .or_insert_with(|| Accum {
-                source_document: row.source_document.clone(),
-                source_link_name: row.source_link_name.clone(),
-                level_key: row.level_key.clone(),
-                level_name: row.level_name.clone(),
-                quantized_elevation_dm: quantized,
-                metadata_elevation_m: f64::from(row.level_elevation_meters),
-                surface_heights: BTreeMap::new(),
-                surface_triangles: 0,
-                source_object_ids: Vec::new(),
-                opaque_source_object_ids: Vec::new(),
-            });
-        entry.source_object_ids.push(row.revit_unique_id.clone());
-        if occludes(role_for_category(&row.category)) {
-            entry
-                .opaque_source_object_ids
-                .push(row.revit_unique_id.clone());
+    for scene in scenes {
+        let mut identities: Vec<String> = Vec::with_capacity(scene.features.len());
+        for row in &scene.features {
+            let quantized = (f64::from(row.level_elevation_meters) * 10.0).round() as i32;
+            let identity = composite_level_id(
+                asset_version,
+                &row.source_document,
+                &row.source_link_name,
+                &row.level_key,
+                quantized,
+            );
+            let entry = by_identity
+                .entry(identity.clone())
+                .or_insert_with(|| Accum {
+                    source_document: row.source_document.clone(),
+                    source_link_name: row.source_link_name.clone(),
+                    level_key: row.level_key.clone(),
+                    level_name: row.level_name.clone(),
+                    quantized_elevation_dm: quantized,
+                    metadata_elevation_m: f64::from(row.level_elevation_meters),
+                    surface_heights: BTreeMap::new(),
+                    surface_triangles: 0,
+                    source_object_ids: Vec::new(),
+                    opaque_source_object_ids: Vec::new(),
+                });
+            entry.source_object_ids.push(row.revit_unique_id.clone());
+            if occludes(role_for_category(&row.category)) {
+                entry
+                    .opaque_source_object_ids
+                    .push(row.revit_unique_id.clone());
+            }
+            identities.push(identity);
         }
-        identity_by_feature.push(Some(identity));
+        identity_by_feature.push(identities);
     }
 
     // Walkable geometry, weighted by triangle area: a plane is where most of
     // the walkable surface is, not where the most triangles happen to be. A
     // finely tessellated ramp cannot outvote a coarse concourse slab.
-    for primitive in &scene.primitives {
-        let Some(Some(identity)) = identity_by_feature.get(primitive.feature_id as usize) else {
-            continue;
-        };
-        let Some(row) = scene.features.get(primitive.feature_id as usize) else {
-            continue;
-        };
-        if role_for_category(&row.category) != SemanticRole::Walkable {
-            continue;
-        }
-        let Some(entry) = by_identity.get_mut(identity) else {
-            continue;
-        };
-        for triangle in primitive.positions.chunks_exact(3) {
-            let a = transform.apply(triangle[0]);
-            let b = transform.apply(triangle[1]);
-            let c = transform.apply(triangle[2]);
-            let area = horizontal_area(a, b, c);
-            if area <= 0.0 {
-                // A vertical facet is a riser or a wall face, not a plane.
+    for (index, scene) in scenes.iter().enumerate() {
+        for primitive in &scene.primitives {
+            let Some(identity) = identity_by_feature
+                .get(index)
+                .and_then(|identities| identities.get(primitive.feature_id as usize))
+            else {
+                continue;
+            };
+            let Some(row) = scene.features.get(primitive.feature_id as usize) else {
+                continue;
+            };
+            if role_for_category(&row.category) != SemanticRole::Walkable {
                 continue;
             }
-            let height = (a[2] + b[2] + c[2]) / 3.0;
-            let bin = (height / PLANE_BIN_M).round() as i64;
-            *entry.surface_heights.entry(bin).or_insert(0.0) += area;
-            entry.surface_triangles += 1;
+            let Some(entry) = by_identity.get_mut(identity) else {
+                continue;
+            };
+            for triangle in primitive.positions.chunks_exact(3) {
+                let a = transform.apply(triangle[0]);
+                let b = transform.apply(triangle[1]);
+                let c = transform.apply(triangle[2]);
+                let area = horizontal_area(a, b, c);
+                if area <= 0.0 {
+                    // A vertical facet is a riser or a wall face, not a plane.
+                    continue;
+                }
+                let height = (a[2] + b[2] + c[2]) / 3.0;
+                let bin = (height / PLANE_BIN_M).round() as i64;
+                *entry.surface_heights.entry(bin).or_insert(0.0) += area;
+                entry.surface_triangles += 1;
+            }
         }
     }
 
@@ -477,13 +487,13 @@ pub struct RegistrationReport {
 /// [`evaluate_activation`](crate::evaluate_activation).
 #[must_use]
 pub fn measure_registration(
-    scene: &GlbScene,
+    scenes: &[GlbScene],
     asset_version: &str,
     transform: &FrameTransform,
     venue: &[VenueFloor],
     profile: &RegistrationProfile,
 ) -> RegistrationReport {
-    let levels = resolve_tile_levels(scene, asset_version, transform);
+    let levels = resolve_tile_levels(scenes, asset_version, transform);
 
     // Altitude first: a level belongs to the canonical floor whose resolved
     // plane it sits on, not to whichever floor happens to be closest in plan.
@@ -517,39 +527,43 @@ pub fn measure_registration(
     let mut samples_by_level: BTreeMap<&str, Vec<[f64; 2]>> = BTreeMap::new();
     let mut edges_by_level: BTreeMap<&str, BTreeMap<(WeldedPoint, WeldedPoint), i32>> =
         BTreeMap::new();
-    for primitive in &scene.primitives {
-        let Some(row) = scene.features.get(primitive.feature_id as usize) else {
-            continue;
-        };
-        if role_for_category(&row.category) != SemanticRole::Walkable {
-            continue;
-        }
-        let composite = composite_level_id(
-            asset_version,
-            &row.source_document,
-            &row.source_link_name,
-            &row.level_key,
-            (f64::from(row.level_elevation_meters) * 10.0).round() as i32,
-        );
-        let Some((key, _)) = floor_of_level.get_key_value(composite.as_str()) else {
-            continue;
-        };
-        let edges = edges_by_level.entry(key).or_default();
-        for triangle in primitive.positions.chunks_exact(3) {
-            let corners = [
-                weld(transform.apply(triangle[0])),
-                weld(transform.apply(triangle[1])),
-                weld(transform.apply(triangle[2])),
-            ];
-            for i in 0..3 {
-                let (a, b) = (corners[i], corners[(i + 1) % 3]);
-                if a == b {
-                    continue;
+    for scene in scenes {
+        for primitive in &scene.primitives {
+            let Some(row) = scene.features.get(primitive.feature_id as usize) else {
+                continue;
+            };
+            if role_for_category(&row.category) != SemanticRole::Walkable {
+                continue;
+            }
+            let composite = composite_level_id(
+                asset_version,
+                &row.source_document,
+                &row.source_link_name,
+                &row.level_key,
+                (f64::from(row.level_elevation_meters) * 10.0).round() as i32,
+            );
+            let Some((key, _)) = floor_of_level.get_key_value(composite.as_str()) else {
+                continue;
+            };
+            let edges = edges_by_level.entry(key).or_default();
+            for triangle in primitive.positions.chunks_exact(3) {
+                let corners = [
+                    weld(transform.apply(triangle[0])),
+                    weld(transform.apply(triangle[1])),
+                    weld(transform.apply(triangle[2])),
+                ];
+                for i in 0..3 {
+                    let (a, b) = (corners[i], corners[(i + 1) % 3]);
+                    if a == b {
+                        continue;
+                    }
+                    // Undirected, and welded across members: a shared edge
+                    // arrives once from each triangle with opposite winding,
+                    // and the seam where two content files meet is interior
+                    // geometry rather than two boundaries facing each other.
+                    let key = if a <= b { (a, b) } else { (b, a) };
+                    *edges.entry(key).or_insert(0) += 1;
                 }
-                // Undirected: a shared edge arrives once from each triangle,
-                // with opposite winding.
-                let key = if a <= b { (a, b) } else { (b, a) };
-                *edges.entry(key).or_insert(0) += 1;
             }
         }
     }
@@ -900,13 +914,13 @@ impl ActivationEvaluation {
 /// fixing the first failure sees a shorter list rather than a different one.
 #[must_use]
 pub fn evaluate_activation(
-    scene: &GlbScene,
+    scenes: &[GlbScene],
     venue: &[VenueFloor],
     profile: &RegistrationProfile,
     input: &ActivationInput<'_>,
     transform: &FrameTransform,
 ) -> ActivationEvaluation {
-    let report = measure_registration(scene, input.asset_version, transform, venue, profile);
+    let report = measure_registration(scenes, input.asset_version, transform, venue, profile);
     let mut gates: Vec<GateFailure> = Vec::new();
 
     if !input.integrity_verified {
