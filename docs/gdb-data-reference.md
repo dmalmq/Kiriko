@@ -290,6 +290,18 @@ polygons.
 - **Floor filtering takes the canonical floor's whole registered set** of composite source levels (`levelIndicesOf` / `setActiveLevels`), because a floor maps to one or more of them. The generated source passes a set of one.
 - Equivalence is asserted, not inspected: `core/crates/kiriko-bundle/tests/render_scene.rs` compares the two sources' documents for one venue on frame, canonical level groups, and the role→occlusion table. Its GLB fixture builder is `#[path]`-included from the scene crate's tests — two builders would drift into describing two different "valid GLB"s.
 
+**Stage 3 verification (#76).** `server/test/stage3Proof.test.ts` carries one package built in this repository through the whole path in one test — ingest → pin to an immutable version → gates → activate → the served document decoded through the same reader the generated scene uses — and proves the guarantees that only hold once the steps compose: members stored once and released only when nothing references them (deleting the venue is the release path), pinned members served with hash ETags, immutable caching, content type, ranges, and cross-version isolation, and a control venue with no package whose bundle is byte-identical to a fresh compile with no descriptor.
+
+The registered assets are a data-gated acceptance (`server/test/stage3Tokyo.test.ts`) and skip when absent. Both are needed — the venue GDB registration is measured against, and the tile package:
+
+```bash
+KIRIKO_TOKYO_FIXTURES=/path/to/tokyo\ station \
+KIRIKO_TOKYO_TILES=/path/to/tokyo\ 3dtiles \
+pnpm --dir server exec vitest run test/stage3Tokyo.test.ts
+```
+
+It holds every floor to #31's **widest** certified band (0.70 m, M2F's) and the venue as a whole to the combined carved figure (0.65 m), printing each floor's measured p90, sample count, and carve-out on failure. Deliberately not a per-floor band table: #31 measured bands per floor *label*, and mapping a label to the canonical level id a profile keys on takes knowledge of the import that the test cannot check — a wrong mapping would apply the wrong band and still pass. A producer setting a real profile reads the printed numbers and sets `floorP90MaxM` per canonical id.
+
 ## Gotchas
 
 - **Total route weight is in `cost` units, not metres**, though the viewer currently labels it `m` (known follow-up).
