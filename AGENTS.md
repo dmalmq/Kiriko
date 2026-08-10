@@ -16,7 +16,11 @@ pnpm dev          # predev rebuilds @kiriko/wasm; Vite on :5173
 ```
 First run seeds an admin only from env on an empty DB:
 `KIRIKO_BOOTSTRAP_USER=admin KIRIKO_BOOTSTRAP_PASSWORD=… pnpm dev:server`.
-For local role testing, `KIRIKO_SEED_DEV_USERS=1 pnpm dev:server` also seeds `admin`/`member`/`viewer` (all password `password`), (re)setting those three accounts' passwords/roles each run. Opt-in, and hard-skipped under `NODE_ENV=production`.
+
+**Testing accounts.** `KIRIKO_SEED_DEV_USERS=1 KIRIKO_SEED_PASSWORD=… pnpm dev:server` seeds the accounts listed in `$KIRIKO_DATA_DIR/seed-users.json` (dev default: `server/data/seed-users.json`, gitignored — shape in `server/seed-users.example.json`), giving each the shared password and (re)setting password and role on every start. With no such file it falls back to `admin`/`member`/`viewer`. Accounts it does not list are untouched. `KIRIKO_SEED_PASSWORD` has no default — without it nothing is seeded, so named accounts can never end up with a guessable password. Opt-in, and hard-skipped under `NODE_ENV=production`. There is no user-management API yet (Workstream 1B); this file is how accounts exist.
+
+**Sharing with colleagues on the LAN (testing only).** `pnpm dev:server` then `pnpm share` (= `vite --host`) and hand out `http://<this-machine-ip>:5173`. One port is enough: Vite serves the app and proxies both `/api` and `/v` to the backend on loopback, so the server itself stays unexposed. Windows Firewall needs an inbound rule, from an elevated shell: `New-NetFirewallRule -DisplayName "Kiriko dev" -Direction Inbound -LocalPort 5173 -Protocol TCP -Action Allow`. `pnpm dev` remains loopback-only, so exposing the machine is always deliberate. This is plaintext HTTP with a shared password and non-`Secure` session cookies — anyone on the network can read a session. Fine for colleague testing, not for anything real.
+
 Editing Rust while servers run needs a restart (or `pnpm core:build`). Verify: `cargo test --manifest-path core/Cargo.toml --workspace`, `pnpm exec tsc --noEmit`, `pnpm --dir server exec tsc --noEmit`, `pnpm exec vitest run`, `pnpm --dir server exec vitest run`.
 
 **Windows toolchain:** the wasm build (`core:build:wasm`) compiles a C dependency (`zstd-sys`) for `wasm32`, which requires **clang** (MSVC can't target wasm). Install LLVM (`winget install LLVM.LLVM`). `scripts/build-wasm.mjs` auto-points cc-rs at a standard LLVM install when clang isn't on PATH; otherwise set `CC_wasm32_unknown_unknown` to a wasm-capable clang.
