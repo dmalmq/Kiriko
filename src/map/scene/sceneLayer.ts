@@ -240,7 +240,7 @@ export interface SceneDiagnostics {
   levelCount: number;
   /** Canonical level ids in the document's own index order. */
   levelIds: readonly string[];
-  activeLevelIndex(): number;
+  activeLevelIndices(): number[];
 }
 
 /** Global key carrying `SceneDiagnostics` while the layer is attached. */
@@ -374,17 +374,19 @@ export class SceneLayer implements CustomLayerInterface {
   private _selectedFeature = 0;
   private _hoveredFeature = 0;
   private _contextLost = false;
-  private _activeLevelIndex: number;
+  private _activeLevelIndices: number[];
   private _showContextLevels: boolean;
   private _stats: SceneLayerStats;
 
   constructor(scene: SceneView, options: SceneLayerOptions = {}) {
     this._scene = scene;
     this.id = options.id ?? "kiriko-scene";
-    this._activeLevelIndex = Math.min(
-      Math.max(0, Math.floor(options.activeLevelIndex ?? 0)),
-      Math.max(0, scene.levels.length - 1),
-    );
+    this._activeLevelIndices = [
+      Math.min(
+        Math.max(0, Math.floor(options.activeLevelIndex ?? 0)),
+        Math.max(0, scene.levels.length - 1),
+      ),
+    ];
     this._showContextLevels = options.showContextLevels ?? false;
 
     const anchor = sceneAnchor(scene.header.frameOriginEcef);
@@ -480,7 +482,7 @@ export class SceneLayer implements CustomLayerInterface {
       let visible = 0;
       for (const batch of this._batches) {
         const opacity = batchOpacity(batch, {
-          activeLevelIndex: this._activeLevelIndex,
+          activeLevelIndices: this._activeLevelIndices,
           showContextLevels: this._showContextLevels,
         });
         if (opacity <= 0) {
@@ -592,7 +594,7 @@ export class SceneLayer implements CustomLayerInterface {
         // hidden ceiling must not intercept a click on the room below it.
         if (
           batchOpacity(batch, {
-            activeLevelIndex: this._activeLevelIndex,
+            activeLevelIndices: this._activeLevelIndices,
             showContextLevels: this._showContextLevels,
           }) < 1
         ) {
@@ -823,12 +825,19 @@ export class SceneLayer implements CustomLayerInterface {
     targets.height = height;
   }
 
-  /** Draw a different floor at full opacity. */
-  setActiveLevel(levelIndex: number): void {
-    this._activeLevelIndex = Math.min(
-      Math.max(0, Math.floor(levelIndex)),
-      Math.max(0, this._scene.levels.length - 1),
-    );
+  /**
+   * Draw a different floor at full opacity.
+   *
+   * Takes every scene level the floor renders, because a canonical floor maps
+   * to one or more composite source levels. Indices outside the document are
+   * dropped rather than clamped: clamping would silently draw a floor the
+   * caller did not ask for.
+   */
+  setActiveLevels(levelIndices: readonly number[]): void {
+    const last = this._scene.levels.length - 1;
+    this._activeLevelIndices = levelIndices
+      .map((index) => Math.floor(index))
+      .filter((index) => index >= 0 && index <= last);
   }
 
   /** Show or hide the other floors as quiet context. */
@@ -857,14 +866,23 @@ export class SceneLayer implements CustomLayerInterface {
       sourceHash: this._scene.header.sourceHash,
       levelCount: this._scene.levels.length,
       levelIds: this._scene.levels.map((level) => level.canonicalId),
-      activeLevelIndex: () => this._activeLevelIndex,
+      activeLevelIndices: () => [...this._activeLevelIndices],
     };
   }
 
-  /** The level index a canonical level id maps to, or `null` when absent. */
-  levelIndexOf(canonicalId: string): number | null {
-    const index = this._scene.levels.findIndex((level) => level.canonicalId === canonicalId);
-    return index < 0 ? null : index;
+  /**
+   * Every scene level a canonical floor renders — the registered set of
+   * composite source levels for the generated source's one, for tiles
+   * potentially several. Empty when the scene has no such floor.
+   */
+  levelIndicesOf(canonicalId: string): number[] {
+    const indices: number[] = [];
+    this._scene.levels.forEach((level, index) => {
+      if (level.canonicalId === canonicalId) {
+        indices.push(index);
+      }
+    });
+    return indices;
   }
 
   /**

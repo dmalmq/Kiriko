@@ -21,11 +21,12 @@
  */
 
 /**
- * Sources the viewer can render. `tiles` joins in Stage 3 and enters the same
- * ladder above `generated`; the machine is written so that arrival adds a
- * source rather than a second machine.
+ * Sources the viewer can render, in ladder order: an activated 3D Tiles
+ * package, the generated scene every published version retains, and the
+ * universal 2D view.
  */
-export type SceneSourceId = "generated" | "fallback2d";
+export type SceneSourceId = "tiles" | "generated" | "fallback2d";
+
 
 export type FallbackReason =
   /** The device does not meet the capability floor. */
@@ -43,17 +44,32 @@ export type FallbackReason =
  */
 export const MAX_3D_RETRIES = 2;
 
+/**
+ * Automatic attempts at the tile scene. One: a package that will not start is
+ * usually a package, not a blip, and the venue's generated scene is right
+ * there.
+ */
+export const MAX_TILE_RETRIES = 1;
+
 export interface SceneSourceState {
   active: SceneSourceId;
   /** Why 2D is showing; `null` when 3D renders, or when it was never asked for. */
   reason: FallbackReason | null;
   retriesLeft: number;
+  /** Attempts left at the tile scene before it is given up for this session. */
+  tileRetriesLeft: number;
   /** A swap is in progress and the canvas is veiled. Never a crossfade. */
   veil: boolean;
   /** Whether 3D was requested at all — a 2D-only session is not a fallback. */
   requested: boolean;
   /** Whether the device meets the floor; a retry cannot conjure capability. */
   capable: boolean;
+  /**
+   * The rung this state fell from, when it fell one rung rather than to 2D.
+   * `null` when nothing was given up — a venue with no package rendering its
+   * generated scene has lost nothing and is told nothing.
+   */
+  droppedFrom: SceneSourceId | null;
 }
 
 export type SceneSourceEvent =
@@ -72,12 +88,19 @@ export interface SceneSourceOptions {
 }
 
 export function initialSceneSource(
-  options: SceneSourceOptions & { requested: boolean; capabilitySupported: boolean },
+  options: SceneSourceOptions & {
+    requested: boolean;
+    capabilitySupported: boolean;
+    /** Whether this version has an activated tile package to render. */
+    tilesAvailable?: boolean;
+  },
 ): SceneSourceState {
   const base = {
     retriesLeft: MAX_3D_RETRIES,
+    tileRetriesLeft: MAX_TILE_RETRIES,
     // Nothing has been replaced yet, so there is nothing to veil.
     veil: false,
+    droppedFrom: null,
     requested: options.requested,
     capable: options.capabilitySupported,
   };
@@ -87,7 +110,11 @@ export function initialSceneSource(
   if (!options.capabilitySupported) {
     return { ...base, active: "fallback2d", reason: "capability_unmet" };
   }
-  return { ...base, active: "generated", reason: null };
+  return {
+    ...base,
+    active: options.tilesAvailable === true ? "tiles" : "generated",
+    reason: null,
+  };
 }
 
 export function reduceSceneSource(
@@ -160,6 +187,20 @@ function fallBack(
     // canvas or overwrite the reason that first explained it.
     return state;
   }
+  // A tile scene that will not load costs one rung, not the whole ladder: the
+  // venue always retains a generated scene (#30 section 1), and dropping past
+  // it would discard 3D this device can render. A lost context is different —
+  // the next rung needs the same GPU, so it would fail again immediately.
+  if (state.active === "tiles" && reason === "load_failed" && state.tileRetriesLeft > 0) {
+    return {
+      ...state,
+      active: "generated",
+      reason: null,
+      droppedFrom: "tiles",
+      tileRetriesLeft: state.tileRetriesLeft - 1,
+      veil: !options.reducedMotion,
+    };
+  }
   return {
     ...state,
     active: "fallback2d",
@@ -178,6 +219,15 @@ export interface SourceProvenance {
  * what is rendering — never a source that is not.
  */
 export function sourceProvenance(state: SceneSourceState): SourceProvenance {
+  if (state.active === "tiles") {
+    return {
+      badge: { ja: "3D Tiles", en: "3D Tiles" },
+      provenance: {
+        ja: "3D Tiles · 制作元の詳細形状",
+        en: "3D Tiles · source-authored detail",
+      },
+    };
+  }
   if (state.active === "generated") {
     return {
       badge: { ja: "生成3D", en: "Generated 3D" },
@@ -193,8 +243,21 @@ export function sourceProvenance(state: SceneSourceState): SourceProvenance {
   };
 }
 
-/** Why 2D is showing, in both languages; `null` when nothing fell back. */
+/**
+ * What was given up and why, in both languages; `null` when nothing was.
+ *
+ * Covers both kinds of loss: the whole 3D view falling to 2D, and the detailed
+ * scene falling one rung to the generated one. A reviewer who was looking at
+ * source-authored geometry a moment ago is owed the second explanation as much
+ * as the first.
+ */
 export function fallbackNotice(state: SceneSourceState): { ja: string; en: string } | null {
+  if (state.active === "generated" && state.droppedFrom === "tiles") {
+    return {
+      ja: "詳細な3Dシーンを読み込めませんでした。生成3Dで続けます。",
+      en: "The detailed 3D scene could not be loaded. Continuing with the generated scene.",
+    };
+  }
   if (state.active !== "fallback2d" || state.reason === null) {
     return null;
   }

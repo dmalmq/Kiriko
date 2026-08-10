@@ -134,7 +134,12 @@ export interface BatchVisibility {
 }
 
 export interface VisibilityState {
-  activeLevelIndex: number;
+  /**
+   * Every scene level the active canonical floor renders. A floor maps to one
+   * or more composite source levels (#31), and the reviewer selected the floor
+   * — not one of the source documents it happens to be exported from.
+   */
+  activeLevelIndices: readonly number[];
   showContextLevels: boolean;
 }
 
@@ -144,7 +149,7 @@ export interface VisibilityState {
  * per-floor number rather than a per-venue one.
  */
 export function batchOpacity(batch: BatchVisibility, state: VisibilityState): number {
-  if (batch.levelIndex === state.activeLevelIndex) {
+  if (state.activeLevelIndices.includes(batch.levelIndex)) {
     return Object.hasOwn(HIDDEN_ROLES_ON_ACTIVE_LEVEL, batch.role) ? 0 : 1;
   }
   if (!state.showContextLevels) {

@@ -1595,11 +1595,13 @@ export function IndoorMap({
     if (layer == null) {
       return;
     }
-    const index = layer.levelIndexOf(levelId);
-    if (index == null) {
+    // Every scene level this floor renders: one for the generated source,
+    // potentially several composite source levels for tiles.
+    const indices = layer.levelIndicesOf(levelId);
+    if (indices.length === 0) {
       return;
     }
-    layer.setActiveLevel(index);
+    layer.setActiveLevels(indices);
     if (prefersReducedMotion()) {
       map?.triggerRepaint();
       return;

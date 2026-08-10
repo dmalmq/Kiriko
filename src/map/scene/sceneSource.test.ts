@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_3D_RETRIES,
+  fallbackNotice,
   initialSceneSource,
   reduceSceneSource,
   sourceProvenance,
@@ -181,5 +182,90 @@ describe("sourceProvenance", () => {
       reduceSceneSource(rendering(), { type: "context_lost" }, MOTION),
     );
     expect(fallback.provenance.en.toLowerCase()).not.toContain("generated");
+  });
+});
+
+/** 3D requested, the floor met, and the version has an activated package. */
+function renderingTiles(): SceneSourceState {
+  return initialSceneSource({
+    requested: true,
+    capabilitySupported: true,
+    tilesAvailable: true,
+    ...MOTION,
+  });
+}
+
+describe("the tiles rung", () => {
+  it("starts on tiles when the version has an activated package", () => {
+    const state = renderingTiles();
+    expect(state.active).toBe("tiles");
+    expect(state.reason).toBeNull();
+  });
+
+  it("starts on generated when the version has none", () => {
+    expect(rendering().active).toBe("generated");
+  });
+
+  it("falls one rung to generated when the tile scene will not load", () => {
+    // Not to 2D: the venue always retains a generated scene (#30 section 1),
+    // and dropping past it would discard 3D the device can render.
+    const state = reduceSceneSource(renderingTiles(), { type: "load_failed" }, MOTION);
+    expect(state.active).toBe("generated");
+    expect(state.reason).toBeNull();
+    expect(state.veil).toBe(true);
+  });
+
+  it("retries the tile scene once before giving it up", () => {
+    const first = reduceSceneSource(renderingTiles(), { type: "load_failed" }, MOTION);
+    expect(first.tileRetriesLeft).toBe(0);
+    // A second failure of the generated scene is the generated scene's
+    // failure, and lands on 2D as it always did.
+    const second = reduceSceneSource(first, { type: "load_failed" }, MOTION);
+    expect(second.active).toBe("fallback2d");
+    expect(second.reason).toBe("load_failed");
+  });
+
+  it("never climbs back to tiles on its own", () => {
+    // Fallback is one-way (#30 section 5): a view that silently oscillates
+    // between two sources is worse than one that is merely less detailed.
+    const fell = reduceSceneSource(renderingTiles(), { type: "load_failed" }, MOTION);
+    for (const type of ["scene_ready", "context_restored", "retry_requested"] as const) {
+      expect(reduceSceneSource(fell, { type }, MOTION).active).not.toBe("tiles");
+    }
+  });
+
+  it("reports tiles in the badge and the provenance line", () => {
+    const provenance = sourceProvenance(renderingTiles());
+    expect(provenance.badge.en).toBe("3D Tiles");
+    expect(provenance.provenance.en).toBe("3D Tiles · source-authored detail");
+    expect(provenance.badge.ja.length).toBeGreaterThan(0);
+    expect(provenance.provenance.ja).toContain("3D Tiles");
+  });
+
+  it("updates the badge the moment it falls back to generated", () => {
+    const fell = reduceSceneSource(renderingTiles(), { type: "load_failed" }, MOTION);
+    expect(sourceProvenance(fell).badge.en).toBe("Generated 3D");
+  });
+
+  it("explains a drop from tiles to generated in both languages", () => {
+    const fell = reduceSceneSource(renderingTiles(), { type: "load_failed" }, MOTION);
+    const notice = fallbackNotice(fell);
+    expect(notice?.en.length).toBeGreaterThan(0);
+    expect(notice?.ja.length).toBeGreaterThan(0);
+    expect(notice?.en.toLowerCase()).toContain("generated");
+  });
+
+  it("replaces the source without a veil under reduced motion", () => {
+    const state = reduceSceneSource(renderingTiles(), { type: "load_failed" }, REDUCED);
+    expect(state.active).toBe("generated");
+    expect(state.veil).toBe(false);
+  });
+
+  it("goes straight to 2D from tiles when the device loses its context", () => {
+    // A lost context is not the tile scene's fault and the generated scene
+    // needs the same GPU, so stepping down a rung would fail again immediately.
+    const state = reduceSceneSource(renderingTiles(), { type: "context_lost" }, MOTION);
+    expect(state.active).toBe("fallback2d");
+    expect(state.reason).toBe("context_lost");
   });
 });
