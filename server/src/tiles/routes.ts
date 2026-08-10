@@ -86,6 +86,139 @@ async function readAcceptedMembers(
 }
 
 export function registerTileRoutes(app: FastifyInstance): void {
+  app.get(
+    "/api/venues/:venueId/tiles",
+    {
+      preHandler: requireProducerSession,
+      schema: {
+        params: Type.Object({ venueId: Type.String() }),
+        response: {
+          200: Type.Object({
+            packages: Type.Array(
+              Type.Object({
+                packageId: Type.Number(),
+                sourceHash: Type.String(),
+                rootTileset: Type.String(),
+                assetVersions: Type.Array(Type.String()),
+                extensions: Type.Array(Type.String()),
+                ignored: Type.Array(Type.String()),
+                totalBytes: Type.Number(),
+                memberCount: Type.Number(),
+                createdAt: Type.String(),
+                /** Null until registration has run; not the same as measuring badly. */
+                evaluation: Type.Union([
+                  Type.Object({
+                    state: Type.String(),
+                    /** False once the venue has published since: other geometry. */
+                    current: Type.Boolean(),
+                    capabilityProfile: Type.Union([Type.String(), Type.Null()]),
+                    profileId: Type.String(),
+                    profileVersion: Type.Number(),
+                    report: Type.Unknown(),
+                    gates: Type.Array(
+                      Type.Object({
+                        code: Type.String(),
+                        subject: Type.String(),
+                        measured: Type.Union([Type.Number(), Type.Null()]),
+                        band: Type.Union([Type.Number(), Type.Null()]),
+                      }),
+                    ),
+                    evaluatedAt: Type.String(),
+                    activatedAt: Type.Union([Type.String(), Type.Null()]),
+                  }),
+                  Type.Null(),
+                ]),
+                /** A published version serves this package. */
+                serving: Type.Boolean(),
+              }),
+            ),
+          }),
+          403: ErrorSchema,
+          404: ErrorSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { venueId } = request.params as { venueId: string };
+      const venue = request.server.db
+        .prepare("SELECT id FROM venues WHERE id = ?")
+        .get(Number(venueId));
+      if (venue === undefined) {
+        return reply.code(404).send(errorBody("venue_not_found", "venue_not_found"));
+      }
+
+      // What a new evaluation would be measured against. Comparing each stored
+      // evaluation to it here is what keeps `current` the server's answer: the
+      // same comparison `activate` refuses with `evaluation_stale`, so a client
+      // never has to re-derive when an activation is still allowed.
+      const target = evaluationTarget(request.server.db, Number(venueId));
+      const rows = request.server.db
+        .prepare(
+          `SELECT p.id AS packageId, p.source_hash AS sourceHash, p.root_tileset AS rootTileset,
+                  p.asset_versions_json AS assetVersionsJson, p.extensions_json AS extensionsJson,
+                  p.ignored_json AS ignoredJson, p.total_bytes AS totalBytes,
+                  p.created_at AS createdAt,
+                  (SELECT COUNT(*) FROM tile_package_members m WHERE m.package_id = p.id)
+                    AS memberCount,
+                  EXISTS (
+                    SELECT 1 FROM version_tile_packages vtp
+                    JOIN versions v ON v.id = vtp.version_id
+                    WHERE vtp.package_id = p.id AND v.status = 'published'
+                  ) AS serving
+           FROM tile_packages p
+           WHERE p.venue_id = ?
+           ORDER BY p.id DESC`,
+        )
+        .all(Number(venueId)) as {
+        packageId: number;
+        sourceHash: string;
+        rootTileset: string;
+        assetVersionsJson: string;
+        extensionsJson: string;
+        ignoredJson: string;
+        totalBytes: number;
+        createdAt: string;
+        memberCount: number;
+        serving: number;
+      }[];
+
+      return reply.code(200).send({
+        packages: rows.map((row) => {
+          const stored = findEvaluation(request.server.db, row.packageId);
+          return {
+            packageId: row.packageId,
+            sourceHash: row.sourceHash,
+            rootTileset: row.rootTileset,
+            assetVersions: JSON.parse(row.assetVersionsJson) as string[],
+            extensions: JSON.parse(row.extensionsJson) as string[],
+            ignored: JSON.parse(row.ignoredJson) as string[],
+            totalBytes: row.totalBytes,
+            memberCount: row.memberCount,
+            createdAt: row.createdAt,
+            evaluation:
+              stored === null
+                ? null
+                : {
+                    state: stored.state,
+                    current:
+                      target !== null
+                      && stored.evaluatedVersionId === target.versionId
+                      && stored.evaluatedBundleHash === target.bundleHash,
+                    capabilityProfile: stored.capabilityProfile,
+                    profileId: stored.profileId,
+                    profileVersion: stored.profileVersion,
+                    report: stored.evaluation.report,
+                    gates: stored.evaluation.gates,
+                    evaluatedAt: stored.evaluatedAt,
+                    activatedAt: stored.activatedAt,
+                  },
+            serving: row.serving === 1,
+          };
+        }),
+      });
+    },
+  );
+
   app.post(
     "/api/venues/:venueId/tiles/inspect",
     {

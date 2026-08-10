@@ -23,6 +23,13 @@ export interface VenueSummary extends VenueRow {
   editableMapping: boolean;
   hasNetwork: boolean;
   hasGraph: boolean;
+  /**
+   * Whether this venue holds tile packages, and whether the version a viewer
+   * would open actually renders one. The two are independent: activation is an
+   * explicit producer act (#74), so a venue can hold a package indefinitely
+   * without a reviewer ever seeing tiles.
+   */
+  tiles: { packages: number; activeOnLatest: boolean };
 }
 
 /** ASCII-only slug; non-latin names fall back to "venue". */
@@ -78,9 +85,25 @@ export function listVenues(db: Database.Database, tenantId: number): VenueSummar
     `SELECT net_junctions_blob_hash AS j, synthesized AS syn FROM versions
      WHERE venue_id = ? AND status = 'published' ORDER BY seq DESC LIMIT 1`,
   );
+  const tileCountStmt = db.prepare(
+    "SELECT COUNT(*) AS count FROM tile_packages WHERE venue_id = ?",
+  );
+  // Keyed on the latest *published* version, the one a viewer opens — not on the
+  // venue's history. A plain IMDF version published over an activated one
+  // carries no descriptor, and the gallery must stop claiming tiles when that
+  // happens.
+  const tileActiveStmt = db.prepare(
+    `SELECT 1 AS x FROM version_tile_packages vtp
+     WHERE vtp.version_id = (
+       SELECT id FROM versions WHERE venue_id = ? AND status = 'published'
+       ORDER BY seq DESC LIMIT 1
+     ) LIMIT 1`,
+  );
   return venues.map((venue) => {
     const net = networkStmt.get(venue.id) as { j: string | null; syn: number } | undefined;
     const hasNetwork = net?.j != null;
+    // `COUNT(*)` always returns a row, so this read needs no absent branch.
+    const tileCount = tileCountStmt.get(venue.id) as { count: number };
     const latest = latestStmt.get(venue.id) as
       | { seq: number; publicId: string; status: string; statsJson: string | null; createdAt: string }
       | undefined;
@@ -98,6 +121,10 @@ export function listVenues(db: Database.Database, tenantId: number): VenueSummar
       editableMapping: gdbStmt.get(venue.id) !== undefined,
       hasNetwork,
       hasGraph: hasNetwork || net?.syn === 1,
+      tiles: {
+        packages: tileCount.count,
+        activeOnLatest: tileActiveStmt.get(venue.id) !== undefined,
+      },
     };
   });
 }

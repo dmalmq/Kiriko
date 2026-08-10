@@ -105,6 +105,9 @@ export interface StoredEvaluation {
   capabilityProfile: string | null;
   evaluation: TileActivationEvaluation;
   state: "evaluated" | "activated";
+  evaluatedAt: string;
+  /** Null exactly while `state` is `evaluated`; the table's own CHECK enforces it. */
+  activatedAt: string | null;
 }
 
 interface EvaluationRow {
@@ -119,6 +122,8 @@ interface EvaluationRow {
   reportJson: string;
   gatesJson: string;
   state: string;
+  evaluatedAt: string;
+  activatedAt: string | null;
 }
 
 /**
@@ -178,7 +183,7 @@ export function findEvaluation(db: Database, packageId: number): StoredEvaluatio
               evaluated_bundle_hash AS evaluatedBundleHash, profile_id AS profileId,
               profile_version AS profileVersion, capability_profile AS capabilityProfile,
               profile_json AS profileJson, report_json AS reportJson, gates_json AS gatesJson,
-              state
+              state, evaluated_at AS evaluatedAt, activated_at AS activatedAt
        FROM tile_activations
        WHERE package_id = ?
        ORDER BY evaluated_version_id DESC LIMIT 1`,
@@ -198,6 +203,8 @@ export function findEvaluation(db: Database, packageId: number): StoredEvaluatio
     profileVersion: row.profileVersion,
     capabilityProfile: row.capabilityProfile,
     state: row.state === "activated" ? "activated" : "evaluated",
+    evaluatedAt: row.evaluatedAt,
+    activatedAt: row.activatedAt,
     evaluation: {
       report,
       gates,
