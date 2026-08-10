@@ -9,8 +9,9 @@ mod package;
 mod quantize;
 mod registration;
 mod roles;
-
-pub use derive::{DeriveReport, derive_scene, derive_scene_with_report};
+pub use derive::{
+    DeriveReport, PackageScene, derive_package_scene, derive_scene, derive_scene_with_report,
+};
 pub use format::{
     OcclusionClass, SCENE_MAGIC, SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel,
     SemanticRole, decode_scene, encode_scene,

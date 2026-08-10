@@ -4,14 +4,15 @@
 //! by `(level, semantic role)` and quantizes per group. Canonical object and
 //! level association is issue #30's ingestion concern, not this pass.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::SceneError;
 use crate::format::{
-    SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel, SemanticRole,
+    OcclusionClass, SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel, SemanticRole,
 };
-use crate::glb::read_glb;
+use crate::glb::{GlbPrimitive, GlbScene, read_glb};
 use crate::quantize::{encode_normal_oct, quantize_positions};
+use crate::registration::{FrameTransform, TileLevel};
 use crate::roles::{occlusion_for_role, role_for_category};
 
 /// Deriver output plus the gate-1 measurement the CLI reports.
@@ -235,6 +236,253 @@ pub fn derive_scene_with_report(
         document,
         gathered_primitives,
     })
+}
+
+/// A package's derived document plus what derivation could not resolve.
+#[derive(Debug, Clone)]
+pub struct PackageScene {
+    pub document: SceneDocument,
+    /// Composite levels no floor mapping claimed. Activation refuses a package
+    /// with any of these unless its content is classified context (#74), so a
+    /// non-empty list here is either context or a caller that skipped the gate.
+    pub unmapped_levels: Vec<String>,
+}
+
+/// Derive the render document for an activated tile package.
+///
+/// Produces the *same* KSC1 the generated source compiles to — that is what
+/// lets one renderer, one picking path, and one visual language serve both
+/// sources. What only a package can supply is identity: each composite level
+/// carries the canonical floor it was registered to, each source object carries
+/// the canonical feature it was associated with, and producer-classified
+/// context carries the occlusion policy the producer chose rather than the one
+/// its Revit category implies.
+///
+/// `levels` comes from [`resolve_tile_levels`](crate::resolve_tile_levels) —
+/// the same pass registration measured — so the renderer cannot draw floors the
+/// activation gates never judged.
+///
+/// # Errors
+///
+/// Returns [`SceneError::Glb`] when a primitive's feature id falls outside its
+/// member's feature table.
+pub fn derive_package_scene(
+    scenes: &[GlbScene],
+    levels: &[TileLevel],
+    transform: &FrameTransform,
+    source_hash: &str,
+    floor_mappings: &BTreeMap<String, String>,
+    associations: &BTreeMap<String, String>,
+    contextual: &BTreeMap<String, OcclusionClass>,
+) -> Result<PackageScene, SceneError> {
+    // Keyed on the composite identity minus its asset-version component, which
+    // is constant within one package.
+    let mut level_index_of: HashMap<(&str, &str, &str, i32), u32> =
+        HashMap::with_capacity(levels.len());
+    let mut unmapped_levels: Vec<String> = Vec::new();
+    let scene_levels: Vec<SceneLevel> = levels
+        .iter()
+        .enumerate()
+        .map(|(index, level)| {
+            level_index_of.insert(
+                (
+                    level.source_document.as_str(),
+                    level.source_link_name.as_str(),
+                    level.level_key.as_str(),
+                    level.quantized_elevation_dm,
+                ),
+                index as u32,
+            );
+            let canonical_id = floor_mappings.get(&level.composite_id).cloned();
+            if canonical_id.is_none() {
+                unmapped_levels.push(level.composite_id.clone());
+            }
+            SceneLevel {
+                // Empty rather than borrowed: a level no floor claimed must not
+                // answer a floor filter for one.
+                canonical_id: canonical_id.unwrap_or_default(),
+                source_level_key: level.level_key.clone(),
+                source_level_name: level.level_name.clone(),
+                source_document: level.source_document.clone(),
+                source_link_name: level.source_link_name.clone(),
+                source_elevation_meters: Some(level.metadata_elevation_m as f32),
+                // The mesh is placement authority (#31); the metadata above is
+                // provenance sitting beside it.
+                resolved_plane_z: level.resolved_plane_m.unwrap_or(0.0) as f32,
+                quantized_elevation_dm: level.quantized_elevation_dm,
+            }
+        })
+        .collect();
+
+    // Features in member order, each remembering which member it came from:
+    // feature ids are member-local, so a primitive resolves against its own
+    // member's slice of the feature list.
+    let mut features: Vec<SceneFeature> = Vec::new();
+    let mut feature_base: Vec<usize> = Vec::with_capacity(scenes.len());
+    for scene in scenes {
+        feature_base.push(features.len());
+        for row in &scene.features {
+            // Matched on the composite identity minus its asset-version
+            // component, which is constant within one package: recomputing the
+            // full string here would mean two places spelling identity, and
+            // that is how they stop agreeing.
+            let identity = (
+                row.source_document.as_str(),
+                row.source_link_name.as_str(),
+                row.level_key.as_str(),
+                (f64::from(row.level_elevation_meters) * 10.0).round() as i32,
+            );
+            let role = role_for_category(&row.category);
+            features.push(SceneFeature {
+                source_object_id: row.revit_unique_id.clone(),
+                canonical_id: associations.get(&row.revit_unique_id).cloned(),
+                level_index: level_index_of.get(&identity).copied().unwrap_or(0),
+                role,
+                occlusion: contextual
+                    .get(&row.revit_unique_id)
+                    .copied()
+                    .unwrap_or_else(|| occlusion_for_role(role)),
+                // Source-authored geometry: full confidence.
+                confidence: 255,
+                min_z: row.min_z,
+                max_z: row.max_z,
+            });
+        }
+    }
+
+    let geometry = batch_geometry(scenes, &feature_base, &features, transform)?;
+
+    Ok(PackageScene {
+        document: SceneDocument {
+            header: SceneHeader {
+                format_version: 1,
+                deriver_version: 1,
+                source_hash: source_hash.to_string(),
+                frame_origin_ecef: [
+                    transform.matrix()[12],
+                    transform.matrix()[13],
+                    transform.matrix()[14],
+                ],
+                world_transform: *transform.matrix(),
+                bounds_min: geometry.bounds_min,
+                bounds_max: geometry.bounds_max,
+            },
+            levels: scene_levels,
+            features,
+            batches: geometry.batches,
+        },
+        unmapped_levels,
+    })
+}
+
+/// Batched geometry and the bounds it spans, venue-local metres.
+struct BatchedGeometry {
+    batches: Vec<SceneBatch>,
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+}
+
+/// Group every member's geometry by `(level, role)`, quantize per group, and
+/// measure the scene's bounds — the shared tail of both derivation paths.
+fn batch_geometry(
+    scenes: &[GlbScene],
+    feature_base: &[usize],
+    features: &[SceneFeature],
+    transform: &FrameTransform,
+) -> Result<BatchedGeometry, SceneError> {
+    let mut groups: HashMap<(u32, u8), Group> = HashMap::new();
+    let mut bounds_min = [f32::INFINITY; 3];
+    let mut bounds_max = [f32::NEG_INFINITY; 3];
+    let mut any = false;
+
+    for (member, scene) in scenes.iter().enumerate() {
+        let base = feature_base.get(member).copied().unwrap_or(0);
+        for primitive in &scene.primitives {
+            let index = base + primitive.feature_id as usize;
+            let feature = features.get(index).ok_or_else(|| {
+                SceneError::Glb(format!(
+                    "primitive feature id {} out of range in member {member}",
+                    primitive.feature_id
+                ))
+            })?;
+            let group = groups
+                .entry((feature.level_index, role_rank(feature.role)))
+                .or_default();
+            // Positions arrive in the venue-local frame: the renderer places the
+            // scene with the header transform, and a package that kept tile
+            // coordinates would need the renderer to know which source it is
+            // drawing.
+            for position in &primitive.positions {
+                let placed = transform.apply(*position);
+                let placed = [placed[0] as f32, placed[1] as f32, placed[2] as f32];
+                group.positions.push(placed);
+                for axis in 0..3 {
+                    bounds_min[axis] = bounds_min[axis].min(placed[axis]);
+                    bounds_max[axis] = bounds_max[axis].max(placed[axis]);
+                }
+                any = true;
+            }
+            group.normals.extend(rotated_normals(primitive, transform));
+            group
+                .feature_indices
+                .extend(std::iter::repeat_n(index as u32, primitive.positions.len()));
+        }
+    }
+    if !any {
+        bounds_min = [0.0; 3];
+        bounds_max = [0.0; 3];
+    }
+
+    let mut group_order: Vec<((u32, u8), Group)> = groups.into_iter().collect();
+    group_order.sort_by_key(|((level_index, rank), _)| (*level_index, *rank));
+    let batches = group_order
+        .into_iter()
+        .map(|((level_index, rank), group)| {
+            let (quantized, origin, scale) = quantize_positions(&group.positions);
+            SceneBatch {
+                level_index,
+                role: ROLE_ORDER[rank as usize],
+                quantization_origin: origin,
+                quantization_scale: scale,
+                vertex_count: group.positions.len() as u32,
+                positions: quantized,
+                normals: group
+                    .normals
+                    .iter()
+                    .map(|normal| encode_normal_oct(*normal))
+                    .collect(),
+                feature_indices: group.feature_indices,
+            }
+        })
+        .collect();
+    Ok(BatchedGeometry {
+        batches,
+        bounds_min,
+        bounds_max,
+    })
+}
+
+/// Normals rotated into the venue frame. The transform's basis is orthonormal
+/// (an ENU basis composed with an axis swap), so rotating is enough — no
+/// inverse-transpose, and no renormalisation to pay for.
+fn rotated_normals(primitive: &GlbPrimitive, transform: &FrameTransform) -> Vec<[f32; 3]> {
+    let m = transform.matrix();
+    primitive
+        .normals
+        .iter()
+        .map(|normal| {
+            let (x, y, z) = (
+                f64::from(normal[0]),
+                f64::from(normal[1]),
+                f64::from(normal[2]),
+            );
+            [
+                (m[0] * x + m[4] * y + m[8] * z) as f32,
+                (m[1] * x + m[5] * y + m[9] * z) as f32,
+                (m[2] * x + m[6] * y + m[10] * z) as f32,
+            ]
+        })
+        .collect()
 }
 
 /// One accumulating group of concatenated triangle-list geometry.
