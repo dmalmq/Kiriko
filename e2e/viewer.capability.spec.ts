@@ -192,10 +192,10 @@ test.describe("3D capability and fallback", () => {
       await waitForMapIdle(page);
       const before = await page.evaluate(() => {
         const handle = Reflect.get(window, "__kirikoScene") as {
-          activeLevelIndex: () => number;
+          activeLevelIndices: () => number[];
           sourceHash: string;
         };
-        return { level: handle.activeLevelIndex(), hash: handle.sourceHash };
+        return { levels: handle.activeLevelIndices(), hash: handle.sourceHash };
       });
 
       await armContextLoss(page);
@@ -230,10 +230,10 @@ test.describe("3D capability and fallback", () => {
       await waitForMapIdle(page);
       const after = await page.evaluate(() => {
         const handle = Reflect.get(window, "__kirikoScene") as {
-          activeLevelIndex: () => number;
+          activeLevelIndices: () => number[];
           sourceHash: string;
         };
-        return { level: handle.activeLevelIndex(), hash: handle.sourceHash };
+        return { levels: handle.activeLevelIndices(), hash: handle.sourceHash };
       });
       expect(after).toEqual(before);
       await expect(floorButton(page, LEVEL_2F_SHORT)).toHaveAttribute("aria-pressed", "true");

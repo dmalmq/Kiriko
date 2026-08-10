@@ -134,9 +134,11 @@ test.describe("scene visual language", () => {
       const gap = await page.evaluate(() => {
         const handle = Reflect.get(window, "__kirikoScene") as {
           levelIds: string[];
-          activeLevelIndex: () => number;
+          activeLevelIndices: () => number[];
         };
-        const index = handle.activeLevelIndex();
+        // A canonical floor can render several composite source levels; they
+        // share a plane, so the first names the floor as well as any.
+        const index = handle.activeLevelIndices()[0] ?? 0;
         return { level: handle.levelIds[index] ?? null, index };
       });
       expect(gap.level).not.toBeNull();
