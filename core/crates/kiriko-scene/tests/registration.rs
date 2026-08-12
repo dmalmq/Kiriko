@@ -163,8 +163,9 @@ fn a_tile_floor_on_the_venue_outline_registers_at_zero() {
     assert_eq!(report.floors.len(), 1);
     let floor = &report.floors[0];
     assert_eq!(floor.canonical_level_id, "level-1");
-    assert!(floor.stats.samples > 100, "the outline is sampled densely");
-    assert!(floor.stats.p90_m < 1e-9, "p90 was {}", floor.stats.p90_m);
+    let stats = floor.stats.expect("a mapped, sampled floor has residuals");
+    assert!(stats.samples > 100, "the outline is sampled densely");
+    assert!(stats.p90_m < 1e-9, "p90 was {}", stats.p90_m);
     assert!(floor.median_shift_m < 1e-9);
     assert!(floor.coherent_clusters.is_empty());
     assert!(report.unmapped_levels.is_empty());
@@ -200,7 +201,8 @@ fn a_floor_offset_from_the_venue_reports_a_coherent_shift() {
     );
     assert!((floor.median_offset_m[1]).abs() < 1e-6);
     assert!((floor.median_shift_m - 0.2).abs() < 1e-6);
-    assert!((floor.stats.p90_m - 0.2).abs() < 1e-6);
+    let stats = floor.stats.expect("a mapped, sampled floor has residuals");
+    assert!((stats.p90_m - 0.2).abs() < 1e-6);
 }
 
 #[test]
@@ -230,12 +232,13 @@ fn geometry_the_venue_does_not_model_is_carved_out_not_counted() {
         floor.carved_out > 0,
         "the overhanging three quarters of the tile floor is carved out"
     );
+    let stats = floor.stats.expect("a mapped, sampled floor has residuals");
     assert!(
-        floor.stats.max_m < 1.0,
+        stats.max_m < 1.0,
         "nothing beyond the carve-out band survives, but max was {}",
-        floor.stats.max_m
+        stats.max_m
     );
-    assert_eq!(floor.sampled, floor.stats.samples + floor.carved_out);
+    assert_eq!(floor.sampled, stats.samples + floor.carved_out);
 }
 
 #[test]
@@ -380,9 +383,108 @@ fn content_split_across_several_members_registers_as_one_asset() {
         ["floor-west", "floor-east"]
     );
     assert_eq!(report.floors.len(), 1);
+    let stats = report.floors[0]
+        .stats
+        .expect("a mapped, sampled floor has residuals");
     assert!(
-        report.floors[0].stats.p90_m < 1e-9,
+        stats.p90_m < 1e-9,
         "the seam where two members meet is interior geometry, not a boundary: p90 was {}",
-        report.floors[0].stats.p90_m
+        stats.p90_m
     );
+}
+
+/// The same rectangle, on an arbitrary plane: a stack to check mappings against.
+fn venue_floor_at(level_id: &str, plane_z_m: f64) -> VenueFloor {
+    VenueFloor {
+        plane_z_m,
+        ..venue_floor(level_id, [0.0, 0.0], [10.0, 10.0])
+    }
+}
+
+/// A walkable quad covering the venue rectangle at `plane`, on its own level.
+fn tile_floor_at(level_key: &str, plane: f32) -> Vec<u8> {
+    glb_with_features(&[FeatureSpec::new(
+        &format!("floor-{level_key}"),
+        "Floors",
+        level_key,
+        plane,
+        quad([0.0, 0.0], [10.0, 10.0], plane),
+    )])
+}
+
+#[test]
+fn a_level_inside_the_tolerance_of_two_floors_is_ambiguous_not_nearest() {
+    // The tolerance is wider than some floor-to-floor gaps. Picking the nearer
+    // of two candidates would be a guess presented as an identification, and a
+    // producer would never learn a choice had been made.
+    let glb = tile_floor_at("l1", 0.4);
+    let scenes = [read_glb(&glb).expect("fixture parses")];
+    let venue = [venue_floor_at("upper", 1.0), venue_floor_at("lower", 0.0)];
+
+    let report = measure_registration(
+        &scenes,
+        "asset",
+        &FrameTransform::identity(),
+        &venue,
+        &RegistrationProfile::default(),
+    );
+
+    assert_eq!(report.ambiguous_levels.len(), 1);
+    // Still mapped, and to the nearer floor: the report describes what happened.
+    // The gate is what refuses to act on it.
+    assert_eq!(
+        report.levels[0].mapped_canonical_level_id.as_deref(),
+        Some("lower")
+    );
+    assert_eq!(report.levels[0].mapped_floor_plane_m, Some(0.0));
+}
+
+#[test]
+fn a_level_reports_the_floor_it_matched_and_that_floor_s_own_plane() {
+    // The one decision in this report a producer must check by eye, so both
+    // planes have to reach them: a whole stack offset by a storey maps every
+    // level to its neighbour and every residual still measures small.
+    let glb = tile_floor_at("l1", 4.0);
+    let scenes = [read_glb(&glb).expect("fixture parses")];
+    let venue = [venue_floor_at("second", 4.0), venue_floor_at("first", 0.0)];
+
+    let report = measure_registration(
+        &scenes,
+        "asset",
+        &FrameTransform::identity(),
+        &venue,
+        &RegistrationProfile::default(),
+    );
+
+    assert_eq!(
+        report.levels[0].mapped_canonical_level_id.as_deref(),
+        Some("second")
+    );
+    assert_eq!(report.levels[0].resolved_plane_m, Some(4.0));
+    assert_eq!(report.levels[0].mapped_floor_plane_m, Some(4.0));
+    assert!(report.ambiguous_levels.is_empty());
+}
+
+#[test]
+fn a_floor_with_no_surviving_samples_reports_no_residuals_rather_than_zeroes() {
+    // Zeroed statistics read exactly like perfect agreement. A floor nothing was
+    // measured against must say so, or the number is a lie with a decimal point.
+    let glb = tile_floor_at("l1", 0.0);
+    let scenes = [read_glb(&glb).expect("fixture parses")];
+    // The venue floor is far away in plan, so every sample is carved out as a
+    // model-coverage difference rather than counted as a residual.
+    let venue = [venue_floor("only", [500.0, 500.0], [510.0, 510.0])];
+
+    let report = measure_registration(
+        &scenes,
+        "asset",
+        &FrameTransform::identity(),
+        &venue,
+        &RegistrationProfile::default(),
+    );
+
+    assert!(report.venue_wide.is_none(), "nothing was measured");
+    for floor in &report.floors {
+        assert!(floor.stats.is_none(), "no samples survived on any floor");
+    }
 }

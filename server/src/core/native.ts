@@ -855,6 +855,14 @@ export interface TileLevelRegistration {
   surfaceTriangles: number;
   sourceObjectIds: string[];
   opaqueSourceObjectIds: string[];
+  /**
+   * The canonical floor this level matched, and that floor's own plane. The one
+   * decision in the report a producer must check by eye: a stack offset by about
+   * a storey maps every level to its neighbour, and where footprints repeat the
+   * residuals against the wrong floor are as small as against the right one.
+   */
+  mappedCanonicalLevelId: string | null;
+  mappedFloorPlaneM: number | null;
 }
 
 export interface CoherentCluster {
@@ -870,7 +878,12 @@ export interface FloorRegistration {
   compositeSourceLevels: string[];
   sampled: number;
   carvedOut: number;
-  stats: ResidualStats;
+  /**
+   * `null` when no sample survived the carve-out. Zeroed statistics read as
+   * perfect agreement, which is the opposite of what no samples mean — so the
+   * absence is in the type, and every consumer has to answer for it.
+   */
+  stats: ResidualStats | null;
   medianOffsetM: [number, number];
   medianShiftM: number;
   coherentClusters: CoherentCluster[];
@@ -882,8 +895,14 @@ export interface TileRegistrationReport {
   levels: TileLevelRegistration[];
   floors: FloorRegistration[];
   unmappedLevels: string[];
+  /**
+   * Levels with more than one candidate floor inside the match tolerance. The
+   * tolerance is wider than some floor-to-floor gaps, so nearest-wins would be a
+   * guess wearing a mapping's clothes.
+   */
+  ambiguousLevels: string[];
   appliedVerticalOffsetM: number;
-  venueWide: ResidualStats;
+  venueWide: ResidualStats | null;
 }
 
 /** One blocked gate: what failed, on what, and against which number. */

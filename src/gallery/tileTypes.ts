@@ -44,6 +44,17 @@ export interface TileLevelRegistration {
   surfaceTriangles: number;
   sourceObjectIds: string[];
   opaqueSourceObjectIds: string[];
+  /**
+   * The canonical floor this level matched, and that floor's own plane.
+   *
+   * This pair is the one decision in the report geometry cannot settle. A stack
+   * offset by roughly a storey maps every level to its neighbour, and where
+   * footprints repeat — station platforms, concourses — the residuals against the
+   * wrong floor measure as small as against the right one. So both planes are put
+   * in front of the producer, who confirms the mapping before activating.
+   */
+  mappedCanonicalLevelId: string | null;
+  mappedFloorPlaneM: number | null;
 }
 
 /** A localised cluster of residuals pointing the same way: registration, not noise. */
@@ -60,7 +71,8 @@ export interface FloorRegistration {
   compositeSourceLevels: string[];
   sampled: number;
   carvedOut: number;
-  stats: ResidualStats;
+  /** `null` when no sample survived the carve-out — never a row of zeroes. */
+  stats: ResidualStats | null;
   medianOffsetM: [number, number];
   medianShiftM: number;
   coherentClusters: CoherentCluster[];
@@ -73,8 +85,14 @@ export interface TileRegistrationReport {
   floors: FloorRegistration[];
   /** Levels no canonical floor claims. #74 fails the gate rather than guessing. */
   unmappedLevels: string[];
+  /** Levels with more than one candidate floor inside the match tolerance. */
+  ambiguousLevels: string[];
   appliedVerticalOffsetM: number;
-  venueWide: ResidualStats;
+  /**
+   * Every surviving sample across every floor; `null` when there were none.
+   * Absence lives in the type so no view can print it as a clean measurement.
+   */
+  venueWide: ResidualStats | null;
 }
 
 /** The registration profile a producer may override, field for field. */

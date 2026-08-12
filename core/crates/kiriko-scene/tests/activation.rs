@@ -394,3 +394,91 @@ fn an_evaluation_serialises_with_the_names_the_bridge_reads() {
         serde_json::from_value(profile).expect("profile round-trips");
     assert_eq!(restored, RegistrationProfile::default());
 }
+
+#[test]
+fn a_stack_whose_levels_interleave_blocks_activation() {
+    // Levels sorted by their own plane must map to floors in the same order. A
+    // real stack does not interleave, so this is a misalignment even when every
+    // residual is small — which, with repeated station footprints, it will be.
+    let glb = glb_with_features(&[
+        FeatureSpec::new(
+            "floor-low",
+            "Floors",
+            "l1",
+            0.0,
+            quad([0.0, 0.0], [40.0, 20.0], 0.0),
+        ),
+        FeatureSpec::new(
+            "floor-high",
+            "Floors",
+            "l2",
+            1.0,
+            quad([0.0, 0.0], [40.0, 20.0], 1.0),
+        ),
+    ]);
+    let scene = read_glb(&glb).expect("fixture glb reads");
+    // The floors are 1 m apart and the tolerance is 1.5 m, so the lower tile
+    // level's nearest floor is the upper one and vice versa.
+    let venue = [
+        venue_floor("upper", 0.2, [0.0, 0.0], [40.0, 20.0]),
+        venue_floor("lower", 0.9, [0.0, 0.0], [40.0, 20.0]),
+    ];
+    let contextual = BTreeSet::new();
+
+    let evaluation = evaluate_activation(
+        std::slice::from_ref(&scene),
+        &venue,
+        &RegistrationProfile::default(),
+        &input(&contextual),
+        &FrameTransform::identity(),
+    );
+
+    assert!(
+        codes(&evaluation.gates).contains(&GateCode::LevelMappingAmbiguous),
+        "both floors sit inside the tolerance: {:?}",
+        evaluation.gates
+    );
+}
+
+#[test]
+fn two_levels_that_cannot_be_one_storey_block_when_they_claim_one_floor() {
+    // A floor may legitimately be rendered by several composite levels (#31),
+    // but not by levels further apart than the match tolerance — that is a
+    // collapse, and it means the stack was not understood.
+    let glb = glb_with_features(&[
+        FeatureSpec::new(
+            "floor-a",
+            "Floors",
+            "l1",
+            0.0,
+            quad([0.0, 0.0], [40.0, 20.0], 0.0),
+        ),
+        FeatureSpec::new(
+            "floor-b",
+            "Floors",
+            "l2",
+            1.6,
+            quad([0.0, 0.0], [40.0, 20.0], 1.6),
+        ),
+    ]);
+    let scene = read_glb(&glb).expect("fixture glb reads");
+    // One floor only, sitting between them: each is 0.8 m away, inside the 1.5 m
+    // tolerance, but 1.6 m apart from each other — further than the tolerance
+    // that decides what "the same storey" means.
+    let venue = [venue_floor("level-1", 0.8, [0.0, 0.0], [40.0, 20.0])];
+    let contextual = BTreeSet::new();
+
+    let evaluation = evaluate_activation(
+        std::slice::from_ref(&scene),
+        &venue,
+        &RegistrationProfile::default(),
+        &input(&contextual),
+        &FrameTransform::identity(),
+    );
+
+    assert!(
+        codes(&evaluation.gates).contains(&GateCode::LevelMappingCollapsed),
+        "1.6 m apart, both claiming one floor: {:?}",
+        evaluation.gates
+    );
+}

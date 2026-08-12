@@ -176,6 +176,15 @@ pub struct TileLevel {
     /// Source objects on this level whose role occludes and that therefore
     /// must be assigned to a floor or explicitly classified as context.
     pub opaque_source_object_ids: Vec<String>,
+    /// The canonical floor this level was matched to, and that floor's own
+    /// plane. Reported because the match is the one decision in this report a
+    /// producer must check by eye: a whole stack offset by roughly a storey
+    /// maps every level to its neighbour, and where footprints repeat — station
+    /// platforms, concourses — the residuals against the wrong floor are as
+    /// small as against the right one. Geometry cannot settle it, so the
+    /// producer is shown both planes and asked.
+    pub mapped_canonical_level_id: Option<String>,
+    pub mapped_floor_plane_m: Option<f64>,
 }
 
 /// Group a package's source elements into composite levels and resolve each
@@ -306,6 +315,10 @@ pub fn resolve_tile_levels(
                 surface_triangles: accum.surface_triangles,
                 source_object_ids: accum.source_object_ids,
                 opaque_source_object_ids: accum.opaque_source_object_ids,
+                // Resolving a level says nothing about which floor it is;
+                // `measure_registration` fills these once it has matched.
+                mapped_canonical_level_id: None,
+                mapped_floor_plane_m: None,
             }
         })
         .collect()
@@ -452,7 +465,9 @@ pub struct FloorRegistration {
     pub sampled: usize,
     /// Samples excluded as model-coverage differences.
     pub carved_out: usize,
-    pub stats: ResidualStats,
+    /// `None` when nothing survived the carve-out. Zeroed statistics read as
+    /// perfect agreement, which is the opposite of what no samples mean.
+    pub stats: Option<ResidualStats>,
     /// Componentwise median offset, tile minus venue.
     pub median_offset_m: [f64; 2],
     pub median_shift_m: f64,
@@ -470,12 +485,16 @@ pub struct RegistrationReport {
     pub floors: Vec<FloorRegistration>,
     /// Composite levels no canonical floor claims. Reported, never guessed at.
     pub unmapped_levels: Vec<String>,
+    /// Composite levels with more than one candidate floor inside the match
+    /// tolerance. The tolerance is wider than some floor-to-floor gaps, so
+    /// nearest-wins here would be a guess wearing a mapping's clothes.
+    pub ambiguous_levels: Vec<String>,
     /// The vertical offset the profile applied to tile planes before matching.
     /// Recorded so a producer can see which datum reconciliation produced this
     /// registration table.
     pub applied_vertical_offset_m: f64,
-    /// Every surviving sample across every floor.
-    pub venue_wide: ResidualStats,
+    /// Every surviving sample across every floor; `None` when there were none.
+    pub venue_wide: Option<ResidualStats>,
 }
 
 /// Measure a package's registration against the venue's own geometry, the way
@@ -493,30 +512,40 @@ pub fn measure_registration(
     venue: &[VenueFloor],
     profile: &RegistrationProfile,
 ) -> RegistrationReport {
-    let levels = resolve_tile_levels(scenes, asset_version, transform);
+    let mut levels = resolve_tile_levels(scenes, asset_version, transform);
 
     // Altitude first: a level belongs to the canonical floor whose resolved
     // plane it sits on, not to whichever floor happens to be closest in plan.
-    let mut floor_of_level: BTreeMap<&str, &VenueFloor> = BTreeMap::new();
+    let mut floor_of_level: BTreeMap<String, &VenueFloor> = BTreeMap::new();
     let mut unmapped_levels: Vec<String> = Vec::new();
-    for level in &levels {
+    let mut ambiguous_levels: Vec<String> = Vec::new();
+    for level in &mut levels {
         let Some(measured) = level.resolved_plane_m else {
             // No plane is its own gate failure; it cannot also be a mapping.
             unmapped_levels.push(level.composite_id.clone());
             continue;
         };
         let plane = measured + profile.vertical_offset_m;
-        let nearest = venue
+        let mut candidates: Vec<&VenueFloor> = venue
             .iter()
             .filter(|floor| (floor.plane_z_m - plane).abs() <= profile.level_match_tolerance_m)
-            .min_by(|a, b| {
-                (a.plane_z_m - plane)
-                    .abs()
-                    .total_cmp(&(b.plane_z_m - plane).abs())
-            });
-        match nearest {
+            .collect();
+        candidates.sort_by(|a, b| {
+            (a.plane_z_m - plane)
+                .abs()
+                .total_cmp(&(b.plane_z_m - plane).abs())
+        });
+        // Two floors inside the tolerance is not a near miss to break by
+        // nearest: the tolerance is wider than some mezzanine gaps, and picking
+        // one silently is the difference between a mapping and a guess.
+        if candidates.len() > 1 {
+            ambiguous_levels.push(level.composite_id.clone());
+        }
+        match candidates.first() {
             Some(floor) => {
-                floor_of_level.insert(level.composite_id.as_str(), floor);
+                level.mapped_canonical_level_id = Some(floor.level_id.clone());
+                level.mapped_floor_plane_m = Some(floor.plane_z_m);
+                floor_of_level.insert(level.composite_id.clone(), floor);
             }
             None => unmapped_levels.push(level.composite_id.clone()),
         }
@@ -641,6 +670,7 @@ pub fn measure_registration(
         levels,
         floors,
         unmapped_levels,
+        ambiguous_levels,
         applied_vertical_offset_m: profile.vertical_offset_m,
         venue_wide: stats_of(&mut venue_wide),
     }
@@ -771,17 +801,20 @@ fn cluster(
         .collect()
 }
 
-fn stats_of(distances: &mut [f64]) -> ResidualStats {
+fn stats_of(distances: &mut [f64]) -> Option<ResidualStats> {
     if distances.is_empty() {
-        return ResidualStats::default();
+        // Not a distribution of zero error — no distribution at all. Returning
+        // zeroes here is what let an unmeasured registration print as a clean
+        // one all the way out to the producer's screen.
+        return None;
     }
     distances.sort_by(f64::total_cmp);
-    ResidualStats {
+    Some(ResidualStats {
         samples: distances.len(),
         p50_m: percentile(distances, 0.50),
         p90_m: percentile(distances, 0.90),
         max_m: distances[distances.len() - 1],
-    }
+    })
 }
 
 /// Nearest-rank percentile over sorted values: an actual measured sample, never
@@ -835,6 +868,16 @@ pub enum GateCode {
     LevelPlaneUnresolved,
     /// A rendered level maps to no canonical floor.
     LevelNotMapped,
+    /// More than one canonical floor sits inside the match tolerance, so the
+    /// nearest is a tie-break rather than an identification.
+    LevelMappingAmbiguous,
+    /// Levels sorted by their own plane map to floors that are not in the same
+    /// order. A stack cannot interleave, so something is misaligned.
+    LevelMappingScrambled,
+    /// Two levels further apart than the tolerance map to one floor. A floor may
+    /// legitimately be rendered by several levels (#31), but not by levels that
+    /// cannot be the same storey.
+    LevelMappingCollapsed,
     /// Opaque content belongs to no level and has no contextual class.
     UnclassifiedOpaqueContent,
 }
@@ -852,6 +895,9 @@ impl GateCode {
             Self::CoherentResidual => "coherentResidual",
             Self::LevelPlaneUnresolved => "levelPlaneUnresolved",
             Self::LevelNotMapped => "levelNotMapped",
+            Self::LevelMappingAmbiguous => "levelMappingAmbiguous",
+            Self::LevelMappingScrambled => "levelMappingScrambled",
+            Self::LevelMappingCollapsed => "levelMappingCollapsed",
             Self::UnclassifiedOpaqueContent => "unclassifiedOpaqueContent",
         }
     }
@@ -987,13 +1033,86 @@ pub fn evaluate_activation(
         }
     }
 
+    // The mapping invariants. None of these can prove a mapping right: a stack
+    // shifted a whole storey, covering fewer floors than the venue has, with
+    // repeated footprints, satisfies every one of them and is still wrong. That
+    // case is why the datum is a producer decision (#74) and why the producer
+    // confirms the table. These catch the cases that *are* decidable.
+    for composite in &report.ambiguous_levels {
+        gates.push(GateFailure {
+            code: GateCode::LevelMappingAmbiguous,
+            subject: composite.clone(),
+            measured: None,
+            band: Some(profile.level_match_tolerance_m),
+        });
+    }
+
+    // Order: levels sorted by their own plane must map to floors whose planes
+    // are in the same order. A real stack does not interleave.
+    let mut placed: Vec<(f64, f64, &str)> = report
+        .levels
+        .iter()
+        .filter_map(|level| {
+            Some((
+                level.resolved_plane_m?,
+                level.mapped_floor_plane_m?,
+                level.composite_id.as_str(),
+            ))
+        })
+        .collect();
+    placed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for pair in placed.windows(2) {
+        let [lower, upper] = [pair[0], pair[1]];
+        if upper.1 < lower.1 {
+            gates.push(GateFailure {
+                code: GateCode::LevelMappingScrambled,
+                subject: upper.2.to_string(),
+                measured: Some(upper.1),
+                band: Some(lower.1),
+            });
+        }
+    }
+
+    // Collapse: one floor claiming two levels that cannot be the same storey.
+    let mut planes_by_floor: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+    for level in &report.levels {
+        if let (Some(floor), Some(plane)) = (
+            level.mapped_canonical_level_id.as_deref(),
+            level.resolved_plane_m,
+        ) {
+            planes_by_floor.entry(floor).or_default().push(plane);
+        }
+    }
+    for (floor, planes) in &planes_by_floor {
+        let (Some(low), Some(high)) = (
+            planes.iter().copied().reduce(f64::min),
+            planes.iter().copied().reduce(f64::max),
+        ) else {
+            continue;
+        };
+        let spread = high - low;
+        if spread > profile.level_match_tolerance_m {
+            gates.push(GateFailure {
+                code: GateCode::LevelMappingCollapsed,
+                subject: (*floor).to_string(),
+                measured: Some(spread),
+                band: Some(profile.level_match_tolerance_m),
+            });
+        }
+    }
+
     for floor in &report.floors {
         let band = profile.p90_band_for(&floor.canonical_level_id);
-        if floor.stats.p90_m > band {
+        // A floor with no surviving samples cannot exceed a band; it also cannot
+        // clear one. `LevelNotMapped` and the unmeasured report are what say so —
+        // this gate speaks only about measurements that exist.
+        if let Some(stats) = floor.stats
+            && stats.p90_m > band
+        {
             gates.push(GateFailure {
                 code: GateCode::RegistrationOutOfBand,
                 subject: floor.canonical_level_id.clone(),
-                measured: Some(floor.stats.p90_m),
+                measured: Some(stats.p90_m),
                 band: Some(band),
             });
         }
