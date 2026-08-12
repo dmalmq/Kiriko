@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CircleLayerSpecification, FillLayerSpecification, LineLayerSpecification } from "maplibre-gl";
 import { themes } from "../theme/presets";
 import { buildIndoorStyle } from "./buildIndoorStyle";
+import { FLOOR_ELEVATION_SOURCE_ID } from "./scene/floorElevation";
 import {
   applyThemePaintProperties,
   buildFeatureLayers,
@@ -181,6 +182,11 @@ describe("route layers", () => {
   it("registers the route source and layers in the indoor style", () => {
     const style = buildIndoorStyle(theme);
     expect(style.sources[ROUTE_SOURCE_ID]).toMatchObject({ type: "geojson" });
+    expect(style.sources[FLOOR_ELEVATION_SOURCE_ID]).toMatchObject({
+      type: "raster-dem",
+      encoding: "terrarium",
+    });
+    expect(style.terrain).toBeUndefined();
     const ids = style.layers.map((layer) => layer.id);
     expect(ids).toContain(LAYER_ROUTE);
     expect(ids).toContain(LAYER_ROUTE_ENDPOINT);
