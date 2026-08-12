@@ -302,6 +302,12 @@ const DOORWAY_SPLIT_EPS_M: f64 = 0.05;
 /// target must sit past the stub for the stub to remain useful; closer junctions
 /// attach from the midpoint directly.
 const DOORWAY_STUB_JUNCTION_MARGIN_M: f64 = 0.1;
+/// Minimum opening length (m) considered for geometry review classification.
+const OPENING_REVIEW_LENGTH_M: f64 = 5.0;
+/// Minimum opening arc length (m) considered curved for geometry review.
+const OPENING_REVIEW_CURVE_MIN_M: f64 = 2.0;
+/// Maximum chord/arc ratio considered straight for geometry review.
+const OPENING_REVIEW_CHORD_ARC_RATIO: f64 = 0.8;
 
 /// Minimum interior clearance (m) for a stub-offset sample to count as "deep"
 /// inside walkable space when scoring passage direction. Stricter than
@@ -871,11 +877,20 @@ fn line_verts(coords: &Value) -> Vec<[f64; 2]> {
         .unwrap_or_default()
 }
 
+#[derive(Clone, Debug)]
+struct OpeningAxis {
+    feature_id: String,
+    mid: [f64; 2],
+    direction: [f64; 2],
+    arc_length_m: f64,
+    chord_length_m: f64,
+}
+
 /// An opening's midpoint plus unit LINE direction (metre frame at the
 /// midpoint's latitude) from its first→last vertex of the longest part.
 /// The doorway loop scores this against its normal to pick the passage
 /// axis. `None` for degenerate geometry.
-fn opening_axis(geom: &Value) -> Option<([f64; 2], [f64; 2])> {
+fn opening_axis(feature_id: &str, geom: &Value) -> Option<OpeningAxis> {
     let obj = geom.as_object()?;
     let coords = obj.get("coordinates")?;
     let verts: Vec<[f64; 2]> = match obj.get("type")?.as_str()? {
@@ -895,17 +910,30 @@ fn opening_axis(geom: &Value) -> Option<([f64; 2], [f64; 2])> {
         }
         _ => return None,
     };
+    let arc_length_m: f64 = verts
+        .windows(2)
+        .map(|window| haversine_m(window[0], window[1]))
+        .sum();
     let (Some(first), Some(last)) = (verts.first(), verts.last()) else {
         return None;
     };
     let mid = linestring_midpoint(geom)?;
     let mx = 111_320.0 * mid[1].to_radians().cos();
-    let (dx, dy) = ((last[0] - first[0]) * mx, (last[1] - first[1]) * 111_320.0);
-    let len = (dx * dx + dy * dy).sqrt();
-    if len <= f64::EPSILON {
+    let (dx, dy) = (
+        (last[0] - first[0]) * mx,
+        (last[1] - first[1]) * 111_320.0,
+    );
+    let chord_length_m = (dx * dx + dy * dy).sqrt();
+    if chord_length_m <= f64::EPSILON || arc_length_m <= f64::EPSILON {
         return None;
     }
-    Some((mid, [dx / len, dy / len]))
+    Some(OpeningAxis {
+        feature_id: feature_id.to_string(),
+        mid,
+        direction: [dx / chord_length_m, dy / chord_length_m],
+        arc_length_m,
+        chord_length_m,
+    })
 }
 
 /// One doorway side candidate: geometry is retained without graph emission
@@ -1144,7 +1172,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
 
     for &ord in &ordinals {
         let mut walk: Vec<&Value> = Vec::new();
-        let mut openings: Vec<([f64; 2], [f64; 2])> = Vec::new();
+        let mut openings: Vec<OpeningAxis> = Vec::new();
         let mut transit: Vec<TransitUnit<'_>> = Vec::new();
         for f in &document.features {
             let Some(level_id) = f.level_id.as_deref() else {
@@ -1170,8 +1198,8 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     }
                 }
                 FeatureType::Opening => {
-                    if let Some(ma) = opening_axis(geom) {
-                        openings.push(ma);
+                    if let Some(opening) = opening_axis(&f.id, geom) {
+                        openings.push(opening);
                     }
                 }
                 _ => {}
@@ -1245,7 +1273,8 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         // anchors split degree-2 chains, preventing visual smoothing from
         // moving a doorway or transit fallback behind a wall or out of range.
         let mut protected = vec![false; skeleton.nodes.len()];
-        for &(mid, _) in &openings {
+        for opening in &openings {
+            let mid = opening.mid;
             let mut cands: Vec<(usize, usize, f64)> = skeleton
                 .nodes
                 .iter()
@@ -1303,7 +1332,9 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         // below naturally includes T-junction nodes. Union blob roots as we
         // go so a later opening's grouping sees prior doorway merges.
         let mut doorway_plans: Vec<DoorwayPlan> = Vec::new();
-        for &(mid, line_dir) in &openings {
+        for opening in &openings {
+            let mid = opening.mid;
+            let line_dir = opening.direction;
             // Nearest VALID node per blob: candidates in distance order, the
             // first whose segment from the opening stays within walkable
             // space. This remains the source of truth for WHICH blobs attach
@@ -3805,15 +3836,21 @@ mod tests {
                 ]),
             ),
         ]));
-        let (mid, axis) = opening_axis(&geom).expect("axis parses");
+        let opening = opening_axis("opening-1", &geom).expect("axis parses");
+        assert_eq!(opening.feature_id, "opening-1");
         assert!(
-            (mid[0] - 139.03125).abs() < 1e-9 && (mid[1] - 35.0).abs() < 1e-9,
-            "midpoint from the first part: {mid:?}"
+            (opening.mid[0] - 139.03125).abs() < 1e-9
+                && (opening.mid[1] - 35.0).abs() < 1e-9,
+            "midpoint from the first part: {:?}",
+            opening.mid
         );
         assert!(
-            axis[0] > 0.99 && axis[1].abs() < 0.01,
-            "axis along the first part (+lon): {axis:?}"
+            opening.direction[0] > 0.99 && opening.direction[1].abs() < 0.01,
+            "axis along the first part (+lon): {:?}",
+            opening.direction
         );
+        assert!(opening.arc_length_m > 0.0);
+        assert!((opening.chord_length_m / opening.arc_length_m - 1.0).abs() < 0.01);
     }
 
     /// Metre-offset coordinate helper for chord tests (lat 35.6).
