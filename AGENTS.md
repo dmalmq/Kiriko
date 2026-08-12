@@ -9,7 +9,12 @@ Kiriko is a React/MapLibre indoor-GIS viewer + review workspace backed by Fastif
 - `docs/superpowers/` — specs and implementation plans.
 
 ## Running locally (dev)
-Two processes; backend first (Vite proxies `/api` → `:8790`):
+`./dev.sh` is the normal way in: it starts both processes in order, seeds the
+testing accounts, and serves on the LAN. It asks for the shared password once and
+saves it to `server/data/dev-password` (gitignored); `KIRIKO_SHARE=0` keeps Vite
+on loopback and `KIRIKO_SEED=0` leaves accounts alone.
+
+Two processes by hand; backend first (Vite proxies `/api` → `:8790`):
 ```bash
 pnpm dev:server   # predev:server rebuilds @kiriko/node; tsx watch
 pnpm dev          # predev rebuilds @kiriko/wasm; Vite on :5173
