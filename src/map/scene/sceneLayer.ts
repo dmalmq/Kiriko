@@ -241,6 +241,8 @@ export interface SceneDiagnostics {
   /** Canonical level ids in the document's own index order. */
   levelIds: readonly string[];
   activeLevelIndices(): number[];
+  /** Registered levels retained as non-pickable route context. */
+  contextLevelIndices(): number[];
 }
 
 /** Global key carrying `SceneDiagnostics` while the layer is attached. */
@@ -250,6 +252,8 @@ export interface SceneLayerOptions {
   id?: string;
   /** Index into `scene.levels`; the floor drawn at full opacity. */
   activeLevelIndex?: number;
+  /** Registered levels retained as quiet route context. */
+  contextLevelIndices?: readonly number[];
   /** Draw the other floors as quiet context. */
   showContextLevels?: boolean;
 }
@@ -375,6 +379,7 @@ export class SceneLayer implements CustomLayerInterface {
   private _hoveredFeature = 0;
   private _contextLost = false;
   private _activeLevelIndices: number[];
+  private _contextLevelIndices: number[];
   private _showContextLevels: boolean;
   private _stats: SceneLayerStats;
 
@@ -387,6 +392,9 @@ export class SceneLayer implements CustomLayerInterface {
         Math.max(0, scene.levels.length - 1),
       ),
     ];
+    this._contextLevelIndices = (options.contextLevelIndices ?? [])
+      .map((index) => Math.floor(index))
+      .filter((index) => index >= 0 && index < scene.levels.length);
     this._showContextLevels = options.showContextLevels ?? false;
 
     const anchor = sceneAnchor(scene.header.frameOriginEcef);
@@ -483,6 +491,7 @@ export class SceneLayer implements CustomLayerInterface {
       for (const batch of this._batches) {
         const opacity = batchOpacity(batch, {
           activeLevelIndices: this._activeLevelIndices,
+          contextLevelIndices: this._contextLevelIndices,
           showContextLevels: this._showContextLevels,
         });
         if (opacity <= 0) {
@@ -595,6 +604,7 @@ export class SceneLayer implements CustomLayerInterface {
         if (
           batchOpacity(batch, {
             activeLevelIndices: this._activeLevelIndices,
+            contextLevelIndices: this._contextLevelIndices,
             showContextLevels: this._showContextLevels,
           }) < 1
         ) {
@@ -840,6 +850,15 @@ export class SceneLayer implements CustomLayerInterface {
       .filter((index) => index >= 0 && index <= last);
   }
 
+  /** Retain registered levels for one route floor as quiet, non-pickable context. */
+  setContextLevels(levelIndices: readonly number[]): void {
+    const last = this._scene.levels.length - 1;
+    this._contextLevelIndices = levelIndices
+      .map((index) => Math.floor(index))
+      .filter((index) => index >= 0 && index <= last);
+    this._map?.triggerRepaint();
+  }
+
   /** Show or hide the other floors as quiet context. */
   setShowContextLevels(show: boolean): void {
     this._showContextLevels = show;
@@ -867,6 +886,7 @@ export class SceneLayer implements CustomLayerInterface {
       levelCount: this._scene.levels.length,
       levelIds: this._scene.levels.map((level) => level.canonicalId),
       activeLevelIndices: () => [...this._activeLevelIndices],
+      contextLevelIndices: () => [...this._contextLevelIndices],
     };
   }
 

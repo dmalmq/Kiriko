@@ -140,6 +140,8 @@ export interface VisibilityState {
    * — not one of the source documents it happens to be exported from.
    */
   activeLevelIndices: readonly number[];
+  /** Registered levels for the one route floor retained as quiet context. */
+  contextLevelIndices: readonly number[];
   showContextLevels: boolean;
 }
 
@@ -152,7 +154,10 @@ export function batchOpacity(batch: BatchVisibility, state: VisibilityState): nu
   if (state.activeLevelIndices.includes(batch.levelIndex)) {
     return Object.hasOwn(HIDDEN_ROLES_ON_ACTIVE_LEVEL, batch.role) ? 0 : 1;
   }
-  if (!state.showContextLevels) {
+  if (
+    !state.showContextLevels &&
+    !state.contextLevelIndices.includes(batch.levelIndex)
+  ) {
     return 0;
   }
   // A context floor's ceiling is the one thing standing between the camera and
