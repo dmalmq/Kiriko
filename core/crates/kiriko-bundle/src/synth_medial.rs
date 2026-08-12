@@ -919,10 +919,7 @@ fn opening_axis(feature_id: &str, geom: &Value) -> Option<OpeningAxis> {
     };
     let mid = linestring_midpoint(geom)?;
     let mx = 111_320.0 * mid[1].to_radians().cos();
-    let (dx, dy) = (
-        (last[0] - first[0]) * mx,
-        (last[1] - first[1]) * 111_320.0,
-    );
+    let (dx, dy) = ((last[0] - first[0]) * mx, (last[1] - first[1]) * 111_320.0);
     let chord_length_m = (dx * dx + dy * dy).sqrt();
     if chord_length_m <= f64::EPSILON || arc_length_m <= f64::EPSILON {
         return None;
@@ -933,6 +930,34 @@ fn opening_axis(feature_id: &str, geom: &Value) -> Option<OpeningAxis> {
         direction: [dx / chord_length_m, dy / chord_length_m],
         arc_length_m,
         chord_length_m,
+    })
+}
+
+fn opening_geometry_review(opening: &OpeningAxis, ordinal: f64) -> Option<RouteBuildWarning> {
+    let ratio = opening.chord_length_m / opening.arc_length_m;
+    let long = opening.arc_length_m > OPENING_REVIEW_LENGTH_M;
+    let curved = opening.arc_length_m >= OPENING_REVIEW_CURVE_MIN_M
+        && ratio < OPENING_REVIEW_CHORD_ARC_RATIO;
+    if !long && !curved {
+        return None;
+    }
+    let reason = match (long, curved) {
+        (true, true) => "long,curved",
+        (true, false) => "long",
+        (false, true) => "curved",
+        (false, false) => unreachable!(),
+    };
+    Some(RouteBuildWarning {
+        code: "synth_opening_geometry_review".into(),
+        detail: format!(
+            "opening {} on ordinal {} requires review: arc_m={:.3} chord_m={:.3} chord_arc_ratio={:.3} reason={}",
+            opening.feature_id,
+            ordinal,
+            opening.arc_length_m,
+            opening.chord_length_m,
+            ratio,
+            reason,
+        ),
     })
 }
 
@@ -1199,6 +1224,9 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 }
                 FeatureType::Opening => {
                     if let Some(opening) = opening_axis(&f.id, geom) {
+                        if let Some(warning) = opening_geometry_review(&opening, ord) {
+                            warnings.push(warning);
+                        }
                         openings.push(opening);
                     }
                 }
@@ -2350,6 +2378,23 @@ mod tests {
         Value::Object(BTreeMap::from([
             ("type".to_string(), Value::String("LineString".to_string())),
             ("coordinates".to_string(), coords),
+        ]))
+    }
+
+    fn polyline(points: &[[f64; 2]]) -> Value {
+        Value::Object(BTreeMap::from([
+            ("type".to_string(), Value::String("LineString".to_string())),
+            (
+                "coordinates".to_string(),
+                Value::Array(
+                    points
+                        .iter()
+                        .map(|point| {
+                            Value::Array(vec![Value::Number(point[0]), Value::Number(point[1])])
+                        })
+                        .collect(),
+                ),
+            ),
         ]))
     }
 
@@ -3839,8 +3884,7 @@ mod tests {
         let opening = opening_axis("opening-1", &geom).expect("axis parses");
         assert_eq!(opening.feature_id, "opening-1");
         assert!(
-            (opening.mid[0] - 139.03125).abs() < 1e-9
-                && (opening.mid[1] - 35.0).abs() < 1e-9,
+            (opening.mid[0] - 139.03125).abs() < 1e-9 && (opening.mid[1] - 35.0).abs() < 1e-9,
             "midpoint from the first part: {:?}",
             opening.mid
         );
@@ -3857,6 +3901,121 @@ mod tests {
     fn xy_at(cx: f64, cy: f64) -> impl Fn(f64, f64) -> [f64; 2] {
         let mx = 111_320.0 * cy.to_radians().cos();
         move |x_m: f64, y_m: f64| [cx + x_m / mx, cy + y_m / 111_320.0]
+    }
+
+    #[test]
+    fn normal_opening_geometry_is_silent() {
+        let xy = xy_at(139.7, 35.6);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature(
+                    "w",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.7, 35.6, 0.0004, 0.0001),
+                ),
+                feature(
+                    "normal",
+                    FeatureType::Opening,
+                    "l0",
+                    None,
+                    polyline(&[xy(0.0, 0.0), xy(1.2, 0.0)]),
+                ),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        assert!(
+            !build
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "synth_opening_geometry_review")
+        );
+    }
+
+    #[test]
+    fn long_opening_geometry_warns_but_still_builds() {
+        let xy = xy_at(139.7, 35.6);
+        let opening = polyline(&[xy(-3.0, 0.0), xy(3.0, 0.0)]);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature(
+                    "w",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.7, 35.6, 0.0004, 0.0001),
+                ),
+                feature(
+                    "long-opening",
+                    FeatureType::Opening,
+                    "l0",
+                    None,
+                    opening.clone(),
+                ),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let warning = build
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "synth_opening_geometry_review")
+            .expect("review warning");
+        assert!(warning.detail.contains("long-opening"));
+        assert!(warning.detail.contains("reason=long"));
+        let mid = linestring_midpoint(&opening).expect("midpoint");
+        assert!(
+            build
+                .graph
+                .nodes
+                .iter()
+                .any(|node| [node.lon, node.lat] == mid),
+            "warned opening remains in the graph"
+        );
+    }
+
+    #[test]
+    fn curved_opening_geometry_warns_with_ratio() {
+        let xy = xy_at(139.7, 35.6);
+        let opening = polyline(&[xy(0.0, 0.0), xy(1.0, 0.0), xy(1.0, 1.0), xy(0.0, 1.0)]);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![feature(
+                "curved-opening",
+                FeatureType::Opening,
+                "l0",
+                None,
+                opening,
+            )],
+        );
+        let build = synthesize_network_medial(&doc);
+        let warning = build
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "synth_opening_geometry_review")
+            .expect("review warning without walkway");
+        assert!(warning.detail.contains("curved-opening"));
+        assert!(warning.detail.contains("reason=curved"));
+        assert!(
+            build.graph.nodes.is_empty(),
+            "diagnostic does not require a synthesized floor"
+        );
+    }
+
+    #[test]
+    fn long_and_curved_opening_emits_one_combined_warning() {
+        let opening = OpeningAxis {
+            feature_id: "both".into(),
+            mid: [139.7, 35.6],
+            direction: [1.0, 0.0],
+            arc_length_m: 8.0,
+            chord_length_m: 4.0,
+        };
+        let warning = opening_geometry_review(&opening, 2.0).expect("warning");
+        assert_eq!(warning.code, "synth_opening_geometry_review");
+        assert!(warning.detail.contains("reason=long,curved"));
     }
 
     fn rect_poly(cx: f64, cy: f64, x0: f64, y0: f64, x1: f64, y1: f64) -> Polygon<f64> {
