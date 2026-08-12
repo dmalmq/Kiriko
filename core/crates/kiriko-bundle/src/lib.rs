@@ -29,6 +29,7 @@ mod spatial_section;
 mod synth;
 #[cfg(feature = "netgen")]
 mod synth_medial;
+mod transit_match;
 
 pub use codec::{
     BundleDocument, BundleInspection, BundleMetadata, BundleStats, CapabilityReport,
