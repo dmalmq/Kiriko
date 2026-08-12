@@ -14,6 +14,7 @@ import {
   FLOOR_ELEVATION_SOURCE_ID,
   createFloorElevationProtocol,
   floorElevationTileUrl,
+  floorElevationSource,
 } from "./scene/floorElevation";
 import {
   resolveSceneFloorState,
@@ -197,16 +198,41 @@ function prefersReducedMotion(): boolean {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-function hasSetTiles(
-  source: unknown,
-): source is { setTiles(tiles: string[]): void } {
-  return (
-    typeof source === "object" &&
-    source !== null &&
-    "setTiles" in source &&
-    typeof source.setTiles === "function"
-  );
+function whenFloorElevationReady(
+  map: MapLibreMap,
+  fn: () => void,
+): () => void {
+  let settled = false;
+  const run = (): void => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    map.off("sourcedata", onSourceData);
+    fn();
+  };
+  const onSourceData = (event: {
+    sourceId?: string;
+    isSourceLoaded?: boolean;
+    dataType?: string;
+  }): void => {
+    if (
+      event.sourceId === FLOOR_ELEVATION_SOURCE_ID &&
+      event.isSourceLoaded === true &&
+      (event.dataType === "source" || event.dataType === undefined)
+    ) {
+      run();
+    }
+  };
+
+  map.on("sourcedata", onSourceData);
+
+  return () => {
+    settled = true;
+    map.off("sourcedata", onSourceData);
+  };
 }
+
 
 const EMPTY_SCENE_FLOOR_STATE: SceneFloorState = {
   activeLevelIndices: [],
@@ -758,6 +784,7 @@ export function IndoorMap({
   const appliedCameraKeyRef = useRef<number | null>(null);
   const themeIdRef = useRef(theme.id);
   const cancelReadyRef = useRef<(() => void) | null>(null);
+  const floorElevationReadyCancelRef = useRef<(() => void) | null>(null);
   const cameraCancelRef = useRef<(() => void) | null>(null);
   const issueHighlightCancelRef = useRef<(() => void) | null>(null);
   const visibilityRef = useRef(layerVisibility);
@@ -817,16 +844,39 @@ export function IndoorMap({
       layer?.setActiveLevels(floorState.activeLevelIndices);
       layer?.setContextLevels(floorState.contextLevelIndices);
 
+      // `setTerrain` rejects while MapLibre is still loading a style. Scene
+      // state can update immediately; the existing sourcedata waiter replays
+      // this synchronization through `applyOverlays` once the style is ready.
+      if (!styleReady(map)) {
+        return floorState;
+      }
+
       const tileUrl = floorElevationTileUrl(floorState.activePlaneM ?? Number.NaN);
-      const source = map.getSource(FLOOR_ELEVATION_SOURCE_ID);
-      if (tileUrl === null || !hasSetTiles(source)) {
+      if (tileUrl === null) {
+        floorElevationReadyCancelRef.current?.();
+        floorElevationReadyCancelRef.current = null;
         map.setTerrain(null);
         floorElevationUrlRef.current = null;
-      } else {
-        if (floorElevationUrlRef.current !== tileUrl) {
-          source.setTiles([tileUrl]);
-          floorElevationUrlRef.current = tileUrl;
+      } else if (floorElevationUrlRef.current !== tileUrl) {
+        floorElevationReadyCancelRef.current?.();
+        map.setTerrain(null);
+        if (map.getSource(FLOOR_ELEVATION_SOURCE_ID) != null) {
+          map.removeSource(FLOOR_ELEVATION_SOURCE_ID);
         }
+        floorElevationReadyCancelRef.current = whenFloorElevationReady(map, () => {
+          floorElevationReadyCancelRef.current = null;
+          map.setTerrain({
+            source: FLOOR_ELEVATION_SOURCE_ID,
+            exaggeration: 1,
+          });
+          map.triggerRepaint();
+        });
+        map.addSource(FLOOR_ELEVATION_SOURCE_ID, {
+          ...floorElevationSource(),
+          tiles: [tileUrl],
+        });
+        floorElevationUrlRef.current = tileUrl;
+      } else {
         map.setTerrain({
           source: FLOOR_ELEVATION_SOURCE_ID,
           exaggeration: 1,
@@ -881,7 +931,15 @@ export function IndoorMap({
     }
 
     applyLayerVisibility(map, visibilityRef.current);
-  }, []);
+    syncSceneFloorState(
+      map,
+      sceneLayerRef.current,
+      sceneRef.current,
+      levelId,
+      dirs?.route ?? null,
+      venue,
+    );
+  }, [syncSceneFloorState]);
 
   // Applies overlays now when the style is ready, otherwise exactly once when
   // a geojson source finishes loading. A floor change keeps the style busy
@@ -1006,11 +1064,35 @@ export function IndoorMap({
       FLOOR_ELEVATION_PROTOCOL,
       createFloorElevationProtocol(),
     );
+    const initialScene = sceneRef.current;
+    const initialFloorState =
+      initialScene === null
+        ? EMPTY_SCENE_FLOOR_STATE
+        : resolveSceneFloorState(
+            initialScene,
+            venueRef.current.levels,
+            levelIdRef.current,
+            directionsRef.current?.route ?? null,
+          );
+    const initialFloorUrl = floorElevationTileUrl(
+      initialFloorState.activePlaneM ?? Number.NaN,
+    );
+    const style = buildIndoorStyle(theme);
+    const initialFloorSource = style.sources[FLOOR_ELEVATION_SOURCE_ID];
+    if (
+      initialFloorUrl !== null &&
+      typeof initialFloorSource === "object" &&
+      initialFloorSource !== null &&
+      initialFloorSource.type === "raster-dem"
+    ) {
+      initialFloorSource.tiles = [initialFloorUrl];
+      floorElevationUrlRef.current = initialFloorUrl;
+    }
     let map: MapLibreMap;
     try {
       map = new maplibregl.Map({
         container,
-        style: buildIndoorStyle(theme),
+        style,
         ...(preserveDrawingBufferRef.current
           ? { canvasContextAttributes: { preserveDrawingBuffer: true } }
           : {}),
@@ -1306,6 +1388,8 @@ export function IndoorMap({
       cameraCancelRef.current = null;
       issueHighlightCancelRef.current?.();
       issueHighlightCancelRef.current = null;
+      floorElevationReadyCancelRef.current?.();
+      floorElevationReadyCancelRef.current = null;
       const overlayWaiter = overlayWaiterRef.current;
       if (overlayWaiter != null) {
         map.off("sourcedata", overlayWaiter);
@@ -1628,6 +1712,8 @@ export function IndoorMap({
       map.off("idle", attach);
       map.off("load", attach);
       sceneLayerRef.current = null;
+      floorElevationReadyCancelRef.current?.();
+      floorElevationReadyCancelRef.current = null;
       if (styleReady(map)) {
         map.setTerrain(null);
       }
