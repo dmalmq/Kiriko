@@ -21,6 +21,9 @@ fn venue_floor(level_id: &str, min: [f64; 2], max: [f64; 2]) -> VenueFloor {
             [max[0], max[1]],
             [min[0], max[1]],
         ]],
+        // Unlabelled: these tests measure geometry, and no label is the honest
+        // "no corroboration available" case rather than a passing check.
+        labels: Vec::new(),
     }
 }
 

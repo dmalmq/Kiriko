@@ -2,6 +2,7 @@
 //! compile to (design: docs/superpowers/specs/2026-08-03-3d-rendering-architecture-design.md).
 
 mod derive;
+mod floor_label;
 mod format;
 mod generated;
 mod glb;
@@ -25,8 +26,9 @@ pub use package::{
 pub use quantize::{decode_normal_oct, encode_normal_oct, quantize_positions};
 pub use registration::{
     ActivationEvaluation, ActivationInput, CoherentCluster, FloorRegistration, FrameTransform,
-    GateCode, GateFailure, RegistrationProfile, RegistrationReport, ResidualStats, TileLevel,
-    VenueFloor, composite_level_id, evaluate_activation, measure_registration, resolve_tile_levels,
+    GateCode, GateFailure, LabelAgreement, RegistrationProfile, RegistrationReport, ResidualStats,
+    TileLevel, VenueFloor, composite_level_id, evaluate_activation, measure_registration,
+    resolve_tile_levels,
 };
 pub use roles::{occlusion_for_role, role_for_category};
 

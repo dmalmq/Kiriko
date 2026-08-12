@@ -101,6 +101,10 @@ pub struct VenueFloorGeometry {
     pub plane_z_m: f64,
     /// Unit outlines, venue-local metres, closing vertex dropped.
     pub rings: Vec<Vec<[f64; 2]>>,
+    /// This floor's own names, in every locale the venue carries them: the
+    /// corroboration altitude cannot supply (#81). Never a join key — labels
+    /// agree with the mapping altitude chose, or contradict it, or say nothing.
+    pub labels: Vec<String>,
 }
 
 /// Extract every canonical floor's unit geometry from a decoded bundle.
@@ -134,6 +138,24 @@ pub fn venue_floor_geometry(document: &BundleDocument) -> Vec<VenueFloorGeometry
         if rings.is_empty() {
             continue;
         }
+        // Every locale's label and short name. A Revit level key might resemble
+        // either — "B1" the short name, or "B1F Yaesu" the label — so all of them
+        // travel and the comparison decides.
+        let level = document
+            .levels
+            .iter()
+            .find(|level| level.id == record.level_id);
+        let labels: Vec<String> = level
+            .map(|level| {
+                level
+                    .short_name
+                    .values()
+                    .chain(level.label.values())
+                    .filter(|value| !value.trim().is_empty())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
         floors.push(VenueFloorGeometry {
             level_id: record.level_id.clone(),
             ordinal: record.ordinal,
@@ -141,6 +163,7 @@ pub fn venue_floor_geometry(document: &BundleDocument) -> Vec<VenueFloorGeometry
             plane_z_m: (record.resolved_scene_z_mm + frame.vertical_normalisation_offset_mm) as f64
                 / 1000.0,
             rings,
+            labels,
         });
     }
     floors

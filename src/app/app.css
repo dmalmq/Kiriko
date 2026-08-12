@@ -3068,3 +3068,19 @@ button {
   overflow-x: auto;
   white-space: nowrap;
 }
+
+/* The name check: three states, and `unknown` must not read as a pass. Agreement
+   is quiet (it is the expected case), a contradiction is loud, and "not
+   comparable" is muted so nobody mistakes it for corroboration. */
+.tile-dialog__check--agrees {
+  color: var(--color-accent);
+}
+
+.tile-dialog__check--contradicts {
+  color: var(--color-danger, #b3261e);
+  font-weight: 600;
+}
+
+.tile-dialog__check--unknown {
+  color: var(--color-muted);
+}

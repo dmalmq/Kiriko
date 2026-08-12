@@ -84,6 +84,7 @@ function report(overrides: Partial<TileRegistrationReport> = {}): TileRegistrati
         opaqueSourceObjectIds: ["obj-9"],
         mappedCanonicalLevelId: LEVEL_B1,
         mappedFloorPlaneM: -6.0,
+        labelAgreement: "agrees",
       },
     ],
     unmappedLevels: [],
@@ -297,6 +298,46 @@ describe("TilePackageDialog", () => {
     // -4 − (50 + −54) = 0: the level lands on the floor it was matched to.
     expect(within(mapping).getByText("0.00")).toBeTruthy();
     expect(within(mapping).queryByText("-54.00")).toBeNull();
+  });
+
+  it("shows whether each level's own name corroborates the floor it mapped to", async () => {
+    open();
+    await waitFor(() => expect(listTilePackages).toHaveBeenCalled());
+    await uploadAPackage();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Measure registration" }));
+
+    const mapping = await waitFor(() =>
+      screen.getByRole("table", { name: "Level to floor mapping" }),
+    );
+    expect(within(mapping).getByText("agrees")).toBeTruthy();
+  });
+
+  it("never shows an uncomparable name as a passed check", async () => {
+    // Two exports sharing no naming convention corroborate nothing. Rendering
+    // that as a tick would be the same bug as printing an unmeasured residual as
+    // 0.00 — the absence of a check dressed as a passed one.
+    evaluateTilePackage.mockResolvedValue({
+      state: "evaluated",
+      report: report({
+        levels: [{ ...report().levels[0]!, labelAgreement: "unknown" }],
+      }),
+      floorMappings: [],
+      gates: [],
+    });
+    open();
+    await waitFor(() => expect(listTilePackages).toHaveBeenCalled());
+    await uploadAPackage();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Measure registration" }));
+
+    const mapping = await waitFor(() =>
+      screen.getByRole("table", { name: "Level to floor mapping" }),
+    );
+    expect(within(mapping).getByText("not comparable")).toBeTruthy();
+    expect(within(mapping).queryByText("agrees")).toBeNull();
   });
 
   it("prints the venue-wide residuals and each floor's own numbers", async () => {

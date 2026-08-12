@@ -63,6 +63,13 @@ const ui = {
   mappedFloor: { ja: "対応する会場フロア", en: "Venue floor" },
   floorPlane: { ja: "会場フロアの床面", en: "Floor plane" },
   gap: { ja: "差", en: "Gap" },
+  nameCheck: { ja: "名称の照合", en: "Name check" },
+  /** Three states, and `unknown` is the absence of a check rather than a pass. */
+  nameCheckValue: {
+    agrees: { ja: "一致", en: "agrees" },
+    contradicts: { ja: "不一致", en: "contradicts" },
+    unknown: { ja: "照合不可", en: "not comparable" },
+  },
   noFloor: { ja: "対応なし", en: "none" },
   confirmMapping: {
     ja: "各レベルの対応フロアを確認しました",
@@ -701,6 +708,7 @@ function MappingTable({
           <th>{ui.mappedFloor[locale]}</th>
           <th>{ui.floorPlane[locale]}</th>
           <th>{ui.gap[locale]}</th>
+          <th>{ui.nameCheck[locale]}</th>
           <th>{ui.triangles[locale]}</th>
         </tr>
       </thead>
@@ -728,6 +736,13 @@ function MappingTable({
                 : metres(
                     level.mappedFloorPlaneM - (level.resolvedPlaneM + appliedVerticalOffsetM),
                   )}
+            </td>
+            <td className={`tile-dialog__check tile-dialog__check--${level.labelAgreement}`}>
+              {/* Three states, and the third is not a pass: `unknown` means the
+                  two exports share no naming convention, so nothing corroborated
+                  the altitude match. Showing it as a tick would be the same bug
+                  as printing an unmeasured residual as 0.00. */}
+              {ui.nameCheckValue[level.labelAgreement][locale]}
             </td>
             <td>{level.surfaceTriangles}</td>
           </tr>

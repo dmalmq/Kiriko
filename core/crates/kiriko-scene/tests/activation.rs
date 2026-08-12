@@ -10,7 +10,7 @@ mod support;
 use std::collections::BTreeSet;
 
 use kiriko_scene::{
-    ActivationInput, FrameTransform, GateCode, RegistrationProfile, VenueFloor,
+    ActivationInput, FrameTransform, GateCode, LabelAgreement, RegistrationProfile, VenueFloor,
     evaluate_activation, read_glb,
 };
 use support::{FeatureSpec, glb_with_features, quad};
@@ -26,6 +26,22 @@ fn venue_floor(level_id: &str, plane_z_m: f64, min: [f64; 2], max: [f64; 2]) -> 
             [max[0], max[1]],
             [min[0], max[1]],
         ]],
+        labels: Vec::new(),
+    }
+}
+
+/// The same floor, answering to a name. Only the label tests need one, and the
+/// rest must keep measuring what they measure without corroboration.
+fn labelled_floor(
+    level_id: &str,
+    label: &str,
+    plane_z_m: f64,
+    min: [f64; 2],
+    max: [f64; 2],
+) -> VenueFloor {
+    VenueFloor {
+        labels: vec![label.to_string()],
+        ..venue_floor(level_id, plane_z_m, min, max)
     }
 }
 
@@ -481,4 +497,106 @@ fn two_levels_that_cannot_be_one_storey_block_when_they_claim_one_floor() {
         "1.6 m apart, both claiming one floor: {:?}",
         evaluation.gates
     );
+}
+
+#[test]
+fn a_stack_shifted_a_whole_storey_is_caught_by_its_own_labels() {
+    // The case every geometric gate passes and #81 exists for. The package's B1
+    // floor sits at the venue's 1F plane, so altitude matches it to 1F; the
+    // footprints are identical, so every residual measures zero. Only the level's
+    // own name knows better.
+    let glb = glb_with_features(&[FeatureSpec::new(
+        "floor-b1",
+        "Floors",
+        "B1F",
+        0.0,
+        quad([0.0, 0.0], [40.0, 20.0], 0.0),
+    )]);
+    let scene = read_glb(&glb).expect("fixture glb reads");
+    let venue = [
+        labelled_floor("level-1f", "1F", 0.0, [0.0, 0.0], [40.0, 20.0]),
+        labelled_floor("level-b1", "B1F", -4.0, [0.0, 0.0], [40.0, 20.0]),
+    ];
+    let contextual = BTreeSet::new();
+
+    let evaluation = evaluate_activation(
+        std::slice::from_ref(&scene),
+        &venue,
+        &RegistrationProfile::default(),
+        &input(&contextual),
+        &FrameTransform::identity(),
+    );
+
+    // Altitude was satisfied: it mapped, and its residuals are clean.
+    let level = &evaluation.report.levels[0];
+    assert_eq!(level.mapped_canonical_level_id.as_deref(), Some("level-1f"));
+    assert!(
+        evaluation
+            .report
+            .floors
+            .iter()
+            .all(|floor| floor.stats.is_none_or(|stats| stats.p90_m < 1e-9)),
+        "the footprints are identical, so the wrong floor fits perfectly"
+    );
+    // And the label refused it.
+    assert_eq!(level.label_agreement, LabelAgreement::Contradicts);
+    assert!(
+        codes(&evaluation.gates).contains(&GateCode::LevelLabelContradiction),
+        "the level names B1F and was mapped to 1F: {:?}",
+        evaluation.gates
+    );
+}
+
+#[test]
+fn a_label_that_names_the_floor_it_mapped_to_corroborates_it() {
+    let glb = glb_with_features(&[FeatureSpec::new(
+        "floor-b1",
+        "Floors",
+        "B1F",
+        -4.0,
+        quad([0.0, 0.0], [40.0, 20.0], -4.0),
+    )]);
+    let scene = read_glb(&glb).expect("fixture glb reads");
+    let venue = [
+        labelled_floor("level-1f", "1F", 0.0, [0.0, 0.0], [40.0, 20.0]),
+        labelled_floor("level-b1", "B1F", -4.0, [0.0, 0.0], [40.0, 20.0]),
+    ];
+    let contextual = BTreeSet::new();
+
+    let evaluation = evaluate_activation(
+        std::slice::from_ref(&scene),
+        &venue,
+        &RegistrationProfile::default(),
+        &input(&contextual),
+        &FrameTransform::identity(),
+    );
+
+    assert_eq!(
+        evaluation.report.levels[0].label_agreement,
+        LabelAgreement::Agrees
+    );
+    assert_eq!(codes(&evaluation.gates), Vec::new());
+}
+
+#[test]
+fn an_unlabelled_venue_produces_no_evidence_rather_than_a_passed_check() {
+    // Two exports sharing no naming convention must read as "not checked", never
+    // as "checked and fine" — the whole distinction this module rests on.
+    let scene = read_glb(&registered_package()).expect("fixture glb reads");
+    let venue = [venue_floor("level-1", 0.0, [0.0, 0.0], [40.0, 20.0])];
+    let contextual = BTreeSet::new();
+
+    let evaluation = evaluate_activation(
+        std::slice::from_ref(&scene),
+        &venue,
+        &RegistrationProfile::default(),
+        &input(&contextual),
+        &FrameTransform::identity(),
+    );
+
+    assert_eq!(
+        evaluation.report.levels[0].label_agreement,
+        LabelAgreement::Unknown
+    );
+    assert_eq!(codes(&evaluation.gates), Vec::new());
 }

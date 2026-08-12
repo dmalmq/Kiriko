@@ -715,6 +715,7 @@ impl Task for TileActivationTask {
                 ordinal: floor.ordinal,
                 plane_z_m: floor.plane_z_m,
                 rings: floor.rings,
+                labels: floor.labels,
             })
             .collect();
         let evaluation = kiriko_scene::evaluate_activation(

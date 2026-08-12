@@ -89,6 +89,10 @@ test.describe("tile producer surface", () => {
       // each level sits on the right floor, so a person says so.
       await expect(page.getByRole("button", { name: "Activate" })).toBeDisabled();
       await expect(mapping.getByText(LEVEL_B1)).toBeVisible();
+      // And the corroboration altitude cannot supply (#81), on real data: the
+      // package's own level key reduces to the same form as the venue level's
+      // short name, all the way from IMDF import through §8 to this cell.
+      await expect(mapping.getByText("agrees")).toBeVisible();
       await page.getByLabel(/I have checked the floor/).check();
       await expect(page.getByRole("button", { name: "Activate" })).toBeEnabled();
 
@@ -151,15 +155,17 @@ test.describe("tile producer surface", () => {
     // none, so the dialog states the precondition instead of offering a retry.
     await page.goto("/");
     await signIn(page);
-    const created = await page.request.post("/api/venues", {
-      data: { name: uniqueDatasetName("tiles-empty", testInfo) },
-    });
+    // Named, and located by that name: other specs publish venues concurrently,
+    // and `.first()` picked one of theirs — which registers fine, so the test
+    // passed alone and failed in the suite.
+    const name = uniqueDatasetName("tiles-empty", testInfo);
+    const created = await page.request.post("/api/venues", { data: { name } });
     expect(created.status()).toBe(201);
     const venueId = (await created.json()).venue.id as number;
     try {
       await page.reload();
       await switchLocale(page, "en");
-      const card = page.locator(".dataset-card").first();
+      const card = page.locator(".dataset-card", { hasText: name });
       await card.getByRole("button", { name: "3D Tiles" }).click();
       await uploadPackage(page, UNPLACEABLE_PLANE_M);
       await expect(page.getByText("tileset.json")).toBeVisible({ timeout: 30_000 });

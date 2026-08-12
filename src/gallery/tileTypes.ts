@@ -55,6 +55,14 @@ export interface TileLevelRegistration {
    */
   mappedCanonicalLevelId: string | null;
   mappedFloorPlaneM: number | null;
+  /**
+   * The corroboration altitude cannot supply (#81): whether this level's own
+   * label names the floor it was matched to.
+   *
+   * `unknown` means two exports share no naming convention — the absence of a
+   * check, which must never be shown as a passed one.
+   */
+  labelAgreement: "agrees" | "contradicts" | "unknown";
 }
 
 /** A localised cluster of residuals pointing the same way: registration, not noise. */

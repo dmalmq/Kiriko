@@ -61,6 +61,10 @@ const TILE_GATE_COPY: Record<string, { ja: string; en: string } | undefined> = {
     ja: "レベルの高さ順と会場フロアの順序が一致しません。スタック全体の位置合わせを確認してください。",
     en: "The levels' own order does not match the venue floors' order. Check how the whole stack is placed.",
   },
+  levelLabelContradiction: {
+    ja: "このレベルの名称は別のフロアを指しています。スタック全体が1フロアずれている可能性があります。",
+    en: "This level's own name belongs to a different floor. The whole stack may be a storey out.",
+  },
   levelMappingCollapsed: {
     ja: "同じ階とは考えられない複数のレベルが1つのフロアに対応しています。",
     en: "Levels too far apart to be one storey are mapped to a single floor.",

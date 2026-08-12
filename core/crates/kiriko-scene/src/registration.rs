@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::floor_label::{floor_label_candidates, labels_agree};
 use crate::format::SemanticRole;
 use crate::glb::GlbScene;
 use crate::roles::role_for_category;
@@ -185,6 +186,10 @@ pub struct TileLevel {
     /// producer is shown both planes and asked.
     pub mapped_canonical_level_id: Option<String>,
     pub mapped_floor_plane_m: Option<f64>,
+    /// What this level's own label says about that match (#81). The one check
+    /// that does not come from altitude, and so the only one that can catch a
+    /// stack offset by a storey where every footprint repeats.
+    pub label_agreement: LabelAgreement,
 }
 
 /// Group a package's source elements into composite levels and resolve each
@@ -319,6 +324,7 @@ pub fn resolve_tile_levels(
                 // `measure_registration` fills these once it has matched.
                 mapped_canonical_level_id: None,
                 mapped_floor_plane_m: None,
+                label_agreement: LabelAgreement::Unknown,
             }
         })
         .collect()
@@ -351,6 +357,27 @@ pub struct VenueFloor {
     /// resolved by altitude before distance (#33).
     pub plane_z_m: f64,
     pub rings: Vec<Vec<[f64; 2]>>,
+    /// This floor's own names, every locale. Corroboration, never a join key:
+    /// altitude picks the floor and a label can only agree or contradict (#81).
+    pub labels: Vec<String>,
+}
+
+/// What a tile level's own label says about the floor altitude matched it to.
+///
+/// The distinction that matters is between *no evidence* and *evidence of
+/// correctness*. Two exports sharing no naming convention produce `Unknown`, and
+/// `Unknown` must never read as reassurance — it is the absence of a check, not
+/// a passed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LabelAgreement {
+    /// The level's label names the floor it was matched to.
+    Agrees,
+    /// The level's label names exactly one venue floor, and it is a different one.
+    Contradicts,
+    /// No label on either side, none that reduce to a comparable form, or a label
+    /// naming several floors — none of which is evidence either way.
+    Unknown,
 }
 
 /// The versioned thresholds and sampling parameters every registration
@@ -541,10 +568,42 @@ pub fn measure_registration(
         if candidates.len() > 1 {
             ambiguous_levels.push(level.composite_id.clone());
         }
+        // The label check, done against every floor rather than only the matched
+        // one: the question is not "do these two strings agree" but "does this
+        // level's own name belong to a *different* floor" — which is the shape a
+        // whole-storey offset takes and the shape altitude cannot see.
+        let tile_labels: BTreeSet<String> = floor_label_candidates(&level.level_key)
+            .into_iter()
+            .chain(floor_label_candidates(&level.level_name))
+            .collect();
+        let named: Vec<&VenueFloor> = venue
+            .iter()
+            .filter(|floor| {
+                let floor_labels = floor
+                    .labels
+                    .iter()
+                    .flat_map(|label| floor_label_candidates(label))
+                    .collect::<BTreeSet<String>>();
+                labels_agree(&tile_labels, &floor_labels)
+            })
+            .collect();
+
         match candidates.first() {
             Some(floor) => {
                 level.mapped_canonical_level_id = Some(floor.level_id.clone());
                 level.mapped_floor_plane_m = Some(floor.plane_z_m);
+                level.label_agreement =
+                    if named.iter().any(|named| named.level_id == floor.level_id) {
+                        LabelAgreement::Agrees
+                    } else if named.len() == 1 {
+                        // Exactly one floor answers to this level's name, and it is
+                        // not the floor altitude chose. That is a contradiction, not
+                        // a preference — and still not a licence to remap.
+                        LabelAgreement::Contradicts
+                    } else {
+                        // No floor answers to it, or several do. Neither is evidence.
+                        LabelAgreement::Unknown
+                    };
                 floor_of_level.insert(level.composite_id.clone(), floor);
             }
             None => unmapped_levels.push(level.composite_id.clone()),
@@ -878,6 +937,10 @@ pub enum GateCode {
     /// legitimately be rendered by several levels (#31), but not by levels that
     /// cannot be the same storey.
     LevelMappingCollapsed,
+    /// A level's own label names a different canonical floor than the one its
+    /// altitude matched. The only check here that does not come from altitude,
+    /// and so the only one that sees a stack offset by a whole storey.
+    LevelLabelContradiction,
     /// Opaque content belongs to no level and has no contextual class.
     UnclassifiedOpaqueContent,
 }
@@ -898,6 +961,7 @@ impl GateCode {
             Self::LevelMappingAmbiguous => "levelMappingAmbiguous",
             Self::LevelMappingScrambled => "levelMappingScrambled",
             Self::LevelMappingCollapsed => "levelMappingCollapsed",
+            Self::LevelLabelContradiction => "levelLabelContradiction",
             Self::UnclassifiedOpaqueContent => "unclassifiedOpaqueContent",
         }
     }
@@ -1026,6 +1090,18 @@ pub fn evaluate_activation(
         if !mapped.contains(level.composite_id.as_str()) {
             gates.push(GateFailure {
                 code: GateCode::LevelNotMapped,
+                subject: level.composite_id.clone(),
+                measured: None,
+                band: None,
+            });
+        }
+        if level.label_agreement == LabelAgreement::Contradicts {
+            // The level's own name belongs to another floor. Not a preference to
+            // weigh against altitude — a contradiction between two independent
+            // accounts of the same fact, which is exactly the evidence altitude
+            // cannot produce about a stack offset by a storey.
+            gates.push(GateFailure {
+                code: GateCode::LevelLabelContradiction,
                 subject: level.composite_id.clone(),
                 measured: None,
                 band: None,

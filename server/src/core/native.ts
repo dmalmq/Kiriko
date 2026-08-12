@@ -863,6 +863,13 @@ export interface TileLevelRegistration {
    */
   mappedCanonicalLevelId: string | null;
   mappedFloorPlaneM: number | null;
+  /**
+   * What this level's own label says about that match: `agrees`, `contradicts`,
+   * or `unknown`. The only check that does not come from altitude, and so the
+   * only one that sees a stack offset by a whole storey where footprints repeat.
+   * `unknown` is the absence of a check, never a passed one.
+   */
+  labelAgreement: "agrees" | "contradicts" | "unknown";
 }
 
 export interface CoherentCluster {
