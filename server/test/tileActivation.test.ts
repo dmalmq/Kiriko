@@ -59,7 +59,8 @@ describe("tile activation evaluation", () => {
       [LEVEL_B1, [`asset-v1|station.rvt||b1fl|${Math.round(plane * 10)}`]],
     ]);
     expect(evaluation.report.floors[0]?.canonicalLevelId).toBe(LEVEL_B1);
-    expect(evaluation.report.floors[0]?.stats.p90M).toBeLessThan(0.01);
+    // A mapped, sampled floor has residuals; absence would be a different bug.
+    expect(evaluation.report.floors[0]?.stats?.p90M).toBeLessThan(0.01);
     expect(evaluation.report.levels[0]?.resolvedPlaneM).toBeCloseTo(plane, 3);
   });
 

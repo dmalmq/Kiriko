@@ -288,7 +288,7 @@ describe.skipIf(!DATA_PRESENT)("Stage 3 on the registered Tokyo package", () => 
       method: "POST",
       url: `/api/venues/${venue.id}/tiles/${record.packageId}/activate`,
       headers: { cookie },
-      payload: {},
+      payload: { mappingConfirmed: true },
     });
     expect(activated.statusCode, activated.body).toBe(202);
     await app.queue.idle();

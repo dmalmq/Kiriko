@@ -233,9 +233,14 @@ export function markActivated(
   db.prepare(
     `UPDATE tile_activations
      SET state = 'activated', activated_at = datetime('now'),
-         activated_by = ?, activated_version_id = ?, scene_blob_hash = ?
+         activated_by = ?, activated_version_id = ?, scene_blob_hash = ?,
+         -- The same act and the same person: activating *is* asserting the
+         -- mapping, and the route refuses without the assertion. Stored so the
+         -- later question is "who checked, against which report" rather than
+         -- "was a box ticked".
+         mapping_confirmed_at = datetime('now'), mapping_confirmed_by = ?
      WHERE id = ?`,
-  ).run(activatedBy, activatedVersionId, sceneBlobHash, evaluationId);
+  ).run(activatedBy, activatedVersionId, sceneBlobHash, activatedBy, evaluationId);
 }
 
 /**

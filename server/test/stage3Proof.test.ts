@@ -143,7 +143,7 @@ async function activate(venue: Venue, packageId: number): Promise<void> {
     method: "POST",
     url: `/api/venues/${venue.id}/tiles/${packageId}/activate`,
     headers: { cookie: venue.cookie },
-    payload: {},
+    payload: { mappingConfirmed: true },
   });
   expect(activated.statusCode, activated.body).toBe(202);
   await venue.app.queue.idle();

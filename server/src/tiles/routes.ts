@@ -534,6 +534,17 @@ export function registerTileRoutes(app: FastifyInstance): void {
       preHandler: requireProducerSession,
       schema: {
         params: Type.Object({ venueId: Type.String(), packageId: Type.String() }),
+        body: Type.Object({
+          /**
+           * The producer asserts the level→floor mapping is right. Required
+           * because no gate can establish it: a stack offset by roughly a storey
+           * maps every level to its neighbour, and where footprints repeat the
+           * residuals against the wrong floor are as small as against the right
+           * one. Enforced here rather than only in the dialog — a guarantee that
+           * lives in a checkbox is a guarantee anything with `curl` can skip.
+           */
+          mappingConfirmed: Type.Boolean(),
+        }),
         response: {
           202: Type.Object({
             jobId: Type.String(),
@@ -559,6 +570,11 @@ export function registerTileRoutes(app: FastifyInstance): void {
         // Activation is a decision about measurements. Without them there is
         // nothing to decide on, and gating would be a formality.
         return reply.code(409).send(errorBody("not_evaluated", "not_evaluated"));
+      }
+      // The schema guarantees the field's presence and type; this is the value.
+      const { mappingConfirmed } = request.body as { mappingConfirmed: boolean };
+      if (!mappingConfirmed) {
+        return reply.code(409).send(errorBody("mapping_unconfirmed", "mapping_unconfirmed"));
       }
       const target = evaluationTarget(request.server.db, Number(venueId));
       if (target === null) {

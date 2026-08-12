@@ -121,7 +121,7 @@ async function activate(
     method: "POST",
     url: `/api/venues/${venue.venueId}/tiles/${packageId}/activate`,
     headers: { cookie: venue.cookie },
-    payload: {},
+    payload: { mappingConfirmed: true },
   });
   return { statusCode: response.statusCode, body: response.json<Record<string, unknown>>() };
 }
@@ -177,6 +177,53 @@ describe("tile activation", () => {
 
     expect(statusCode).toBe(409);
     expect(body["code"]).toBe("not_evaluated");
+  });
+
+  it("refuses to activate a mapping nobody confirmed", async () => {
+    // The gates cannot establish that each level is on the right floor: a stack
+    // offset by about a storey maps every level to its neighbour, and where
+    // footprints repeat the residuals against the wrong floor measure as small as
+    // against the right one. So a person asserts it — and the assertion is
+    // enforced here, not only in the dialog. A guarantee that lives in a checkbox
+    // is a guarantee anything with `curl` can skip.
+    const venue = await publishedVenue("Unconfirmed");
+    const packageId = await ingestCorridor(venue);
+    await evaluate(venue, packageId);
+
+    const response = await venue.app.inject({
+      method: "POST",
+      url: `/api/venues/${venue.venueId}/tiles/${packageId}/activate`,
+      headers: { cookie: venue.cookie },
+      payload: { mappingConfirmed: false },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json<{ code: string }>().code).toBe("mapping_unconfirmed");
+    // And nothing was published on the way to refusing.
+    const versions = venue.app.db
+      .prepare("SELECT COUNT(*) AS count FROM versions WHERE venue_id = ?")
+      .get(venue.venueId) as { count: number };
+    expect(versions.count).toBe(1);
+  });
+
+  it("records who confirmed the mapping alongside the activation", async () => {
+    // The question worth answering later is not whether a box was ticked but who
+    // checked, and against which measurements — which this row already holds.
+    const venue = await publishedVenue("Confirmed");
+    const packageId = await ingestCorridor(venue);
+    await evaluate(venue, packageId);
+
+    const { statusCode } = await activate(venue, packageId);
+
+    expect(statusCode).toBe(202);
+    const row = venue.app.db
+      .prepare(
+        `SELECT mapping_confirmed_by AS by, mapping_confirmed_at AS at
+         FROM tile_activations WHERE package_id = ?`,
+      )
+      .get(packageId) as { by: number | null; at: string | null };
+    expect(row.by).not.toBeNull();
+    expect(row.at).not.toBeNull();
   });
 
   it("refuses to activate a package a gate blocks, and says which", async () => {

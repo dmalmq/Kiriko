@@ -103,7 +103,7 @@ async function activatedVenue(name: string): Promise<Venue & { packageId: number
     method: "POST",
     url: `/api/venues/${venue.venueId}/tiles/${packageId}/activate`,
     headers: { cookie: venue.cookie },
-    payload: {},
+    payload: { mappingConfirmed: true },
   });
   expect(activated.statusCode, activated.body).toBe(202);
   await venue.app.queue.idle();
