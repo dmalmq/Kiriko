@@ -198,13 +198,24 @@ function prefersReducedMotion(): boolean {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
+function sceneFloorSourcesReady(map: MapLibreMap): boolean {
+  try {
+    return (
+      map.isSourceLoaded(FLOOR_ELEVATION_SOURCE_ID) === true &&
+      map.isSourceLoaded(INDOOR_SOURCE_ID) === true
+    );
+  } catch {
+    return false;
+  }
+}
+
 function whenFloorElevationReady(
   map: MapLibreMap,
   fn: () => void,
 ): () => void {
   let settled = false;
-  const run = (): void => {
-    if (settled) {
+  const runWhenReady = (): void => {
+    if (settled || !sceneFloorSourcesReady(map)) {
       return;
     }
     settled = true;
@@ -217,15 +228,17 @@ function whenFloorElevationReady(
     dataType?: string;
   }): void => {
     if (
-      event.sourceId === FLOOR_ELEVATION_SOURCE_ID &&
+      (event.sourceId === FLOOR_ELEVATION_SOURCE_ID ||
+        event.sourceId === INDOOR_SOURCE_ID) &&
       event.isSourceLoaded === true &&
       (event.dataType === "source" || event.dataType === undefined)
     ) {
-      run();
+      runWhenReady();
     }
   };
 
   map.on("sourcedata", onSourceData);
+  runWhenReady();
 
   return () => {
     settled = true;
@@ -780,6 +793,12 @@ export function IndoorMap({
   const floorElevationUrlRef = useRef<string | null>(null);
   const hoverIdRef = useRef<string | null>(null);
   const appliedSelectedRef = useRef<string | null>(null);
+  const floorElevationAttachedUrlRef = useRef<string | null>(null);
+  const desiredSceneFloorStateRef = useRef<SceneFloorState>(
+    EMPTY_SCENE_FLOOR_STATE,
+  );
+  const mapStyleAvailableRef = useRef(false);
+  const initialMapLoadCompleteRef = useRef(false);
   const appliedIssueHighlightRef = useRef<string | null>(null);
   const appliedCameraKeyRef = useRef<number | null>(null);
   const themeIdRef = useRef(theme.id);
@@ -825,7 +844,6 @@ export function IndoorMap({
   const syncSceneFloorState = useCallback(
     (
       map: MapLibreMap,
-      layer: SceneLayer | null,
       currentScene: SceneView | null,
       currentLevelId: string,
       route: RouteResultDto | null,
@@ -840,47 +858,76 @@ export function IndoorMap({
               currentLevelId,
               route,
             );
+      desiredSceneFloorStateRef.current = floorState;
+      const applyDesiredSceneLevels = (): void => {
+        const desired = desiredSceneFloorStateRef.current;
+        sceneLayerRef.current?.setActiveLevels(desired.activeLevelIndices);
+        sceneLayerRef.current?.setContextLevels(desired.contextLevelIndices);
+      };
 
-      layer?.setActiveLevels(floorState.activeLevelIndices);
-      layer?.setContextLevels(floorState.contextLevelIndices);
-
-      // `setTerrain` rejects while MapLibre is still loading a style. Scene
-      // state can update immediately; the existing sourcedata waiter replays
-      // this synchronization through `applyOverlays` once the style is ready.
-      if (!styleReady(map)) {
+      // `isStyleLoaded()` also becomes false for transient source work. Once
+      // the initial style exists, source replacement and terrain mutation stay
+      // legal; only initial construction or context loss blocks style calls.
+      if (!styleReady(map) && !mapStyleAvailableRef.current) {
         return floorState;
       }
 
       const tileUrl = floorElevationTileUrl(floorState.activePlaneM ?? Number.NaN);
-      if (tileUrl === null) {
-        floorElevationReadyCancelRef.current?.();
-        floorElevationReadyCancelRef.current = null;
-        map.setTerrain(null);
-        floorElevationUrlRef.current = null;
-      } else if (floorElevationUrlRef.current !== tileUrl) {
-        floorElevationReadyCancelRef.current?.();
-        map.setTerrain(null);
-        if (map.getSource(FLOOR_ELEVATION_SOURCE_ID) != null) {
-          map.removeSource(FLOOR_ELEVATION_SOURCE_ID);
+      const attachTerrain = (): void => {
+        if (
+          floorElevationUrlRef.current !== tileUrl ||
+          tileUrl === null ||
+          floorElevationTileUrl(
+            desiredSceneFloorStateRef.current.activePlaneM ?? Number.NaN,
+          ) !== tileUrl
+        ) {
+          return;
         }
-        floorElevationReadyCancelRef.current = whenFloorElevationReady(map, () => {
-          floorElevationReadyCancelRef.current = null;
-          map.setTerrain({
-            source: FLOOR_ELEVATION_SOURCE_ID,
-            exaggeration: 1,
-          });
-          map.triggerRepaint();
-        });
-        map.addSource(FLOOR_ELEVATION_SOURCE_ID, {
-          ...floorElevationSource(),
-          tiles: [tileUrl],
-        });
-        floorElevationUrlRef.current = tileUrl;
-      } else {
+        floorElevationReadyCancelRef.current = null;
         map.setTerrain({
           source: FLOOR_ELEVATION_SOURCE_ID,
           exaggeration: 1,
         });
+        floorElevationAttachedUrlRef.current = tileUrl;
+        applyDesiredSceneLevels();
+        map.triggerRepaint();
+      };
+
+      if (tileUrl === null) {
+        floorElevationReadyCancelRef.current?.();
+        floorElevationReadyCancelRef.current = null;
+        if (floorElevationAttachedUrlRef.current !== null) {
+          map.setTerrain(null);
+          floorElevationAttachedUrlRef.current = null;
+        }
+        floorElevationUrlRef.current = null;
+        applyDesiredSceneLevels();
+      } else if (floorElevationUrlRef.current !== tileUrl) {
+        floorElevationReadyCancelRef.current?.();
+        floorElevationReadyCancelRef.current = null;
+        if (floorElevationAttachedUrlRef.current !== null) {
+          map.setTerrain(null);
+          floorElevationAttachedUrlRef.current = null;
+        }
+        if (map.getSource(FLOOR_ELEVATION_SOURCE_ID) != null) {
+          map.removeSource(FLOOR_ELEVATION_SOURCE_ID);
+        }
+        floorElevationUrlRef.current = tileUrl;
+        floorElevationReadyCancelRef.current = whenFloorElevationReady(
+          map,
+          attachTerrain,
+        );
+        map.addSource(FLOOR_ELEVATION_SOURCE_ID, {
+          ...floorElevationSource(),
+          tiles: [tileUrl],
+        });
+      } else if (floorElevationAttachedUrlRef.current === tileUrl) {
+        applyDesiredSceneLevels();
+      } else if (floorElevationReadyCancelRef.current === null) {
+        floorElevationReadyCancelRef.current = whenFloorElevationReady(
+          map,
+          attachTerrain,
+        );
       }
       map.triggerRepaint();
       return floorState;
@@ -890,7 +937,6 @@ export function IndoorMap({
   // False until onLoad finishes its one-time source/overlay initialization.
   // The unified overlay effect must not arm a sourcedata waiter (or write)
   // before that, or onLoad and the waiter can each apply the same data.
-  const initialMapLoadCompleteRef = useRef(false);
 
   // Applies every overlay from the latest refs; each overlay keeps its
   // "update only while active, clear exactly once" guard. Call only when the
@@ -933,7 +979,6 @@ export function IndoorMap({
     applyLayerVisibility(map, visibilityRef.current);
     syncSceneFloorState(
       map,
-      sceneLayerRef.current,
       sceneRef.current,
       levelId,
       dirs?.route ?? null,
@@ -1309,6 +1354,7 @@ export function IndoorMap({
     };
 
     const onLoad = (): void => {
+      mapStyleAvailableRef.current = true;
       const indoorData = setSourceData(map, venueRef.current, levelIdRef.current);
       indoorSourceStateRef.current =
         indoorData === null ? null : { venue: venueRef.current, data: indoorData };
@@ -1329,7 +1375,6 @@ export function IndoorMap({
       applyLayerVisibility(map, visibilityRef.current);
       syncSceneFloorState(
         map,
-        sceneLayerRef.current,
         sceneRef.current,
         levelIdRef.current,
         directionsRef.current?.route ?? null,
@@ -1405,6 +1450,8 @@ export function IndoorMap({
       map.off("idle", markIdle);
       map.off("render", markLoadedRenderIdle);
       floorElevationUrlRef.current = null;
+      floorElevationAttachedUrlRef.current = null;
+      mapStyleAvailableRef.current = false;
       map.off("dataloading", clearIdle);
       map.off("movestart", clearIdle);
       onControlsRef.current?.(null);
@@ -1655,6 +1702,7 @@ export function IndoorMap({
       if (layer != null || !styleReady(map) || map.getLayer(SCENE_LAYER_ID) != null) {
         return;
       }
+      mapStyleAvailableRef.current = true;
       try {
         const initialFloorState = resolveSceneFloorState(
           scene,
@@ -1667,7 +1715,14 @@ export function IndoorMap({
           activeLevelIndex: initialFloorState.activeLevelIndices[0] ?? 0,
           contextLevelIndices: initialFloorState.contextLevelIndices,
         });
-        layer.setActiveLevels(initialFloorState.activeLevelIndices);
+        if (
+          floorElevationAttachedUrlRef.current ===
+          floorElevationTileUrl(initialFloorState.activePlaneM ?? Number.NaN)
+        ) {
+          layer.setActiveLevels(initialFloorState.activeLevelIndices);
+        } else {
+          layer.setActiveLevels([]);
+        }
         map.addLayer(layer);
         // A 3D scene needs a camera that can look at it (#23 D7); MapLibre
         // keeps owning the camera, this only lifts the 2D constraints.
@@ -1678,7 +1733,6 @@ export function IndoorMap({
         sceneLayerRef.current = layer;
         syncSceneFloorState(
           map,
-          layer,
           scene,
           levelIdRef.current,
           directionsRef.current?.route ?? null,
@@ -1714,9 +1768,13 @@ export function IndoorMap({
       sceneLayerRef.current = null;
       floorElevationReadyCancelRef.current?.();
       floorElevationReadyCancelRef.current = null;
-      if (styleReady(map)) {
+      if (
+        (styleReady(map) || mapStyleAvailableRef.current) &&
+        floorElevationAttachedUrlRef.current !== null
+      ) {
         map.setTerrain(null);
       }
+      floorElevationAttachedUrlRef.current = null;
       floorElevationUrlRef.current = null;
       setSceneLabelLayer(null);
       Reflect.deleteProperty(window, SCENE_DIAGNOSTICS_KEY);
@@ -1750,6 +1808,7 @@ export function IndoorMap({
       // Without preventDefault the browser will never restore this context.
       event.preventDefault();
       sceneLayerRef.current?.markContextLost();
+      mapStyleAvailableRef.current = false;
       sceneLayerRef.current = null;
       setSceneLabelLayer(null);
       Reflect.deleteProperty(window, SCENE_DIAGNOSTICS_KEY);
@@ -1791,7 +1850,6 @@ export function IndoorMap({
     const previousIndices = layer?.diagnostics().activeLevelIndices() ?? [];
     const floorState = syncSceneFloorState(
       map,
-      layer,
       scene,
       levelId,
       directions?.route ?? null,
