@@ -36,6 +36,7 @@ Key facts: GDAL stays in TypeScript (gdal3.js); all data interpretation is Rust.
 ## Conventions
 - TDD; commit per logical change; strict TS (no `any`); match existing patterns.
 - Bilingual UI (ja/en) — every user string needs both.
+- **Absence never renders as success.** No measurement, no samples, nothing mapped, nothing found — none of these may be shown as a zero, an empty band, or a clean row. Zero is a measured value and reads as a good one. Put the absence in the type (`Option`/`| null`) at the layer that knows, so consumers must answer for it rather than each view remembering; render it as absent in words; and give every measurement view a test for its empty state. This is a real bug found twice in the tile registration report — see `docs/gdb-data-reference.md`'s producer-surface notes.
 
 ## Agent skills
 

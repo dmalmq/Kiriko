@@ -87,7 +87,7 @@ describe("tile package api", () => {
       },
     });
 
-    const error = await api.activateTilePackage(3, 7).catch((thrown: unknown) => thrown);
+    const error = await api.activateTilePackage(3, 7, true).catch((thrown: unknown) => thrown);
 
     expect(error).toBeInstanceOf(TileApiError);
     const failure = error as TileApiError;
@@ -130,7 +130,7 @@ describe("tile package api", () => {
   it("accepts an activation and reports the version it will publish", async () => {
     mockFetch(202, { jobId: "job-1", versionId: 12, seq: 3 });
 
-    expect(await api.activateTilePackage(3, 7)).toEqual({ jobId: "job-1", versionId: 12, seq: 3 });
+    expect(await api.activateTilePackage(3, 7, true)).toEqual({ jobId: "job-1", versionId: 12, seq: 3 });
   });
 
   it("discards a package", async () => {

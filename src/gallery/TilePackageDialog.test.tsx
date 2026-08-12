@@ -19,7 +19,13 @@ const uploadTilePackage =
 const evaluateTilePackage =
   vi.fn<(venueId: number, packageId: number, body: unknown) => Promise<TileEvaluationResult>>();
 const activateTilePackage =
-  vi.fn<(venueId: number, packageId: number) => Promise<{ jobId: string; versionId: number; seq: number }>>();
+  vi.fn<
+    (
+      venueId: number,
+      packageId: number,
+      mappingConfirmed: boolean,
+    ) => Promise<{ jobId: string; versionId: number; seq: number }>
+  >();
 const discardTilePackage = vi.fn<(venueId: number, packageId: number) => Promise<void>>();
 const waitForJob = vi.fn<(jobId: string) => Promise<{ status: string; message?: string }>>();
 
@@ -33,8 +39,8 @@ vi.mock("./api", async () => {
         uploadTilePackage(venueId, file, onProgress),
       evaluateTilePackage: (venueId: number, packageId: number, body: unknown) =>
         evaluateTilePackage(venueId, packageId, body),
-      activateTilePackage: (venueId: number, packageId: number) =>
-        activateTilePackage(venueId, packageId),
+      activateTilePackage: (venueId: number, packageId: number, mappingConfirmed: boolean) =>
+        activateTilePackage(venueId, packageId, mappingConfirmed),
       discardTilePackage: (venueId: number, packageId: number) =>
         discardTilePackage(venueId, packageId),
       waitForJob: (jobId: string) => waitForJob(jobId),
@@ -76,9 +82,12 @@ function report(overrides: Partial<TileRegistrationReport> = {}): TileRegistrati
         surfaceTriangles: 4211,
         sourceObjectIds: ["obj-1"],
         opaqueSourceObjectIds: ["obj-9"],
+        mappedCanonicalLevelId: LEVEL_B1,
+        mappedFloorPlaneM: -6.0,
       },
     ],
     unmappedLevels: [],
+    ambiguousLevels: [],
     ...overrides,
   };
 }
@@ -199,6 +208,97 @@ describe("TilePackageDialog", () => {
     expect(uploadTilePackage).not.toHaveBeenCalled();
   });
 
+  it("will not activate until the producer confirms the floor mapping", async () => {
+    // The gates cannot establish the mapping: a stack a storey out measures small
+    // residuals against the wrong floor. So a passing evaluation is necessary and
+    // not sufficient, and the confirmation is the missing piece.
+    open();
+    await waitFor(() => expect(listTilePackages).toHaveBeenCalled());
+    await uploadAPackage();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Measure registration" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Activate" })).toBeTruthy());
+
+    expect(screen.getByRole("button", { name: "Activate" })).toHaveProperty("disabled", true);
+    await user.click(screen.getByLabelText(/I have checked the floor/));
+    expect(screen.getByRole("button", { name: "Activate" })).toHaveProperty("disabled", false);
+  });
+
+  it("withdraws a confirmation when the mapping is measured again", async () => {
+    // A confirmation is about one mapping table. Re-measuring with a different
+    // offset produces a different one, and carrying the tick across would mean
+    // the producer had confirmed a table they never saw.
+    open();
+    await waitFor(() => expect(listTilePackages).toHaveBeenCalled());
+    await uploadAPackage();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Measure registration" }));
+    await waitFor(() => expect(screen.getByLabelText(/I have checked the floor/)).toBeTruthy());
+    await user.click(screen.getByLabelText(/I have checked the floor/));
+    expect(screen.getByRole("button", { name: "Activate" })).toHaveProperty("disabled", false);
+
+    await user.click(screen.getByRole("button", { name: "Measure again" }));
+
+    await waitFor(() => expect(evaluateTilePackage).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText(/I have checked the floor/)).toHaveProperty("checked", false);
+    expect(screen.getByRole("button", { name: "Activate" })).toHaveProperty("disabled", true);
+  });
+
+  it("shows each level beside the floor it mapped to and the gap between them", async () => {
+    // The join a producer would otherwise make across two tables, and the one
+    // geometry cannot make for them.
+    open();
+    await waitFor(() => expect(listTilePackages).toHaveBeenCalled());
+    await uploadAPackage();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Measure registration" }));
+
+    const mapping = await waitFor(() =>
+      screen.getByRole("table", { name: "Level to floor mapping" }),
+    );
+    // The level's own plane, the floor's own plane, and what separates them.
+    expect(within(mapping).getByText("-6.02")).toBeTruthy();
+    expect(within(mapping).getByText("-6.00")).toBeTruthy();
+    expect(within(mapping).getByText(LEVEL_B1)).toBeTruthy();
+    expect(within(mapping).getByText("0.02")).toBeTruthy();
+  });
+
+  it("measures the gap against the plane the offset placed, not the raw one", async () => {
+    // Otherwise the offset itself prints as a discrepancy — a −54 m gap beside a
+    // floor the level lands exactly on — and the column a producer is here to
+    // read becomes the one they learn to ignore.
+    evaluateTilePackage.mockResolvedValue({
+      state: "evaluated",
+      report: report({
+        appliedVerticalOffsetM: -54,
+        levels: [
+          {
+            ...report().levels[0]!,
+            resolvedPlaneM: 50,
+            mappedCanonicalLevelId: LEVEL_B1,
+            mappedFloorPlaneM: -4,
+          },
+        ],
+      }),
+      floorMappings: [],
+      gates: [],
+    });
+    open();
+    await waitFor(() => expect(listTilePackages).toHaveBeenCalled());
+    await uploadAPackage();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Measure registration" }));
+
+    const mapping = await waitFor(() =>
+      screen.getByRole("table", { name: "Level to floor mapping" }),
+    );
+    // -4 − (50 + −54) = 0: the level lands on the floor it was matched to.
+    expect(within(mapping).getByText("0.00")).toBeTruthy();
+    expect(within(mapping).queryByText("-54.00")).toBeNull();
+  });
+
   it("prints the venue-wide residuals and each floor's own numbers", async () => {
     open();
     await waitFor(() => expect(listTilePackages).toHaveBeenCalled());
@@ -223,7 +323,9 @@ describe("TilePackageDialog", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Measure registration" }));
 
-    const levels = await waitFor(() => screen.getByRole("table", { name: "Levels" }));
+    const levels = await waitFor(() =>
+      screen.getByRole("table", { name: "Level to floor mapping" }),
+    );
     expect(within(levels).getByText("-6.02")).toBeTruthy();
     expect(within(levels).getByText("-3.00")).toBeTruthy();
     expect(within(levels).getByText("3.02")).toBeTruthy();
@@ -323,10 +425,11 @@ describe("TilePackageDialog", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Measure registration" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Activate" })).toBeTruthy());
+    await user.click(screen.getByLabelText(/I have checked the floor/));
 
     await user.click(screen.getByRole("button", { name: "Activate" }));
 
-    await waitFor(() => expect(activateTilePackage).toHaveBeenCalledWith(3, 7));
+    await waitFor(() => expect(activateTilePackage).toHaveBeenCalledWith(3, 7, true));
     await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("job-1"));
     await waitFor(() => expect(onActivated).toHaveBeenCalled());
   });
@@ -343,6 +446,7 @@ describe("TilePackageDialog", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Measure registration" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Activate" })).toBeTruthy());
+    await user.click(screen.getByLabelText(/I have checked the floor/));
 
     await user.click(screen.getByRole("button", { name: "Activate" }));
 
@@ -357,7 +461,7 @@ describe("TilePackageDialog", () => {
     evaluateTilePackage.mockResolvedValue({
       state: "evaluated",
       report: report({
-        venueWide: { samples: 0, p50M: 0, p90M: 0, maxM: 0 },
+        venueWide: null,
         floors: [],
         unmappedLevels: ["asset#doc#link#B1#-30"],
       }),

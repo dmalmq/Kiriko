@@ -68,10 +68,12 @@ test.describe("tile producer surface", () => {
 
       // 2. The first measurement cannot map a floor 4 m off the venue's own.
       await page.getByRole("button", { name: "Measure registration" }).click();
-      const levels = page.getByRole("table", { name: "Levels" });
-      await expect(levels).toBeVisible({ timeout: 30_000 });
-      // The plane came from the tile surfaces, not from the metadata (#31).
-      await expect(levels.getByText("50.00", { exact: true }).first()).toBeVisible();
+      const mapping = page.getByRole("table", { name: "Level to floor mapping" });
+      await expect(mapping).toBeVisible({ timeout: 30_000 });
+      // The plane came from the tile surfaces, not from the metadata (#31), and
+      // no venue floor sits near it, so the mapping column says so.
+      await expect(mapping.getByText("50.00", { exact: true }).first()).toBeVisible();
+      await expect(mapping.getByText("none")).toBeVisible();
       await expect(page.getByText("Activation is blocked")).toBeVisible();
       await expect(page.getByRole("button", { name: "Activate" })).toBeDisabled();
 
@@ -83,6 +85,11 @@ test.describe("tile producer surface", () => {
       // 4. Gates clear, and the venue's own canonical floor is now mapped.
       const floors = page.getByRole("table", { name: "Floors" });
       await expect(floors.getByText(LEVEL_B1)).toBeVisible({ timeout: 30_000 });
+      // Gates pass, and activation is still refused: no gate can establish that
+      // each level sits on the right floor, so a person says so.
+      await expect(page.getByRole("button", { name: "Activate" })).toBeDisabled();
+      await expect(mapping.getByText(LEVEL_B1)).toBeVisible();
+      await page.getByLabel(/I have checked the floor/).check();
       await expect(page.getByRole("button", { name: "Activate" })).toBeEnabled();
 
       // 5. Activation publishes a version.
@@ -120,17 +127,19 @@ test.describe("tile producer surface", () => {
       await uploadPackage(page, FIXTURE_B1_PLANE_M);
       await expect(page.getByText("tileset.json")).toBeVisible({ timeout: 30_000 });
       await page.getByRole("button", { name: "Measure registration" }).click();
-      await expect(page.getByRole("button", { name: "Activate" })).toBeEnabled({
-        timeout: 30_000,
-      });
+      await expect(page.getByRole("table", { name: "Floors" })).toBeVisible({ timeout: 30_000 });
 
       await page.reload();
       await openTilesDialog(page, name);
 
-      // The stored evaluation came back, so the flow resumes at its verdict.
+      // The stored evaluation came back, so the flow resumes at its verdict —
+      // including the confirmation, which a reload deliberately does not keep: it
+      // is an assertion about a table this session has not shown yet.
       await expect(page.getByRole("table", { name: "Floors" })).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByRole("button", { name: "Activate" })).toBeEnabled();
       await expect(page.getByRole("button", { name: "Measure again" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Activate" })).toBeDisabled();
+      await page.getByLabel(/I have checked the floor/).check();
+      await expect(page.getByRole("button", { name: "Activate" })).toBeEnabled();
     } finally {
       await page.request.delete(`/api/venues/${venue.venueId}`);
     }

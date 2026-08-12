@@ -53,6 +53,18 @@ const TILE_GATE_COPY: Record<string, { ja: string; en: string } | undefined> = {
     ja: "フロアに属さない不透明な要素です。コンテキストとして分類してください。",
     en: "This opaque element belongs to no floor. Classify it as context before activating.",
   },
+  levelMappingAmbiguous: {
+    ja: "この階に対応しうる会場フロアが複数あります。垂直オフセットで絞り込んでください。",
+    en: "More than one venue floor could be this level. Narrow it with the vertical offset.",
+  },
+  levelMappingScrambled: {
+    ja: "レベルの高さ順と会場フロアの順序が一致しません。スタック全体の位置合わせを確認してください。",
+    en: "The levels' own order does not match the venue floors' order. Check how the whole stack is placed.",
+  },
+  levelMappingCollapsed: {
+    ja: "同じ階とは考えられない複数のレベルが1つのフロアに対応しています。",
+    en: "Levels too far apart to be one storey are mapped to a single floor.",
+  },
 };
 
 /** Every gate the copy table answers for. */
@@ -118,6 +130,10 @@ const TILE_ERROR_COPY: Record<string, { ja: string; en: string } | undefined> = 
   activation_blocked: {
     ja: "ゲートにより有効化できません。",
     en: "A gate blocks activation.",
+  },
+  mapping_unconfirmed: {
+    ja: "有効化の前に、各レベルの対応フロアを確認してください。",
+    en: "Confirm the floor each level maps to before activating.",
   },
   unsafe_archive_path: {
     ja: "パッケージの外を参照する項目が含まれています。",

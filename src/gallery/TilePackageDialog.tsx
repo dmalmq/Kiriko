@@ -59,6 +59,19 @@ const ui = {
   metadataElevation: { ja: "メタデータの標高", en: "Metadata elevation" },
   difference: { ja: "差", en: "Difference" },
   triangles: { ja: "三角形", en: "Triangles" },
+  mappingTable: { ja: "レベルとフロアの対応", en: "Level to floor mapping" },
+  mappedFloor: { ja: "対応する会場フロア", en: "Venue floor" },
+  floorPlane: { ja: "会場フロアの床面", en: "Floor plane" },
+  gap: { ja: "差", en: "Gap" },
+  noFloor: { ja: "対応なし", en: "none" },
+  confirmMapping: {
+    ja: "各レベルの対応フロアを確認しました",
+    en: "I have checked the floor each level maps to",
+  },
+  confirmMappingWhy: {
+    ja: "スタック全体が1フロアずれていても残差は小さく出ます。形状では判定できないため、確認は人が行います。",
+    en: "A stack a whole storey out still measures small residuals. Geometry cannot settle it, so a person confirms it.",
+  },
   unmapped: {
     ja: "対応するフロアがないレベル",
     en: "Levels no venue floor corresponds to",
@@ -138,6 +151,9 @@ export function TilePackageDialog({
   const [offsetText, setOffsetText] = useState("");
   const [bandText, setBandText] = useState<Record<string, string>>({});
   const [contextual, setContextual] = useState<string[]>([]);
+  // Reset by every new measurement: a confirmation is about one mapping table,
+  // and re-measuring with a different offset produces a different one.
+  const [mappingConfirmed, setMappingConfirmed] = useState(false);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -215,6 +231,8 @@ export function TilePackageDialog({
   const measure = useCallback(
     async (entry: TilePackageListEntry) => {
       setFailure(null);
+      // The producer confirmed a table this run is about to replace.
+      setMappingConfirmed(false);
       setPhase({ step: "measuring", entry });
       try {
         const result = await api.evaluateTilePackage(venueId, entry.packageId, {
@@ -260,7 +278,9 @@ export function TilePackageDialog({
     && evaluation.current
     && evaluation.state !== "activated"
     && gates.length === 0
-    && entry?.serving === false;
+    && entry?.serving === false
+    // The gates cannot prove the mapping right, so the person who can says so.
+    && mappingConfirmed;
 
   return (
     <dialog
@@ -343,10 +363,24 @@ export function TilePackageDialog({
 
           {report !== null ? (
             <>
-              {/* Zero samples is not a clean measurement, and a row of 0.00 m
-                  reads exactly like one. Nothing mapped, so nothing was
-                  measured, and the gates below say why. */}
-              {report.venueWide.samples === 0 ? (
+              {/* The mapping first, because it is the claim the rest of the
+                  report rests on: every residual below was measured against the
+                  floor named here. If a level is on the wrong one, small
+                  residuals are agreement with the wrong geometry. */}
+              <MappingTable
+                levels={report.levels}
+                appliedVerticalOffsetM={report.appliedVerticalOffsetM}
+                locale={locale}
+              />
+              {report.appliedVerticalOffsetM !== 0 ? (
+                <p className="gdb-dialog__summary">
+                  {ui.appliedOffset[locale]}: {metres(report.appliedVerticalOffsetM)} m
+                </p>
+              ) : null}
+              {/* No surviving sample is not a distribution of zero error. A row of
+                  0.00 m reads exactly like perfect agreement, so absence says so
+                  in words and the gates below say why. */}
+              {report.venueWide === null ? (
                 <p className="gdb-dialog__summary tile-dialog__unmapped">
                   {ui.nothingSampled[locale]}
                 </p>
@@ -377,11 +411,6 @@ export function TilePackageDialog({
                   </tbody>
                 </table>
               )}
-              {report.appliedVerticalOffsetM !== 0 ? (
-                <p className="gdb-dialog__summary">
-                  {ui.appliedOffset[locale]}: {metres(report.appliedVerticalOffsetM)} m
-                </p>
-              ) : null}
               <FloorTable
                 floors={report.floors}
                 locale={locale}
@@ -390,7 +419,6 @@ export function TilePackageDialog({
                   setBandText((current) => ({ ...current, [canonicalId]: value }));
                 }}
               />
-              <LevelTable levels={report.levels} locale={locale} />
               {/* A `levelNotMapped` gate already names these, in a sentence that
                   says what to do about it. Printing the same ids again above it
                   is the same fact twice in two voices. */}
@@ -461,6 +489,24 @@ export function TilePackageDialog({
             </div>
           ) : null}
 
+          {/* The last line of defence, and the only one for the case geometry
+              cannot decide. Deliberately not phrased as a formality: it names
+              what the producer is asserting, and why nothing else can. */}
+          {report !== null && gates.length === 0 ? (
+            <div className="tile-dialog__confirm">
+              <label className="tile-dialog__context">
+                <input
+                  type="checkbox"
+                  aria-label={ui.confirmMapping[locale]}
+                  checked={mappingConfirmed}
+                  onChange={(event) => setMappingConfirmed(event.target.checked)}
+                />
+                {ui.confirmMapping[locale]}
+              </label>
+              <p className="gdb-dialog__summary">{ui.confirmMappingWhy[locale]}</p>
+            </div>
+          ) : null}
+
           {failure !== null ? (
             <div className="gdb-dialog__error" role="alert">
               <p>{failure}</p>
@@ -498,7 +544,11 @@ export function TilePackageDialog({
                   setPhase({ step: "activating", entry });
                   void (async () => {
                     try {
-                      const submitted = await api.activateTilePackage(venueId, entry.packageId);
+                      const submitted = await api.activateTilePackage(
+                        venueId,
+                        entry.packageId,
+                        mappingConfirmed,
+                      );
                       const job = await api.waitForJob(submitted.jobId);
                       if (job.status !== "done") {
                         setFailure(tileErrorMessage("", locale));
@@ -596,9 +646,11 @@ function FloorTable({
             <td>{floor.canonicalLevelId}</td>
             <td>{floor.sampled}</td>
             <td>{floor.carvedOut}</td>
-            <td>{metres(floor.stats.p50M)}</td>
-            <td>{metres(floor.stats.p90M)}</td>
-            <td>{metres(floor.stats.maxM)}</td>
+            {/* An unmeasured floor gets an em dash, never 0.00: this column is
+                read as agreement, and absence is not agreement. */}
+            <td>{floor.stats === null ? "—" : metres(floor.stats.p50M)}</td>
+            <td>{floor.stats === null ? "—" : metres(floor.stats.p90M)}</td>
+            <td>{floor.stats === null ? "—" : metres(floor.stats.maxM)}</td>
             <td>{metres(floor.medianShiftM)}</td>
             <td>{floor.coherentClusters.length}</td>
             <td>
@@ -618,16 +670,37 @@ function FloorTable({
   );
 }
 
-function LevelTable({ levels, locale }: { levels: TileLevelRegistration[]; locale: LocaleCode }) {
+/**
+ * Level → floor, with both planes and the gap between them.
+ *
+ * The join a producer would otherwise make in their head across two tables, and
+ * the one geometry cannot make for them: nothing here proves the mapping right,
+ * so it is laid out to be *checked*. A stack a storey out reads as a column of
+ * plausible small deltas against the wrong floor names — which is why the names
+ * and the planes sit in the same row.
+ */
+function MappingTable({
+  levels,
+  appliedVerticalOffsetM,
+  locale,
+}: {
+  levels: TileLevelRegistration[];
+  /** Applied to tile planes before matching, so the gap must account for it. */
+  appliedVerticalOffsetM: number;
+  locale: LocaleCode;
+}) {
   if (levels.length === 0) return null;
   return (
-    <table className="gdb-dialog__table" aria-label={ui.levelsTable[locale]}>
+    <table className="gdb-dialog__table" aria-label={ui.mappingTable[locale]}>
       <thead>
         <tr>
           <th>{ui.level[locale]}</th>
           <th>{ui.resolvedPlane[locale]}</th>
           <th>{ui.metadataElevation[locale]}</th>
           <th>{ui.difference[locale]}</th>
+          <th>{ui.mappedFloor[locale]}</th>
+          <th>{ui.floorPlane[locale]}</th>
+          <th>{ui.gap[locale]}</th>
           <th>{ui.triangles[locale]}</th>
         </tr>
       </thead>
@@ -640,6 +713,22 @@ function LevelTable({ levels, locale }: { levels: TileLevelRegistration[]; local
             {/* The disagreement is provenance, not an error: the mesh is what
                 renders, and #31 measured 3.02 m of it at KITTE. */}
             <td>{level.metadataDifferenceM === null ? "—" : metres(level.metadataDifferenceM)}</td>
+            <td className="tile-dialog__mapped">
+              {level.mappedCanonicalLevelId ?? ui.noFloor[locale]}
+            </td>
+            <td>{level.mappedFloorPlaneM === null ? "—" : metres(level.mappedFloorPlaneM)}</td>
+            <td>
+              {/* The gap that decided the match: the floor's plane against the
+                  level's *placed* plane, offset included. Comparing against the
+                  raw plane instead printed the offset itself as a discrepancy —
+                  −54.00 m beside a floor the level lands exactly on — which
+                  teaches a producer to ignore the column they are here to read. */}
+              {level.mappedFloorPlaneM === null || level.resolvedPlaneM === null
+                ? "—"
+                : metres(
+                    level.mappedFloorPlaneM - (level.resolvedPlaneM + appliedVerticalOffsetM),
+                  )}
+            </td>
             <td>{level.surfaceTriangles}</td>
           </tr>
         ))}

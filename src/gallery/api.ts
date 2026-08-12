@@ -728,13 +728,20 @@ export const api = {
     );
   },
 
+  /**
+   * Activate a package. `mappingConfirmed` is the producer's assertion that each
+   * level maps to the right floor — the server refuses without it, because no
+   * gate can establish it (a stack a storey out measures small residuals against
+   * the wrong floor).
+   */
   async activateTilePackage(
     venueId: number,
     packageId: number,
+    mappingConfirmed: boolean,
   ): Promise<TileActivationAccepted> {
     return tileRequest<TileActivationAccepted>(
       `/api/venues/${venueId}/tiles/${packageId}/activate`,
-      { method: "POST", body: "{}" },
+      { method: "POST", body: JSON.stringify({ mappingConfirmed }) },
     );
   },
 
