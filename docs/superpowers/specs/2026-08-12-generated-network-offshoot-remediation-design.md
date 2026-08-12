@@ -214,14 +214,14 @@ The same logical link can appear as a point on either endpoint floor, but never 
 
 Add dedicated constants and layers:
 
-- `LAYER_NETWORK_VERTICAL_LINK_HIT` — transparent 12 px circle hit target;
-- `LAYER_NETWORK_VERTICAL_LINK` — 5 px magenta circle marker;
-- `LAYER_NETWORK_VERTICAL_LINK_SELECTED` — 8 px Ai Indigo selected marker with a white ring;
-- `LAYER_NETWORK_VERTICAL_LINK_LABEL` — compact `↑ F3` / `↓ F1` symbol derived from `targetDirection` and `targetFloor`.
+- `LAYER_NETWORK_VERTICAL_LINK_HIT` — transparent 12 px circle hit target, translated `[12, -12]` screen pixels from the endpoint;
+- `LAYER_NETWORK_VERTICAL_LINK` — 5 px magenta circle marker with the same translation;
+- `LAYER_NETWORK_VERTICAL_LINK_SELECTED` — 8 px Ai Indigo selected marker with a white ring and the same translation;
+- `LAYER_NETWORK_VERTICAL_LINK_LABEL` — compact `↑ F3` / `↓ F1` symbol offset to the translated marker, derived from `targetDirection` and `targetFloor`.
 
 The marker deliberately uses no conveyance-category icon: the graph/export contract does not preserve that category. It communicates only the facts the data supports—this is a cross-floor link, its direction, and its target floor. The target-floor token is already language-neutral floor data, so this change introduces no new localized user string or external icon dependency.
 
-`IndoorMap` treats a vertical marker hit as a connection selection using the same canonical path identity as a horizontal connection. Delete and selection tools therefore continue to edit the underlying logical connection. Junction picking precedence remains above connection picking.
+`IndoorMap` queries the junction hit layer first, the translated vertical-link hit layer second, and the path hit layer third. The endpoint itself therefore remains a junction target while the offset marker selects the connection. A vertical marker reports the same canonical path identity as a horizontal connection, so delete and selection tools continue to edit the underlying logical connection.
 
 ## 8. Delivery sequence
 
@@ -278,7 +278,7 @@ Add `networkFeatures.test.ts` cases:
 
 Add `featureLayers.test.ts` assertions for vertical hit, visible, and selected layers.
 
-Add `IndoorMap.test.tsx` cases for vertical-marker selection, junction precedence, and deletion through canonical connection identity.
+Add `IndoorMap.test.tsx` cases for vertical-marker selection and junction precedence. Extend the existing `deleteConnection` unit test in `networkFeatures.test.ts` with a vertical reciprocal pair to prove that the marker's canonical identity deletes the underlying connection.
 
 ### 9.3 Dataset acceptance
 
