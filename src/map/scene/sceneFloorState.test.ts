@@ -86,6 +86,17 @@ describe("resolveSceneFloorState", () => {
         .contextLevelIndices,
     ).toEqual([1, 2]);
   });
+  it("uses the preceding floor when a route returns to its starting floor", () => {
+    expect(
+      resolveSceneFloorState(
+        MULTI_FLOOR_SCENE,
+        LEVELS,
+        "b1",
+        route([-1, 0, 1, -1]),
+      ).contextLevelIndices,
+    ).toEqual([3]);
+  });
+
 
   it("collapses consecutive same-floor segments before choosing context", () => {
     expect(

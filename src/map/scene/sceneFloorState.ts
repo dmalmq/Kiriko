@@ -49,7 +49,10 @@ function contextOrdinal(
     return null;
   }
   const ordinals = routeOrdinalSequence(route);
-  const activeIndex = ordinals.indexOf(activeOrdinal);
+  const activeIndex =
+    ordinals.at(-1) === activeOrdinal
+      ? ordinals.length - 1
+      : ordinals.indexOf(activeOrdinal);
   if (activeIndex < 0) {
     return null;
   }
