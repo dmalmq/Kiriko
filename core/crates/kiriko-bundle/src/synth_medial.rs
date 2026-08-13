@@ -1381,22 +1381,24 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             };
             match f.feature_type {
                 FeatureType::Unit => {
-                    let Some(category) = f.category.as_deref() else {
-                        continue;
-                    };
-                    if is_walkway(category) {
-                        walk.push(geom);
-                    } else if is_transit(category)
-                        && let Some(c) = polygon_centroid(geom)
-                    {
-                        transit.push((c, category.to_string(), largest_polygon(geom), geom));
-                    } else {
-                        // Every other categorized unit (rooms, shops, service
-                        // areas, …) is a non-walkable footprint: subtract it
-                        // from the navigable area so centerlines route around
-                        // it. Also kept for the room re-rank pass below.
-                        obstacles.push(geom);
-                        room_polys.extend(geo_polygons(geom));
+                    match f.category.as_deref() {
+                        Some(category) if is_walkway(category) => {
+                            walk.push(geom);
+                        }
+                        Some(category) if is_transit(category) => {
+                            if let Some(c) = polygon_centroid(geom) {
+                                transit.push((c, category.to_string(), largest_polygon(geom), geom));
+                            }
+                        }
+                        // Every other unit — rooms, shops, service areas, and
+                        // units with NO category at all — is a non-walkable
+                        // footprint: subtract it from the navigable area so
+                        // centerlines route around it. Also kept for the room
+                        // re-rank pass below.
+                        _ => {
+                            obstacles.push(geom);
+                            room_polys.extend(geo_polygons(geom));
+                        }
                     }
                 }
                 FeatureType::Fixture | FeatureType::Kiosk => {
@@ -2635,6 +2637,37 @@ mod tests {
                 .iter()
                 .any(|e| segment_crosses_fixture(e, &build.graph, &fx)),
             "no edge chord passes through the fixture"
+        );
+    }
+
+    #[test]
+    fn uncategorized_unit_hole_breaks_a_centerline_that_used_to_cross_it() {
+        // A wide walkway with a unit that carries NO category in the middle.
+        // A unit without a category is neither walkable nor transit, so it is
+        // an obstacle: carved out of the navigable area, the centerline loops
+        // around it and no edge chord crosses the footprint.
+        let walk = rect(139.70000, 35.60000, 0.00040, 0.00012); // ~36 m × 13 m
+        let unit = rect(139.70000, 35.60000, 0.00004, 0.00004); // ~3.6 m × 4.5 m
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("u0", FeatureType::Unit, "l0", None, unit.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        assert!(
+            !build.graph.edges.is_empty(),
+            "walkway still synthesizes centerlines"
+        );
+        let u = geo_polygons(&unit).pop().expect("unit polygon");
+        assert!(
+            !build
+                .graph
+                .edges
+                .iter()
+                .any(|e| segment_crosses_fixture(e, &build.graph, &u)),
+            "no edge chord passes through the uncategorized unit"
         );
     }
 
