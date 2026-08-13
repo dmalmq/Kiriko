@@ -48,9 +48,27 @@ fn is_transit(category: &str) -> bool {
 /// or locks, ordered by level ordinal. Levels with neither are omitted —
 /// [`kiriko_route::smooth_route`] already treats a missing floor as identity,
 /// and an empty polygon set makes nothing walkable.
+///
+/// Walkable floors subtract the venue's obstacles: every non-walkway,
+/// non-transit unit (rooms, shops, uncategorized units), plus `Fixture` and
+/// `Kiosk` polygons, becomes a hole of the floor's walkable polygons, so a
+/// smoothed chord cannot pull through them — the same obstacle classes the
+/// graph synthesizer subtracts (Task 12). `Detail` line stadium buffers are
+/// not applied here: they are optional and would duplicate the synthesizer's
+/// buffer dependency on the WASM path; unit/fixture/kiosk polygons are the
+/// blocking classes that matter for route smoothing.
+/// Per-floor accumulation while scanning features: walkable polygons,
+/// obstacle exterior rings (folded into the polygons as holes afterwards),
+/// and door locks.
+struct FloorAccum {
+    ordinal: f64,
+    polygons: Vec<WalkablePolygon>,
+    obstacles: Vec<Vec<[f64; 2]>>,
+    locks: Vec<[f64; 2]>,
+}
+
 pub fn walkable_floors(document: &BundleDocument) -> Vec<WalkableFloor> {
-    // (ordinal, polygons, locks); ordinal-ordered, one entry per level.
-    let mut floors: Vec<(f64, Vec<WalkablePolygon>, Vec<[f64; 2]>)> = Vec::new();
+    let mut floors: Vec<FloorAccum> = Vec::new();
     for feature in &document.features {
         let Some(level_id) = feature.level_id.as_deref() else {
             continue;
@@ -66,77 +84,113 @@ pub fn walkable_floors(document: &BundleDocument) -> Vec<WalkableFloor> {
         let Some(geometry) = feature.geometry.as_ref() else {
             continue;
         };
-        let idx = match floors.iter().position(|(o, _, _)| *o == ordinal) {
+        let idx = match floors.iter().position(|f| f.ordinal == ordinal) {
             Some(i) => i,
             None => {
-                floors.push((ordinal, Vec::new(), Vec::new()));
+                floors.push(FloorAccum {
+                    ordinal,
+                    polygons: Vec::new(),
+                    obstacles: Vec::new(),
+                    locks: Vec::new(),
+                });
                 floors.len() - 1
             }
         };
         match feature.feature_type {
             FeatureType::Unit => match feature.category.as_deref() {
                 Some(cat) if is_walkway(cat) => {
-                    if let Some(polygon) = walkable_polygon(geometry) {
-                        floors[idx].1.push(polygon);
-                    }
+                    floors[idx].polygons.extend(walkable_polygons(geometry));
                 }
                 Some(cat) if is_transit(cat) => {
                     if let Some(lock) = polygon_centroid(geometry) {
-                        floors[idx].2.push(lock);
+                        floors[idx].locks.push(lock);
                     }
                 }
-                _ => {}
+                // Every other unit — non-walkway, non-transit, or carrying no
+                // category at all — is an obstacle, like the synthesizer.
+                _ => floors[idx].obstacles.extend(obstacle_rings(geometry)),
             },
+            FeatureType::Fixture | FeatureType::Kiosk => {
+                floors[idx].obstacles.extend(obstacle_rings(geometry));
+            }
             FeatureType::Opening => {
                 if let Some(lock) = linestring_midpoint(geometry) {
-                    floors[idx].2.push(lock);
+                    floors[idx].locks.push(lock);
                 }
             }
             _ => {}
         }
     }
-    floors.sort_by(|a, b| a.0.total_cmp(&b.0));
+    floors.sort_by(|a, b| a.ordinal.total_cmp(&b.ordinal));
     floors
         .into_iter()
-        .filter(|(_, polygons, locks)| !polygons.is_empty() || !locks.is_empty())
-        .map(|(ordinal, polygons, locks)| WalkableFloor {
-            ordinal,
-            polygons,
-            locks,
+        .filter(|f| !f.polygons.is_empty() || !f.locks.is_empty())
+        .map(|mut f| {
+            if !f.obstacles.is_empty() {
+                // Every obstacle ring becomes a hole of EVERY walkable polygon
+                // on the floor: the smoother rejects any point inside a hole,
+                // so an obstacle blocks the passage regardless of which
+                // walkable polygon's exterior contains it.
+                for polygon in &mut f.polygons {
+                    polygon.holes.extend(f.obstacles.iter().cloned());
+                }
+            }
+            WalkableFloor {
+                ordinal: f.ordinal,
+                polygons: f.polygons,
+                locks: f.locks,
+            }
         })
         .collect()
 }
 
-/// Exterior ring plus holes of a `Polygon`, or of the largest part of a
-/// `MultiPolygon` (the same part choice as [`polygon_centroid`]). `None` for
-/// other geometry or an empty exterior ring.
-fn walkable_polygon(geometry: &Value) -> Option<WalkablePolygon> {
-    let obj = geometry.as_object()?;
-    let coords = obj.get("coordinates")?;
+/// Exterior ring plus holes of a `Polygon`, or of EVERY part of a
+/// `MultiPolygon`. The largest-part choice of [`polygon_centroid`] is only
+/// for point anchoring (locks); walkable area must keep every part, or the
+/// smoother would let chords cross the dropped parts. Empty for other
+/// geometry or a part with an empty exterior ring.
+fn walkable_polygons(geometry: &Value) -> Vec<WalkablePolygon> {
+    let Some(obj) = geometry.as_object() else {
+        return Vec::new();
+    };
+    let Some(coords) = obj.get("coordinates") else {
+        return Vec::new();
+    };
+    let Some(kind) = obj.get("type").and_then(Value::as_str) else {
+        return Vec::new();
+    };
     let rings_of = |part: &Value| -> Vec<Vec<[f64; 2]>> {
         part.as_array()
             .map(|rings| rings.iter().map(ring_coords).collect())
             .unwrap_or_default()
     };
-    let (exterior, holes) = match obj.get("type")?.as_str()? {
-        "Polygon" => split_rings(rings_of(coords))?,
-        "MultiPolygon" => {
-            let mut best: Option<(f64, Vec<Vec<[f64; 2]>>)> = None;
-            for part in coords.as_array()? {
-                let rings = rings_of(part);
-                let Some((exterior, _)) = split_rings(rings.clone()) else {
-                    continue;
-                };
-                let area = ring_area_abs(&exterior);
-                if best.as_ref().is_none_or(|(ba, _)| area > *ba) {
-                    best = Some((area, rings));
-                }
-            }
-            split_rings(best?.1)?
-        }
-        _ => return None,
-    };
-    Some(WalkablePolygon { exterior, holes })
+    match kind {
+        "Polygon" => split_rings(rings_of(coords))
+            .map(|(exterior, holes)| WalkablePolygon { exterior, holes })
+            .into_iter()
+            .collect(),
+        "MultiPolygon" => coords
+            .as_array()
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| split_rings(rings_of(part)))
+                    .map(|(exterior, holes)| WalkablePolygon { exterior, holes })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Exterior ring of every part of an obstacle geometry (`Polygon` or
+/// `MultiPolygon`). These become holes of the floor's walkable polygons, so
+/// a smoothed chord cannot cross them.
+fn obstacle_rings(geometry: &Value) -> Vec<Vec<[f64; 2]>> {
+    walkable_polygons(geometry)
+        .into_iter()
+        .map(|polygon| polygon.exterior)
+        .collect()
 }
 
 /// First ring is the exterior; the rest are holes.
@@ -144,22 +198,6 @@ fn split_rings(rings: Vec<Vec<[f64; 2]>>) -> Option<(Vec<[f64; 2]>, Vec<Vec<[f64
     let mut rings = rings.into_iter();
     let exterior = rings.next().filter(|r| !r.is_empty())?;
     Some((exterior, rings.collect()))
-}
-
-/// Twice the absolute shoelace area of a ring (planar, in degree² units).
-/// Used only to compare `MultiPolygon` parts, so the unit is irrelevant.
-fn ring_area_abs(ring: &[[f64; 2]]) -> f64 {
-    let n = ring.len();
-    if n < 3 {
-        return 0.0;
-    }
-    let mut area2 = 0.0;
-    for i in 0..n {
-        let [x0, y0] = ring[i];
-        let [x1, y1] = ring[(i + 1) % n];
-        area2 += x0 * y1 - x1 * y0;
-    }
-    (area2 / 2.0).abs()
 }
 
 /// Read a GeoJSON position (`[lon, lat, ...]`) as `[lon, lat]`.
@@ -417,6 +455,163 @@ mod tests {
         let raw = kiriko_route::route(&graph, origin, dest).expect("sawtooth edge routes");
         let smoothed = route_smoothed(&doc, origin, dest).expect("smoothed route");
         assert_eq!(smoothed, raw);
+    }
+
+    /// Canonical `MultiPolygon` value from closed rings (one part per ring).
+    fn multipolygon(parts: &[Vec<[f64; 2]>]) -> Value {
+        let coords = Value::Array(
+            parts
+                .iter()
+                .map(|ring| {
+                    Value::Array(vec![Value::Array(
+                        ring.iter().map(|p| position(p[0], p[1])).collect(),
+                    )])
+                })
+                .collect(),
+        );
+        geo("MultiPolygon", coords)
+    }
+
+    /// Even-odd point-in-ring test (ray cast), mirroring the smoother.
+    fn point_in_ring(ring: &[[f64; 2]], p: [f64; 2]) -> bool {
+        let (px, py) = (p[0], p[1]);
+        let mut inside = false;
+        let n = ring.len();
+        for i in 0..n {
+            let (xi, yi) = (ring[i][0], ring[i][1]);
+            let (xj, yj) = (ring[(i + 1) % n][0], ring[(i + 1) % n][1]);
+            if (yi > py) != (yj > py) && px < xi + (py - yi) * (xj - xi) / (yj - yi) {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
+    /// True when every ≤ 0.25 m sample of every smoothed segment stays
+    /// strictly outside the obstacle ring (lon/lat frame).
+    fn chord_misses_ring(route: &Route, ring: &[[f64; 2]]) -> bool {
+        route.segments[0].coordinates.windows(2).all(|w| {
+            let (a, b) = (w[0], w[1]);
+            let steps = (haversine(&a, &b) / 0.25).ceil().max(1.0) as usize;
+            (0..=steps).all(|s| {
+                let t = s as f64 / steps as f64;
+                !point_in_ring(
+                    ring,
+                    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t],
+                )
+            })
+        })
+    }
+
+    #[test]
+    fn a_kiosk_hole_keeps_the_sawtooth_detour_from_collapsing() {
+        // A hall (walkway) with a kiosk standing mid-floor (FeatureType::Kiosk).
+        // The raw polyline detours above the kiosk; greedy-LOS must reject the
+        // straight chord that would cut through it, so the smoothed route
+        // keeps the detour and never crosses the kiosk footprint.
+        let features = vec![
+            feature(
+                "walk0",
+                FeatureType::Unit,
+                "L0",
+                Some("walkway"),
+                polygon(&rect(0.0, 0.0, 20.0, 4.0)),
+            ),
+            feature(
+                "kiosk0",
+                FeatureType::Kiosk,
+                "L0",
+                None,
+                polygon(&rect(8.0, 0.5, 4.0, 3.0)),
+            ),
+        ];
+        let mut doc = document(&[("L0", 0.0)], features);
+        let graph = RouteGraph {
+            nodes: vec![
+                RouteNode {
+                    lon: m(-5.0, 2.0)[0],
+                    lat: m(-5.0, 2.0)[1],
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: m(25.0, 2.0)[0],
+                    lat: m(25.0, 2.0)[1],
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 100_000.0,
+                ordinal: 0.0,
+                interior: vec![
+                    m(0.0, 2.0),
+                    m(6.0, 2.0),
+                    m(8.5, 3.75),
+                    m(11.5, 3.75),
+                    m(13.0, 2.0),
+                    m(20.0, 2.0),
+                ],
+                attrs: EdgeAttrs::default(),
+            }],
+        };
+        doc.graph = Some(graph.clone());
+
+        let origin = Point3 {
+            lon: m(-5.0, 2.0)[0],
+            lat: m(-5.0, 2.0)[1],
+            ordinal: 0.0,
+        };
+        let dest = Point3 {
+            lon: m(25.0, 2.0)[0],
+            lat: m(25.0, 2.0)[1],
+            ordinal: 0.0,
+        };
+        let smoothed = route_smoothed(&doc, origin, dest).expect("smoothed route");
+        let kiosk = rect(8.0, 0.5, 4.0, 3.0);
+        assert!(
+            smoothed.segments[0].coordinates.iter().any(|c| {
+                // A vertex above the kiosk's top edge, over its x-span: the
+                // detour around the kiosk survived greedy-LOS.
+                c[1] > m(0.0, 3.5)[1] && c[0] > m(8.0, 0.0)[0] && c[0] < m(12.0, 0.0)[0]
+            }),
+            "the detour above the kiosk must survive smoothing"
+        );
+        assert!(
+            chord_misses_ring(&smoothed, &kiosk),
+            "a smoothed chord must stay outside the kiosk"
+        );
+    }
+
+    #[test]
+    fn every_multipolygon_part_appears_in_the_walkable_floor() {
+        // A walkway MultiPolygon with two disjoint parts of unequal area:
+        // BOTH parts must be preserved as separate walkable polygons, never
+        // just the largest one.
+        let big = rect(20.0, 0.0, 10.0, 4.0);
+        let small = rect(0.0, 0.0, 4.0, 4.0);
+        let features = vec![feature(
+            "walk0",
+            FeatureType::Unit,
+            "L0",
+            Some("walkway"),
+            multipolygon(&[big.clone(), small.clone()]),
+        )];
+        let doc = document(&[("L0", 0.0)], features);
+        let floors = walkable_floors(&doc);
+        assert_eq!(floors.len(), 1, "one walkable floor");
+        let exteriors: Vec<Vec<[f64; 2]>> = floors[0]
+            .polygons
+            .iter()
+            .map(|p| p.exterior.clone())
+            .collect();
+        assert_eq!(exteriors.len(), 2, "both parts survive as separate polygons");
+        for ring in [&big, &small] {
+            assert!(
+                exteriors.contains(ring),
+                "each MultiPolygon part must appear as a walkable polygon"
+            );
+        }
     }
 
     #[test]
