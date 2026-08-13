@@ -791,6 +791,13 @@ export function IndoorMap({
   const sceneRef = useRef(scene);
   const selectedIdRef = useRef(selectedFeatureId);
   const floorElevationUrlRef = useRef<string | null>(null);
+  // The tiles the DEM source currently serves. The style is born with the
+  // zero-plane URL; construction may override it, and the swap branch keeps
+  // it in step. Tracking it lets a scene whose plane needs no retarget skip
+  // a full DEM reload that would redraw nothing.
+  const floorElevationServedTilesRef = useRef<string | null>(
+    floorElevationSource().tiles?.[0] ?? null,
+  );
   const hoverIdRef = useRef<string | null>(null);
   const appliedSelectedRef = useRef<string | null>(null);
   const floorElevationAttachedUrlRef = useRef<string | null>(null);
@@ -919,17 +926,20 @@ export function IndoorMap({
           map,
           attachTerrain,
         );
-        const existing = map.getSource(FLOOR_ELEVATION_SOURCE_ID);
-        if (existing != null && "setTiles" in existing) {
-          (existing as { setTiles: (tiles: string[]) => void }).setTiles([tileUrl]);
-        } else {
-          if (existing != null) {
-            map.removeSource(FLOOR_ELEVATION_SOURCE_ID);
+        if (floorElevationServedTilesRef.current !== tileUrl) {
+          floorElevationServedTilesRef.current = tileUrl;
+          const existing = map.getSource(FLOOR_ELEVATION_SOURCE_ID);
+          if (existing != null && "setTiles" in existing) {
+            (existing as { setTiles: (tiles: string[]) => void }).setTiles([tileUrl]);
+          } else {
+            if (existing != null) {
+              map.removeSource(FLOOR_ELEVATION_SOURCE_ID);
+            }
+            map.addSource(FLOOR_ELEVATION_SOURCE_ID, {
+              ...floorElevationSource(),
+              tiles: [tileUrl],
+            });
           }
-          map.addSource(FLOOR_ELEVATION_SOURCE_ID, {
-            ...floorElevationSource(),
-            tiles: [tileUrl],
-          });
         }
       } else if (floorElevationAttachedUrlRef.current === tileUrl) {
         applyDesiredSceneLevels();
@@ -1142,6 +1152,7 @@ export function IndoorMap({
     ) {
       initialFloorSource.tiles = [initialFloorUrl];
       floorElevationUrlRef.current = initialFloorUrl;
+      floorElevationServedTilesRef.current = initialFloorUrl;
     }
     let map: MapLibreMap;
     try {

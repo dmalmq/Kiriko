@@ -1935,6 +1935,24 @@ describe("IndoorMap scene floor elevation", () => {
   });
 
 
+  it("attaches terrain without retargeting when the scene plane matches the served tiles", () => {
+    const zeroScene = sceneWithPlanes([["level-1", 0]]);
+    const { map, rerender } = renderMap(baseProps({ scene: null }));
+    expect(map.initialFloorStyleTiles).toEqual([
+      "kiriko-floor://0/{z}/{x}/{y}",
+    ]);
+
+    rerender(baseProps({ scene: zeroScene, levelId: "level-1" }));
+
+    expect(map.floorSourceOperations).toEqual([]);
+    expect(map.floorTileUrls).toEqual([]);
+    expect(map.terrainCalls.at(-1)).toEqual({
+      source: FLOOR_ELEVATION_SOURCE_ID,
+      exaggeration: 1,
+    });
+  });
+
+
   it("attaches terrain at the active scene plane and swaps floors in place", () => {
     const { map, rerender } = renderMap(baseProps({ scene, levelId: "level-1" }));
 
