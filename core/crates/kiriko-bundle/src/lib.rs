@@ -26,6 +26,7 @@ mod scene_compile;
 mod scene_section;
 mod sections;
 mod spatial_section;
+mod transit_match;
 mod synth;
 #[cfg(feature = "netgen")]
 mod synth_medial;
