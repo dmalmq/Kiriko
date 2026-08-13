@@ -9,6 +9,6 @@ pub use build::{RouteBuildError, RouteBuildWarning, RouteGraphBuild, build_route
 pub use floor::floor_to_ordinal;
 pub use graph::{
     COST_UNITS_PER_METER, EdgeAttrs, EdgeKind, PathwayRank, RouteEdge, RouteGraph, RouteNode,
-    VerticalKind, meters_to_cost,
+    VerticalKind, kind_from_key, kind_key, meters_to_cost, vertical_from_key, vertical_key,
 };
 pub use query::{Point3, Route, RouteSegment, route};

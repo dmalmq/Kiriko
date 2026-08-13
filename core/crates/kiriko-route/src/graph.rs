@@ -67,6 +67,60 @@ impl EdgeAttrs {
     }
 }
 
+/// Stable GeoJSON wire name for an [`EdgeKind`] (`net_path.EDGE_KIND`).
+/// Shared by the export and import paths so the vocabulary can never drift.
+#[must_use]
+pub fn kind_key(kind: EdgeKind) -> &'static str {
+    match kind {
+        EdgeKind::Imported => "imported",
+        EdgeKind::Skeleton => "skeleton",
+        EdgeKind::Doorway => "doorway",
+        EdgeKind::Stub => "stub",
+        EdgeKind::Bridge => "bridge",
+        EdgeKind::Chord => "chord",
+        EdgeKind::Vertical => "vertical",
+        EdgeKind::TransitAttach => "transit_attach",
+    }
+}
+
+/// Inverse of [`kind_key`]; `None` for an unknown wire value.
+#[must_use]
+pub fn kind_from_key(key: &str) -> Option<EdgeKind> {
+    match key {
+        "imported" => Some(EdgeKind::Imported),
+        "skeleton" => Some(EdgeKind::Skeleton),
+        "doorway" => Some(EdgeKind::Doorway),
+        "stub" => Some(EdgeKind::Stub),
+        "bridge" => Some(EdgeKind::Bridge),
+        "chord" => Some(EdgeKind::Chord),
+        "vertical" => Some(EdgeKind::Vertical),
+        "transit_attach" => Some(EdgeKind::TransitAttach),
+        _ => None,
+    }
+}
+
+/// Stable GeoJSON wire name for a [`VerticalKind`]
+/// (`net_path.TRANSITION_CATEGORY`).
+#[must_use]
+pub fn vertical_key(kind: VerticalKind) -> &'static str {
+    match kind {
+        VerticalKind::Elevator => "elevator",
+        VerticalKind::Escalator => "escalator",
+        VerticalKind::Stairs => "stairs",
+    }
+}
+
+/// Inverse of [`vertical_key`]; `None` for an unknown wire value.
+#[must_use]
+pub fn vertical_from_key(key: &str) -> Option<VerticalKind> {
+    match key {
+        "elevator" => Some(VerticalKind::Elevator),
+        "escalator" => Some(VerticalKind::Escalator),
+        "stairs" => Some(VerticalKind::Stairs),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteEdge {
     pub from: u32,

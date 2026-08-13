@@ -17,9 +17,12 @@
 //! ascending `id`. Section bytes follow immediately after the directory,
 //! packed back-to-back in directory order. Section IDs are `1 manifest`,
 //! `2 geometry`, `3 stores`, `4 style`, `5 graph`, `6 beacons`,
-//! `7 facilities`; sections 1-3 are required, section 5 is emitted when the
+//! `7 facilities`, `8 spatial context`, `9 scene sources`,
+//! `10 canonical graph` (declared), `11 network QA` (declared),
+//! `12 graph attrs`; sections 1-3 are required, section 5 is emitted when the
 //! document carries a non-empty graph, section 7 when it carries non-empty
-//! facilities, and 4 and 6 are never emitted in Phase Two.
+//! facilities, section 12 only when the graph carries non-default attrs, and
+//! 4, 6, 10, and 11 are never emitted.
 //!
 //! This module is an internal implementation detail of [`crate::codec`]; the
 //! public codec surface is `compile_imdf`, `encode_bundle`, and
@@ -65,6 +68,12 @@ pub(crate) const SECTION_SPATIAL_CONTEXT: u16 = 8;
 pub(crate) const SECTION_SCENE_SOURCES: u16 = 9;
 pub(crate) const SECTION_CANONICAL_GRAPH: u16 = 10;
 pub(crate) const SECTION_NETWORK_QA: u16 = 11;
+/// Section 12 (graph attrs): one generation-quality row per §5 edge, in §5
+/// edge order. Optional; emitted only when at least one edge's attrs differ
+/// from `EdgeAttrs::default()`, so graphs imported before attrs existed
+/// encode byte-identically. Requires §5: without an available graph its rows
+/// are never interpreted.
+pub(crate) const SECTION_GRAPH_ATTRS: u16 = 12;
 
 /// Declared availability edges, as `(requires, references)`.
 ///
@@ -80,6 +89,7 @@ pub(crate) fn declared_dependencies(id: u16) -> (&'static [u16], &'static [u16])
             &[SECTION_SPATIAL_CONTEXT],
             &[SECTION_SCENE_SOURCES, SECTION_CANONICAL_GRAPH],
         ),
+        SECTION_GRAPH_ATTRS => (&[SECTION_GRAPH], &[]),
         _ => (&[], &[]),
     }
 }

@@ -239,7 +239,7 @@ pub(crate) fn clip_graph(
     graph: &kiriko_route::RouteGraph,
     region: &ClipRegion,
 ) -> (kiriko_route::RouteGraph, u32, u32) {
-    use kiriko_route::{EdgeAttrs, RouteEdge, RouteGraph};
+    use kiriko_route::{RouteEdge, RouteGraph};
 
     let mut remap: Vec<Option<u32>> = Vec::with_capacity(graph.nodes.len());
     let mut nodes = Vec::new();
@@ -269,7 +269,7 @@ pub(crate) fn clip_graph(
             weight: edge.weight,
             ordinal: edge.ordinal,
             interior: edge.interior.clone(),
-            attrs: EdgeAttrs::default(),
+            attrs: edge.attrs,
         });
     }
     let dropped_edges = u32::try_from(graph.edges.len() - edges.len()).unwrap_or(u32::MAX);

@@ -164,7 +164,10 @@ pub fn export_network(bundle: &[u8]) -> Result<NetworkGeoJson, ExportError> {
         let travel_time = (length_m / WALK_SPEED_MPS).round() as i64;
         let from_ord = graph.nodes[e.from as usize].ordinal;
         let to_ord = graph.nodes[e.to as usize].ordinal;
-        let vertical = from_ord != to_ord;
+        // HFLAG/passage_type: 1 iff the edge is a real vertical or (legacy)
+        // its endpoint ordinals differ — old graphs without attrs keep the
+        // ordinal-mismatch behavior.
+        let vertical = e.attrs.kind == kiriko_route::EdgeKind::Vertical || from_ord != to_ord;
         let fwd = next_path_id;
         let rev = next_path_id + 1;
         next_path_id += 2;
@@ -181,6 +184,7 @@ pub fn export_network(bundle: &[u8]) -> Result<NetworkGeoJson, ExportError> {
             vertical,
             fwd,
             rev,
+            e.attrs,
             &poly,
         ));
         path_features.push(path_feature(
@@ -194,6 +198,7 @@ pub fn export_network(bundle: &[u8]) -> Result<NetworkGeoJson, ExportError> {
             vertical,
             rev,
             fwd,
+            e.attrs,
             &reversed,
         ));
     }
@@ -219,6 +224,7 @@ fn path_feature(
     vertical: bool,
     path_id: i64,
     reverse_path_id: i64,
+    attrs: kiriko_route::EdgeAttrs,
     poly: &[[f64; 2]],
 ) -> Json {
     let coordinates: Vec<Json> = poly.iter().map(|p| json!([p[0], p[1]])).collect();
@@ -250,6 +256,16 @@ fn path_feature(
             "FFLOOR": ffloor,
             "TFOOLR": tfloor,
             "indoor": 1,
+            "EDGE_KIND": kiriko_route::kind_key(attrs.kind),
+            "PATHWAY_RANK": attrs.rank as u8,
+            "CLEARANCE_M": match attrs.clearance_m {
+                Some(c) => Json::from(c),
+                None => Json::Null,
+            },
+            "TRANSITION_CATEGORY": match attrs.vertical {
+                Some(v) => Json::from(kiriko_route::vertical_key(v)),
+                None => Json::Null,
+            },
         },
         "geometry": { "type": "LineString", "coordinates": coordinates },
     })
@@ -536,5 +552,59 @@ mod tests {
             "fractional cost preserved exactly"
         );
         assert_eq!(g1, g0);
+    }
+
+    #[test]
+    fn export_writes_attrs_keys_and_round_trips_them() {
+        // A real vertical edge (kind, not ordinal mismatch) with every attr
+        // populated: the four keys must be written and read back exactly, and
+        // HFLAG/passage_type must be 1 on kind alone even when both endpoint
+        // ordinals match.
+        let graph = RouteGraph {
+            nodes: vec![
+                RouteNode {
+                    lon: 139.70,
+                    lat: 35.69,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.701,
+                    lat: 35.69,
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 5_000.0,
+                ordinal: 0.0,
+                interior: Vec::new(),
+                attrs: EdgeAttrs {
+                    kind: kiriko_route::EdgeKind::Vertical,
+                    rank: kiriko_route::PathwayRank::Secondary,
+                    clearance_m: Some(1.5),
+                    vertical: Some(kiriko_route::VerticalKind::Elevator),
+                },
+            }],
+        };
+        let net = export_network(&bundle_with_graph(graph.clone())).expect("export");
+        let p: Json = serde_json::from_str(&net.paths).unwrap();
+        let pf = p["features"].as_array().unwrap();
+        assert_eq!(pf[0]["properties"]["EDGE_KIND"], "vertical");
+        assert_eq!(pf[0]["properties"]["PATHWAY_RANK"], 2);
+        assert_eq!(pf[0]["properties"]["CLEARANCE_M"].as_f64(), Some(1.5));
+        assert_eq!(pf[0]["properties"]["TRANSITION_CATEGORY"], "elevator");
+        assert_eq!(
+            pf[0]["properties"]["HFLAG"], 1,
+            "kind == Vertical sets HFLAG even with matching endpoint ordinals"
+        );
+        assert_eq!(pf[0]["properties"]["passage_type"], 1);
+        assert_eq!(pf[0]["properties"]["FFLOOR"], "F1");
+        assert_eq!(pf[0]["properties"]["TFOOLR"], "F1");
+
+        let g1 = kiriko_route::build_route_graph(&net.junctions, &net.paths, &[0.0])
+            .expect("re-import")
+            .graph;
+        assert_eq!(g1, graph, "attrs round-trip through the GeoJSON wire");
     }
 }

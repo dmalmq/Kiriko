@@ -59,9 +59,11 @@ describe("decodeBundle", () => {
     // §8 spatial context section and the compiled §9 generated scene.
     // `absent` must be distinguishable from a section that is present but
     // unreadable, which is what `hasGraph`/`hasFacilities` alone cannot
-    // express; the declared future sections (§10–§11) are absent.
+    // express; graph attrs (§12) and the declared future sections (§10–§11)
+    // are absent.
     expect(response.capabilities).toEqual({
       graph: { state: "absent" },
+      graphAttrs: { state: "absent" },
       facilities: { state: "absent" },
       spatialContext: { state: "available" },
       sceneSources: { state: "available" },
