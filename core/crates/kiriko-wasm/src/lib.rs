@@ -331,7 +331,9 @@ impl From<Route> for RouteDto {
 /// compiled in) or when the snapped endpoints are disconnected.
 fn route_in_document(document: &BundleDocument, origin: Point3, dest: Point3) -> Option<RouteDto> {
     let graph = document.graph.as_ref()?;
-    kiriko_route::route(graph, origin, dest).map(RouteDto::from)
+    let raw = kiriko_route::route(graph, origin, dest)?;
+    let floors = kiriko_bundle::walkable_floors(document);
+    Some(RouteDto::from(kiriko_route::smooth_route(raw, &floors)))
 }
 
 /// Route over a `kvb1` bundle's embedded network graph. `o_*`/`d_*` are the

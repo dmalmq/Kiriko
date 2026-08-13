@@ -17,14 +17,17 @@
 // that build (the shared geometry helpers are still used by both).
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
-use kiriko_route::{RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode};
+use kiriko_route::{
+    EdgeAttrs, EdgeKind, RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode,
+    VerticalKind,
+};
 
 use crate::codec::BundleDocument;
-
+use crate::transit_match::{TransitPair, minimum_cost_maximum_matching};
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
 
 /// Adjacency tolerance (metres): an opening links to a hub, and a transit hub
@@ -43,14 +46,28 @@ const VERTICAL_MATCH_M: f64 = 5.0;
 /// openings instead.
 const ADJACENCY_MAX_M: f64 = 30.0;
 
-/// Extra metres-equivalent cost added to a vertical link by transit kind
-/// (elevator cheapest, stairs dearest). Unknown kinds fall back to stairs.
-fn floor_cost(category: &str) -> f64 {
+/// Transit category → [`VerticalKind`]. Unknown categories fall back to stairs.
+pub(crate) fn vertical_kind(category: &str) -> VerticalKind {
     match category {
-        "elevator" => 3.0,
-        "escalator" => 4.0,
-        _ => 5.0,
+        "elevator" => VerticalKind::Elevator,
+        "escalator" => VerticalKind::Escalator,
+        _ => VerticalKind::Stairs,
     }
+}
+
+/// Metres-equivalent cost of a vertical link: a fixed entry penalty per
+/// transit kind plus a per-floor charge scaled by the ordinal span between
+/// the linked levels (elevator cheapest, stairs dearest). The horizontal
+/// footprint displacement is deliberately excluded — the matcher uses it
+/// only to pick WHICH units link, never how much a floor change costs.
+pub(crate) fn vertical_cost_m(kind: VerticalKind, lower_ord: f64, upper_ord: f64) -> f64 {
+    let floors = (upper_ord - lower_ord).abs();
+    let (entry, per_floor) = match kind {
+        VerticalKind::Elevator => (15.0, 1.0),
+        VerticalKind::Escalator => (0.0, 4.0),
+        VerticalKind::Stairs => (0.0, 10.0),
+    };
+    entry + floors * per_floor
 }
 
 fn is_walkway(category: &str) -> bool {
@@ -480,6 +497,10 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                     weight: haversine_m(*op, hubs[h].pt) as f32,
                     ordinal: ord,
                     interior: Vec::new(),
+                    attrs: EdgeAttrs {
+                        kind: EdgeKind::Doorway,
+                        ..EdgeAttrs::default()
+                    },
                 });
             }
         }
@@ -527,6 +548,10 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                     weight: weight as f32,
                     ordinal: ord,
                     interior: Vec::new(),
+                    attrs: EdgeAttrs {
+                        kind: EdgeKind::Skeleton,
+                        ..EdgeAttrs::default()
+                    },
                 });
             }
         }
@@ -554,6 +579,10 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                             weight: weight as f32,
                             ordinal: ord,
                             interior: Vec::new(),
+                            attrs: EdgeAttrs {
+                                kind: EdgeKind::Skeleton,
+                                ..EdgeAttrs::default()
+                            },
                         });
                     }
                 }
@@ -568,44 +597,74 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         }
     }
 
-    // Vertical: match each transit node to the nearest same-category node on
-    // the next consecutive ordinal. Iterate in node-index order for stability.
+    // Vertical: for each adjacent ordinal pair, group transit nodes by exact
+    // category and link them with deterministic one-to-one matching —
+    // maximum cardinality first, minimum total horizontal distance second.
     transit_all.sort_by_key(|a| a.0);
-    let next_ordinal = |ord: f64| -> Option<f64> {
-        let pos = ordinals.iter().position(|&o| o == ord)?;
-        ordinals.get(pos + 1).copied()
-    };
-    for &(idx, pt, ref category, ord) in &transit_all {
-        // Top floor (no ordinal above) has nothing to match: not a warning.
-        let Some(next) = next_ordinal(ord) else {
-            continue;
-        };
-        let mut best: Option<(u32, f64)> = None;
-        for &(cidx, cpt, ref ccat, cord) in &transit_all {
-            if cord != next || ccat != category {
-                continue;
-            }
-            let d = haversine_m(pt, cpt);
-            if d <= VERTICAL_MATCH_M
-                && best.is_none_or(|(bidx, bd)| d < bd || (d == bd && cidx < bidx))
-            {
-                best = Some((cidx, d));
+    for ordinal_pair in ordinals.windows(2) {
+        let lower_ordinal = ordinal_pair[0];
+        let upper_ordinal = ordinal_pair[1];
+        let mut lower_categories: BTreeSet<String> = BTreeSet::new();
+        for (_, _, candidate_category, ordinal) in &transit_all {
+            if *ordinal == lower_ordinal {
+                lower_categories.insert(candidate_category.clone());
             }
         }
-        match best {
-            Some((cidx, d)) => edges.push(RouteEdge {
-                from: idx,
-                to: cidx,
-                weight: (d + floor_cost(category)) as f32,
-                ordinal: ord,
-                interior: Vec::new(),
-            }),
-            None => warnings.push(RouteBuildWarning {
-                code: "synth_transit_no_link".into(),
-                detail: format!(
-                    "transit node {idx} ({category}) on ordinal {ord} has no match on ordinal {next}"
-                ),
-            }),
+        for category in lower_categories {
+            let lower: Vec<_> = transit_all
+                .iter()
+                .filter(|(_, _, candidate_category, ordinal)| {
+                    *ordinal == lower_ordinal && candidate_category == &category
+                })
+                .collect();
+            let upper: Vec<_> = transit_all
+                .iter()
+                .filter(|(_, _, candidate_category, ordinal)| {
+                    *ordinal == upper_ordinal && candidate_category == &category
+                })
+                .collect();
+            let admissible: Vec<TransitPair> = lower
+                .iter()
+                .flat_map(|(lower_id, lower_point, _, _)| {
+                    upper.iter().filter_map(|(upper_id, upper_point, _, _)| {
+                        let distance = haversine_m(*lower_point, *upper_point);
+                        (distance <= VERTICAL_MATCH_M).then_some(TransitPair {
+                            lower_node_id: *lower_id,
+                            upper_node_id: *upper_id,
+                            horizontal_distance_m: distance,
+                        })
+                    })
+                })
+                .collect();
+            let matches = minimum_cost_maximum_matching(&admissible);
+            let matched_lower: BTreeSet<u32> =
+                matches.iter().map(|pair| pair.lower_node_id).collect();
+            for pair in matches {
+                let kind = vertical_kind(&category);
+                edges.push(RouteEdge {
+                    from: pair.lower_node_id,
+                    to: pair.upper_node_id,
+                    weight: vertical_cost_m(kind, lower_ordinal, upper_ordinal) as f32,
+                    ordinal: lower_ordinal,
+                    interior: Vec::new(),
+                    attrs: EdgeAttrs {
+                        kind: EdgeKind::Vertical,
+                        vertical: Some(kind),
+                        ..EdgeAttrs::default()
+                    },
+                });
+            }
+            for candidate in &lower {
+                let lower_id = candidate.0;
+                if !matched_lower.contains(&lower_id) {
+                    warnings.push(RouteBuildWarning {
+                        code: "synth_transit_no_link".into(),
+                        detail: format!(
+                            "transit node {lower_id} ({category}) on ordinal {lower_ordinal} has no match on ordinal {upper_ordinal}"
+                        ),
+                    });
+                }
+            }
         }
     }
 
@@ -853,10 +912,157 @@ mod tests {
             build.graph.edges
         );
         let e = &build.graph.edges[0];
-        // Coincident footprints → vertical weight ≈ stairs floor cost in canonical
-        // cost units (5.0 m × 1000 = 5000), NOT the raw 5.0 metres.
-        assert!((e.weight - 5000.0).abs() < 1.0, "weight = {}", e.weight);
+        // Coincident footprints → vertical weight is the stairs entry-plus-
+        // per-floor cost: (0 m + 1 floor × 10 m) × 1000 cost units per metre.
+        assert_eq!(e.weight, kiriko_route::meters_to_cost(10.0), "stairs one floor");
         assert_eq!(e.ordinal, 0.0);
+    }
+
+    #[test]
+    fn stairs_two_ordinals_up_cost_twice_the_per_floor_charge() {
+        // L0 → L2 with no stairs on L1: the single vertical link spans two
+        // ordinal steps, so the per-floor charge applies twice
+        // (0 m entry + 2 floors × 10 m) × 1000 cost units per metre.
+        let features = vec![
+            feature(
+                "s0",
+                FeatureType::Unit,
+                "L0",
+                Some("stairs"),
+                polygon(&square(0.001, 0.001, 0.0004)),
+            ),
+            feature(
+                "s2",
+                FeatureType::Unit,
+                "L2",
+                Some("stairs"),
+                polygon(&square(0.001, 0.001, 0.0004)),
+            ),
+        ];
+        let build = synthesize_network(&document(&[("L0", 0.0), ("L2", 2.0)], features));
+        assert_eq!(build.graph.edges.len(), 1, "edges = {:?}", build.graph.edges);
+        assert_eq!(
+            build.graph.edges[0].weight,
+            kiriko_route::meters_to_cost(20.0),
+            "two-floor stairs"
+        );
+    }
+
+    #[test]
+    fn vertical_matching_is_one_to_one_and_maximum_cardinality() {
+        let d = 1.0 / 111_320.0;
+
+        // Lower stairs at 0 m and 1.9 m; upper stairs at 1 m and 3 m. Under
+        // independent nearest-neighbor linking BOTH lowers prefer the 1 m
+        // upper (fan-in), while a full two-pair assignment exists.
+        let features = vec![
+            feature(
+                "l0-a",
+                FeatureType::Unit,
+                "L0",
+                Some("stairs"),
+                polygon(&square(0.0, 0.0, d)),
+            ),
+            feature(
+                "l0-b",
+                FeatureType::Unit,
+                "L0",
+                Some("stairs"),
+                polygon(&square(1.9 * d, 0.0, d)),
+            ),
+            feature(
+                "l1-a",
+                FeatureType::Unit,
+                "L1",
+                Some("stairs"),
+                polygon(&square(1.0 * d, 0.0, d)),
+            ),
+            feature(
+                "l1-b",
+                FeatureType::Unit,
+                "L1",
+                Some("stairs"),
+                polygon(&square(3.0 * d, 0.0, d)),
+            ),
+        ];
+        let build = synthesize_network(&document(&[("L0", 0.0), ("L1", 1.0)], features));
+        let vertical: Vec<_> = build
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                build.graph.nodes[edge.from as usize].ordinal
+                    != build.graph.nodes[edge.to as usize].ordinal
+            })
+            .collect();
+        assert_eq!(
+            vertical.len(),
+            2,
+            "maximum-cardinality assignment links both stairs"
+        );
+        let mut upper_ids: Vec<u32> = vertical.iter().map(|edge| edge.to).collect();
+        upper_ids.sort_unstable();
+        upper_ids.dedup();
+        assert_eq!(upper_ids.len(), 2, "no upper transit node receives fan-in");
+    }
+
+    #[test]
+    fn middle_floor_transit_matches_once_down_and_once_up() {
+        let features = ["L0", "L1", "L2"]
+            .into_iter()
+            .map(|level| {
+                feature(
+                    level,
+                    FeatureType::Unit,
+                    level,
+                    Some("elevator"),
+                    polygon(&square(0.0, 0.0, 0.00001)),
+                )
+            })
+            .collect();
+        let build = synthesize_network(&document(
+            &[("L0", 0.0), ("L1", 1.0), ("L2", 2.0)],
+            features,
+        ));
+        let vertical: Vec<_> = build
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                build.graph.nodes[edge.from as usize].ordinal
+                    != build.graph.nodes[edge.to as usize].ordinal
+            })
+            .collect();
+        assert_eq!(vertical.len(), 2);
+        // Each link is one ordinal step: elevator entry 15 m + 1 floor × 1 m,
+        // in canonical cost units.
+        for edge in vertical {
+            assert_eq!(
+                edge.weight,
+                kiriko_route::meters_to_cost(16.0),
+                "elevator one floor"
+            );
+        }
+    }
+
+    #[test]
+    fn unmatched_lower_transit_emits_existing_warning() {
+        let build = synthesize_network(&document(
+            &[("L0", 0.0), ("L1", 1.0)],
+            vec![feature(
+                "stairs",
+                FeatureType::Unit,
+                "L0",
+                Some("stairs"),
+                polygon(&square(0.0, 0.0, 0.00001)),
+            )],
+        ));
+        assert!(
+            build
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "synth_transit_no_link")
+        );
     }
 
     #[test]

@@ -70,6 +70,11 @@ export const LAYER_NETWORK_JUNCTION = "indoor-network-junction";
 /** Wide, near-invisible hit targets for precise network editing clicks. */
 export const LAYER_NETWORK_PATH_HIT = "indoor-network-path-hit";
 export const LAYER_NETWORK_JUNCTION_HIT = "indoor-network-junction-hit";
+/** Offset semantic marker for cross-floor links (hit, base, selected, label). */
+export const LAYER_NETWORK_VERTICAL_LINK_HIT = "indoor-network-vertical-link-hit";
+export const LAYER_NETWORK_VERTICAL_LINK = "indoor-network-vertical-link";
+export const LAYER_NETWORK_VERTICAL_LINK_SELECTED = "indoor-network-vertical-link-selected";
+export const LAYER_NETWORK_VERTICAL_LINK_LABEL = "indoor-network-vertical-link-label";
 
 /** Layers that participate in click / hover hit-testing. */
 export const CLICKABLE_LAYER_IDS: readonly string[] = [
@@ -653,10 +658,21 @@ export function buildFacilityLayers(): AnyLayer[] {
   ];
 }
 
+/** Semantic `kind` gate shared by the four vertical marker layers. */
+const verticalLinkFilter = (): FilterSpecification => [
+  "==",
+  ["get", "kind"],
+  "vertical-link",
+];
+
+/** Viewport-space offset that keeps the marker clear of its junction. */
+const verticalTranslate: [number, number] = [12, -12];
+
 /**
  * Network-review overlay layers, sourced from `NETWORK_SOURCE_ID`. Fixed,
- * theme-independent colors (magenta paths, cyan junctions) keep the generated
- * routing network visually distinct from the directions route accent.
+ * theme-independent colors (magenta paths, cyan junctions, magenta offset
+ * markers for cross-floor links) keep the generated routing network visually
+ * distinct from the directions route accent.
  */
 export function buildNetworkLayers(): AnyLayer[] {
   return [
@@ -685,6 +701,19 @@ export function buildNetworkLayers(): AnyLayer[] {
       },
     },
     {
+      id: LAYER_NETWORK_VERTICAL_LINK_HIT,
+      type: "circle",
+      source: NETWORK_SOURCE_ID,
+      filter: verticalLinkFilter(),
+      paint: {
+        "circle-radius": 12,
+        "circle-color": "#000000",
+        "circle-opacity": 0.01,
+        "circle-translate": verticalTranslate,
+        "circle-translate-anchor": "viewport",
+      },
+    },
+    {
       id: LAYER_NETWORK_PATH,
       type: "line",
       source: NETWORK_SOURCE_ID,
@@ -706,6 +735,52 @@ export function buildNetworkLayers(): AnyLayer[] {
         "line-width": 3,
         "line-opacity": 0.9,
       },
+    },
+    {
+      id: LAYER_NETWORK_VERTICAL_LINK,
+      type: "circle",
+      source: NETWORK_SOURCE_ID,
+      filter: verticalLinkFilter(),
+      paint: {
+        "circle-radius": 5,
+        "circle-color": "#d81b8c",
+        "circle-stroke-width": 1,
+        "circle-stroke-color": "#ffffff",
+        "circle-translate": verticalTranslate,
+        "circle-translate-anchor": "viewport",
+      },
+    },
+    {
+      id: LAYER_NETWORK_VERTICAL_LINK_SELECTED,
+      type: "circle",
+      source: NETWORK_SOURCE_ID,
+      filter: ["all", ["==", ["get", "kind"], "vertical-link"], ["==", ["get", "selected"], true]],
+      paint: {
+        "circle-radius": 8,
+        "circle-color": "#4F46E5",
+        "circle-stroke-width": 1.5,
+        "circle-stroke-color": "#ffffff",
+        "circle-translate": verticalTranslate,
+        "circle-translate-anchor": "viewport",
+      },
+    },
+    {
+      id: LAYER_NETWORK_VERTICAL_LINK_LABEL,
+      type: "symbol",
+      source: NETWORK_SOURCE_ID,
+      filter: verticalLinkFilter(),
+      layout: {
+        // Glyph-independent label: the indoor style ships no `glyphs` source,
+        // so the visible copy is a canvas-rasterized image per (direction,
+        // floor) pair, selected through the feature's `labelImage` id (see
+        // verticalLinkLabels.ts). 12px right / 12px up keeps it beside the
+        // [12,-12]-translated marker.
+        "icon-image": ["get", "labelImage"],
+        "icon-anchor": "left",
+        "icon-offset": [12, -12],
+        "icon-allow-overlap": true,
+      },
+      paint: {},
     },
     {
       id: LAYER_NETWORK_JUNCTION,

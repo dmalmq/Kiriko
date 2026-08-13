@@ -410,6 +410,7 @@ describe("@kiriko/node inspectBundle (raw native contract)", () => {
       featureLevels: Array<[string, string | null]>;
       capabilities: {
         graph: unknown;
+        graphAttrs: unknown;
         facilities: unknown;
         spatialContext: unknown;
         sceneSources: unknown;
@@ -436,6 +437,7 @@ describe("@kiriko/node inspectBundle (raw native contract)", () => {
     // sections §9–§11).
     expect(inspection.capabilities).toEqual({
       graph: { state: "absent" },
+      graphAttrs: { state: "absent" },
       facilities: { state: "absent" },
       spatialContext: { state: "available" },
       sceneSources: { state: "available" },

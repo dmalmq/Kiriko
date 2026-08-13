@@ -40,11 +40,13 @@ import {
   LAYER_FACILITY_SYMBOL,
   LAYER_NETWORK_JUNCTION_HIT,
   LAYER_NETWORK_PATH_HIT,
+  LAYER_NETWORK_VERTICAL_LINK_HIT,
   ROUTE_SOURCE_ID,
   NETWORK_SOURCE_ID,
 } from "./featureLayers";
 import { LAYER_GROUP_IDS, type LayerVisibility } from "./layerGroups";
 import { buildRouteFeatures } from "./routeFeatures";
+import { registerVerticalLinkLabelImages } from "./verticalLinkLabels";
 import {
   buildNetworkFeatures,
   type NetworkConnectionId,
@@ -333,9 +335,15 @@ function setNetworkSourceData(
     return;
   }
   const ordinal = activeOrdinalFor(venue, levelId);
-  source.setData(
-    buildNetworkFeatures(ordinal === null ? null : network ?? null, ordinal ?? 0, render),
+  const features = buildNetworkFeatures(
+    ordinal === null ? null : network ?? null,
+    ordinal ?? 0,
+    render,
   );
+  // The indoor style ships no glyphs, so vertical-link labels are registered
+  // style images (one per direction/floor pair) referenced via `labelImage`.
+  registerVerticalLinkLabelImages(map, features.features);
+  source.setData(features);
 }
 
 /** Per-floor highlight state from the App-owned editing projection. */
@@ -348,11 +356,12 @@ function networkRenderState(editing: NetworkEditingMapProps): NetworkRenderState
     pendingJunctionId: tool === "connect" ? pendingNodeId : null,
   };
 }
-
 /**
  * Resolve a click/center point to a semantic network pick. Move (and, for a
  * bare click, Add) want a coordinate; every other tool hit-tests the wide
- * junction layer, then the wide path layer, before falling back to a coordinate.
+ * junction layer, then the translated vertical marker, then the wide path
+ * layer, before falling back to a coordinate. Connection picks normalize the
+ * reciprocal id pair so `pathId < reversePathId` always holds.
  */
 function networkPickAt(
   map: MapLibreMap,
@@ -366,12 +375,30 @@ function networkPickAt(
     if (typeof nodeId === "number") {
       return { kind: "junction", nodeId };
     }
+    const verticalHits = map.queryRenderedFeatures(point, {
+      layers: [LAYER_NETWORK_VERTICAL_LINK_HIT],
+    });
+    const verticalProps = verticalHits[0]?.properties;
+    const verticalPathId = verticalProps?.["PATHID"];
+    const verticalReversePathId = verticalProps?.["RPATHID"];
+    if (typeof verticalPathId === "number" && typeof verticalReversePathId === "number") {
+      return {
+        kind: "connection",
+        connectionId: {
+          pathId: Math.min(verticalPathId, verticalReversePathId),
+          reversePathId: Math.max(verticalPathId, verticalReversePathId),
+        },
+      };
+    }
     const pathHits = map.queryRenderedFeatures(point, { layers: [LAYER_NETWORK_PATH_HIT] });
     const props = pathHits[0]?.properties;
     const pathId = props?.["PATHID"];
     const reversePathId = props?.["RPATHID"];
     if (typeof pathId === "number" && typeof reversePathId === "number") {
-      const connectionId: NetworkConnectionId = { pathId, reversePathId };
+      const connectionId: NetworkConnectionId = {
+        pathId: Math.min(pathId, reversePathId),
+        reversePathId: Math.max(pathId, reversePathId),
+      };
       return { kind: "connection", connectionId };
     }
   }
@@ -391,6 +418,7 @@ function updateNetworkCursor(
   }
   const overData =
     map.queryRenderedFeatures(point, { layers: [LAYER_NETWORK_JUNCTION_HIT] }).length > 0 ||
+    map.queryRenderedFeatures(point, { layers: [LAYER_NETWORK_VERTICAL_LINK_HIT] }).length > 0 ||
     map.queryRenderedFeatures(point, { layers: [LAYER_NETWORK_PATH_HIT] }).length > 0;
   if (tool === "delete") {
     canvas.style.cursor = overData ? "pointer" : "not-allowed";
