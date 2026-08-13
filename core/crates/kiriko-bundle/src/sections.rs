@@ -782,8 +782,13 @@ pub(crate) fn apply_graph_attrs(
             ),
         ));
     }
-    for (edge, attrs) in graph.edges.iter_mut().zip(&dto.edges) {
-        edge.attrs = attrs_from_dto(attrs)?;
+    // Validate every row before touching the graph: an invalid §12 must
+    // leave the whole graph at its defaults, never partially applied.
+    let attrs: Result<Vec<kiriko_route::EdgeAttrs>, BundleError> =
+        dto.edges.iter().map(attrs_from_dto).collect();
+    let attrs = attrs?;
+    for (edge, attrs) in graph.edges.iter_mut().zip(attrs) {
+        edge.attrs = attrs;
     }
     Ok(())
 }
@@ -1353,6 +1358,80 @@ mod tests {
                 crate::SectionCapability::Available
             ),
             "the graph itself stays available"
+        );
+    }
+
+    #[test]
+    fn a_bad_later_row_leaves_every_edge_default() {
+        let manifest_bytes =
+            postcard::to_allocvec(&manifest_section_with_ordinal(1.0)).expect("dto encodes");
+        let graph_bytes = postcard::to_allocvec(&GraphSectionDto {
+            nodes: vec![
+                GraphNodeDto {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                GraphNodeDto {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![
+                GraphEdgeDto {
+                    from: 0,
+                    to: 1,
+                    weight: 100.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
+                GraphEdgeDto {
+                    from: 1,
+                    to: 0,
+                    weight: 200.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
+            ],
+        })
+        .expect("graph dto encodes");
+        // First row valid (vertical/elevator); second row has an unknown
+        // kind discriminant. The whole section must be rejected — not just
+        // the bad row.
+        let attrs_bytes = postcard::to_allocvec(&GraphAttrsSectionDto {
+            edges: vec![
+                GraphEdgeAttrDto {
+                    kind: 6,
+                    rank: 1,
+                    clearance_m: None,
+                    vertical: Some(1),
+                },
+                GraphEdgeAttrDto {
+                    kind: 200,
+                    rank: 1,
+                    clearance_m: None,
+                    vertical: None,
+                },
+            ],
+        })
+        .expect("attrs dto encodes");
+        let bytes = wrap_bundle_with_graph_and_attrs(manifest_bytes, graph_bytes, attrs_bytes);
+
+        let decoded =
+            crate::decode_bundle(&bytes).expect("an invalid §12 must not fail the bundle");
+        let graph = decoded.graph.expect("the §5 graph still loads");
+        assert_eq!(graph.edges.len(), 2);
+        assert!(
+            graph.edges.iter().all(|e| e.attrs.is_default()),
+            "an invalid §12 must leave every edge default, including rows before the bad one"
+        );
+        assert!(
+            matches!(
+                decoded.capabilities.graph_attrs(),
+                crate::SectionCapability::Invalid { .. }
+            ),
+            "an unknown discriminant reports §12 invalid"
         );
     }
 
