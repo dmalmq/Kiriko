@@ -86,7 +86,7 @@ export function mapCanvas(page: Page): Locator {
   return page.locator(".indoor-map canvas").first();
 }
 
-export async function waitForMapIdle(page: Page, timeout = 15_000): Promise<void> {
+export async function waitForMapIdle(page: Page, timeout = 45_000): Promise<void> {
   await expect(mapContainer(page)).toHaveAttribute("data-map-idle", "true", {
     timeout,
   });

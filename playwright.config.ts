@@ -20,6 +20,13 @@ export default defineConfig({
     baseURL: "http://127.0.0.1:4173",
     trace: "retain-on-failure",
   },
+  // Software-GL runners (no GPU, shared cores) can take tens of seconds for a
+  // scene page to reach its first idle; the helper-level idle waits carry the
+  // same headroom. Asserted contracts are unchanged — only the wait budget.
+  timeout: 180_000,
+  expect: {
+    timeout: 45_000,
+  },
   projects: [
     {
       name: "chromium",
