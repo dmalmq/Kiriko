@@ -591,12 +591,14 @@ describe("App scene fallback", () => {
     fireEvent.click(screen.getByRole("button", { name: "Fail scene attach" }));
 
     await waitFor(() => {
-      expect(loadKirikoSceneMock).toHaveBeenCalledTimes(2);
       expect(screen.getByTestId("indoor-map-stub").getAttribute("data-scene-id")).toBe(
         "generated",
       );
     });
-    expect(loadKirikoSceneMock.mock.calls[1]?.[2]).toBe("generated");
+    expect(loadKirikoSceneMock.mock.calls.map((call) => call[2])).toEqual([
+      "package",
+      "generated",
+    ]);
     expect(screen.getByText("Generated 3D")).toBeTruthy();
   });
 });
