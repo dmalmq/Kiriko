@@ -1,5 +1,7 @@
 import {
   compileImdf,
+  deriveTileScene as deriveTileSceneNative,
+  evaluateTileActivation as evaluateTileActivationNative,
   exportNetwork,
   ingestTilePackage as ingestTilePackageNative,
   inspectBundle,
@@ -59,6 +61,13 @@ export interface CompileVenueMetadata {
    * facility GDBs still describe the whole site.
    */
   clipToVenue?: boolean;
+  /**
+   * The activated tile package's §9 descriptor, JSON. When present the
+   * compiled bundle's §9 carries it, which is where the renderer reads
+   * activation state and floor mappings from (#74). Absent for a venue with no
+   * activated package, and then the compile is byte-identical to before.
+   */
+  tilesDescriptorJson?: string;
 }
 
 /**
@@ -90,6 +99,7 @@ export type NativeCompileFn = (
   facilitiesGeoJson?: string,
   synthesizeNetwork?: boolean,
   clipToVenue?: boolean,
+  tilesDescriptorJson?: string,
 ) => Promise<unknown>;
 
 const WARNING_CODES: Record<ViewerWarningCode, true> = {
@@ -274,6 +284,7 @@ export async function compileVenueBundle(
         metadata.facilitiesGeoJson,
         metadata.synthesizeNetwork,
         metadata.clipToVenue,
+        metadata.tilesDescriptorJson,
       ),
     );
     if (response.ok) {
@@ -775,4 +786,359 @@ export async function ingestTilePackage(
     const message = error instanceof Error ? error.message : String(error);
     throw new CoreTilePackageError("bridge_error", `native ingest report failed: ${message}`);
   }
+}
+
+/**
+ * `@kiriko/node`'s raw tile-activation bridge contract. Treated as untrusted
+ * FFI output — validated before use.
+ */
+export type NativeTileActivationFn = (
+  bundle: Buffer,
+  contents: Buffer[],
+  requestJson: string,
+) => Promise<unknown>;
+
+/**
+ * The versioned registration profile. Every field is optional over the bridge:
+ * the native default profile carries #31's certified bands, and a stored
+ * profile written before a field existed still loads as that field's old
+ * meaning.
+ */
+export interface RegistrationProfileInput {
+  id?: string;
+  version?: number;
+  sampleSpacingM?: number;
+  carveOutDistanceM?: number;
+  p90MaxM?: number;
+  /** Per-canonical-floor p90 bands: no single number describes an asset. */
+  floorP90MaxM?: Record<string, number>;
+  medianShiftMaxM?: number;
+  coherentResidualMaxM?: number;
+  clusterCellM?: number;
+  clusterMinSamples?: number;
+  levelMatchToleranceM?: number;
+  /** Added to tile planes before matching — a producer decision, never inferred. */
+  verticalOffsetM?: number;
+}
+
+export interface TileActivationRequest {
+  /** The immutable asset version: the first component of composite level identity. */
+  assetVersion: string;
+  /** The published tileset root transform, column-major, applied unchanged (#31). */
+  rootTransform: number[];
+  /** Whether every declared member resolved and hashed as recorded. */
+  integrityVerified: boolean;
+  capabilityProfile: string | null;
+  contextualSourceObjects?: string[];
+  profile?: RegistrationProfileInput;
+}
+
+export interface ResidualStats {
+  samples: number;
+  p50M: number;
+  p90M: number;
+  maxM: number;
+}
+
+export interface TileLevelRegistration {
+  compositeId: string;
+  sourceDocument: string;
+  sourceLinkName: string;
+  levelKey: string;
+  levelName: string;
+  quantizedElevationDm: number;
+  metadataElevationM: number;
+  /** The dominant walkable-surface height; `null` when the level exposes none. */
+  resolvedPlaneM: number | null;
+  /** Metadata minus resolved: provenance, and the disagreement finding's input. */
+  metadataDifferenceM: number | null;
+  surfaceTriangles: number;
+  sourceObjectIds: string[];
+  opaqueSourceObjectIds: string[];
+  /**
+   * The canonical floor this level matched, and that floor's own plane. The one
+   * decision in the report a producer must check by eye: a stack offset by about
+   * a storey maps every level to its neighbour, and where footprints repeat the
+   * residuals against the wrong floor are as small as against the right one.
+   */
+  mappedCanonicalLevelId: string | null;
+  mappedFloorPlaneM: number | null;
+  /**
+   * What this level's own label says about that match: `agrees`, `contradicts`,
+   * or `unknown`. The only check that does not come from altitude, and so the
+   * only one that sees a stack offset by a whole storey where footprints repeat.
+   * `unknown` is the absence of a check, never a passed one.
+   */
+  labelAgreement: "agrees" | "contradicts" | "unknown";
+}
+
+export interface CoherentCluster {
+  eastM: number;
+  northM: number;
+  samples: number;
+  offsetM: [number, number];
+  distanceM: number;
+}
+
+export interface FloorRegistration {
+  canonicalLevelId: string;
+  compositeSourceLevels: string[];
+  sampled: number;
+  carvedOut: number;
+  /**
+   * `null` when no sample survived the carve-out. Zeroed statistics read as
+   * perfect agreement, which is the opposite of what no samples mean — so the
+   * absence is in the type, and every consumer has to answer for it.
+   */
+  stats: ResidualStats | null;
+  medianOffsetM: [number, number];
+  medianShiftM: number;
+  coherentClusters: CoherentCluster[];
+}
+
+export interface TileRegistrationReport {
+  profileId: string;
+  profileVersion: number;
+  levels: TileLevelRegistration[];
+  floors: FloorRegistration[];
+  unmappedLevels: string[];
+  /**
+   * Levels with more than one candidate floor inside the match tolerance. The
+   * tolerance is wider than some floor-to-floor gaps, so nearest-wins would be a
+   * guess wearing a mapping's clothes.
+   */
+  ambiguousLevels: string[];
+  appliedVerticalOffsetM: number;
+  venueWide: ResidualStats | null;
+}
+
+/** One blocked gate: what failed, on what, and against which number. */
+export interface TileActivationGate {
+  code: string;
+  subject: string;
+  measured: number | null;
+  band: number | null;
+}
+
+export interface TileActivationEvaluation {
+  report: TileRegistrationReport;
+  /** Canonical floor → the composite tile levels it renders. */
+  floorMappings: [string, string[]][];
+  /** Empty exactly when the package may be activated. */
+  gates: TileActivationGate[];
+}
+
+/**
+ * An activation evaluation that could not be produced at all — a bundle or
+ * content that would not decode, a venue with no §8 frame to measure in, or a
+ * malformed native response. A package that fails its *gates* is not an error:
+ * that is the evaluation's answer, and it comes back in `gates`.
+ */
+export class CoreTileActivationError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CoreTileActivationError";
+  }
+}
+
+function parseActivationEvaluation(evaluationJson: unknown): TileActivationEvaluation {
+  if (typeof evaluationJson !== "string") {
+    throw new CoreTileActivationError("bridge_error", "native activation returned no evaluation");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(evaluationJson);
+  } catch {
+    throw new CoreTileActivationError("bridge_error", "native activation evaluation was not JSON");
+  }
+  if (parsed === null || typeof parsed !== "object") {
+    throw new CoreTileActivationError(
+      "bridge_error",
+      "native activation evaluation was not an object",
+    );
+  }
+  const value = parsed as Record<string, unknown>;
+  const report = value["report"];
+  const gates = value["gates"];
+  const floorMappings = value["floorMappings"];
+  if (
+    report === null ||
+    typeof report !== "object" ||
+    !Array.isArray(gates) ||
+    !Array.isArray(floorMappings)
+  ) {
+    throw new CoreTileActivationError(
+      "bridge_error",
+      "native activation evaluation was malformed",
+    );
+  }
+  const record = report as Record<string, unknown>;
+  if (
+    typeof record["profileId"] !== "string" ||
+    typeof record["profileVersion"] !== "number" ||
+    !Array.isArray(record["levels"]) ||
+    !Array.isArray(record["floors"]) ||
+    !Array.isArray(record["unmappedLevels"])
+  ) {
+    throw new CoreTileActivationError("bridge_error", "native activation report was malformed");
+  }
+  for (const gate of gates) {
+    if (
+      gate === null ||
+      typeof gate !== "object" ||
+      typeof (gate as Record<string, unknown>)["code"] !== "string" ||
+      typeof (gate as Record<string, unknown>)["subject"] !== "string"
+    ) {
+      throw new CoreTileActivationError("bridge_error", "an activation gate was malformed");
+    }
+  }
+  return parsed as TileActivationEvaluation;
+}
+
+/**
+ * Measure an ingested tile package against a venue version's own compiled
+ * bundle and apply the versioned profile's bands. `contents` is every content
+ * member of the package's tileset graph, evaluated as one asset.
+ *
+ * Resolves with the evaluation whether or not the package may be activated —
+ * `gates` is empty exactly when it may. Throws `CoreTileActivationError` only
+ * when no evaluation could be produced.
+ */
+export async function evaluateTileActivation(
+  bundle: Buffer,
+  contents: Buffer[],
+  request: TileActivationRequest,
+  nativeEvaluate: NativeTileActivationFn = evaluateTileActivationNative,
+): Promise<TileActivationEvaluation> {
+  let response: unknown;
+  try {
+    response = await nativeEvaluate(bundle, contents, JSON.stringify(request));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CoreTileActivationError(
+      "bridge_error",
+      `native activation bridge failed: ${message}`,
+    );
+  }
+  if (response === null || typeof response !== "object" || !("ok" in response)) {
+    throw new CoreTileActivationError("bridge_error", "native activation response was malformed");
+  }
+  if (response.ok !== true) {
+    const errorJson = "errorJson" in response ? response.errorJson : undefined;
+    if (typeof errorJson !== "string") {
+      throw new CoreTileActivationError("bridge_error", "native activation returned no reason");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(errorJson);
+    } catch {
+      throw new CoreTileActivationError("bridge_error", "native activation reason was not JSON");
+    }
+    const reason = parsed as { code?: unknown; message?: unknown };
+    if (typeof reason.code !== "string" || reason.code === "") {
+      throw new CoreTileActivationError("bridge_error", "native activation reason had no code");
+    }
+    throw new CoreTileActivationError(
+      reason.code,
+      typeof reason.message === "string" ? reason.message : `activation refused: ${reason.code}`,
+    );
+  }
+  return parseActivationEvaluation("evaluationJson" in response ? response.evaluationJson : undefined);
+}
+
+/**
+ * `@kiriko/node`'s raw tile-scene bridge contract. Treated as untrusted FFI
+ * output — validated before use.
+ */
+export type NativeTileSceneFn = (
+  bundle: Buffer,
+  contents: Buffer[],
+  requestJson: string,
+) => Promise<unknown>;
+
+/** How a producer classified an unassigned source object (#32 section 6). */
+export type SceneOcclusionClass = "never" | "protected_corridor" | "context";
+
+export interface TileSceneRequest {
+  assetVersion: string;
+  /** The published tileset root transform, column-major, applied unchanged. */
+  rootTransform: number[];
+  /** Identity of the derived document — the package's own content address. */
+  sourceHash: string;
+  /** Composite level identity → canonical floor id. */
+  floorMappings: Record<string, string>;
+  /** Source object id → canonical venue feature id. */
+  sourceObjectAssociations?: Record<string, string>;
+  /** Source object id → the producer's occlusion policy for it. */
+  contextualClassifications?: Record<string, SceneOcclusionClass>;
+}
+
+/** A render document that could not be derived. */
+export class CoreTileSceneError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CoreTileSceneError";
+  }
+}
+
+/** The `KSC1` container magic every derived document starts with. */
+const SCENE_MAGIC = Buffer.from("KSC1", "ascii");
+
+/**
+ * Derive an activated package's render document: the same `KSC1` format the
+ * generated scene compiles to, so the renderer consumes both unchanged.
+ *
+ * Called once, at activation. A 172 MiB package cannot be re-derived per
+ * request, and the bytes belong to the version the activation produced — which
+ * is what lets a pinned URL promise they never change.
+ */
+export async function deriveTileScene(
+  bundle: Buffer,
+  contents: Buffer[],
+  request: TileSceneRequest,
+  nativeDerive: NativeTileSceneFn = deriveTileSceneNative,
+): Promise<Buffer> {
+  let response: unknown;
+  try {
+    response = await nativeDerive(bundle, contents, JSON.stringify(request));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CoreTileSceneError("bridge_error", `native derive bridge failed: ${message}`);
+  }
+  if (response === null || typeof response !== "object" || !("ok" in response)) {
+    throw new CoreTileSceneError("bridge_error", "native derive response was malformed");
+  }
+  if (response.ok !== true) {
+    const errorJson = "errorJson" in response ? response.errorJson : undefined;
+    if (typeof errorJson !== "string") {
+      throw new CoreTileSceneError("bridge_error", "native derive returned no reason");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(errorJson);
+    } catch {
+      throw new CoreTileSceneError("bridge_error", "native derive reason was not JSON");
+    }
+    const reason = parsed as { code?: unknown; message?: unknown };
+    if (typeof reason.code !== "string" || reason.code === "") {
+      throw new CoreTileSceneError("bridge_error", "native derive reason had no code");
+    }
+    throw new CoreTileSceneError(
+      reason.code,
+      typeof reason.message === "string" ? reason.message : `derive refused: ${reason.code}`,
+    );
+  }
+  const scene = "scene" in response ? response.scene : undefined;
+  if (!Buffer.isBuffer(scene) || !scene.subarray(0, 4).equals(SCENE_MAGIC)) {
+    // The bytes go straight into the blob store and out to viewers; a
+    // container that is not KSC1 would be served as one.
+    throw new CoreTileSceneError("bridge_error", "native derive returned no KSC1 document");
+  }
+  return scene;
 }

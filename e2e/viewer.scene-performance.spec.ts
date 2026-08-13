@@ -36,7 +36,7 @@ interface SceneHandle {
   };
   camera: { zoom: number; pitch: number; bearing: number };
   levelIds: string[];
-  activeLevel: number;
+  activeLevels: number[];
 }
 
 async function publishScene(
@@ -61,7 +61,7 @@ async function sceneHandle(page: Page): Promise<SceneHandle> {
           stats: () => SceneHandle["stats"];
           camera: () => SceneHandle["camera"];
           levelIds: string[];
-          activeLevelIndex: () => number;
+          activeLevelIndices: () => number[];
         }
       | undefined;
     if (handle === undefined) {
@@ -71,7 +71,7 @@ async function sceneHandle(page: Page): Promise<SceneHandle> {
       stats: handle.stats(),
       camera: handle.camera(),
       levelIds: handle.levelIds,
-      activeLevel: handle.activeLevelIndex(),
+      activeLevels: handle.activeLevelIndices(),
     };
   });
 }
@@ -267,7 +267,7 @@ test.describe("scene performance and visual correctness", () => {
       // Pick attribution (#26): the id and the position describe the same
       // surface, at a camera where a CPU ray would be least forgiving.
       const handle = await sceneHandle(page);
-      expect(hit!.levelId).toBe(handle.levelIds[handle.activeLevel]);
+      expect(hit!.levelId).toBe(handle.levelIds[handle.activeLevels[0] ?? 0]);
       expect(hit!.localPoint[2]).toBeGreaterThanOrEqual(hit!.featureMinZ - 0.05);
       expect(hit!.localPoint[2]).toBeLessThanOrEqual(hit!.featureMaxZ + 0.05);
     } finally {

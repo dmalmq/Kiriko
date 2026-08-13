@@ -1544,7 +1544,7 @@ describe("App review issue integration", () => {
     expect(screen.queryByLabelText("Due date")).toBeNull();
     expect(createIssueMock).toHaveBeenCalledTimes(1);
 
-    await user.type(within(dialog).getByLabelText("Username"), "daniel");
+    await user.type(within(dialog).getByLabelText("Email"), "daniel");
     await user.type(within(dialog).getByLabelText("Password"), "secret");
     await user.click(within(dialog).getByRole("button", { name: "Sign in" }));
 
@@ -2395,7 +2395,7 @@ describe("App directions mode", () => {
     await user.click(screen.getByRole("button", { name: "Edit network" }));
 
     expect(screen.getByRole("dialog", { name: "Sign in to Kiriko" })).toBeTruthy();
-    await user.type(screen.getByLabelText("Username"), "producer");
+    await user.type(screen.getByLabelText("Email"), "producer");
     await user.type(screen.getByLabelText("Password"), "pw");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
 

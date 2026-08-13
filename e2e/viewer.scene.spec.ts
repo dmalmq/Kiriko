@@ -63,7 +63,7 @@ async function sceneDiagnostics(page: Page): Promise<{
   sourceHash: string;
   levelCount: number;
   levelIds: string[];
-  activeLevel: number;
+  activeLevels: number[];
   hovered: number;
   maxPitch: number;
 }> {
@@ -74,7 +74,7 @@ async function sceneDiagnostics(page: Page): Promise<{
           sourceHash: string;
           levelCount: number;
           levelIds: string[];
-          activeLevelIndex: () => number;
+          activeLevelIndices: () => number[];
           hoveredFeatureIndex: () => number;
           maxPitch: () => number;
         }
@@ -87,7 +87,7 @@ async function sceneDiagnostics(page: Page): Promise<{
       sourceHash: handle.sourceHash,
       levelCount: handle.levelCount,
       levelIds: handle.levelIds,
-      activeLevel: handle.activeLevelIndex(),
+      activeLevels: handle.activeLevelIndices(),
       hovered: handle.hoveredFeatureIndex(),
       maxPitch: handle.maxPitch(),
     };
@@ -219,7 +219,7 @@ test.describe("3D scene layer", () => {
       await floorButton(page, LEVEL_2F_SHORT).click();
       await waitForMapIdle(page);
       const upper = await sceneDiagnostics(page);
-      expect(upper.activeLevel).not.toBe(first.activeLevel);
+      expect(upper.activeLevels).not.toEqual(first.activeLevels);
       // A floor change briefly shows the floors it left as context (#32's
       // handoff), so more than one floor draws during that window — which is the
       // all-levels budget, not the per-level one.
@@ -235,7 +235,7 @@ test.describe("3D scene layer", () => {
       await floorButton(page, LEVEL_B1_SHORT).click();
       await waitForMapIdle(page);
       const lower = await sceneDiagnostics(page);
-      expect(lower.activeLevel).not.toBe(upper.activeLevel);
+      expect(lower.activeLevels).not.toEqual(upper.activeLevels);
       expect(lower.stats.drawCalls).toBeGreaterThan(0);
     } finally {
       await page.request.delete(`/api/venues/${venueId}`);
@@ -289,7 +289,7 @@ test.describe("3D scene layer", () => {
       const scene = await sceneDiagnostics(page);
       // The pick lands on the floor the selector shows, not on a floor above or
       // below it — the depth buffer is what resolved that, not a CPU ray.
-      expect(hit!.levelId).toBe(scene.levelIds[scene.activeLevel]);
+      expect(hit!.levelId).toBe(scene.levelIds[scene.activeLevels[0] ?? 0]);
       expect(hit!.featureIndex).toBeGreaterThanOrEqual(0);
 
       // Pick identity (#26): the position target reports venue-local metres,

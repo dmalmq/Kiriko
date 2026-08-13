@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { KirikoMark } from "../components/icons";
 import type { GdbInspectResponse, GdbMappingPlan, NetworkInspectResponse, FacilitiesInspectResponse } from "../gdb/types";
 import type { LocaleCode } from "../imdf/types";
+import { probeSceneCapability } from "../map/scene/sceneCapability";
 import { api, gdbErrorMessage, viewerHref, type ApiUser, type GdbError, type VenueSummary } from "./api";
 import { AddDataDialog } from "./AddDataDialog";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 import { DatasetCard } from "./DatasetCard";
 import { GdbImportDialog } from "./GdbImportDialog";
 import { SignInModal } from "./SignInModal";
+import { TilePackageDialog } from "./TilePackageDialog";
 import { UploadModal, type UploadModalTarget } from "./UploadModal";
 
 const ui = {
@@ -103,11 +105,16 @@ type TopLevelOwner = "gdb" | "add-data" | "routing";
 
 export function GalleryPage() {
   const [locale, setLocale] = useState<LocaleCode>("ja");
+  // Probed once: a device below the floor is not offered a 3D link that would
+  // land it back in 2D with an apology. Hidden, not disabled — a disabled
+  // control still advertises a feature this machine cannot run.
+  const scene3dOffered = useMemo(() => probeSceneCapability().supported, []);
   const [state, setState] = useState<GalleryState>({ phase: "loading" });
   const [filter, setFilter] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadTarget, setUploadTarget] = useState<UploadModalTarget | null>(null);
   const [deleting, setDeleting] = useState<VenueSummary | null>(null);
+  const [tilesVenue, setTilesVenue] = useState<VenueSummary | null>(null);
   const [gdbFlow, setGdbFlow] = useState<GdbFlow>({ phase: "idle" });
   const [gdbNotice, setGdbNotice] = useState<string | null>(null);
   const [addData, setAddData] = useState<AddDataFlow>({ phase: "idle" });
@@ -233,8 +240,14 @@ export function GalleryPage() {
     navigateTo(viewerHref(venue.slug, venue.latest?.publicVersionId ?? null, locale));
   };
 
+  const openVenue3d = (venue: VenueSummary) => {
+    navigateTo(
+      viewerHref(venue.slug, venue.latest?.publicVersionId ?? null, locale, { scene: true }),
+    );
+  };
+
   const openReview = (venue: VenueSummary) => {
-    navigateTo(viewerHref(venue.slug, venue.latest?.publicVersionId ?? null, locale, true));
+    navigateTo(viewerHref(venue.slug, venue.latest?.publicVersionId ?? null, locale, { review: true }));
   };
 
   const openVersionUpload = (venue: VenueSummary) => {
@@ -890,6 +903,17 @@ export function GalleryPage() {
                 onOpen={() => {
                   openVenue(venue);
                 }}
+                {...(scene3dOffered && venue.latest?.status === "published"
+                  ? {
+                      onView3d: () => {
+                        openVenue3d(venue);
+                      },
+                    }
+                  : {})}
+                onManageTiles={() => {
+                  if (acceptedOwner !== null) return;
+                  setTilesVenue(venue);
+                }}
                 onDelete={() => {
                   if (acceptedOwner !== null) return;
                   setDeleting(venue);
@@ -943,6 +967,21 @@ export function GalleryPage() {
           {...(uploadTarget !== null ? { target: uploadTarget } : {})}
           onClose={closeUpload}
           onPublished={() => {
+            void reload();
+          }}
+        />
+      ) : null}
+      {tilesVenue !== null ? (
+        <TilePackageDialog
+          locale={locale}
+          venueId={tilesVenue.id}
+          venueName={tilesVenue.name}
+          onClose={() => {
+            setTilesVenue(null);
+          }}
+          onActivated={() => {
+            // Activation published a version, so the card's chip, its latest
+            // version, and its stats are all stale.
             void reload();
           }}
         />

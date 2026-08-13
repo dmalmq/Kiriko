@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import type { BlobStore } from "../blobs/store";
 import { compileVenueBundle, CoreCompileError, CoreExportError, exportVenueNetwork, type CompileVenueMetadata } from "../core/native";
+import { attachPackageToVersion } from "../tiles/storage";
 
 /** Persisted into `versions.error` (and mirrored into `jobs.error`) verbatim as JSON. */
 interface StructuredError {
@@ -82,15 +83,25 @@ export function makePublishRunner(
   compile: PublishCompileFn = compileVenueBundle,
 ): (payloadJson: string, signal?: AbortSignal) => Promise<{ versionId: number }> {
   return async (payloadJson: string, signal = new AbortController().signal): Promise<{ versionId: number }> => {
-    const { versionId, networkJunctionsHash, networkPathsHash, facilitiesGeoJsonHash, synthesizeNetwork, clipToSelection } =
-      JSON.parse(payloadJson) as {
-        versionId: number;
-        networkJunctionsHash?: string;
-        networkPathsHash?: string;
-        facilitiesGeoJsonHash?: string;
-        synthesizeNetwork?: boolean;
-        clipToSelection?: boolean;
-      };
+    const {
+      versionId,
+      networkJunctionsHash,
+      networkPathsHash,
+      facilitiesGeoJsonHash,
+      synthesizeNetwork,
+      clipToSelection,
+      tilesDescriptorJson,
+      tilePackageId,
+    } = JSON.parse(payloadJson) as {
+      versionId: number;
+      networkJunctionsHash?: string;
+      networkPathsHash?: string;
+      facilitiesGeoJsonHash?: string;
+      synthesizeNetwork?: boolean;
+      clipToSelection?: boolean;
+      tilesDescriptorJson?: string;
+      tilePackageId?: number;
+    };
     const version = db
       .prepare(
         `SELECT vr.id AS id, vr.venue_id AS venueId, vr.seq AS seq, vr.public_id AS publicId,
@@ -157,6 +168,11 @@ export function makePublishRunner(
       if (clipToSelection === true) {
         metadata.clipToVenue = true;
       }
+      // An activation publishes a version that differs from its predecessor by
+      // exactly this: the §9 descriptor naming the package it renders.
+      if (tilesDescriptorJson !== undefined) {
+        metadata.tilesDescriptorJson = tilesDescriptorJson;
+      }
       throwIfShutdownAborted(signal);
       const { bundle, stats } = await compile(source, metadata);
       throwIfShutdownAborted(signal);
@@ -191,6 +207,12 @@ export function makePublishRunner(
              WHERE ${identityWhere}`,
           )
           .run(bundleHash, JSON.stringify(stats), ...identityParams);
+        if (result.changes === 1 && tilePackageId !== undefined) {
+          // Bound in the same transaction that publishes: a version whose §9
+          // names a package must reference it, or collection would be free to
+          // delete the geometry it is about to serve.
+          attachPackageToVersion(db, versionId, tilePackageId);
+        }
         return result.changes === 1;
       })();
       if (!published) {

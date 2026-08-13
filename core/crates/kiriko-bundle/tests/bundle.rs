@@ -71,6 +71,7 @@ fn compile_with_network_embeds_graph_section() {
         None,
         &[],
         None,
+        None,
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -109,6 +110,7 @@ fn compile_with_malformed_network_is_a_route_error() {
         None,
         &[],
         None,
+        None,
     )
     .expect_err("malformed network GeoJSON must fail the compile");
     assert_eq!(err.code_str(), "route_build_failed");
@@ -128,6 +130,7 @@ fn compile_with_synthesize_network_derives_a_graph_from_venue_geometry() {
         false,
         None,
         &[],
+        None,
         None,
     )
     .expect("fixture compiles with synthesis");
@@ -152,6 +155,7 @@ fn compile_with_synthesis_disabled_and_no_network_has_no_graph() {
         false,
         None,
         &[],
+        None,
         None,
     )
     .expect("fixture compiles");
@@ -183,6 +187,7 @@ fn compile_with_facilities_embeds_facilities_section() {
         false,
         None,
         &[],
+        None,
         None,
     )
     .expect("fixture + network + facilities compiles");
@@ -244,6 +249,7 @@ fn compile_without_facilities_has_no_facilities_section() {
         None,
         &[],
         None,
+        None,
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -272,6 +278,7 @@ fn reports_optional_sections_as_available_or_absent() {
         None,
         &[],
         None,
+        None,
     )
     .expect("fixture + network + facilities compiles");
     let document = decode_bundle(&with_both.bytes).expect("bundle decodes");
@@ -296,6 +303,7 @@ fn reports_optional_sections_as_available_or_absent() {
         false,
         None,
         &[],
+        None,
         None,
     )
     .expect("fixture alone compiles");
@@ -325,6 +333,7 @@ fn inspection_carries_the_capability_report() {
         false,
         None,
         &[],
+        None,
         None,
     )
     .expect("fixture + network compiles");
@@ -356,6 +365,7 @@ fn compile_with_facilities_but_no_network_warns_once_and_leaves_anchors_unset() 
         false,
         None,
         &[],
+        None,
         None,
     )
     .expect("fixture + facilities compiles without a network");
@@ -395,6 +405,7 @@ fn compile_with_malformed_facilities_is_a_facility_error() {
         false,
         None,
         &[],
+        None,
         None,
     )
     .expect_err("malformed facilities GeoJSON must fail the compile");
@@ -450,6 +461,7 @@ fn clipping_drops_network_nodes_outside_the_venue() {
         None,
         &[],
         None,
+        None,
     )
     .expect("fixture + network compiles unclipped");
     let clipped = compile_imdf_with_network(
@@ -462,6 +474,7 @@ fn clipping_drops_network_nodes_outside_the_venue() {
         true,
         None,
         &[],
+        None,
         None,
     )
     .expect("fixture + network compiles clipped");
@@ -702,6 +715,7 @@ fn multi_floor_resolution_exercises_all_three_precedence_branches() {
         Some(&profile),
         &[],
         None,
+        None,
     )
     .expect("multi-floor fixture compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -825,6 +839,7 @@ fn a_producer_override_moves_the_plane_and_keeps_the_source_untouched() {
             reason: "survey corrected F2".into(),
         }],
         None,
+        None,
     )
     .expect("fixture compiles with an override");
     assert!(
@@ -897,6 +912,7 @@ fn an_override_naming_an_unknown_level_warns_and_compiles() {
             actor: "alice".into(),
             reason: "typo".into(),
         }],
+        None,
         None,
     )
     .expect("an unapplied override must not fail the compile");
@@ -1722,6 +1738,7 @@ fn an_invalid_spatial_context_leaves_routing_untouched() {
         None,
         &[],
         None,
+        None,
     )
     .expect("fixture + network compiles");
     let payload = decompress_payload(&compiled.bytes);
@@ -2009,6 +2026,7 @@ fn stage0_fixture_is_frozen_and_reproducible() {
         None,
         &[],
         None,
+        None,
     )
     .expect("fixture inputs compile");
     assert_eq!(
@@ -2156,6 +2174,7 @@ fn the_full_pipeline_compiles_byte_identically() {
             false,
             None,
             &[],
+            None,
             None,
         )
         .expect("stage0 inputs compile")
@@ -2476,6 +2495,7 @@ fn the_scene_compiler_emits_neutral_conveyance_forms() {
         None,
         &[],
         None,
+        None,
     )
     .expect("fixture + network compiles");
     let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
@@ -2552,6 +2572,7 @@ fn the_scene_compiles_byte_identically_with_the_network_pipeline() {
             None,
             &[],
             None,
+            None,
         )
         .expect("compiles")
         .bytes
@@ -2589,6 +2610,7 @@ fn the_scene_profile_drives_nominal_dimensions() {
         None,
         &[],
         Some(&profile),
+        None,
     )
     .expect("compiles with a custom scene profile");
     let document = decode_bundle(&compiled.bytes).expect("decodes");
@@ -2635,6 +2657,7 @@ fn the_generated_scene_source_adapts_the_bundle_content() {
         false,
         None,
         &[],
+        None,
         None,
     )
     .expect("fixture + network compiles");
@@ -2842,4 +2865,227 @@ fn crafted_fixtures_report_the_scene_capability_outcome_per_bundle() {
         );
         assert!(document.scene.is_none());
     }
+}
+
+// -- Stage 3: the §9 tiles descriptor (#74) --------------------------------
+
+fn activated_descriptor() -> kiriko_model::scene::TilesDescriptor {
+    use kiriko_model::scene::{ActivationState, FloorMapping, TilesDescriptor};
+    TilesDescriptor {
+        package_hash: [3u8; 32],
+        manifest_hash: [4u8; 32],
+        activation_state: ActivationState::Activated,
+        registration_profile_id: "default@1".into(),
+        floor_mappings: vec![FloorMapping {
+            canonical_level_id: "b1000001-0000-4000-8000-0000000000b1".into(),
+            composite_source_levels: vec!["asset-v1|station.rvt||b1fl|-31".into()],
+        }],
+        source_object_associations: Vec::new(),
+        contextual_classifications: Vec::new(),
+    }
+}
+
+#[test]
+fn an_activated_package_compiles_its_descriptor_into_section_nine() {
+    // Activation state and the floor mapping live in the immutable bundle the
+    // renderer reads, not in a side table it would have to trust separately.
+    let source = support::build_minimal_imdf_zip();
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+        Some(&activated_descriptor()),
+    )
+    .expect("fixture compiles with a descriptor");
+
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let scene = document.scene.expect("the venue compiles a scene");
+    assert_eq!(scene.descriptor, Some(activated_descriptor()));
+}
+
+#[test]
+fn a_venue_with_no_activated_package_compiles_no_descriptor() {
+    let source = support::build_minimal_imdf_zip();
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+        None,
+    )
+    .expect("fixture compiles");
+
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let scene = document.scene.expect("the venue compiles a scene");
+    assert_eq!(scene.descriptor, None);
+}
+
+#[test]
+fn a_descriptor_naming_a_level_the_venue_does_not_have_is_rejected() {
+    // A mapping that resolves to nothing is a registration table the renderer
+    // cannot filter by: it would silently render a floor no one can select.
+    let source = support::build_minimal_imdf_zip();
+    let mut descriptor = activated_descriptor();
+    descriptor.floor_mappings[0].canonical_level_id = "no-such-level".into();
+
+    let error = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+        Some(&descriptor),
+    )
+    .expect_err("a dangling floor mapping must not compile");
+
+    assert!(
+        format!("{error:?}").contains("no-such-level"),
+        "the error names the level: {error:?}"
+    );
+}
+
+#[test]
+fn venue_floor_geometry_is_the_units_in_venue_local_metres_on_each_plane() {
+    // What registration measures against: the venue's own unit polygons, in the
+    // §8 frame, on the source-elevation plane rather than the normalised scene
+    // Z — a tile package's heights are not normalised, so comparing against a
+    // normalised ladder would compare two different datums by construction.
+    let document = decode_bundle(&compile_minimal()).expect("minimal decodes");
+    let spatial = document
+        .spatial_context
+        .as_ref()
+        .expect("the fixture carries §8");
+
+    let floors = kiriko_bundle::venue_floor_geometry(&document);
+
+    assert_eq!(floors.len(), 3, "one entry per level with unit geometry");
+    let b1 = floors
+        .iter()
+        .find(|floor| floor.level_id == "b1000001-0000-4000-8000-0000000000b1")
+        .expect("B1 is a floor");
+    assert_eq!(b1.ordinal, -1.0);
+    assert_eq!(b1.rings.len(), 6, "B1's six units");
+
+    // B1 is ordinal −1 and the fixture declares no elevations, so the default
+    // profile's 4 m nominal spacing puts its source plane at −4 m. Stated
+    // outright rather than recomputed from the frame: the de-normalisation is
+    // the thing under test, and `scene_z = source − offset` is easy to invert
+    // the wrong way round.
+    assert_eq!(b1.plane_z_m, -4.0);
+    let record = spatial
+        .levels
+        .iter()
+        .find(|level| level.level_id == b1.level_id)
+        .expect("B1 has a §8 record");
+    assert_eq!(
+        record.resolved_scene_z_mm, 0,
+        "the lowest plane is scene Z 0"
+    );
+
+    // The fixture's B1 corridor spans 139.7662..139.7678 by 35.6806..35.6814,
+    // around an anchor at the venue bounds centre (139.7670, 35.6810): roughly
+    // ±72 m east and ±44 m north.
+    let corridor = b1
+        .rings
+        .iter()
+        .find(|ring| ring.iter().any(|point| point[0] < -70.0))
+        .expect("the corridor reaches the west edge");
+    let east: Vec<f64> = corridor.iter().map(|point| point[0]).collect();
+    let north: Vec<f64> = corridor.iter().map(|point| point[1]).collect();
+    let min = |values: &[f64]| values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = |values: &[f64]| values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    assert!((min(&east) + 72.4).abs() < 1.0, "west edge {}", min(&east));
+    assert!((max(&east) - 72.4).abs() < 1.0, "east edge {}", max(&east));
+    assert!(
+        (min(&north) + 44.5).abs() < 1.0,
+        "south edge {}",
+        min(&north)
+    );
+    assert!(
+        (max(&north) - 44.5).abs() < 1.0,
+        "north edge {}",
+        max(&north)
+    );
+}
+
+#[test]
+fn the_projection_reports_an_activated_package_and_its_floor_mapping() {
+    // The renderer learns what this version's scene is from §9 alone. Anything
+    // it had to be told separately could disagree with the bundle it is drawing.
+    let source = support::build_minimal_imdf_zip();
+    let mut descriptor = activated_descriptor();
+    descriptor.floor_mappings[0].composite_source_levels = vec![
+        "asset-v1|station.rvt||b1fl|-31".into(),
+        "asset-v1|kitte.rvt|link|b1fl|-30".into(),
+    ];
+    let compiled = compile_imdf_with_network(
+        &source,
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+        Some(&descriptor),
+    )
+    .expect("fixture compiles with a descriptor");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+
+    let projection = kiriko_bundle::scene_projection(&document);
+
+    let tiles = projection
+        .tiles
+        .expect("the projection reports the package");
+    assert_eq!(tiles.activation_state, "activated");
+    assert_eq!(tiles.registration_profile_id, "default@1");
+    assert_eq!(tiles.package_hash, "03".repeat(32));
+    let b1 = projection
+        .levels
+        .iter()
+        .find(|level| level.level_id == "b1000001-0000-4000-8000-0000000000b1")
+        .expect("B1 is projected");
+    assert_eq!(
+        b1.source_levels,
+        vec![
+            "asset-v1|station.rvt||b1fl|-31".to_string(),
+            "asset-v1|kitte.rvt|link|b1fl|-30".to_string()
+        ],
+        "floor filtering uses the canonical floor's registered composite levels"
+    );
+}
+
+#[test]
+fn a_venue_with_no_package_projects_no_tiles_and_no_source_levels() {
+    let document = decode_bundle(&compile_minimal()).expect("minimal decodes");
+
+    let projection = kiriko_bundle::scene_projection(&document);
+
+    assert_eq!(projection.tiles, None);
+    assert!(
+        projection
+            .levels
+            .iter()
+            .all(|level| level.source_levels.is_empty())
+    );
 }

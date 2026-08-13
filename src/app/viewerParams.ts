@@ -11,10 +11,12 @@ export interface ViewerParams {
   /** Optional 64-hex permanent public version identity that pins the viewer. */
   version: string | null;
   /**
-   * Opt in to the 3D scene layer. The capability preflight that decides this
-   * automatically — and the 2D fallback it falls back to — is a later slice
-   * (#62); until then 3D is explicit, so no venue silently changes how it
-   * renders.
+   * Opt in to the 3D scene layer. 3D is never automatic: a venue must not
+   * silently change how it renders, and the capability floor (#62) can only
+   * take 3D away, never grant it. This is the *initial* request only — the
+   * viewer's toggle owns the choice from then on and keeps this parameter in
+   * step through `sceneSearch`, so the URL stays a shareable record of what is
+   * on screen.
    */
   scene: boolean;
   /**
@@ -83,4 +85,27 @@ export function parseViewerParams(search: string, base?: string): ViewerParams {
     scene,
     capture,
   };
+}
+
+/**
+ * The query string that records a 3D choice, given the current one. The
+ * counterpart to `parseViewerParams`' `scene`: the toggle writes through this
+ * so a reload, a copied link, and the canvas cannot disagree.
+ *
+ * Returns a leading `?` only when parameters remain, since `replaceState("?")`
+ * leaves a bare marker in the address bar.
+ */
+export function sceneSearch(search: string, on: boolean): string {
+  const params = new URLSearchParams(search);
+  if (on) {
+    // `set` rewrites the first occurrence in place and drops any others, so an
+    // already-on URL keeps its shape: `?scene` normalises to `?scene=1` where
+    // it stands rather than jumping to the end.
+    params.set("scene", "1");
+  } else {
+    // `?scene`, `?scene=1`, and `?scene=true` all opt in, so all of them go.
+    params.delete("scene");
+  }
+  const next = params.toString();
+  return next === "" ? "" : `?${next}`;
 }

@@ -87,6 +87,88 @@ pub(crate) fn project_local_mm(frame: &Frame, lon: f64, lat: f64) -> [i64; 2] {
     [(x * 1000.0).round() as i64, (y * 1000.0).round() as i64]
 }
 
+/// One canonical floor's own geometry, as tile registration measures against
+/// it: the level's unit polygons in venue-local ENU metres, on the level's
+/// **source** plane.
+///
+/// Deliberately not the normalised scene Z. A tile package's heights are
+/// whatever its transform produces; normalising one side and not the other
+/// would compare two datums and call the difference a residual.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VenueFloorGeometry {
+    pub level_id: String,
+    pub ordinal: f64,
+    pub plane_z_m: f64,
+    /// Unit outlines, venue-local metres, closing vertex dropped.
+    pub rings: Vec<Vec<[f64; 2]>>,
+    /// This floor's own names, in every locale the venue carries them: the
+    /// corroboration altitude cannot supply (#81). Never a join key — labels
+    /// agree with the mapping altitude chose, or contradict it, or say nothing.
+    pub labels: Vec<String>,
+}
+
+/// Extract every canonical floor's unit geometry from a decoded bundle.
+///
+/// Levels with no §8 record or no unit polygons are omitted: there is nothing
+/// to measure a tile level against, which the activation gate reports as an
+/// unmapped level rather than a clean registration.
+#[must_use]
+pub fn venue_floor_geometry(document: &BundleDocument) -> Vec<VenueFloorGeometry> {
+    let Some(spatial) = document.spatial_context.as_ref() else {
+        return Vec::new();
+    };
+    let frame = &spatial.frame;
+    let mut floors: Vec<VenueFloorGeometry> = Vec::new();
+    for record in &spatial.levels {
+        let rings: Vec<Vec<[f64; 2]>> = document
+            .features
+            .iter()
+            .filter(|feature| feature.feature_type == FeatureType::Unit)
+            .filter(|feature| feature.level_id.as_deref() == Some(record.level_id.as_str()))
+            .filter_map(|feature| feature.geometry.as_ref().and_then(polygon_ring))
+            .map(|ring| {
+                ring.iter()
+                    .map(|[lon, lat]| {
+                        let local = project_local_mm(frame, *lon, *lat);
+                        [local[0] as f64 / 1000.0, local[1] as f64 / 1000.0]
+                    })
+                    .collect()
+            })
+            .collect();
+        if rings.is_empty() {
+            continue;
+        }
+        // Every locale's label and short name. A Revit level key might resemble
+        // either — "B1" the short name, or "B1F Yaesu" the label — so all of them
+        // travel and the comparison decides.
+        let level = document
+            .levels
+            .iter()
+            .find(|level| level.id == record.level_id);
+        let labels: Vec<String> = level
+            .map(|level| {
+                level
+                    .short_name
+                    .values()
+                    .chain(level.label.values())
+                    .filter(|value| !value.trim().is_empty())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        floors.push(VenueFloorGeometry {
+            level_id: record.level_id.clone(),
+            ordinal: record.ordinal,
+            // `scene_z = source − offset`, so the source plane adds it back.
+            plane_z_m: (record.resolved_scene_z_mm + frame.vertical_normalisation_offset_mm) as f64
+                / 1000.0,
+            rings,
+            labels,
+        });
+    }
+    floors
+}
+
 /// Twice the signed area of the ring (shoelace); positive = counter-clockwise.
 fn signed_area2(ring: &[[i64; 2]]) -> i128 {
     let mut sum: i128 = 0;

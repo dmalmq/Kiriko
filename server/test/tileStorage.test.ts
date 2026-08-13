@@ -17,7 +17,7 @@ import {
   packageIsReferenced,
 } from "../src/tiles/storage";
 import { cleanupTestApps, loginCookie, makeTestApp } from "./helpers";
-import { glbFixture, tilesetFixture } from "./tileFixtures";
+import { glbFixture, tilesetFixture } from "../../tests/fixtures/tileFixtures";
 
 afterEach(cleanupTestApps);
 

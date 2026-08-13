@@ -191,4 +191,93 @@ describe("DatasetCard", () => {
     render(<DatasetCard venue={venue} locale="en" onOpen={() => {}} onDelete={() => {}} />);
     expect(screen.queryByRole("button", { name: "Review network" })).toBeNull();
   });
+
+  it("shows Open in 3D and calls onView3d when provided", () => {
+    const onView3d = vi.fn();
+    render(
+      <DatasetCard
+        venue={venue}
+        locale="en"
+        onOpen={() => {}}
+        onDelete={() => {}}
+        onView3d={onView3d}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open in 3D" }));
+    expect(onView3d).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides Open in 3D when onView3d is omitted", () => {
+    // Omitted covers both refusals: a device below the 3D floor, and a venue
+    // with no published version to render.
+    render(<DatasetCard venue={venue} locale="en" onOpen={() => {}} onDelete={() => {}} />);
+    expect(screen.queryByRole("button", { name: "Open in 3D" })).toBeNull();
+  });
+
+  it("labels the 3D action in Japanese when locale is ja", () => {
+    render(
+      <DatasetCard
+        venue={venue}
+        locale="ja"
+        onOpen={() => {}}
+        onDelete={() => {}}
+        onView3d={() => {}}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "3D で開く" })).toBeTruthy();
+  });
+
+  it("shows 3D Tiles and calls onManageTiles when provided", () => {
+    const onManageTiles = vi.fn();
+    render(
+      <DatasetCard
+        venue={venue}
+        locale="en"
+        onOpen={() => {}}
+        onDelete={() => {}}
+        onManageTiles={onManageTiles}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "3D Tiles" }));
+    expect(onManageTiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("chips a venue whose latest version renders tiles", () => {
+    render(
+      <DatasetCard
+        venue={{ ...venue, tiles: { packages: 1, activeOnLatest: true } }}
+        locale="en"
+        onOpen={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    expect(screen.getByText("3D Tiles live")).toBeTruthy();
+  });
+
+  it("distinguishes holding a package from rendering one", () => {
+    // Activation is explicit, so this state lasts as long as the producer takes
+    // to decide. A card that chipped both the same way would be lying.
+    render(
+      <DatasetCard
+        venue={{ ...venue, tiles: { packages: 2, activeOnLatest: false } }}
+        locale="en"
+        onOpen={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    expect(screen.getByText("3D Tiles inactive")).toBeTruthy();
+    expect(screen.queryByText("3D Tiles live")).toBeNull();
+  });
+
+  it("chips nothing for a venue with no packages", () => {
+    render(
+      <DatasetCard
+        venue={{ ...venue, tiles: { packages: 0, activeOnLatest: false } }}
+        locale="en"
+        onOpen={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/3D Tiles/)).toBeNull();
+  });
 });

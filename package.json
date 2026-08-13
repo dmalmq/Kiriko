@@ -16,6 +16,8 @@
     "test:e2e": "playwright test",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "preshare": "pnpm core:build:wasm",
+    "share": "vite --host",
     "core:build:node": "pnpm --filter @kiriko/node build",
     "core:build:wasm": "node scripts/build-wasm.mjs",
     "core:build": "pnpm core:build:node && pnpm core:build:wasm",

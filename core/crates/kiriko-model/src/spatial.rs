@@ -240,8 +240,10 @@ pub struct Frame {
     pub axes: Axes,
     /// Declared units for resolved coordinates in this frame.
     pub unit: LengthUnit,
-    /// Offset added to scene Z so it is normalised non-negative, checked
-    /// integer millimetres. `0` until floor records (#39) resolve planes.
+    /// Subtracted from a level's source elevation to produce its scene Z, so
+    /// the lowest automatic plane lands at 0: `scene_z = source − offset`, and
+    /// a reader recovering the source elevation adds it back. Checked integer
+    /// millimetres; `0` until floor records (#39) resolve planes.
     pub vertical_normalisation_offset_mm: i64,
     /// Index into [`Registries::datums`] — the declared datum.
     pub datum_ref: u32,

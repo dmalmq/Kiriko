@@ -134,9 +134,11 @@ test.describe("scene visual language", () => {
       const gap = await page.evaluate(() => {
         const handle = Reflect.get(window, "__kirikoScene") as {
           levelIds: string[];
-          activeLevelIndex: () => number;
+          activeLevelIndices: () => number[];
         };
-        const index = handle.activeLevelIndex();
+        // A canonical floor can render several composite source levels; they
+        // share a plane, so the first names the floor as well as any.
+        const index = handle.activeLevelIndices()[0] ?? 0;
         return { level: handle.levelIds[index] ?? null, index };
       });
       expect(gap.level).not.toBeNull();
@@ -203,7 +205,7 @@ test.describe("scene visual language", () => {
       expect(await labelCount(page)).toBeGreaterThan(0);
 
       // Back in 2D the flat overlay returns and the scene labels go away.
-      await page.locator(".scene-source__switch").click();
+      await page.locator(".scene-toggle").click();
       await expect.poll(async () => labelCount(page), { timeout: 10_000 }).toBe(0);
       await expect
         .poll(async () => page.locator(".indoor-marker").count(), { timeout: 10_000 })

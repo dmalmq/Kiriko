@@ -15,6 +15,16 @@ import {
 import { defaultLayerVisibility } from "./layerGroups";
 import { buildIndoorSourceDiff, IndoorMap, type IndoorMapProps } from "./IndoorMap";
 import type { MapIssuePin } from "./useIssuePins";
+import {
+  FLOOR_ELEVATION_PROTOCOL,
+  FLOOR_ELEVATION_SOURCE_ID,
+} from "./scene/floorElevation";
+import {
+  SceneLayer,
+  SCENE_DIAGNOSTICS_KEY,
+  type SceneDiagnostics,
+} from "./scene/sceneLayer";
+import type { SceneView } from "./scene/sceneFormat";
 
 interface FakeMapEvent {
   point?: { x: number; y: number };
@@ -22,12 +32,17 @@ interface FakeMapEvent {
   sourceId?: string;
   isSourceLoaded?: boolean;
   dataType?: string;
+  sourceDataChanged?: boolean;
 }
 
 const mapState = vi.hoisted(() => {
   const instances: unknown[] = [];
+  const protocolAdds: string[] = [];
+  const protocolRemovals: string[] = [];
+  const lifecycleEvents: string[] = [];
   let initialStyleLoaded = true;
   let flipStyleLoadedOnIndoorWrite = false;
+  let loadFloorSourceOnAdd = true;
   class FakeMap {
     readonly container: HTMLElement;
     readonly handlers = new Map<string, Set<(event?: FakeMapEvent) => void>>();
@@ -54,7 +69,14 @@ const mapState = vi.hoisted(() => {
         listener(event);
       }
     }
-    readonly touchZoomRotate = { disableRotation(): void {} };
+    readonly touchZoomRotate = {
+      disableRotation(): void {},
+      enableRotation(): void {},
+    };
+    readonly dragRotate = {
+      disable(): void {},
+      enable(): void {},
+    };
     readonly featureStates: Array<{ id: string; state: Record<string, unknown> }> = [];
     readonly removedStates: Array<{ id: string; key: string }> = [];
     readonly easeToCalls: Array<{ center: [number, number]; duration?: number }> = [];
@@ -66,16 +88,41 @@ const mapState = vi.hoisted(() => {
     readonly routeSourceData: unknown[] = [];
     readonly facilitySourceData: unknown[] = [];
     readonly networkSourceData: unknown[] = [];
+    readonly floorTileUrls: string[][] = [];
+    readonly initialFloorStyleTiles: string[];
+    readonly floorSourceOperations: Array<
+      { kind: "remove" } | { kind: "add"; tiles: string[] }
+    > = [];
+    readonly terrainCalls: Array<{
+      source: string;
+      exaggeration: number;
+    } | null> = [];
+    readonly customLayers = new Map<string, { id: string }>();
     queryResult: Array<{ properties: Record<string, unknown> }> = [];
     queryByLayer: Record<string, Array<{ properties: Record<string, unknown> }>> = {};
     styleLoaded = initialStyleLoaded;
+    styleAvailable = initialStyleLoaded;
     sourceLoaded = true;
+    floorSourceLoaded = true;
     center = { lng: 0, lat: 0 };
     zoom = 0;
     removed = false;
 
-    constructor(options: { container: HTMLElement }) {
+    constructor(options: {
+      container: HTMLElement;
+      style?: { sources?: Record<string, unknown> };
+    }) {
       this.container = options.container;
+      const floorSource = options.style?.sources?.[FLOOR_ELEVATION_SOURCE_ID];
+      this.initialFloorStyleTiles =
+        typeof floorSource === "object" &&
+        floorSource !== null &&
+        "tiles" in floorSource &&
+        Array.isArray(floorSource.tiles)
+          ? floorSource.tiles.filter(
+              (tile): tile is string => typeof tile === "string",
+            )
+          : [];
       instances.push(this);
     }
 
@@ -106,6 +153,9 @@ const mapState = vi.hoisted(() => {
     }
 
     emit(type: string, event?: FakeMapEvent): void {
+      if (type === "load") {
+        this.styleAvailable = true;
+      }
       for (const fn of [...(this.handlers.get(type) ?? [])]) {
         fn(event);
       }
@@ -141,6 +191,7 @@ const mapState = vi.hoisted(() => {
       type: string;
       setData: (data: unknown) => void;
       updateData: (diff: { remove?: Array<string | number>; add?: GeoJSON.Feature[] }) => void;
+      setTiles: (tiles: string[]) => void;
     } {
       return {
         type: "geojson",
@@ -180,8 +231,44 @@ const mapState = vi.hoisted(() => {
             this.styleLoaded = false;
           }
         },
+        setTiles: (tiles) => {
+          if (id === FLOOR_ELEVATION_SOURCE_ID) {
+            this.floorTileUrls.push(tiles);
+            this.emit("sourcedata", {
+              sourceId: FLOOR_ELEVATION_SOURCE_ID,
+              isSourceLoaded: true,
+              dataType: "source",
+              sourceDataChanged: true,
+            });
+          }
+        },
       };
     }
+    removeSource(id: string): void {
+      if (id === FLOOR_ELEVATION_SOURCE_ID) {
+        this.floorSourceLoaded = false;
+        this.floorSourceOperations.push({ kind: "remove" });
+      }
+    }
+
+    addSource(id: string, source: { tiles?: string[] }): void {
+      if (id !== FLOOR_ELEVATION_SOURCE_ID) {
+        return;
+      }
+      this.floorSourceOperations.push({
+        kind: "add",
+        tiles: source.tiles ?? [],
+      });
+      if (loadFloorSourceOnAdd) {
+        this.floorSourceLoaded = true;
+        this.emit("sourcedata", {
+          sourceId: FLOOR_ELEVATION_SOURCE_ID,
+          isSourceLoaded: true,
+          dataType: "source",
+        });
+      }
+    }
+
 
     hasImage(): boolean {
       return true;
@@ -193,8 +280,10 @@ const mapState = vi.hoisted(() => {
       return Promise.resolve({ data: { width: 1, height: 1, data: new Uint8Array(4) } });
     }
 
-    isSourceLoaded(): boolean {
-      return this.sourceLoaded;
+    isSourceLoaded(id?: string): boolean {
+      return id === FLOOR_ELEVATION_SOURCE_ID
+        ? this.floorSourceLoaded
+        : this.sourceLoaded;
     }
 
     loaded(): boolean {
@@ -217,12 +306,31 @@ const mapState = vi.hoisted(() => {
       this.removedStates.push({ id: target.id, key });
     }
 
-    getLayer(): Record<string, unknown> {
-      return {};
+    getLayer(id: string): Record<string, unknown> | undefined {
+      return this.customLayers.get(id) ?? (id === "kiriko-scene" ? undefined : {});
+    }
+
+    addLayer(layer: { id: string }): void {
+      this.customLayers.set(layer.id, layer);
+    }
+
+    removeLayer(id: string): void {
+      this.customLayers.delete(id);
+    }
+
+    setTerrain(value: { source: string; exaggeration: number } | null): void {
+      if (!this.styleAvailable) {
+        throw new Error("Style is not done loading.");
+      }
+      this.terrainCalls.push(value);
     }
 
     setLayoutProperty(): void {}
     setPaintProperty(): void {}
+    setPitch(): void {}
+    setBearing(): void {}
+    setMaxPitch(): void {}
+    triggerRepaint(): void {}
 
     project([lng, lat]: [number, number]): { x: number; y: number } {
       return { x: lng, y: lat };
@@ -267,26 +375,49 @@ const mapState = vi.hoisted(() => {
       return 0;
     }
     remove(): void {
+      lifecycleEvents.push("map.remove");
       this.removed = true;
     }
   }
   return {
     instances,
+    protocolAdds,
+    protocolRemovals,
     FakeMap,
     setInitialStyleLoaded(value: boolean) {
       initialStyleLoaded = value;
     },
+    lifecycleEvents,
     setFlipStyleLoadedOnIndoorWrite(value: boolean) {
       flipStyleLoadedOnIndoorWrite = value;
+    },
+    setLoadFloorSourceOnAdd(value: boolean) {
+      loadFloorSourceOnAdd = value;
     },
   };
 });
 
 type FakeMap = InstanceType<typeof mapState.FakeMap>;
 
-vi.mock("maplibre-gl", () => ({
-  default: { Map: mapState.FakeMap },
-}));
+vi.mock("maplibre-gl", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("maplibre-gl")>();
+  const MercatorCoordinate = actual.MercatorCoordinate;
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      Map: mapState.FakeMap,
+      addProtocol: (name: string) => {
+        mapState.protocolAdds.push(name);
+      },
+      removeProtocol: (name: string) => {
+        mapState.lifecycleEvents.push(`protocol.remove:${name}`);
+        mapState.protocolRemovals.push(name);
+      },
+    },
+    MercatorCoordinate,
+  };
+});
 
 function feature(id: string, overrides: Partial<ViewerFeature> = {}): ViewerFeature {
   return {
@@ -322,6 +453,84 @@ function baseVenue(features: ViewerFeature[] = []): LoadedVenue {
 }
 
 const DEFAULT_VENUE = baseVenue();
+
+function sceneWithPlanes(
+  levels: Array<readonly [canonicalId: string, resolvedPlaneZ: number]>,
+): SceneView {
+  return {
+    header: {
+      formatVersion: 1,
+      deriverVersion: 1,
+      sourceHash: "indoor-map-floor-elevation",
+      frameOriginEcef: [6_378_137, 0, 0],
+      worldTransform: [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        6_378_137, 0, 0, 1,
+      ],
+      boundsMin: [0, 0, 0],
+      boundsMax: [1, 1, 16],
+    },
+    levels: levels.map(([canonicalId, resolvedPlaneZ]) => ({
+      canonicalId,
+      sourceLevelKey: "",
+      sourceLevelName: "",
+      sourceElevationMeters: null,
+      resolvedPlaneZ,
+      quantizedElevationDm: Math.round(resolvedPlaneZ * 10),
+    })),
+    features: [],
+    batches: [],
+  };
+}
+
+function crossFloorDirections(route: RouteResultDto | null): NonNullable<IndoorMapProps["directions"]> {
+  return {
+    active: true,
+    origin: null,
+    destination: null,
+    route,
+    onPickPoint: vi.fn(),
+  };
+}
+
+function currentSceneDiagnostics(): SceneDiagnostics {
+  const diagnostics: unknown = Reflect.get(window, SCENE_DIAGNOSTICS_KEY);
+  if (
+    typeof diagnostics !== "object" ||
+    diagnostics === null ||
+    !("activeLevelIndices" in diagnostics) ||
+    typeof diagnostics.activeLevelIndices !== "function" ||
+    !("contextLevelIndices" in diagnostics) ||
+    typeof diagnostics.contextLevelIndices !== "function"
+  ) {
+    throw new Error("scene diagnostics are not attached");
+  }
+  return diagnostics as SceneDiagnostics;
+}
+
+const CROSS_FLOOR_ROUTE: RouteResultDto = {
+  segments: [
+    {
+      ordinal: 0,
+      coordinates: [
+        [139, 35],
+        [139.001, 35],
+      ],
+    },
+    {
+      ordinal: 1,
+      coordinates: [
+        [139.001, 35],
+        [139.002, 35],
+      ],
+    },
+  ],
+  totalWeight: 100,
+  originProjected: [139, 35, 0],
+  destProjected: [139.002, 35, 1],
+};
 
 function review(overrides: Partial<NonNullable<IndoorMapProps["issueReview"]>> = {}) {
   return {
@@ -381,8 +590,12 @@ const originalMatchMedia = window.matchMedia;
 
 beforeEach(() => {
   mapState.instances.length = 0;
+  mapState.protocolAdds.length = 0;
+  mapState.protocolRemovals.length = 0;
+  mapState.lifecycleEvents.length = 0;
   mapState.setInitialStyleLoaded(true);
   mapState.setFlipStyleLoadedOnIndoorWrite(false);
+  mapState.setLoadFloorSourceOnAdd(true);
 });
 
 afterEach(() => {
@@ -1607,5 +1820,265 @@ describe("IndoorMap scene context loss", () => {
     });
 
     expect(onSceneContextLost).not.toHaveBeenCalled();
+  });
+});
+
+describe("IndoorMap scene floor elevation", () => {
+  const scene = sceneWithPlanes([
+    ["level-1", 8],
+    ["level-2", 12],
+  ]);
+
+  it("defers terrain until the initial style finishes loading", () => {
+    mapState.setInitialStyleLoaded(false);
+
+    const utils = render(<IndoorMap {...baseProps({ scene })} />);
+    const map = lastMap();
+    expect(map.initialFloorStyleTiles).toEqual([
+      "kiriko-floor://8000/{z}/{x}/{y}",
+    ]);
+    expect(map.terrainCalls).toEqual([]);
+
+    map.styleLoaded = true;
+    act(() => {
+      map.emit("load");
+    });
+
+    expect(map.floorTileUrls).toEqual([]);
+    expect(map.terrainCalls.at(-1)).toEqual({
+      source: FLOOR_ELEVATION_SOURCE_ID,
+      exaggeration: 1,
+    });
+    utils.unmount();
+  });
+  it("does not recreate terrain when the active plane is unchanged", () => {
+    const { map, rerender } = renderMap(baseProps({ scene, levelId: "level-1" }));
+
+    expect(map.terrainCalls).toEqual([
+      {
+        source: FLOOR_ELEVATION_SOURCE_ID,
+        exaggeration: 1,
+      },
+    ]);
+
+    rerender(
+      baseProps({
+        scene,
+        levelId: "level-1",
+        directions: crossFloorDirections(CROSS_FLOOR_ROUTE),
+      }),
+    );
+
+    expect(map.terrainCalls).toHaveLength(1);
+  });
+  it("waits for both floor and indoor sources before exposing a new scene floor", () => {
+    const { map, rerender } = renderMap(baseProps({ scene, levelId: "level-1" }));
+    mapState.setLoadFloorSourceOnAdd(false);
+    map.sourceLoaded = false;
+    map.styleLoaded = false;
+
+    rerender(baseProps({ scene, levelId: "level-2" }));
+
+    expect(map.styleLoaded).toBe(false);
+    expect(map.floorSourceOperations).toEqual([
+      { kind: "remove" },
+      {
+        kind: "add",
+        tiles: ["kiriko-floor://12000/{z}/{x}/{y}"],
+      },
+    ]);
+    expect(map.terrainCalls.at(-1)).toBeNull();
+    expect(currentSceneDiagnostics().activeLevelIndices()).toEqual([0]);
+
+    act(() => {
+      map.floorSourceLoaded = true;
+      map.emit("sourcedata", {
+        sourceId: FLOOR_ELEVATION_SOURCE_ID,
+        isSourceLoaded: true,
+        dataType: "source",
+      });
+    });
+    expect(map.terrainCalls.at(-1)).toBeNull();
+    expect(currentSceneDiagnostics().activeLevelIndices()).toEqual([0]);
+
+    act(() => {
+      map.sourceLoaded = true;
+      map.styleLoaded = true;
+      map.emit("sourcedata", READY_EVENT);
+    });
+    expect(map.terrainCalls.at(-1)).toEqual({
+      source: FLOOR_ELEVATION_SOURCE_ID,
+      exaggeration: 1,
+    });
+    expect(currentSceneDiagnostics().activeLevelIndices()).toEqual([1]);
+  });
+
+
+  it("replaces a zero-plane source when the scene arrives after map creation", () => {
+    const { map, rerender } = renderMap(baseProps({ scene: null }));
+    expect(map.initialFloorStyleTiles).toEqual([
+      "kiriko-floor://0/{z}/{x}/{y}",
+    ]);
+
+    rerender(baseProps({ scene, levelId: "level-1" }));
+
+    expect(map.floorSourceOperations).toEqual([
+      { kind: "remove" },
+      {
+        kind: "add",
+        tiles: ["kiriko-floor://8000/{z}/{x}/{y}"],
+      },
+    ]);
+    expect(map.floorTileUrls).toEqual([]);
+    expect(map.terrainCalls.at(-1)).toEqual({
+      source: FLOOR_ELEVATION_SOURCE_ID,
+      exaggeration: 1,
+    });
+  });
+
+
+  it("attaches terrain at the active scene plane and swaps floors in place", () => {
+    const { map, rerender } = renderMap(baseProps({ scene, levelId: "level-1" }));
+
+    expect(map.initialFloorStyleTiles).toEqual([
+      "kiriko-floor://8000/{z}/{x}/{y}",
+    ]);
+    expect(map.floorTileUrls).toEqual([]);
+    expect(map.terrainCalls.at(-1)).toEqual({
+      source: FLOOR_ELEVATION_SOURCE_ID,
+      exaggeration: 1,
+    });
+
+    rerender(baseProps({ scene, levelId: "level-2" }));
+
+    expect(map.floorSourceOperations).toEqual([
+      { kind: "remove" },
+      {
+        kind: "add",
+        tiles: ["kiriko-floor://12000/{z}/{x}/{y}"],
+      },
+    ]);
+    expect(map.terrainCalls.at(-1)).toEqual({
+      source: FLOOR_ELEVATION_SOURCE_ID,
+      exaggeration: 1,
+    });
+
+    rerender(
+      baseProps({
+        scene,
+        levelId: "level-2",
+        directions: crossFloorDirections(CROSS_FLOOR_ROUTE),
+      }),
+    );
+    expect(map.floorSourceOperations).toHaveLength(2);
+  });
+
+  it("detaches terrain when the scene returns to 2D", () => {
+    const { map, rerender } = renderMap(baseProps({ scene }));
+
+    rerender(baseProps({ scene: null }));
+
+    expect(map.terrainCalls.at(-1)).toBeNull();
+  });
+
+  it("does not manufacture a plane for contradictory composite levels", () => {
+    const contradictory = sceneWithPlanes([
+      ["level-1", 8],
+      ["level-1", 8.002],
+    ]);
+
+    const { map } = renderMap(baseProps({ scene: contradictory }));
+
+    expect(map.floorTileUrls).toEqual([]);
+    expect(map.terrainCalls).toEqual([]);
+  });
+
+  it("owns the floor protocol for exactly the map lifetime", () => {
+    const utils = render(<IndoorMap {...baseProps()} />);
+    const map = lastMap();
+    expect(mapState.protocolAdds).toEqual([FLOOR_ELEVATION_PROTOCOL]);
+
+    utils.unmount();
+
+    expect(map.removed).toBe(true);
+    expect(mapState.protocolRemovals).toEqual([FLOOR_ELEVATION_PROTOCOL]);
+    expect(mapState.lifecycleEvents).toEqual([
+      "map.remove",
+      `protocol.remove:${FLOOR_ELEVATION_PROTOCOL}`,
+    ]);
+  });
+
+  it("retains the next route floor after the transient handoff and clears it with the route", () => {
+    vi.useFakeTimers();
+    try {
+      const { rerender } = renderMap(
+        baseProps({
+          scene,
+          levelId: "level-1",
+          directions: crossFloorDirections(CROSS_FLOOR_ROUTE),
+        }),
+      );
+
+      rerender(
+        baseProps({
+          scene,
+          levelId: "level-2",
+          directions: crossFloorDirections(CROSS_FLOOR_ROUTE),
+        }),
+      );
+      expect(currentSceneDiagnostics().activeLevelIndices()).toEqual([1]);
+      expect(currentSceneDiagnostics().contextLevelIndices()).toEqual([0]);
+
+      act(() => {
+        vi.advanceTimersByTime(200);
+      });
+      expect(currentSceneDiagnostics().contextLevelIndices()).toEqual([0]);
+
+      rerender(
+        baseProps({
+          scene,
+          levelId: "level-2",
+          directions: crossFloorDirections(null),
+        }),
+      );
+      expect(currentSceneDiagnostics().contextLevelIndices()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains route context without a handoff under reduced motion", () => {
+    window.matchMedia = ((query: string) =>
+      ({
+        matches: true,
+        media: query,
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+      }) as unknown as MediaQueryList) as typeof window.matchMedia;
+    const showContext = vi.spyOn(SceneLayer.prototype, "setShowContextLevels");
+    const { rerender } = renderMap(
+      baseProps({
+        scene,
+        levelId: "level-1",
+        directions: crossFloorDirections(CROSS_FLOOR_ROUTE),
+      }),
+    );
+    showContext.mockClear();
+
+    rerender(
+      baseProps({
+        scene,
+        levelId: "level-2",
+        directions: crossFloorDirections(CROSS_FLOOR_ROUTE),
+      }),
+    );
+
+    expect(showContext).not.toHaveBeenCalledWith(true);
+    expect(currentSceneDiagnostics().activeLevelIndices()).toEqual([1]);
+    expect(currentSceneDiagnostics().contextLevelIndices()).toEqual([0]);
   });
 });

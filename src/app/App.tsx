@@ -82,8 +82,16 @@ import {
   type ViewerState,
 } from "../state/viewerReducer";
 import { kirikoTheme } from "../theme/presets";
-import { api, datasetBundleUrl, gdbErrorMessage, viewerHref, type ApiUser, type GdbError } from "../gallery/api";
-import { parseViewerParams } from "./viewerParams";
+import {
+  api,
+  datasetBundleUrl,
+  datasetSceneUrl,
+  gdbErrorMessage,
+  viewerHref,
+  type ApiUser,
+  type GdbError,
+} from "../gallery/api";
+import { parseViewerParams, sceneSearch } from "./viewerParams";
 
 const ui = {
   product: { ja: "Kiriko", en: "Kiriko" },
@@ -136,6 +144,8 @@ const ui = {
   sceneRetry3d: { ja: "3D表示を再試行", en: "Retry 3D" },
   sceneUse2d: { ja: "2D表示に切り替え", en: "Switch to 2D" },
   sceneSourceLabel: { ja: "表示ソース", en: "View source" },
+  sceneUse3d: { ja: "3D表示に切り替え", en: "Switch to 3D" },
+  sceneToggleLabel: { ja: "表示モード", en: "View mode" },
   editDesktopOnly: {
     ja: "ネットワーク編集はデスクトップで利用できます。",
     en: "Network editing is available on desktop.",
@@ -387,6 +397,19 @@ export function App() {
       setSourceState((current) => reduceSceneSource(current, event, { reducedMotion }));
     },
     [reducedMotion],
+  );
+  // The reviewer's 3D choice, recorded in the URL as it is made. `replaceState`
+  // rather than a reload: the ladder, camera, floor, route, and selection all
+  // survive a swap (#30 section 5), and a reload would discard every one of
+  // them. The parameter still has to move, or a copied link and a refresh would
+  // disagree with what is on screen.
+  const chooseScene3d = useCallback(
+    (on: boolean) => {
+      dispatchSource({ type: on ? "user_chose_3d" : "user_chose_2d" });
+      const { pathname, search, hash } = window.location;
+      window.history.replaceState(null, "", `${pathname}${sceneSearch(search, on)}${hash}`);
+    },
+    [dispatchSource],
   );
   // The veil is a brief cover over a source swap, never a crossfade. Clearing
   // it on a timer is what keeps the swap from lingering as a visible state.
@@ -790,7 +813,7 @@ export function App() {
       }
       if (job.status === "done") {
         setNetworkSave({ busy: false, submitting: false, accepted: null, message: null, error: null });
-        navigateTo(viewerHref(dataset, accepted.publicVersionId, locale, true));
+        navigateTo(viewerHref(dataset, accepted.publicVersionId, locale, { review: true }));
         return;
       }
       if (job.status === "timeout") {
@@ -1424,11 +1447,17 @@ export function App() {
     }
   }, [runLoad, params]);
 
-  // 3D scene: fetched and compiled off-thread only when `?scene` opts in and a
-  // published dataset is being viewed. A venue with no scene resolves absent
-  // and the viewer stays 2D.
+  // 3D scene: fetched and compiled off-thread only while a 3D source is active
+  // and a published dataset is being viewed. A venue with no scene resolves
+  // absent and the viewer stays 2D.
+  // `active` is the single record of whether 3D is on: it starts from `?scene`
+  // and moves with the ladder and the toggle, so this needs no second flag that
+  // could disagree with it. Note it deliberately does not distinguish tiles
+  // from generated — depending on *which* 3D source is active would re-run the
+  // load when the ladder climbs and download the document a second time.
+  const render3d = sourceState.active !== "fallback2d";
   useEffect(() => {
-    if (!params.scene || params.dataset === null || sourceState.active !== "generated") {
+    if (!render3d || params.dataset === null) {
       setScene(null);
       return;
     }
@@ -1442,6 +1471,24 @@ export function App() {
       // performance harness asserts it (#26 section 4).
       performance.mark(SCENE_DECODE_START);
       try {
+        // The activated package first: it is the top of the ladder, and asking
+        // for it is also how the viewer learns whether this version has one —
+        // a venue without a package answers 404, which is an absent source
+        // rather than a failure.
+        const tiles = await loadKirikoScene(
+          datasetSceneUrl(dataset, params.version ?? undefined),
+          controller.signal,
+          "package",
+        );
+        if (cancelled) {
+          return;
+        }
+        if (tiles !== null) {
+          setScene(readScene(tiles));
+          performance.measure(SCENE_DECODE_MEASURE, SCENE_DECODE_START);
+          dispatchSource({ type: "tiles_ready" });
+          return;
+        }
         const described = await loadKirikoScene(
           datasetBundleUrl(dataset, params.version ?? undefined),
           controller.signal,
@@ -1472,7 +1519,7 @@ export function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [params.scene, params.dataset, params.version, sourceState.active, dispatchSource]);
+  }, [render3d, params.dataset, params.version, dispatchSource]);
 
   useEffect(() => {
     loadFromParams();
@@ -1606,6 +1653,10 @@ export function App() {
 
   const warnings = venueState?.loadedVenue.warnings ?? [];
   const showMap = venueState !== null;
+  // The 3D entry point exists when this device can draw a scene and there is a
+  // published venue to draw. Absent, not disabled, otherwise: a disabled button
+  // still advertises a view this machine cannot produce.
+  const sceneToggleShown = showMap && sceneCapability.supported && params.dataset !== null;
   const dragEnabled = showMap && !embed;
   const showEmptyDropzone =
     !embed && (state.status === "empty" || (state.status === "loading" && !state.previous));
@@ -1662,7 +1713,7 @@ export function App() {
       />
 
       <main
-        className="map-stage"
+        className={sceneToggleShown ? "map-stage map-stage--scene-toggle" : "map-stage"}
         onDragOver={dragEnabled ? onMapDragOver : undefined}
         onDragLeave={dragEnabled ? onMapDragLeave : undefined}
         onDrop={dragEnabled ? onMapDrop : undefined}
@@ -1682,7 +1733,7 @@ export function App() {
             facilities={bundleProvenance?.facilities ?? []}
             onSelectFacility={setSelectedFacility}
             network={reviewActive ? editedNetwork : null}
-            scene={sourceState.active === "generated" ? scene : null}
+            scene={sourceState.active === "fallback2d" ? null : scene}
             preserveDrawingBuffer={params.capture}
             onSceneContextLost={() => {
               dispatchSource({ type: "context_lost" });
@@ -1707,7 +1758,24 @@ export function App() {
           />
         ) : null}
 
-        {showMap && params.scene ? (
+        {/* The way into 3D and back out of it. Rendered while 2D is showing
+            too, since a control that only exists once 3D is on cannot turn it
+            on — which is exactly the gap this closes. */}
+        {sceneToggleShown ? (
+          <button
+            type="button"
+            className="scene-toggle"
+            aria-label={ui.sceneToggleLabel[locale]}
+            aria-pressed={render3d}
+            onClick={() => {
+              chooseScene3d(!render3d);
+            }}
+          >
+            {render3d ? ui.sceneUse2d[locale] : ui.sceneUse3d[locale]}
+          </button>
+        ) : null}
+
+        {showMap && sourceState.requested ? (
           <>
             {/* A quiet source badge plus one provenance line (#32): what is
                 rendering, and where its geometry came from. */}
@@ -1734,16 +1802,6 @@ export function App() {
                   </button>
                 ) : null}
               </div>
-            ) : sourceState.active === "generated" ? (
-              <button
-                type="button"
-                className="scene-notice__retry scene-source__switch"
-                onClick={() => {
-                  dispatchSource({ type: "user_chose_2d" });
-                }}
-              >
-                {ui.sceneUse2d[locale]}
-              </button>
             ) : null}
             {/* The swap veil: a brief canvas-coloured cover, never a crossfade
                 between two independently fitted sources. */}

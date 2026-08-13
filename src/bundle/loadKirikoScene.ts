@@ -8,9 +8,9 @@
  * interactive map, and the geometry payload is transferred back rather than
  * copied.
  *
- * Resolves `null` when the bundle carries no renderable scene — a venue
- * without 3D data is an absent capability, not a load failure, and the caller
- * keeps showing 2D exactly as before.
+ * Resolves `null` when there is no renderable scene — a bundle without 3D
+ * data, or a venue with no activated package (a 404 on the package path). An
+ * absent source is not a load failure; the caller steps down the ladder.
  */
 import { VenueLoadError } from "../errors/VenueLoadError";
 import { BUNDLE_WORKER_FAILED_MESSAGE } from "./types";
@@ -34,6 +34,7 @@ function fetchFailedError(src: string, status?: number): VenueLoadError {
 export async function loadKirikoScene(
   src: string,
   signal?: AbortSignal,
+  source: "generated" | "package" = "generated",
 ): Promise<DescribedSceneDto | null> {
   if (signal?.aborted) {
     throw new DOMException("Aborted", "AbortError");
@@ -47,6 +48,11 @@ export async function loadKirikoScene(
       throw error;
     }
     throw fetchFailedError(src);
+  }
+  if (response.status === 404 && source === "package") {
+    // A venue with no activated package is not a failure: it renders its
+    // generated scene, which is the next rung of the ladder.
+    return null;
   }
   if (!response.ok) {
     throw fetchFailedError(src, response.status);
@@ -145,7 +151,7 @@ export async function loadKirikoScene(
     worker.addEventListener("messageerror", onMessageError);
     signal?.addEventListener("abort", onAbort, { once: true });
 
-    const request: BundleSceneRequest = { type: "scene", buffer };
+    const request: BundleSceneRequest = { type: "scene", buffer, source };
     try {
       worker.postMessage(request, [buffer]);
     } catch {

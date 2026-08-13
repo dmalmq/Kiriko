@@ -3,6 +3,10 @@ import type { VenueSummary } from "./api";
 
 const ui = {
   open: { ja: "開く", en: "Open" },
+  view3d: { ja: "3D で開く", en: "Open in 3D" },
+  manageTiles: { ja: "3D タイル", en: "3D Tiles" },
+  tilesActive: { ja: "3D タイル表示中", en: "3D Tiles live" },
+  tilesHeld: { ja: "3D タイル未有効", en: "3D Tiles inactive" },
   delete: { ja: "削除", en: "Delete" },
   uploadImdf: { ja: "IMDF をアップロード", en: "Upload IMDF" },
   importGdb: { ja: "GDB を取り込む", en: "Import GDB" },
@@ -21,6 +25,10 @@ export interface DatasetCardProps {
   venue: VenueSummary;
   locale: LocaleCode;
   onOpen: () => void;
+  /** Absent when this device is below the 3D floor, or the venue is unpublished. */
+  onView3d?: () => void;
+  /** Absent when the signed-in user cannot manage tile packages. */
+  onManageTiles?: () => void;
   onDelete: () => void;
   onImportGdb?: () => void;
   onAddData?: () => void;
@@ -37,7 +45,9 @@ export function DatasetCard({
   venue,
   locale,
   onOpen,
+  onView3d,
   onDelete,
+  onManageTiles,
   onImportGdb,
   onAddData,
   onEditMapping,
@@ -58,6 +68,14 @@ export function DatasetCard({
         <h3 className="dataset-card__name">{venue.name}</h3>
         <div className="dataset-card__chips">
           <span className="chip">IMDF</span>
+          {/* Holding a package and rendering one are different facts: activation
+              is explicit, so a venue can hold one for a week with every reviewer
+              still seeing the generated scene. */}
+          {venue.tiles !== undefined && venue.tiles.activeOnLatest ? (
+            <span className="chip chip--tiles">{ui.tilesActive[locale]}</span>
+          ) : venue.tiles !== undefined && venue.tiles.packages > 0 ? (
+            <span className="chip">{ui.tilesHeld[locale]}</span>
+          ) : null}
         </div>
         <p className="dataset-card__meta">
           {stats
@@ -103,6 +121,16 @@ export function DatasetCard({
         {onReviewNetwork ? (
           <button type="button" className="btn-ghost" onClick={onReviewNetwork} disabled={actionsDisabled}>
             {ui.reviewNetwork[locale]}
+          </button>
+        ) : null}
+        {onManageTiles ? (
+          <button type="button" className="btn-ghost" onClick={onManageTiles} disabled={actionsDisabled}>
+            {ui.manageTiles[locale]}
+          </button>
+        ) : null}
+        {onView3d ? (
+          <button type="button" className="btn-ghost" onClick={onView3d} disabled={actionsDisabled}>
+            {ui.view3d[locale]}
           </button>
         ) : null}
         <button type="button" className="btn-primary" onClick={onOpen} disabled={actionsDisabled}>

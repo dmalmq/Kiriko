@@ -8,7 +8,14 @@ import type {
   BundleSceneRequest,
   BundleWorkerResponse,
 } from "./types";
-import { decodeBundle, facilities, generatedScene, initKirikoWasm, routeBundle } from "./wasm";
+import {
+  decodeBundle,
+  decodeScene,
+  facilities,
+  generatedScene,
+  initKirikoWasm,
+  routeBundle,
+} from "./wasm";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -78,8 +85,9 @@ export async function routeBundleMessage(
 }
 
 /**
- * Compiles one transferred bundle `ArrayBuffer` into the shared render
- * document through `generatedScene` in `./wasm`. Stateless like the others.
+ * Compiles one transferred `ArrayBuffer` into the shared render document:
+ * a bundle's §9 through `generatedScene`, or an activated package's
+ * server-derived document through `decodeScene`. Stateless like the others.
  * A bundle with no §9 scene or no §8 spatial context is not a failure of the
  * worker but an absent capability: it resolves to `{type:"failed"}` with the
  * shared code, and the caller decides from the scene projection whether 3D was
@@ -90,7 +98,9 @@ export async function sceneBundleMessage(
 ): Promise<BundleWorkerResponse> {
   try {
     await initKirikoWasm();
-    const described = generatedScene(new Uint8Array(request.buffer));
+    const bytes = new Uint8Array(request.buffer);
+    const described =
+      request.source === "package" ? decodeScene(bytes) : generatedScene(bytes);
     return { type: "scene", meta: described.meta, payload: described.payload };
   } catch {
     return {

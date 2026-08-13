@@ -12,6 +12,12 @@ export interface AppConfig {
   bootstrapUser?: string;
   bootstrapPassword?: string;
   seedDevUsers?: boolean;
+  /**
+   * Shared password for every seeded testing account. No default: seeding is
+   * skipped without it, so named accounts never fall back to something
+   * guessable on a network-reachable instance.
+   */
+  seedPassword?: string;
 }
 
 export function positiveInt(value: string | undefined, fallback: number): number {
@@ -50,6 +56,10 @@ export function configFromEnv(): AppConfig & { port: number } {
   if (user !== undefined && password !== undefined) {
     config.bootstrapUser = user;
     config.bootstrapPassword = password;
+  }
+  const seedPassword = process.env["KIRIKO_SEED_PASSWORD"];
+  if (seedPassword !== undefined) {
+    config.seedPassword = seedPassword;
   }
   return config;
 }

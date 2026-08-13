@@ -144,7 +144,7 @@ describe("GalleryPage", () => {
     await user.click(screen.getByRole("button", { name: "EN" }));
 
     await user.click(screen.getByRole("button", { name: "Review network" }));
-    expect(viewerHrefSpy).toHaveBeenCalledWith("tokyo-station", PUBLIC_ID, "en", true);
+    expect(viewerHrefSpy).toHaveBeenCalledWith("tokyo-station", PUBLIC_ID, "en", { review: true });
   });
 
   it("opens IMDF version upload for the selected venue", async () => {
@@ -1437,7 +1437,7 @@ describe("GalleryPage async lifecycle blockers", () => {
 
     await user.click(screen.getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(screen.getByRole("dialog", { name: "Sign in to Kiriko" })).toBeTruthy());
-    await user.type(screen.getByLabelText("Username"), "daniel");
+    await user.type(screen.getByLabelText("Email"), "daniel");
     await user.type(screen.getByLabelText("Password"), "secret");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
 
@@ -1469,7 +1469,7 @@ describe("GalleryPage async lifecycle blockers", () => {
     await waitFor(() => expect(generateNetwork).toHaveBeenCalledWith(42));
     await user.click(screen.getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(screen.getByRole("dialog", { name: "Sign in to Kiriko" })).toBeTruthy());
-    await user.type(screen.getByLabelText("Username"), "daniel");
+    await user.type(screen.getByLabelText("Email"), "daniel");
     await user.type(screen.getByLabelText("Password"), "secret");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
 

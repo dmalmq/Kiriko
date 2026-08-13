@@ -211,6 +211,7 @@ fn main() {
         None,
         &[],
         None,
+        None,
     )
     .expect("stage0 fixture must compile");
     write_fixture(

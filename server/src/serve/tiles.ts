@@ -76,13 +76,39 @@ function findScene(app: FastifyInstance, versionId: number): DescriptorRow | nul
   return row ?? null;
 }
 
+interface SceneRow {
+  hash: string;
+  byteSize: number;
+}
+
+/**
+ * The render document the version's activation derived.
+ *
+ * Joined through the activation that *produced* this version, not through the
+ * package: a package can be evaluated against several versions, and only the
+ * activation that published one describes what that one renders.
+ */
+function findSceneDocument(app: FastifyInstance, versionId: number): SceneRow | null {
+  const row = app.db
+    .prepare(
+      `SELECT a.scene_blob_hash AS hash, b.size AS byteSize
+       FROM tile_activations a
+       JOIN blobs b ON b.hash = a.scene_blob_hash
+       WHERE a.activated_version_id = ? AND a.state = 'activated'
+         AND a.scene_blob_hash IS NOT NULL`,
+    )
+    .get(versionId) as SceneRow | undefined;
+  return row ?? null;
+}
+
 export function registerTileServeRoutes(app: FastifyInstance): void {
   const latestParams = Type.Object({ tenant: Type.String(), venue: Type.String() });
+  // The permanent public version identity, as the pinned bundle route uses.
+  const pinnedId = Type.String({ pattern: "^[0-9a-f]{64}$" });
   const memberParams = Type.Object({
     tenant: Type.String(),
     venue: Type.String(),
-    // The permanent public version identity, as the pinned bundle route uses.
-    id: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+    id: pinnedId,
     "*": Type.String(),
   });
 
@@ -173,6 +199,54 @@ export function registerTileServeRoutes(app: FastifyInstance): void {
       }
       reply.header("content-length", String(member.byteSize));
       return reply.send(app.blobs.stream(member.hash));
+    },
+  );
+
+  /**
+   * The render document, latest and pinned. Same bytes either way — the
+   * document is derived once at activation — so the only difference is what a
+   * cache may assume: the pinned URL names a version and can never change, the
+   * latest one revalidates because publishing again changes the answer.
+   */
+  function sendScene(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    publicId: string | null,
+    cacheControl: string,
+  ) {
+    const { tenant, venue } = request.params as { tenant: string; venue: string };
+    const version = findPublishedVersion(app.db, tenant, venue, publicId);
+    if (version === null) {
+      return reply.code(404).send({ error: "not_found" });
+    }
+    const scene = findSceneDocument(app, version.id);
+    if (scene === null) {
+      // A published venue with no activated package renders its generated
+      // scene. That is ordinary, not an error — but there is nothing here.
+      return reply.code(404).send({ error: "no_tile_scene" });
+    }
+    reply.header("Kiriko-Version-Id", version.publicId);
+    reply.header("Kiriko-Version-Seq", String(version.seq));
+    reply.header("ETag", `"${scene.hash}"`);
+    reply.header("cache-control", cacheControl);
+    reply.type("application/vnd.kiriko.scene");
+    if (request.headers["if-none-match"] === `"${scene.hash}"`) {
+      return reply.code(304).send();
+    }
+    reply.header("content-length", String(scene.byteSize));
+    return reply.send(app.blobs.stream(scene.hash));
+  }
+
+  app.get("/v/:tenant/:venue/scene", { schema: { params: latestParams } }, async (request, reply) =>
+    sendScene(request, reply, null, LATEST_CACHE_CONTROL),
+  );
+
+  app.get(
+    "/v/:tenant/:venue/scene@:id",
+    { schema: { params: Type.Object({ ...latestParams.properties, id: pinnedId }) } },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      return sendScene(request, reply, id, PINNED_CACHE_CONTROL);
     },
   );
 }

@@ -141,6 +141,23 @@ pub struct ScenePickProjection {
     pub evidence: Vec<SceneEvidenceProjection>,
 }
 
+/// The activated tile package a version renders, as §9 records it.
+///
+/// Present exactly when the bundle carries a tiles descriptor. The renderer
+/// learns what a version's scene is from here and nowhere else: anything it
+/// had to be told separately could disagree with the bundle it is drawing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TilesDescriptorProjection {
+    /// `activated` | `not_activated`.
+    pub activation_state: String,
+    /// The versioned registration profile the activation was judged under.
+    pub registration_profile_id: String,
+    /// The immutable package identity, lowercase hex.
+    pub package_hash: String,
+    pub manifest_hash: String,
+}
+
 /// The full typed scene projection: everything a renderer needs plus the
 /// capability state, serializable to TypeScript.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -152,6 +169,9 @@ pub struct SceneProjection {
     pub levels: Vec<SceneLevelProjection>,
     pub primitives: Vec<ScenePrimitiveProjection>,
     pub capability: SceneCapabilityState,
+    /// The activated tile package, when this version has one. Floor mappings
+    /// are on each level's `source_levels`, where floor filtering reads them.
+    pub tiles: Option<TilesDescriptorProjection>,
 }
 
 impl SceneProjection {
@@ -234,6 +254,7 @@ mod tests {
                 primitive("p2", vec!["so-2"], None),
             ],
             capability: SceneCapabilityState::Ready,
+            tiles: None,
         }
     }
 

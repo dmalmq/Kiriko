@@ -212,7 +212,9 @@ export function useSceneLabels({
     overlay.className = OVERLAY_CLASS;
     container.append(overlay);
 
-    const levelIndex = layer.levelIndexOf(levelId) ?? 0;
+    // Labels anchor on the floor's plane; every source level registered to a
+    // floor sits on the same one, so the first is as good as any.
+    const levelIndex = layer.levelIndicesOf(levelId)[0] ?? 0;
     const base = collectSceneLabelCandidates(venue, levelId, locale, selectedFeatureId);
     const anchors = new Map<string, [number, number, number]>();
     for (const candidate of base) {

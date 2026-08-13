@@ -125,9 +125,36 @@ The dated plans under `docs/superpowers/plans/` remain execution history for the
 
 ## 3. Phase 1 — Production-ready shared web platform
 
-**Status:** Next  
+**Status:** Deferred (see the 2026-08-10 amendment below)  
 **Primary users:** JRE Consultants producers, internal reviewers, and invited client reviewers  
 **Outcome:** The current web application can be deployed, operated, recovered, and shared as a dependable service without developer intervention for routine use.
+
+**Amendment, 2026-08-10.** Two facts, recorded so this roadmap stops describing
+a state that does not exist.
+
+First, **3D stages 3–6 no longer sit behind Workstream 1A's release gate in
+practice.** Stage 3 shipped in full (#70–#76, closed) ahead of that gate, so the
+two risks §1.2 placed behind 1A — reference-counted GC across venue versions,
+and a backup surface that grows by ~172 MiB per 3D venue version — are now live
+on a system with no restore drill. The ordering in §1.2 and §9 was not
+renegotiated; it was overtaken.
+
+Second, **Workstream 1A is deliberately tabled**, not in progress. Its entry
+gate requires the office-server host, reverse proxy, storage volume, and backup
+destination to be identified, and they are not yet settled. A design pass on
+2026-08-10 established the shape a plan would take (native service on a Windows
+client host, Caddy terminating TLS, `Win32_ShadowCopy` snapshots to an off-box
+destination, a fail-closed production preflight, graceful shutdown on
+`SIGINT`/`SIGBREAK`, and a scripted restore drill) but produced no spec: writing
+one against undecided infrastructure would commit exact paths and commands that
+the real host would then contradict.
+
+**Current operating mode is local testing only.** The application runs on a
+developer desktop and is shared with colleagues over the LAN through Vite's
+dev server (`pnpm share`), with plaintext HTTP, seeded accounts sharing one
+password, and non-`Secure` session cookies — documented in `AGENTS.md`. Nothing
+in this mode is a production deployment, and the gap between it and Phase 1's
+outcome is exactly what 1A exists to close.
 
 ### Entry gate
 

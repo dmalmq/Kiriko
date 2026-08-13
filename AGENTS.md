@@ -9,14 +9,23 @@ Kiriko is a React/MapLibre indoor-GIS viewer + review workspace backed by Fastif
 - `docs/superpowers/` — specs and implementation plans.
 
 ## Running locally (dev)
-Two processes; backend first (Vite proxies `/api` → `:8790`):
+`./dev.sh` is the normal way in: it starts both processes in order, seeds the
+testing accounts, and serves on the LAN. It asks for the shared password once and
+saves it to `server/data/dev-password` (gitignored); `KIRIKO_SHARE=0` keeps Vite
+on loopback and `KIRIKO_SEED=0` leaves accounts alone.
+
+Two processes by hand; backend first (Vite proxies `/api` → `:8790`):
 ```bash
 pnpm dev:server   # predev:server rebuilds @kiriko/node; tsx watch
 pnpm dev          # predev rebuilds @kiriko/wasm; Vite on :5173
 ```
 First run seeds an admin only from env on an empty DB:
 `KIRIKO_BOOTSTRAP_USER=admin KIRIKO_BOOTSTRAP_PASSWORD=… pnpm dev:server`.
-For local role testing, `KIRIKO_SEED_DEV_USERS=1 pnpm dev:server` also seeds `admin`/`member`/`viewer` (all password `password`), (re)setting those three accounts' passwords/roles each run. Opt-in, and hard-skipped under `NODE_ENV=production`.
+
+**Testing accounts.** `KIRIKO_SEED_DEV_USERS=1 KIRIKO_SEED_PASSWORD=… pnpm dev:server` seeds the accounts listed in `$KIRIKO_DATA_DIR/seed-users.json` (dev default: `server/data/seed-users.json`, gitignored — shape in `server/seed-users.example.json`), giving each the shared password and (re)setting password and role on every start. With no such file it falls back to `admin`/`member`/`viewer`. Accounts it does not list are untouched. `KIRIKO_SEED_PASSWORD` has no default — without it nothing is seeded, so named accounts can never end up with a guessable password. Opt-in, and hard-skipped under `NODE_ENV=production`. There is no user-management API yet (Workstream 1B); this file is how accounts exist.
+
+**Sharing with colleagues on the LAN (testing only).** `pnpm dev:server` then `pnpm share` (= `vite --host`) and hand out `http://<this-machine-ip>:5173`. One port is enough: Vite serves the app and proxies both `/api` and `/v` to the backend on loopback, so the server itself stays unexposed. Windows Firewall needs an inbound rule, from an elevated shell: `New-NetFirewallRule -DisplayName "Kiriko dev" -Direction Inbound -LocalPort 5173 -Protocol TCP -Action Allow`. `pnpm dev` remains loopback-only, so exposing the machine is always deliberate. This is plaintext HTTP with a shared password and non-`Secure` session cookies — anyone on the network can read a session. Fine for colleague testing, not for anything real.
+
 Editing Rust while servers run needs a restart (or `pnpm core:build`). Verify: `cargo test --manifest-path core/Cargo.toml --workspace`, `pnpm exec tsc --noEmit`, `pnpm --dir server exec tsc --noEmit`, `pnpm exec vitest run`, `pnpm --dir server exec vitest run`.
 
 **Windows toolchain:** the wasm build (`core:build:wasm`) compiles a C dependency (`zstd-sys`) for `wasm32`, which requires **clang** (MSVC can't target wasm). Install LLVM (`winget install LLVM.LLVM`). `scripts/build-wasm.mjs` auto-points cc-rs at a standard LLVM install when clang isn't on PATH; otherwise set `CC_wasm32_unknown_unknown` to a wasm-capable clang.
@@ -32,6 +41,7 @@ Key facts: GDAL stays in TypeScript (gdal3.js); all data interpretation is Rust.
 ## Conventions
 - TDD; commit per logical change; strict TS (no `any`); match existing patterns.
 - Bilingual UI (ja/en) — every user string needs both.
+- **Absence never renders as success.** No measurement, no samples, nothing mapped, nothing found — none of these may be shown as a zero, an empty band, or a clean row. Zero is a measured value and reads as a good one. Put the absence in the type (`Option`/`| null`) at the layer that knows, so consumers must answer for it rather than each view remembering; render it as absent in words; and give every measurement view a test for its empty state. This is a real bug found twice in the tile registration report — see `docs/gdb-data-reference.md`'s producer-surface notes.
 
 ## Agent skills
 

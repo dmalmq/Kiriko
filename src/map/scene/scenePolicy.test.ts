@@ -27,22 +27,47 @@ const ALL_ROLES: SemanticRoleName[] = [
 ];
 
 describe("batchOpacity", () => {
+  it("draws every source level registered to the active floor", () => {
+    // A canonical floor maps to one or more composite tile levels (#31), and
+    // the reviewer selected the floor, not one of its source documents.
+    const state = {
+      activeLevelIndices: [1, 2],
+      contextLevelIndices: [],
+      showContextLevels: false,
+    };
+    expect(batchOpacity({ levelIndex: 1, role: "Walkable" }, state)).toBe(1);
+    expect(batchOpacity({ levelIndex: 2, role: "Walkable" }, state)).toBe(1);
+    expect(batchOpacity({ levelIndex: 3, role: "Walkable" }, state)).toBe(0);
+  });
+
   it("draws the active floor and hides every other one", () => {
-    const state = { activeLevelIndex: 1, showContextLevels: false };
+    const state = {
+      activeLevelIndices: [1],
+      contextLevelIndices: [],
+      showContextLevels: false,
+    };
     expect(batchOpacity({ levelIndex: 1, role: "Walkable" }, state)).toBe(1);
     expect(batchOpacity({ levelIndex: 0, role: "Walkable" }, state)).toBe(0);
     expect(batchOpacity({ levelIndex: 2, role: "Structure" }, state)).toBe(0);
   });
 
   it("hides the active floor's ceilings so the space below is legible", () => {
-    const state = { activeLevelIndex: 0, showContextLevels: false };
+    const state = {
+      activeLevelIndices: [0],
+      contextLevelIndices: [],
+      showContextLevels: false,
+    };
     expect(batchOpacity({ levelIndex: 0, role: "Ceiling" }, state)).toBe(0);
     // A ceiling is the only role hidden by default; walls stay.
     expect(batchOpacity({ levelIndex: 0, role: "Structure" }, state)).toBe(1);
   });
 
   it("fades a context floor's ceiling further than the floor itself", () => {
-    const state = { activeLevelIndex: 0, showContextLevels: true };
+    const state = {
+      activeLevelIndices: [0],
+      contextLevelIndices: [],
+      showContextLevels: true,
+    };
     const floor = batchOpacity({ levelIndex: 1, role: "Walkable" }, state);
     const ceiling = batchOpacity({ levelIndex: 1, role: "Ceiling" }, state);
     // The ceiling is the protected-corridor occluder between the camera and the
@@ -52,8 +77,28 @@ describe("batchOpacity", () => {
     expect(batchOpacity({ levelIndex: 1, role: "Structure" }, state)).toBe(floor);
   });
 
+  it("retains only the route floor as persistent context after handoff", () => {
+    const state = {
+      activeLevelIndices: [0],
+      contextLevelIndices: [1],
+      showContextLevels: false,
+    };
+    expect(batchOpacity({ levelIndex: 0, role: "Walkable" }, state)).toBe(1);
+    expect(batchOpacity({ levelIndex: 1, role: "Walkable" }, state)).toBe(
+      CONTEXT_LEVEL_OPACITY,
+    );
+    expect(batchOpacity({ levelIndex: 1, role: "Ceiling" }, state)).toBe(
+      OCCLUDER_FADE_OPACITY,
+    );
+    expect(batchOpacity({ levelIndex: 2, role: "Walkable" }, state)).toBe(0);
+  });
+
   it("dissolves nothing for the camera on the active floor beyond its ceilings", () => {
-    const state = { activeLevelIndex: 0, showContextLevels: true };
+    const state = {
+      activeLevelIndices: [0],
+      contextLevelIndices: [],
+      showContextLevels: true,
+    };
     // A wall between the camera and the selection stays solid: #32 dissolves
     // only protected-corridor occluders, and only on context floors.
     expect(batchOpacity({ levelIndex: 0, role: "Structure" }, state)).toBe(1);
@@ -61,7 +106,11 @@ describe("batchOpacity", () => {
   });
 
   it("shows other floors as quiet context when asked", () => {
-    const state = { activeLevelIndex: 0, showContextLevels: true };
+    const state = {
+      activeLevelIndices: [0],
+      contextLevelIndices: [],
+      showContextLevels: true,
+    };
     expect(batchOpacity({ levelIndex: 1, role: "Walkable" }, state)).toBe(CONTEXT_LEVEL_OPACITY);
     expect(batchOpacity({ levelIndex: 0, role: "Walkable" }, state)).toBe(1);
     expect(CONTEXT_LEVEL_OPACITY).toBeGreaterThan(0);
