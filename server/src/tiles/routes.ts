@@ -37,7 +37,6 @@ import {
   descriptorFor,
   evaluationTarget,
   findEvaluation,
-  markActivated,
   storeEvaluation,
 } from "./activation";
 import { collectTileBlobs, discardPackage, registerTileBlob } from "./storage";
@@ -161,9 +160,14 @@ export function registerTileRoutes(app: FastifyInstance): void {
                   (SELECT COUNT(*) FROM tile_package_members m WHERE m.package_id = p.id)
                     AS memberCount,
                   EXISTS (
-                    SELECT 1 FROM version_tile_packages vtp
-                    JOIN versions v ON v.id = vtp.version_id
-                    WHERE vtp.package_id = p.id AND v.status = 'published'
+                    SELECT 1
+                    FROM version_tile_packages vtp
+                    WHERE vtp.package_id = p.id
+                      AND vtp.version_id = (
+                        SELECT id FROM versions
+                        WHERE venue_id = p.venue_id AND status = 'published'
+                        ORDER BY seq DESC LIMIT 1
+                      )
                   ) AS serving
            FROM tile_packages p
            WHERE p.venue_id = ?
@@ -659,14 +663,10 @@ export function registerTileRoutes(app: FastifyInstance): void {
           clipToSelection: storedPlanClipsToSelection(target.gdbPlanJson),
           tilesDescriptorJson: descriptorFor(evaluation, pkg.sourceHash, pkg.rootTilesetHash),
           tilePackageId: Number(packageId),
+          tileActivationEvaluationId: evaluation.id,
+          tileActivatedBy: request.user.id,
+          tileSceneBlobHash: stored.hash,
         },
-      );
-      markActivated(
-        request.server.db,
-        evaluation.id,
-        accepted.versionId,
-        request.user.id,
-        stored.hash,
       );
       return reply
         .code(202)
