@@ -104,6 +104,8 @@ const mapState = vi.hoisted(() => {
     styleAvailable = initialStyleLoaded;
     sourceLoaded = true;
     floorSourceLoaded = true;
+    floorSourcePresent = true;
+    invalidSourceLoadChecks = 0;
     center = { lng: 0, lat: 0 };
     zoom = 0;
     removed = false;
@@ -247,6 +249,7 @@ const mapState = vi.hoisted(() => {
     removeSource(id: string): void {
       if (id === FLOOR_ELEVATION_SOURCE_ID) {
         this.floorSourceLoaded = false;
+        this.floorSourcePresent = false;
         this.floorSourceOperations.push({ kind: "remove" });
       }
     }
@@ -255,6 +258,7 @@ const mapState = vi.hoisted(() => {
       if (id !== FLOOR_ELEVATION_SOURCE_ID) {
         return;
       }
+      this.floorSourcePresent = true;
       this.floorSourceOperations.push({
         kind: "add",
         tiles: source.tiles ?? [],
@@ -281,6 +285,10 @@ const mapState = vi.hoisted(() => {
     }
 
     isSourceLoaded(id?: string): boolean {
+      if (id === FLOOR_ELEVATION_SOURCE_ID && !this.floorSourcePresent) {
+        this.invalidSourceLoadChecks += 1;
+        throw new Error(`There is no tile manager with ID '${id}'`);
+      }
       return id === FLOOR_ELEVATION_SOURCE_ID
         ? this.floorSourceLoaded
         : this.sourceLoaded;
@@ -1929,6 +1937,7 @@ describe("IndoorMap scene floor elevation", () => {
         tiles: ["kiriko-floor://8000/{z}/{x}/{y}"],
       },
     ]);
+    expect(map.invalidSourceLoadChecks).toBe(0);
     expect(map.floorTileUrls).toEqual([]);
     expect(map.terrainCalls.at(-1)).toEqual({
       source: FLOOR_ELEVATION_SOURCE_ID,

@@ -913,14 +913,14 @@ export function IndoorMap({
           map.removeSource(FLOOR_ELEVATION_SOURCE_ID);
         }
         floorElevationUrlRef.current = tileUrl;
-        floorElevationReadyCancelRef.current = whenFloorElevationReady(
-          map,
-          attachTerrain,
-        );
         map.addSource(FLOOR_ELEVATION_SOURCE_ID, {
           ...floorElevationSource(),
           tiles: [tileUrl],
         });
+        floorElevationReadyCancelRef.current = whenFloorElevationReady(
+          map,
+          attachTerrain,
+        );
       } else if (floorElevationAttachedUrlRef.current === tileUrl) {
         applyDesiredSceneLevels();
       } else if (floorElevationReadyCancelRef.current === null) {
