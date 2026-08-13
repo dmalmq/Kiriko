@@ -1,17 +1,28 @@
 import { describe, expect, it } from "vitest";
-import type { CircleLayerSpecification, FillLayerSpecification, LineLayerSpecification } from "maplibre-gl";
+import type {
+  CircleLayerSpecification,
+  FillLayerSpecification,
+  LineLayerSpecification,
+  SymbolLayerSpecification,
+} from "maplibre-gl";
 import { themes } from "../theme/presets";
 import { buildIndoorStyle } from "./buildIndoorStyle";
 import { FLOOR_ELEVATION_SOURCE_ID } from "./scene/floorElevation";
 import {
   applyThemePaintProperties,
   buildFeatureLayers,
+  buildNetworkLayers,
   buildRouteLayers,
   CLICKABLE_LAYER_IDS,
   LAYER_ROUTE,
   LAYER_ROUTE_ENDPOINT,
   LAYER_ROUTE_CONNECTOR,
   ROUTE_SOURCE_ID,
+  NETWORK_SOURCE_ID,
+  LAYER_NETWORK_VERTICAL_LINK_HIT,
+  LAYER_NETWORK_VERTICAL_LINK,
+  LAYER_NETWORK_VERTICAL_LINK_SELECTED,
+  LAYER_NETWORK_VERTICAL_LINK_LABEL,
   LAYER_ISSUE_HIGHLIGHT_OUTLINE,
   LAYER_ISSUE_HIGHLIGHT_POINT,
   LAYER_SELECTED_OUTLINE,
@@ -192,6 +203,38 @@ describe("route layers", () => {
     expect(ids).toContain(LAYER_ROUTE_ENDPOINT);
     // Route renders above every feature layer.
     expect(ids.indexOf(LAYER_ROUTE)).toBeGreaterThan(ids.indexOf(LAYER_ISSUE_HIGHLIGHT_POINT));
+  });
+});
+
+describe("vertical network link layers", () => {
+  it("draws and hit-tests an offset semantic marker", () => {
+    const layers = buildNetworkLayers();
+    const byId = (id: string) => layers.find((layer) => layer.id === id);
+    const hit = byId(LAYER_NETWORK_VERTICAL_LINK_HIT) as CircleLayerSpecification;
+    const marker = byId(LAYER_NETWORK_VERTICAL_LINK) as CircleLayerSpecification;
+    const selected = byId(LAYER_NETWORK_VERTICAL_LINK_SELECTED) as CircleLayerSpecification;
+
+    for (const layer of [hit, marker, selected]) {
+      expect(layer.source).toBe(NETWORK_SOURCE_ID);
+      expect(JSON.stringify(layer.filter)).toContain("vertical-link");
+      expect(layer.paint?.["circle-translate"]).toEqual([12, -12]);
+      expect(layer.paint?.["circle-translate-anchor"]).toBe("viewport");
+    }
+    expect(hit.paint?.["circle-radius"]).toBe(12);
+    expect(marker.paint?.["circle-radius"]).toBe(5);
+    expect(selected.paint?.["circle-radius"]).toBe(8);
+    expect(JSON.stringify(selected.filter)).toContain("selected");
+  });
+
+  it("labels only supported direction and target-floor facts", () => {
+    const label = buildNetworkLayers().find(
+      (layer) => layer.id === LAYER_NETWORK_VERTICAL_LINK_LABEL,
+    ) as SymbolLayerSpecification | undefined;
+    expect(label?.type).toBe("symbol");
+    expect(label?.source).toBe(NETWORK_SOURCE_ID);
+    expect(JSON.stringify(label?.layout?.["text-field"])).toContain("targetDirection");
+    expect(JSON.stringify(label?.layout?.["text-field"])).toContain("targetFloor");
+    expect(JSON.stringify(label)).not.toMatch(/stairs|escalator|elevator/i);
   });
 });
 
