@@ -141,8 +141,8 @@ export function storeEvaluation(
     evaluation: TileActivationEvaluation;
     evaluatedBy: number;
   },
-): void {
-  db.prepare(
+): boolean {
+  const result = db.prepare(
     `INSERT INTO tile_activations
        (package_id, evaluated_version_id, evaluated_bundle_hash, profile_id, profile_version,
         profile_json, capability_profile, report_json, gates_json, state, evaluated_by)
@@ -160,7 +160,9 @@ export function storeEvaluation(
        evaluated_by = excluded.evaluated_by,
        activated_at = NULL,
        activated_by = NULL,
-       activated_version_id = NULL`,
+       activated_version_id = NULL
+     WHERE tile_activations.state = 'evaluated'
+       AND tile_activations.activating_version_id IS NULL`,
   ).run(
     input.packageId,
     input.target.versionId,
@@ -173,6 +175,7 @@ export function storeEvaluation(
     JSON.stringify(input.evaluation.gates),
     input.evaluatedBy,
   );
+  return result.changes === 1;
 }
 
 /** The newest evaluation of this package, whichever version it measured. */
@@ -217,6 +220,38 @@ export function findEvaluation(db: Database, packageId: number): StoredEvaluatio
 }
 
 /**
+ * Reserve the immutable evaluation snapshot for the publication version that
+ * will consume it. Called inside the version/job enqueue transaction.
+ */
+export function reserveActivation(
+  db: Database,
+  evaluationId: number,
+  activatingVersionId: number,
+  activatingBy: number,
+): boolean {
+  const result = db.prepare(
+    `UPDATE tile_activations
+     SET activating_version_id = ?, activating_by = ?, activating_at = datetime('now')
+     WHERE id = ? AND state = 'evaluated' AND activating_version_id IS NULL`,
+  ).run(activatingVersionId, activatingBy, evaluationId);
+  return result.changes === 1;
+}
+
+/** Release a failed publication without touching the evaluation evidence. */
+export function releaseActivation(
+  db: Database,
+  evaluationId: number,
+  activatingVersionId: number,
+): boolean {
+  const result = db.prepare(
+    `UPDATE tile_activations
+     SET activating_version_id = NULL, activating_by = NULL, activating_at = NULL
+     WHERE id = ? AND state = 'evaluated' AND activating_version_id = ?`,
+  ).run(evaluationId, activatingVersionId);
+  return result.changes === 1;
+}
+
+/**
  * Bind an evaluation to the immutable version its activation produced, and to
  * the render document derived for it.
  *
@@ -230,17 +265,21 @@ export function markActivated(
   activatedBy: number,
   sceneBlobHash: string,
 ): void {
-  db.prepare(
+  const result = db.prepare(
     `UPDATE tile_activations
      SET state = 'activated', activated_at = datetime('now'),
          activated_by = ?, activated_version_id = ?, scene_blob_hash = ?,
+         activating_version_id = NULL, activating_by = NULL, activating_at = NULL,
          -- The same act and the same person: activating *is* asserting the
          -- mapping, and the route refuses without the assertion. Stored so the
          -- later question is "who checked, against which report" rather than
          -- "was a box ticked".
          mapping_confirmed_at = datetime('now'), mapping_confirmed_by = ?
-     WHERE id = ?`,
-  ).run(activatedBy, activatedVersionId, sceneBlobHash, activatedBy, evaluationId);
+     WHERE id = ? AND state = 'evaluated' AND activating_version_id = ?`,
+  ).run(activatedBy, activatedVersionId, sceneBlobHash, activatedBy, evaluationId, activatedVersionId);
+  if (result.changes !== 1) {
+    throw new Error("tile activation reservation was lost");
+  }
 }
 
 /**

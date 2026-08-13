@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { BlobStore } from "../blobs/store";
 import { compileVenueBundle, CoreCompileError, CoreExportError, exportVenueNetwork, type CompileVenueMetadata } from "../core/native";
 import { attachPackageToVersion } from "../tiles/storage";
+import { markActivated, releaseActivation } from "../tiles/activation";
 
 /** Persisted into `versions.error` (and mirrored into `jobs.error`) verbatim as JSON. */
 interface StructuredError {
@@ -92,6 +93,9 @@ export function makePublishRunner(
       clipToSelection,
       tilesDescriptorJson,
       tilePackageId,
+      tileActivationEvaluationId,
+      tileActivatedBy,
+      tileSceneBlobHash,
     } = JSON.parse(payloadJson) as {
       versionId: number;
       networkJunctionsHash?: string;
@@ -101,6 +105,9 @@ export function makePublishRunner(
       clipToSelection?: boolean;
       tilesDescriptorJson?: string;
       tilePackageId?: number;
+      tileActivationEvaluationId?: number;
+      tileActivatedBy?: number;
+      tileSceneBlobHash?: string;
     };
     const version = db
       .prepare(
@@ -212,6 +219,23 @@ export function makePublishRunner(
           // names a package must reference it, or collection would be free to
           // delete the geometry it is about to serve.
           attachPackageToVersion(db, versionId, tilePackageId);
+          if (
+            tileActivationEvaluationId === undefined
+            || tileActivatedBy === undefined
+            || tileSceneBlobHash === undefined
+          ) {
+            throw new Error("tile activation metadata is incomplete");
+          }
+          // Activation becomes historical fact only when the version serving
+          // it becomes public. A failed or interrupted compilation leaves the
+          // evaluation available for a clean retry.
+          markActivated(
+            db,
+            tileActivationEvaluationId,
+            versionId,
+            tileActivatedBy,
+            tileSceneBlobHash,
+          );
         }
         return result.changes === 1;
       })();
@@ -232,9 +256,15 @@ export function makePublishRunner(
       // left untouched and the job is reported `stale_version` rather
       // than the original — now meaningless — compiler/domain code.
       const candidate = toStructuredError(error);
-      const result = db
-        .prepare(`UPDATE versions SET status = 'failed', bundle_hash = NULL, error = ? WHERE ${identityWhere}`)
-        .run(JSON.stringify(candidate), ...identityParams);
+      const result = db.transaction(() => {
+        const failed = db
+          .prepare(`UPDATE versions SET status = 'failed', bundle_hash = NULL, error = ? WHERE ${identityWhere}`)
+          .run(JSON.stringify(candidate), ...identityParams);
+        if (failed.changes === 1 && tileActivationEvaluationId !== undefined) {
+          releaseActivation(db, tileActivationEvaluationId, versionId);
+        }
+        return failed;
+      })();
       const structured = result.changes === 1 ? candidate : staleVersionError(version.id);
       throw new Error(JSON.stringify(structured));
     }
