@@ -763,9 +763,10 @@ pub(crate) fn encode_graph_attrs(graph: &kiriko_route::RouteGraph) -> Result<Vec
 }
 
 /// Decode §12 rows and write them onto the already-decoded §5 graph. A
-/// length mismatch or an unknown discriminant leaves the graph's attrs at
-/// their defaults and reports the section invalid; the graph itself is never
-/// failed here.
+/// length mismatch, an unknown discriminant, or a row violating the
+/// `vertical.is_some()` iff `kind == vertical` invariant leaves the graph's
+/// attrs at their defaults and reports the section invalid; the graph itself
+/// is never failed here.
 pub(crate) fn apply_graph_attrs(
     graph: &mut kiriko_route::RouteGraph,
     bytes: &[u8],
@@ -843,6 +844,15 @@ fn attrs_from_dto(dto: &GraphEdgeAttrDto) -> Result<kiriko_route::EdgeAttrs, Bun
             ));
         }
     };
+    // Design invariant: `vertical.is_some()` iff `kind == Vertical`. A row
+    // that violates it is as corrupt as an unknown discriminant — reject it
+    // before any edge is touched.
+    if (kind == EdgeKind::Vertical) != vertical.is_some() {
+        return Err(BundleError::new(
+            BundleErrorCode::InvalidBundle,
+            "graph attrs vertical must be set iff kind is vertical",
+        ));
+    }
     Ok(kiriko_route::EdgeAttrs {
         kind,
         rank,
@@ -1432,6 +1442,121 @@ mod tests {
                 crate::SectionCapability::Invalid { .. }
             ),
             "an unknown discriminant reports §12 invalid"
+        );
+    }
+
+    #[test]
+    fn vertical_must_be_set_iff_kind_is_vertical() {
+        // A valid row first, then one row violating each direction of the
+        // `vertical.is_some()` iff `kind == vertical` invariant: a Vertical
+        // edge with no transition category, and a non-vertical edge carrying
+        // one. Both must invalidate §12 atomically, exactly like an unknown
+        // discriminant.
+        let manifest_bytes =
+            postcard::to_allocvec(&manifest_section_with_ordinal(1.0)).expect("dto encodes");
+        let graph_bytes = postcard::to_allocvec(&GraphSectionDto {
+            nodes: vec![
+                GraphNodeDto {
+                    lon: 139.7,
+                    lat: 35.6,
+                    ordinal: 0.0,
+                },
+                GraphNodeDto {
+                    lon: 139.7,
+                    lat: 35.7,
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![
+                GraphEdgeDto {
+                    from: 0,
+                    to: 1,
+                    weight: 100.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
+                GraphEdgeDto {
+                    from: 1,
+                    to: 0,
+                    weight: 200.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                },
+            ],
+        })
+        .expect("graph dto encodes");
+
+        // Direction 1: kind = Vertical (6) but vertical = None.
+        let attrs_bytes = postcard::to_allocvec(&GraphAttrsSectionDto {
+            edges: vec![
+                GraphEdgeAttrDto {
+                    kind: 6,
+                    rank: 1,
+                    clearance_m: None,
+                    vertical: Some(1),
+                },
+                GraphEdgeAttrDto {
+                    kind: 6,
+                    rank: 1,
+                    clearance_m: None,
+                    vertical: None,
+                },
+            ],
+        })
+        .expect("attrs dto encodes");
+        let bytes = wrap_bundle_with_graph_and_attrs(
+            manifest_bytes.clone(),
+            graph_bytes.clone(),
+            attrs_bytes,
+        );
+        let decoded =
+            crate::decode_bundle(&bytes).expect("an invalid §12 must not fail the bundle");
+        let graph = decoded.graph.expect("the §5 graph still loads");
+        assert_eq!(graph.edges.len(), 2);
+        assert!(
+            graph.edges.iter().all(|e| e.attrs.is_default()),
+            "a vertical edge without a transition category must leave every edge default, including rows before the bad one"
+        );
+        assert!(
+            matches!(
+                decoded.capabilities.graph_attrs(),
+                crate::SectionCapability::Invalid { .. }
+            ),
+            "a vertical edge without a transition category reports §12 invalid"
+        );
+
+        // Direction 2: kind != Vertical but vertical = Some.
+        let attrs_bytes = postcard::to_allocvec(&GraphAttrsSectionDto {
+            edges: vec![
+                GraphEdgeAttrDto {
+                    kind: 0,
+                    rank: 1,
+                    clearance_m: None,
+                    vertical: Some(2),
+                },
+                GraphEdgeAttrDto {
+                    kind: 0,
+                    rank: 1,
+                    clearance_m: None,
+                    vertical: None,
+                },
+            ],
+        })
+        .expect("attrs dto encodes");
+        let bytes = wrap_bundle_with_graph_and_attrs(manifest_bytes, graph_bytes, attrs_bytes);
+        let decoded =
+            crate::decode_bundle(&bytes).expect("an invalid §12 must not fail the bundle");
+        let graph = decoded.graph.expect("the §5 graph still loads");
+        assert!(
+            graph.edges.iter().all(|e| e.attrs.is_default()),
+            "a non-vertical edge with a transition category must leave every edge default, including rows before the bad one"
+        );
+        assert!(
+            matches!(
+                decoded.capabilities.graph_attrs(),
+                crate::SectionCapability::Invalid { .. }
+            ),
+            "a non-vertical edge with a transition category reports §12 invalid"
         );
     }
 
