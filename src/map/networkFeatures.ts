@@ -181,8 +181,8 @@ export function buildNetworkFeatures(
       const targetOrdinal = floorLabelToOrdinal(targetFloor);
       if (fromOrdinal === null || targetOrdinal === null) continue;
 
-      const fromCoordinate = pointCoordinate(junctionByNodeId.get(fromNodeId));
-      const targetCoordinate = pointCoordinate(junctionByNodeId.get(toNodeId));
+      const fromCoordinate = pointCoordinates(junctionByNodeId.get(fromNodeId));
+      const targetCoordinate = pointCoordinates(junctionByNodeId.get(toNodeId));
       if (fromCoordinate === null || targetCoordinate === null) continue;
 
       let endpointNodeId: number;
@@ -484,8 +484,8 @@ function movePathEndpoint(
 }
 
 /** Finite [lon, lat] of a junction Point, or null. */
-function pointCoordinates(feature: NetworkFeature): [number, number] | null {
-  if (feature.geometry.type !== "Point") return null;
+function pointCoordinates(feature: NetworkFeature | undefined): [number, number] | null {
+  if (feature == null || feature.geometry.type !== "Point") return null;
   const lon = feature.geometry.coordinates[0];
   const lat = feature.geometry.coordinates[1];
   return typeof lon === "number" &&
@@ -496,9 +496,6 @@ function pointCoordinates(feature: NetworkFeature): [number, number] | null {
     : null;
 }
 
-function pointCoordinate(feature: NetworkFeature | undefined): GeoJSON.Position | null {
-  return feature?.geometry.type === "Point" ? feature.geometry.coordinates : null;
-}
 
 /**
  * Append a new `net_junction` on `ordinal` with the canonical export defaults
