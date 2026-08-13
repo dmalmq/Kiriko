@@ -23,7 +23,7 @@ use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
 use kiriko_route::{
     EdgeAttrs, EdgeKind, RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode,
-    vertical_from_key,
+    VerticalKind,
 };
 
 use crate::codec::BundleDocument;
@@ -46,14 +46,28 @@ const VERTICAL_MATCH_M: f64 = 5.0;
 /// openings instead.
 const ADJACENCY_MAX_M: f64 = 30.0;
 
-/// Extra metres-equivalent cost added to a vertical link by transit kind
-/// (elevator cheapest, stairs dearest). Unknown kinds fall back to stairs.
-fn floor_cost(category: &str) -> f64 {
+/// Transit category → [`VerticalKind`]. Unknown categories fall back to stairs.
+pub(crate) fn vertical_kind(category: &str) -> VerticalKind {
     match category {
-        "elevator" => 3.0,
-        "escalator" => 4.0,
-        _ => 5.0,
+        "elevator" => VerticalKind::Elevator,
+        "escalator" => VerticalKind::Escalator,
+        _ => VerticalKind::Stairs,
     }
+}
+
+/// Metres-equivalent cost of a vertical link: a fixed entry penalty per
+/// transit kind plus a per-floor charge scaled by the ordinal span between
+/// the linked levels (elevator cheapest, stairs dearest). The horizontal
+/// footprint displacement is deliberately excluded — the matcher uses it
+/// only to pick WHICH units link, never how much a floor change costs.
+pub(crate) fn vertical_cost_m(kind: VerticalKind, lower_ord: f64, upper_ord: f64) -> f64 {
+    let floors = (upper_ord - lower_ord).abs();
+    let (entry, per_floor) = match kind {
+        VerticalKind::Elevator => (15.0, 1.0),
+        VerticalKind::Escalator => (0.0, 4.0),
+        VerticalKind::Stairs => (0.0, 10.0),
+    };
+    entry + floors * per_floor
 }
 
 fn is_walkway(category: &str) -> bool {
@@ -626,15 +640,16 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
             let matched_lower: BTreeSet<u32> =
                 matches.iter().map(|pair| pair.lower_node_id).collect();
             for pair in matches {
+                let kind = vertical_kind(&category);
                 edges.push(RouteEdge {
                     from: pair.lower_node_id,
                     to: pair.upper_node_id,
-                    weight: (pair.horizontal_distance_m + floor_cost(&category)) as f32,
+                    weight: vertical_cost_m(kind, lower_ordinal, upper_ordinal) as f32,
                     ordinal: lower_ordinal,
                     interior: Vec::new(),
                     attrs: EdgeAttrs {
                         kind: EdgeKind::Vertical,
-                        vertical: vertical_from_key(&category),
+                        vertical: Some(kind),
                         ..EdgeAttrs::default()
                     },
                 });
@@ -897,10 +912,40 @@ mod tests {
             build.graph.edges
         );
         let e = &build.graph.edges[0];
-        // Coincident footprints → vertical weight ≈ stairs floor cost in canonical
-        // cost units (5.0 m × 1000 = 5000), NOT the raw 5.0 metres.
-        assert!((e.weight - 5000.0).abs() < 1.0, "weight = {}", e.weight);
+        // Coincident footprints → vertical weight is the stairs entry-plus-
+        // per-floor cost: (0 m + 1 floor × 10 m) × 1000 cost units per metre.
+        assert_eq!(e.weight, kiriko_route::meters_to_cost(10.0), "stairs one floor");
         assert_eq!(e.ordinal, 0.0);
+    }
+
+    #[test]
+    fn stairs_two_ordinals_up_cost_twice_the_per_floor_charge() {
+        // L0 → L2 with no stairs on L1: the single vertical link spans two
+        // ordinal steps, so the per-floor charge applies twice
+        // (0 m entry + 2 floors × 10 m) × 1000 cost units per metre.
+        let features = vec![
+            feature(
+                "s0",
+                FeatureType::Unit,
+                "L0",
+                Some("stairs"),
+                polygon(&square(0.001, 0.001, 0.0004)),
+            ),
+            feature(
+                "s2",
+                FeatureType::Unit,
+                "L2",
+                Some("stairs"),
+                polygon(&square(0.001, 0.001, 0.0004)),
+            ),
+        ];
+        let build = synthesize_network(&document(&[("L0", 0.0), ("L2", 2.0)], features));
+        assert_eq!(build.graph.edges.len(), 1, "edges = {:?}", build.graph.edges);
+        assert_eq!(
+            build.graph.edges[0].weight,
+            kiriko_route::meters_to_cost(20.0),
+            "two-floor stairs"
+        );
     }
 
     #[test]
@@ -979,7 +1024,7 @@ mod tests {
             &[("L0", 0.0), ("L1", 1.0), ("L2", 2.0)],
             features,
         ));
-        let vertical = build
+        let vertical: Vec<_> = build
             .graph
             .edges
             .iter()
@@ -987,8 +1032,17 @@ mod tests {
                 build.graph.nodes[edge.from as usize].ordinal
                     != build.graph.nodes[edge.to as usize].ordinal
             })
-            .count();
-        assert_eq!(vertical, 2);
+            .collect();
+        assert_eq!(vertical.len(), 2);
+        // Each link is one ordinal step: elevator entry 15 m + 1 floor × 1 m,
+        // in canonical cost units.
+        for edge in vertical {
+            assert_eq!(
+                edge.weight,
+                kiriko_route::meters_to_cost(16.0),
+                "elevator one floor"
+            );
+        }
     }
 
     #[test]

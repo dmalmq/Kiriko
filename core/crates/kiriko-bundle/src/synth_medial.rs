@@ -25,13 +25,15 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::codec::BundleDocument;
-use crate::synth::{haversine_m, linestring_midpoint, point_boundary_dist_m, polygon_centroid};
+use crate::synth::{
+    haversine_m, linestring_midpoint, point_boundary_dist_m, polygon_centroid, vertical_cost_m,
+    vertical_kind,
+};
 use crate::transit_match::{TransitPair, minimum_cost_maximum_matching};
 use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
 use kiriko_route::{
     EdgeAttrs, EdgeKind, RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode,
-    vertical_from_key,
 };
 
 /// Convert one canonical GeoJSON ring (`[[lon,lat],…]`) to a geo `LineString`.
@@ -777,13 +779,6 @@ fn is_walkway(category: &str) -> bool {
 }
 fn is_transit(category: &str) -> bool {
     matches!(category, "elevator" | "escalator" | "stairs")
-}
-fn floor_cost(category: &str) -> f64 {
-    match category {
-        "elevator" => 3.0,
-        "escalator" => 4.0,
-        _ => 5.0,
-    }
 }
 
 /// Largest-area `geo` polygon of a canonical transit-unit geometry, if any.
@@ -1986,15 +1981,16 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             let matched_lower: BTreeSet<u32> =
                 matches.iter().map(|pair| pair.lower_node_id).collect();
             for pair in matches {
+                let kind = vertical_kind(&category);
                 edges.push(RouteEdge {
                     from: pair.lower_node_id,
                     to: pair.upper_node_id,
-                    weight: (pair.horizontal_distance_m + floor_cost(&category)) as f32,
+                    weight: vertical_cost_m(kind, lower_ordinal, upper_ordinal) as f32,
                     ordinal: lower_ordinal,
                     interior: Vec::new(),
                     attrs: EdgeAttrs {
                         kind: EdgeKind::Vertical,
-                        vertical: vertical_from_key(&category),
+                        vertical: Some(kind),
                         ..EdgeAttrs::default()
                     },
                 });
@@ -2344,7 +2340,7 @@ mod tests {
         }
         let doc = document(&[("l0", 0.0), ("l1", 1.0)], features);
         let build = synthesize_network_medial(&doc);
-        let vertical = build
+        let vertical: Vec<_> = build
             .graph
             .edges
             .iter()
@@ -2352,10 +2348,18 @@ mod tests {
                 build.graph.nodes[e.from as usize].ordinal
                     != build.graph.nodes[e.to as usize].ordinal
             })
-            .count();
+            .collect();
         assert_eq!(
-            vertical, 1,
+            vertical.len(),
+            1,
             "overlapping stair footprints link exactly once"
+        );
+        // The ~11 m centroid offset must NOT enter the weight: stairs one
+        // floor cost (0 m entry + 1 floor × 10 m) × 1000 cost units per metre.
+        assert_eq!(
+            vertical[0].weight,
+            kiriko_route::meters_to_cost(10.0),
+            "stairs one floor, horizontal offset excluded"
         );
     }
 
@@ -2424,7 +2428,7 @@ mod tests {
             &[("L0", 0.0), ("L1", 1.0), ("L2", 2.0)],
             features,
         ));
-        let vertical = build
+        let vertical: Vec<_> = build
             .graph
             .edges
             .iter()
@@ -2432,8 +2436,16 @@ mod tests {
                 build.graph.nodes[edge.from as usize].ordinal
                     != build.graph.nodes[edge.to as usize].ordinal
             })
-            .count();
-        assert_eq!(vertical, 2);
+            .collect();
+        assert_eq!(vertical.len(), 2);
+        // Each link is one ordinal step: elevator entry 15 m + 1 floor × 1 m.
+        for edge in vertical {
+            assert_eq!(
+                edge.weight,
+                kiriko_route::meters_to_cost(16.0),
+                "elevator one floor"
+            );
+        }
     }
 
     /// Number of connected components of a RouteGraph (undirected).
