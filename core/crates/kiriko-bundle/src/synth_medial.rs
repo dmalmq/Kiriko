@@ -22,10 +22,11 @@ use geo::algorithm::orient::{Direction, Orient};
 use geo::{Coord, LineString, MultiPolygon, Polygon};
 use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::codec::BundleDocument;
 use crate::synth::{haversine_m, linestring_midpoint, point_boundary_dist_m, polygon_centroid};
+use crate::transit_match::{TransitPair, minimum_cost_maximum_matching};
 use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
 use kiriko_route::{RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode};
@@ -1887,36 +1888,72 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         }
     }
 
-    // Vertical transitions: match each transit unit to the nearest same-kind
-    // unit on the next consecutive floor.
+    // Vertical transitions: for each adjacent ordinal pair, group transit
+    // nodes by exact category and link them with deterministic one-to-one
+    // matching — maximum cardinality first, minimum total horizontal
+    // distance second. Footprint overlap keeps switchbacks linkable.
     transit_all.sort_by_key(|a| a.0);
-    let next_ordinal = |o: f64| -> Option<f64> {
-        let pos = ordinals.iter().position(|&x| x == o)?;
-        ordinals.get(pos + 1).copied()
-    };
-    for (idx, pt, category, ord, footprint) in transit_all.iter() {
-        let Some(next) = next_ordinal(*ord) else {
-            continue;
-        };
-        let mut best: Option<(u32, f64)> = None;
-        for (cidx, cpt, ccat, cord, cfoot) in transit_all.iter() {
-            if *cord != next || ccat != category {
-                continue;
-            }
-            let d = haversine_m(*pt, *cpt);
-            let linkable = d <= VERTICAL_MATCH_M || footprints_overlap(footprint, cfoot);
-            if linkable && best.is_none_or(|(bi, bd)| d < bd || (d == bd && *cidx < bi)) {
-                best = Some((*cidx, d));
+    for ordinal_pair in ordinals.windows(2) {
+        let lower_ordinal = ordinal_pair[0];
+        let upper_ordinal = ordinal_pair[1];
+        let mut lower_categories: BTreeSet<String> = BTreeSet::new();
+        for (_, _, category, ordinal, _) in &transit_all {
+            if *ordinal == lower_ordinal {
+                lower_categories.insert(category.clone());
             }
         }
-        if let Some((cidx, d)) = best {
-            edges.push(RouteEdge {
-                from: *idx,
-                to: cidx,
-                weight: (d + floor_cost(category)) as f32,
-                ordinal: *ord,
-                interior: Vec::new(),
-            });
+        for category in lower_categories {
+            let lower: Vec<_> = transit_all
+                .iter()
+                .filter(|(_, _, candidate_category, ordinal, _)| {
+                    *ordinal == lower_ordinal && candidate_category == &category
+                })
+                .collect();
+            let upper: Vec<_> = transit_all
+                .iter()
+                .filter(|(_, _, candidate_category, ordinal, _)| {
+                    *ordinal == upper_ordinal && candidate_category == &category
+                })
+                .collect();
+            let admissible: Vec<TransitPair> = lower
+                .iter()
+                .flat_map(|(lower_id, lower_point, _, _, lower_footprint)| {
+                    upper
+                        .iter()
+                        .filter_map(|(upper_id, upper_point, _, _, upper_footprint)| {
+                            let distance = haversine_m(*lower_point, *upper_point);
+                            let linkable = distance <= VERTICAL_MATCH_M
+                                || footprints_overlap(lower_footprint, upper_footprint);
+                            linkable.then_some(TransitPair {
+                                lower_node_id: *lower_id,
+                                upper_node_id: *upper_id,
+                                horizontal_distance_m: distance,
+                            })
+                        })
+                })
+                .collect();
+            let matches = minimum_cost_maximum_matching(&admissible);
+            let matched_lower: BTreeSet<u32> =
+                matches.iter().map(|pair| pair.lower_node_id).collect();
+            for pair in matches {
+                edges.push(RouteEdge {
+                    from: pair.lower_node_id,
+                    to: pair.upper_node_id,
+                    weight: (pair.horizontal_distance_m + floor_cost(&category)) as f32,
+                    ordinal: lower_ordinal,
+                    interior: Vec::new(),
+                });
+            }
+            for (lower_id, _, _, _, _) in &lower {
+                if !matched_lower.contains(lower_id) {
+                    warnings.push(RouteBuildWarning {
+                        code: "synth_transit_no_link".into(),
+                        detail: format!(
+                            "transit node {lower_id} ({category}) on ordinal {lower_ordinal} has no match on ordinal {upper_ordinal}"
+                        ),
+                    });
+                }
+            }
         }
     }
 
@@ -1946,7 +1983,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
 mod tests {
     use super::*;
     use geo::algorithm::area::Area;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// Canonical `Polygon` for an axis-aligned square of `size` at `(cx, cy)`.
     fn square(cx: f64, cy: f64, size: f64) -> Value {
@@ -2174,10 +2211,96 @@ mod tests {
         }
         let doc = document(&[("l0", 0.0), ("l1", 1.0)], features);
         let build = synthesize_network_medial(&doc);
-        let vertical = build.graph.edges.iter().any(|e| {
-            build.graph.nodes[e.from as usize].ordinal != build.graph.nodes[e.to as usize].ordinal
-        });
-        assert!(vertical, "overlapping stair footprints link the floors");
+        let vertical = build
+            .graph
+            .edges
+            .iter()
+            .filter(|e| {
+                build.graph.nodes[e.from as usize].ordinal
+                    != build.graph.nodes[e.to as usize].ordinal
+            })
+            .count();
+        assert_eq!(
+            vertical, 1,
+            "overlapping stair footprints link exactly once"
+        );
+    }
+
+    #[test]
+    fn medial_vertical_matching_has_no_fan_in() {
+        // Two stair pairs per floor. Lower stairs at 0 m and 1.9 m, upper at
+        // 1 m and 3 m: independent nearest-neighbor linking sends BOTH lowers
+        // to the 1 m upper, while a full two-pair assignment exists.
+        let xy = xy_at(139.7, 35.6);
+        let mut features = Vec::new();
+        for (level, lower_floor) in [("L0", true), ("L1", false)] {
+            features.push(feature(
+                &format!("walk-{level}"),
+                FeatureType::Unit,
+                level,
+                Some("walkway"),
+                rect(139.7, 35.6, 0.00020, 0.00010),
+            ));
+            let offsets = if lower_floor { [0.0, 1.9] } else { [1.0, 3.0] };
+            for (index, x) in offsets.into_iter().enumerate() {
+                let center = xy(x, 0.0);
+                features.push(feature(
+                    &format!("stairs-{level}-{index}"),
+                    FeatureType::Unit,
+                    level,
+                    Some("stairs"),
+                    rect(center[0], center[1], 0.000004, 0.000004),
+                ));
+            }
+        }
+        let build = synthesize_network_medial(&document(&[("L0", 0.0), ("L1", 1.0)], features));
+        let vertical: Vec<_> = build
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                build.graph.nodes[edge.from as usize].ordinal
+                    != build.graph.nodes[edge.to as usize].ordinal
+            })
+            .collect();
+        assert_eq!(vertical.len(), 2);
+        let targets: BTreeSet<u32> = vertical.iter().map(|edge| edge.to).collect();
+        assert_eq!(targets.len(), 2, "each upper unit is matched at most once");
+    }
+
+    #[test]
+    fn medial_middle_floor_transit_matches_down_and_up() {
+        let mut features = Vec::new();
+        for level in ["L0", "L1", "L2"] {
+            features.push(feature(
+                &format!("walk-{level}"),
+                FeatureType::Unit,
+                level,
+                Some("walkway"),
+                square(139.7, 35.6, 0.0002),
+            ));
+            features.push(feature(
+                &format!("elevator-{level}"),
+                FeatureType::Unit,
+                level,
+                Some("elevator"),
+                rect(139.7, 35.6, 0.00001, 0.00001),
+            ));
+        }
+        let build = synthesize_network_medial(&document(
+            &[("L0", 0.0), ("L1", 1.0), ("L2", 2.0)],
+            features,
+        ));
+        let vertical = build
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                build.graph.nodes[edge.from as usize].ordinal
+                    != build.graph.nodes[edge.to as usize].ordinal
+            })
+            .count();
+        assert_eq!(vertical, 2);
     }
 
     /// Number of connected components of a RouteGraph (undirected).
