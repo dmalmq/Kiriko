@@ -33,7 +33,8 @@ use crate::transit_match::{TransitPair, minimum_cost_maximum_matching};
 use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
 use kiriko_route::{
-    EdgeAttrs, EdgeKind, RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode,
+    EdgeAttrs, EdgeKind, PathwayRank, RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild,
+    RouteNode,
 };
 
 /// Convert one canonical GeoJSON ring (`[[lon,lat],…]`) to a geo `LineString`.
@@ -1218,6 +1219,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
 
     for &ord in &ordinals {
         let mut walk: Vec<&Value> = Vec::new();
+        let mut room_polys: Vec<Polygon<f64>> = Vec::new();
         let mut openings: Vec<OpeningAxis> = Vec::new();
         let mut transit: Vec<TransitUnit<'_>> = Vec::new();
         for f in &document.features {
@@ -1241,6 +1243,13 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         && let Some(c) = polygon_centroid(geom)
                     {
                         transit.push((c, category.to_string(), largest_polygon(geom), geom));
+                    } else {
+                        // Every other categorized unit (rooms, shops, service
+                        // areas, …) is a non-walkway, non-transit footprint:
+                        // centerlines whose midpoint crosses one of these are
+                        // re-ranked Secondary after emit (sloppy IMDF where a
+                        // walkway overlaps a room).
+                        room_polys.extend(geo_polygons(geom));
                     }
                 }
                 FeatureType::Opening => {
@@ -1585,6 +1594,11 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         }
 
         // Emit skeleton (now including any doorway T-junction splits).
+        // Floor-local edge range: the Secondary re-rank pass below touches
+        // only edges emitted on THIS floor (skeleton, doorway, bridge, chord,
+        // transit attach); verticals are added after all floors and never
+        // see the pass.
+        let floor_edges_start = edges.len();
         let base = nodes.len();
         for n in &skeleton.nodes {
             nodes.push(RouteNode {
@@ -1930,6 +1944,37 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 }
             }
             transit_all.push((idx as u32, *tp, category.clone(), ord, footprint.clone()));
+        }
+
+        // Secondary-rank centerlines: any Skeleton/Bridge/Chord edge whose
+        // midpoint falls inside a non-walkway, non-transit unit (rooms etc.)
+        // is demoted to Secondary and charged 3× its metre length. This models
+        // sloppy IMDF where a walkway overlaps a room on GDB conversion — the
+        // medial axis (built from walkways alone) runs straight through the
+        // room, and routing through the room should cost more than along a
+        // real corridor. Doorway / transit-attach edges never match (kinds
+        // filtered), and verticals are added after all floors. The 3× factor
+        // is applied on metres, before the global `meters_to_cost` conversion.
+        if !room_polys.is_empty() {
+            for e in &mut edges[floor_edges_start..] {
+                if !matches!(
+                    e.attrs.kind,
+                    EdgeKind::Skeleton | EdgeKind::Bridge | EdgeKind::Chord
+                ) {
+                    continue;
+                }
+                let mid = [
+                    (nodes[e.from as usize].lon + nodes[e.to as usize].lon) / 2.0,
+                    (nodes[e.from as usize].lat + nodes[e.to as usize].lat) / 2.0,
+                ];
+                if room_polys
+                    .iter()
+                    .any(|p| p.contains(&Point::new(mid[0], mid[1])))
+                {
+                    e.attrs.rank = PathwayRank::Secondary;
+                    e.weight *= 3.0;
+                }
+            }
         }
     }
 
@@ -2291,6 +2336,84 @@ mod tests {
         assert!(
             build.graph.edges.iter().any(|e| e.attrs.kind == EdgeKind::Vertical),
             "stacked transit is typed Vertical"
+        );
+    }
+
+    #[test]
+    fn skeleton_through_a_room_is_secondary_and_tripled() {
+        // Sloppy IMDF (GDB conversion): the `room` unit polygon OVERLAPS the
+        // east half of the walkway. The medial axis is built from the walkway
+        // alone, so centerline midpoints on the overlapped half sit inside the
+        // room → Secondary at 3× metres. The doorway attach crossing the same
+        // overlap must stay Primary.
+        let walk = rect(139.70000, 35.60000, 0.00040, 0.00008); // ~36 m × 9 m
+        let room = rect(139.70010, 35.60000, 0.00016, 0.00016); // east-half overlap
+        let door = line(139.70008, 35.59996, 139.70013, 35.59996); // south wall
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("r", FeatureType::Unit, "l0", Some("room"), room),
+                feature("door", FeatureType::Opening, "l0", None, door),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+
+        let secondary: Vec<_> = g
+            .edges
+            .iter()
+            .filter(|e| e.attrs.rank == kiriko_route::PathwayRank::Secondary)
+            .collect();
+        assert!(
+            !secondary.is_empty(),
+            "room-overlapped centerlines are ranked secondary"
+        );
+        for e in secondary {
+            let metres = haversine_m(
+                [g.nodes[e.from as usize].lon, g.nodes[e.from as usize].lat],
+                [g.nodes[e.to as usize].lon, g.nodes[e.to as usize].lat],
+            );
+            assert!(
+                (e.weight - kiriko_route::meters_to_cost(metres * 3.0)).abs() < 1.0,
+                "secondary weight is 3× metres: got {} expected {}",
+                e.weight,
+                kiriko_route::meters_to_cost(metres * 3.0)
+            );
+            assert!(
+                matches!(
+                    e.attrs.kind,
+                    EdgeKind::Skeleton | EdgeKind::Bridge | EdgeKind::Chord
+                ),
+                "only centerline kinds are re-ranked, got {:?}",
+                e.attrs.kind
+            );
+        }
+
+        // The walkway outside the room keeps its Primary centerlines.
+        assert!(
+            g.edges.iter().any(|e| {
+                e.attrs.kind == EdgeKind::Skeleton
+                    && e.attrs.rank == kiriko_route::PathwayRank::Primary
+            }),
+            "walkway outside the room stays primary"
+        );
+
+        // Doorway attach edges crossing the same room are never re-ranked.
+        let doorway_edges: Vec<_> = g
+            .edges
+            .iter()
+            .filter(|e| e.attrs.kind == EdgeKind::Doorway)
+            .collect();
+        assert!(
+            !doorway_edges.is_empty(),
+            "fixture produces a doorway attach"
+        );
+        assert!(
+            doorway_edges
+                .iter()
+                .all(|e| e.attrs.rank == kiriko_route::PathwayRank::Primary),
+            "doorway attach edges stay primary"
         );
     }
 
