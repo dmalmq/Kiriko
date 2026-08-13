@@ -104,6 +104,8 @@ const mapState = vi.hoisted(() => {
     styleAvailable = initialStyleLoaded;
     sourceLoaded = true;
     floorSourceLoaded = true;
+    floorSourcePresent = true;
+    invalidSourceLoadChecks = 0;
     center = { lng: 0, lat: 0 };
     zoom = 0;
     removed = false;
@@ -247,6 +249,7 @@ const mapState = vi.hoisted(() => {
     removeSource(id: string): void {
       if (id === FLOOR_ELEVATION_SOURCE_ID) {
         this.floorSourceLoaded = false;
+        this.floorSourcePresent = false;
         this.floorSourceOperations.push({ kind: "remove" });
       }
     }
@@ -255,6 +258,7 @@ const mapState = vi.hoisted(() => {
       if (id !== FLOOR_ELEVATION_SOURCE_ID) {
         return;
       }
+      this.floorSourcePresent = true;
       this.floorSourceOperations.push({
         kind: "add",
         tiles: source.tiles ?? [],
@@ -281,6 +285,10 @@ const mapState = vi.hoisted(() => {
     }
 
     isSourceLoaded(id?: string): boolean {
+      if (id === FLOOR_ELEVATION_SOURCE_ID && !this.floorSourcePresent) {
+        this.invalidSourceLoadChecks += 1;
+        throw new Error(`There is no tile manager with ID '${id}'`);
+      }
       return id === FLOOR_ELEVATION_SOURCE_ID
         ? this.floorSourceLoaded
         : this.sourceLoaded;
@@ -1880,13 +1888,8 @@ describe("IndoorMap scene floor elevation", () => {
     rerender(baseProps({ scene, levelId: "level-2" }));
 
     expect(map.styleLoaded).toBe(false);
-    expect(map.floorSourceOperations).toEqual([
-      { kind: "remove" },
-      {
-        kind: "add",
-        tiles: ["kiriko-floor://12000/{z}/{x}/{y}"],
-      },
-    ]);
+    expect(map.floorTileUrls).toEqual([["kiriko-floor://12000/{z}/{x}/{y}"]]);
+    expect(map.floorSourceOperations).toEqual([]);
     expect(map.terrainCalls.at(-1)).toBeNull();
     expect(currentSceneDiagnostics().activeLevelIndices()).toEqual([0]);
 
@@ -1914,7 +1917,7 @@ describe("IndoorMap scene floor elevation", () => {
   });
 
 
-  it("replaces a zero-plane source when the scene arrives after map creation", () => {
+  it("retargets a zero-plane source when the scene arrives after map creation", () => {
     const { map, rerender } = renderMap(baseProps({ scene: null }));
     expect(map.initialFloorStyleTiles).toEqual([
       "kiriko-floor://0/{z}/{x}/{y}",
@@ -1922,14 +1925,9 @@ describe("IndoorMap scene floor elevation", () => {
 
     rerender(baseProps({ scene, levelId: "level-1" }));
 
-    expect(map.floorSourceOperations).toEqual([
-      { kind: "remove" },
-      {
-        kind: "add",
-        tiles: ["kiriko-floor://8000/{z}/{x}/{y}"],
-      },
-    ]);
-    expect(map.floorTileUrls).toEqual([]);
+    expect(map.floorSourceOperations).toEqual([]);
+    expect(map.invalidSourceLoadChecks).toBe(0);
+    expect(map.floorTileUrls).toEqual([["kiriko-floor://8000/{z}/{x}/{y}"]]);
     expect(map.terrainCalls.at(-1)).toEqual({
       source: FLOOR_ELEVATION_SOURCE_ID,
       exaggeration: 1,
@@ -1951,13 +1949,8 @@ describe("IndoorMap scene floor elevation", () => {
 
     rerender(baseProps({ scene, levelId: "level-2" }));
 
-    expect(map.floorSourceOperations).toEqual([
-      { kind: "remove" },
-      {
-        kind: "add",
-        tiles: ["kiriko-floor://12000/{z}/{x}/{y}"],
-      },
-    ]);
+    expect(map.floorSourceOperations).toEqual([]);
+    expect(map.floorTileUrls).toEqual([["kiriko-floor://12000/{z}/{x}/{y}"]]);
     expect(map.terrainCalls.at(-1)).toEqual({
       source: FLOOR_ELEVATION_SOURCE_ID,
       exaggeration: 1,
@@ -1970,7 +1963,7 @@ describe("IndoorMap scene floor elevation", () => {
         directions: crossFloorDirections(CROSS_FLOOR_ROUTE),
       }),
     );
-    expect(map.floorSourceOperations).toHaveLength(2);
+    expect(map.floorTileUrls).toHaveLength(1);
   });
 
   it("detaches terrain when the scene returns to 2D", () => {
