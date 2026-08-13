@@ -930,18 +930,28 @@ export function IndoorMap({
           map.setTerrain(null);
           floorElevationAttachedUrlRef.current = null;
         }
-        if (map.getSource(FLOOR_ELEVATION_SOURCE_ID) != null) {
-          map.removeSource(FLOOR_ELEVATION_SOURCE_ID);
-        }
         floorElevationUrlRef.current = tileUrl;
+        // Arm the waiter before mutating: a synchronous `sourcedata` from the
+        // mutation must land on it. The source is never removed to swap — it
+        // is retargeted in place — because MapLibre answers `isSourceLoaded`
+        // against the live manager map, and a remove/add window makes that
+        // probe throw from inside the library's own render loop.
         floorElevationReadyCancelRef.current = whenFloorElevationReady(
           map,
           attachTerrain,
         );
-        map.addSource(FLOOR_ELEVATION_SOURCE_ID, {
-          ...floorElevationSource(),
-          tiles: [tileUrl],
-        });
+        const existing = map.getSource(FLOOR_ELEVATION_SOURCE_ID);
+        if (existing != null && "setTiles" in existing) {
+          (existing as { setTiles: (tiles: string[]) => void }).setTiles([tileUrl]);
+        } else {
+          if (existing != null) {
+            map.removeSource(FLOOR_ELEVATION_SOURCE_ID);
+          }
+          map.addSource(FLOOR_ELEVATION_SOURCE_ID, {
+            ...floorElevationSource(),
+            tiles: [tileUrl],
+          });
+        }
       } else if (floorElevationAttachedUrlRef.current === tileUrl) {
         applyDesiredSceneLevels();
       } else if (floorElevationReadyCancelRef.current === null) {

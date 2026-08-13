@@ -211,6 +211,30 @@ describe("tile package list", () => {
     expect(entry.evaluation!.activatedAt).not.toBeNull();
   });
 
+  it("stops calling a historical package serving after a plain publication supersedes it", async () => {
+    const venue = await publishedVenue("Superseded serving");
+    const packageId = await ingestCorridor(venue);
+    await venue.app.inject({
+      method: "POST",
+      url: `/api/venues/${venue.venueId}/tiles/${packageId}/registration`,
+      headers: { cookie: venue.cookie },
+      payload: { capabilityProfile: "webgl2-mrt-float" },
+    });
+    const activated = await venue.app.inject({
+      method: "POST",
+      url: `/api/venues/${venue.venueId}/tiles/${packageId}/activate`,
+      headers: { cookie: venue.cookie },
+      payload: { mappingConfirmed: true },
+    });
+    expect(activated.statusCode, activated.body).toBe(202);
+    await venue.app.queue.idle();
+    expect((await list(venue))[0]!.serving).toBe(true);
+
+    await republish(venue);
+
+    expect((await list(venue))[0]!.serving).toBe(false);
+  });
+
   it("lists newest first", async () => {
     const venue = await publishedVenue("Ordering");
     const first = await ingestCorridor(venue, 0);

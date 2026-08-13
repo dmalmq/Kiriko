@@ -20,6 +20,7 @@ import { cleanupTestApps, loginCookie, makeTestApp } from "./helpers";
 import { corridorPackageGlb, rootTransform } from "../../tests/fixtures/tileRegistration";
 import { venuePlaneFromBundle } from "./tileRegistrationFixtures";
 import { tilesetFixture } from "../../tests/fixtures/tileFixtures";
+import { evaluationTarget, findEvaluation, reserveActivation, storeEvaluation } from "../src/tiles/activation";
 
 afterEach(cleanupTestApps);
 
@@ -214,6 +215,7 @@ describe("tile activation", () => {
     await evaluate(venue, packageId);
 
     const { statusCode } = await activate(venue, packageId);
+    await venue.app.queue.idle();
 
     expect(statusCode).toBe(202);
     const row = venue.app.db
@@ -276,6 +278,154 @@ describe("tile activation", () => {
       .prepare("SELECT bundle_hash AS bundleHash FROM versions WHERE id = ?")
       .get(venue.versionId) as { bundleHash: string };
     expect(previous.bundleHash).toBe(venue.bundleHash);
+  });
+
+  it("keeps the evaluation unactivated when publication fails", async () => {
+    const venue = await publishedVenue("Activation publication failure");
+    const packageId = await ingestCorridor(venue);
+    await evaluate(venue, packageId);
+    venue.app.db.exec(`
+      CREATE TRIGGER reject_activation_publication
+      BEFORE UPDATE OF status ON versions
+      WHEN OLD.status = 'draft' AND NEW.status = 'published'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated activation publication failure');
+      END;
+    `);
+
+    const { statusCode, body } = await activate(venue, packageId);
+    expect(statusCode, JSON.stringify(body)).toBe(202);
+    await venue.app.queue.idle();
+
+    const evaluation = venue.app.db
+      .prepare(
+        `SELECT state, activated_at AS activatedAt,
+                activated_version_id AS activatedVersionId,
+                scene_blob_hash AS sceneBlobHash
+         FROM tile_activations WHERE package_id = ?`,
+      )
+      .get(packageId);
+    expect(evaluation).toEqual({
+      state: "evaluated",
+      activatedAt: null,
+      activatedVersionId: null,
+      sceneBlobHash: null,
+    });
+    const failed = venue.app.db
+      .prepare("SELECT status FROM versions WHERE venue_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(venue.venueId);
+    expect(failed).toEqual({ status: "failed" });
+  });
+
+  it("keeps an activation evaluation immutable while publication is in flight", async () => {
+    const venue = await publishedVenue("Activation evaluation reservation");
+    const packageId = await ingestCorridor(venue);
+    await evaluate(venue, packageId);
+
+    const activation = await activate(venue, packageId);
+    expect(activation.statusCode, JSON.stringify(activation.body)).toBe(202);
+    const reserved = venue.app.db
+      .prepare(
+        `SELECT activating_version_id AS activatingVersionId
+         FROM tile_activations WHERE package_id = ?`,
+      )
+      .get(packageId);
+    expect(reserved).toEqual({ activatingVersionId: activation.body["versionId"] });
+
+    const original = findEvaluation(venue.app.db, packageId);
+    const target = evaluationTarget(venue.app.db, venue.venueId);
+    const producer = venue.app.db.prepare("SELECT id FROM users LIMIT 1").get() as { id: number };
+    expect(original).not.toBeNull();
+    expect(target).not.toBeNull();
+    expect(
+      storeEvaluation(venue.app.db, {
+        packageId,
+        target: target!,
+        profile: { id: "must-not-replace-reserved-evaluation", version: 99 },
+        capabilityProfile: original!.capabilityProfile,
+        evaluation: original!.evaluation,
+        evaluatedBy: producer.id,
+      }),
+    ).toBe(false);
+
+    await venue.app.queue.idle();
+    const stored = venue.app.db
+      .prepare(
+        `SELECT profile_id AS profileId, state
+         FROM tile_activations WHERE package_id = ?`,
+      )
+      .get(packageId);
+    expect(stored).toEqual({ profileId: "default", state: "activated" });
+  });
+
+  it("releases an activation reservation when recovery fails its draft version", async () => {
+    const venue = await publishedVenue("Interrupted activation publication");
+    const packageId = await ingestCorridor(venue);
+    await evaluate(venue, packageId);
+    const evaluation = findEvaluation(venue.app.db, packageId);
+    expect(evaluation).not.toBeNull();
+    const draft = venue.app.db
+      .prepare(
+        `INSERT INTO versions
+           (venue_id, seq, public_id, source_blob_hash, source_kind, status)
+         SELECT venue_id, 2, lower(hex(randomblob(32))), source_blob_hash, source_kind, 'draft'
+         FROM versions WHERE id = ?`,
+      )
+      .run(venue.versionId);
+    const draftVersionId = Number(draft.lastInsertRowid);
+    expect(reserveActivation(venue.app.db, evaluation!.id, draftVersionId, 1)).toBe(true);
+
+    venue.app.db
+      .prepare(
+        `UPDATE versions
+         SET status = 'failed', error = '{"code":"interrupted_by_restart"}'
+         WHERE id = ?`,
+      )
+      .run(draftVersionId);
+
+    const stored = venue.app.db
+      .prepare(
+        `SELECT state, activating_version_id AS activatingVersionId
+         FROM tile_activations WHERE package_id = ?`,
+      )
+      .get(packageId);
+    expect(stored).toEqual({ state: "evaluated", activatingVersionId: null });
+  });
+
+  it("retries a failed activation at a fresh version sequence", async () => {
+    const venue = await publishedVenue("Activation publication retry");
+    const packageId = await ingestCorridor(venue);
+    await evaluate(venue, packageId);
+    venue.app.db.exec(`
+      CREATE TRIGGER reject_first_activation_publication
+      BEFORE UPDATE OF status ON versions
+      WHEN OLD.status = 'draft' AND NEW.status = 'published'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated activation publication failure');
+      END;
+    `);
+
+    const first = await activate(venue, packageId);
+    expect(first.statusCode, JSON.stringify(first.body)).toBe(202);
+    await venue.app.queue.idle();
+    venue.app.db.exec("DROP TRIGGER reject_first_activation_publication");
+
+    const retry = await activate(venue, packageId);
+    expect(retry.statusCode, JSON.stringify(retry.body)).toBe(202);
+    expect(retry.body["seq"]).toBe(3);
+    await venue.app.queue.idle();
+
+    const versions = venue.app.db
+      .prepare(
+        `SELECT seq, status FROM versions
+         WHERE venue_id = ? ORDER BY seq`,
+      )
+      .all(venue.venueId);
+    expect(versions).toEqual([
+      { seq: 1, status: "published" },
+      { seq: 2, status: "failed" },
+      { seq: 3, status: "published" },
+    ]);
   });
 
   it("refuses an evaluation the venue has since published past", async () => {

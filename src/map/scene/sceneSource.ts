@@ -74,8 +74,12 @@ export interface SceneSourceState {
 
 export type SceneSourceEvent =
   | { type: "scene_ready" }
-  /** The version's activated package answered: its document is loadable. */
+  /** The package path answered with an activated render document. */
   | { type: "tiles_ready" }
+  /** The package path has no activated document; descend without a warning. */
+  | { type: "tiles_unavailable" }
+  /** The package document could not be fetched or decoded. */
+  | { type: "tiles_failed" }
   | { type: "capability_unmet" }
   | { type: "load_failed" }
   | { type: "context_lost" }
@@ -139,6 +143,32 @@ export function reduceSceneSource(
         return state;
       }
       return { ...state, active: "tiles", reason: null };
+
+    case "tiles_unavailable":
+      if (state.active !== "tiles" && state.active !== "generated") {
+        return state;
+      }
+      return {
+        ...state,
+        active: "generated",
+        reason: null,
+        droppedFrom: null,
+        tileRetriesLeft: 0,
+      };
+
+    case "tiles_failed":
+      if (
+        state.active !== "generated"
+        || state.droppedFrom !== null
+        || state.tileRetriesLeft <= 0
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        droppedFrom: "tiles",
+        tileRetriesLeft: state.tileRetriesLeft - 1,
+      };
 
     case "veil_finished":
       return state.veil ? { ...state, veil: false } : state;

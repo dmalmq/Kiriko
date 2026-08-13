@@ -37,7 +37,7 @@ import {
   descriptorFor,
   evaluationTarget,
   findEvaluation,
-  markActivated,
+  reserveActivation,
   storeEvaluation,
 } from "./activation";
 import { collectTileBlobs, discardPackage, registerTileBlob } from "./storage";
@@ -48,6 +48,8 @@ const ErrorSchema = Type.Object({
   message: Type.String(),
   details: Type.Optional(Type.Unknown()),
 });
+
+class ActivationInProgressError extends Error {}
 
 function errorBody(
   code: string,
@@ -161,9 +163,14 @@ export function registerTileRoutes(app: FastifyInstance): void {
                   (SELECT COUNT(*) FROM tile_package_members m WHERE m.package_id = p.id)
                     AS memberCount,
                   EXISTS (
-                    SELECT 1 FROM version_tile_packages vtp
-                    JOIN versions v ON v.id = vtp.version_id
-                    WHERE vtp.package_id = p.id AND v.status = 'published'
+                    SELECT 1
+                    FROM version_tile_packages vtp
+                    WHERE vtp.package_id = p.id
+                      AND vtp.version_id = (
+                        SELECT id FROM versions
+                        WHERE venue_id = p.venue_id AND status = 'published'
+                        ORDER BY seq DESC LIMIT 1
+                      )
                   ) AS serving
            FROM tile_packages p
            WHERE p.venue_id = ?
@@ -510,7 +517,7 @@ export function registerTileRoutes(app: FastifyInstance): void {
         return reply.code(500).send(errorBody("internal_error", "internal_error"));
       }
 
-      storeEvaluation(request.server.db, {
+      const stored = storeEvaluation(request.server.db, {
         packageId: Number(packageId),
         target,
         profile,
@@ -518,6 +525,9 @@ export function registerTileRoutes(app: FastifyInstance): void {
         evaluation,
         evaluatedBy: request.user.id,
       });
+      if (!stored) {
+        return reply.code(409).send(errorBody("activation_in_progress", "activation_in_progress"));
+      }
 
       return reply.code(200).send({
         state: "evaluated",
@@ -632,45 +642,53 @@ export function registerTileRoutes(app: FastifyInstance): void {
         .run(stored.hash, stored.size);
       registerTileBlob(request.server.db, stored.hash, stored.size);
 
-      const nextSeq = target.seq + 1;
-      const accepted = request.server.queue.enqueuePublication(
-        "publish_imdf",
-        {
-          venueId: Number(venueId),
-          seq: nextSeq,
-          publicId: newPublicVersionId(),
-          sourceBlobHash: target.sourceBlobHash,
-          sourceKind: target.sourceKind,
-          gdbSourceBlobHash: target.gdbSourceBlobHash,
-          gdbPlanJson: target.gdbPlanJson,
-          networkJunctionsBlobHash: target.networkJunctionsBlobHash,
-          networkPathsBlobHash: target.networkPathsBlobHash,
-          facilitiesBlobHash: target.facilitiesBlobHash,
-          synthesized: target.synthesized,
-        },
-        {
-          // Every input is the published version's own, so the new version
-          // differs by exactly the descriptor. Anything reconstructed
-          // differently here would silently recompile the venue.
-          networkJunctionsHash: target.networkJunctionsBlobHash ?? undefined,
-          networkPathsHash: target.networkPathsBlobHash ?? undefined,
-          facilitiesGeoJsonHash: target.facilitiesBlobHash ?? undefined,
-          synthesizeNetwork: target.synthesized,
-          clipToSelection: storedPlanClipsToSelection(target.gdbPlanJson),
-          tilesDescriptorJson: descriptorFor(evaluation, pkg.sourceHash, pkg.rootTilesetHash),
-          tilePackageId: Number(packageId),
-        },
-      );
-      markActivated(
-        request.server.db,
-        evaluation.id,
-        accepted.versionId,
-        request.user.id,
-        stored.hash,
-      );
+      let accepted: { jobId: string; versionId: number; seq: number };
+      try {
+        accepted = request.server.queue.enqueuePublication(
+          "publish_imdf",
+          {
+            venueId: Number(venueId),
+            seq: "next",
+            publicId: newPublicVersionId(),
+            sourceBlobHash: target.sourceBlobHash,
+            sourceKind: target.sourceKind,
+            gdbSourceBlobHash: target.gdbSourceBlobHash,
+            gdbPlanJson: target.gdbPlanJson,
+            networkJunctionsBlobHash: target.networkJunctionsBlobHash,
+            networkPathsBlobHash: target.networkPathsBlobHash,
+            facilitiesBlobHash: target.facilitiesBlobHash,
+            synthesized: target.synthesized,
+          },
+          {
+            // Every input is the published version's own, so the new version
+            // differs by exactly the descriptor. Anything reconstructed
+            // differently here would silently recompile the venue.
+            networkJunctionsHash: target.networkJunctionsBlobHash ?? undefined,
+            networkPathsHash: target.networkPathsBlobHash ?? undefined,
+            facilitiesGeoJsonHash: target.facilitiesBlobHash ?? undefined,
+            synthesizeNetwork: target.synthesized,
+            clipToSelection: storedPlanClipsToSelection(target.gdbPlanJson),
+            tilesDescriptorJson: descriptorFor(evaluation, pkg.sourceHash, pkg.rootTilesetHash),
+            tilePackageId: Number(packageId),
+            tileActivationEvaluationId: evaluation.id,
+            tileActivatedBy: request.user.id,
+            tileSceneBlobHash: stored.hash,
+          },
+          (versionId) => {
+            if (!reserveActivation(request.server.db, evaluation.id, versionId, request.user.id)) {
+              throw new ActivationInProgressError();
+            }
+          },
+        );
+      } catch (error) {
+        if (error instanceof ActivationInProgressError) {
+          return reply.code(409).send(errorBody("activation_in_progress", "activation_in_progress"));
+        }
+        throw error;
+      }
       return reply
         .code(202)
-        .send({ jobId: accepted.jobId, versionId: accepted.versionId, seq: nextSeq });
+        .send({ jobId: accepted.jobId, versionId: accepted.versionId, seq: accepted.seq });
     },
   );
 }

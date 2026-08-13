@@ -376,6 +376,10 @@ export function App() {
   // The venue's 3D scene, loaded only when `?scene` opts in. Null keeps the
   // viewer exactly 2D.
   const [scene, setScene] = useState<SceneView | null>(null);
+  const loadedSceneRef = useRef<{
+    key: string;
+    source: "package" | "generated";
+  } | null>(null);
   // The capability floor is probed once per session, before anything is
   // fetched: a device that cannot render 3D must not pay for a scene download.
   const sceneCapability = useMemo(() => probeSceneCapability(), []);
@@ -1448,20 +1452,33 @@ export function App() {
   }, [runLoad, params]);
 
   // 3D scene: fetched and compiled off-thread only while a 3D source is active
-  // and a published dataset is being viewed. A venue with no scene resolves
-  // absent and the viewer stays 2D.
-  // `active` is the single record of whether 3D is on: it starts from `?scene`
-  // and moves with the ladder and the toggle, so this needs no second flag that
-  // could disagree with it. Note it deliberately does not distinguish tiles
-  // from generated — depending on *which* 3D source is active would re-run the
-  // load when the ladder climbs and download the document a second time.
+  // and a published dataset is being viewed. The ladder's active rung chooses
+  // the document. The initial generated rung probes the package once before
+  // settling; after a package attach failure, generated is loaded explicitly.
   const render3d = sourceState.active !== "fallback2d";
   useEffect(() => {
     if (!render3d || params.dataset === null) {
+      loadedSceneRef.current = null;
       setScene(null);
       return;
     }
     const dataset = params.dataset;
+    const sceneKey = `${dataset}:${params.version ?? "latest"}`;
+    const packageCandidate =
+      sourceState.active === "tiles"
+      || (
+        sourceState.active === "generated"
+        && sourceState.droppedFrom === null
+        && sourceState.tileRetriesLeft > 0
+      );
+    const requestedSource = packageCandidate ? "package" : "generated";
+    if (
+      loadedSceneRef.current?.key === sceneKey
+      && loadedSceneRef.current.source === requestedSource
+    ) {
+      return;
+    }
+
     const controller = new AbortController();
     let cancelled = false;
     void (async () => {
@@ -1471,47 +1488,39 @@ export function App() {
       // performance harness asserts it (#26 section 4).
       performance.mark(SCENE_DECODE_START);
       try {
-        // The activated package first: it is the top of the ladder, and asking
-        // for it is also how the viewer learns whether this version has one —
-        // a venue without a package answers 404, which is an absent source
-        // rather than a failure.
-        const tiles = await loadKirikoScene(
-          datasetSceneUrl(dataset, params.version ?? undefined),
-          controller.signal,
-          "package",
-        );
-        if (cancelled) {
-          return;
-        }
-        if (tiles !== null) {
-          setScene(readScene(tiles));
-          performance.measure(SCENE_DECODE_MEASURE, SCENE_DECODE_START);
-          dispatchSource({ type: "tiles_ready" });
-          return;
-        }
         const described = await loadKirikoScene(
-          datasetBundleUrl(dataset, params.version ?? undefined),
+          requestedSource === "package"
+            ? datasetSceneUrl(dataset, params.version ?? undefined)
+            : datasetBundleUrl(dataset, params.version ?? undefined),
           controller.signal,
+          requestedSource,
         );
         if (cancelled) {
           return;
         }
         if (described === null) {
-          // The bundle carries no renderable scene: nothing failed, there is
-          // simply nothing to render, and the venue stays 2D.
+          loadedSceneRef.current = null;
           setScene(null);
-          dispatchSource({ type: "load_failed" });
+          dispatchSource({
+            type: requestedSource === "package" ? "tiles_unavailable" : "load_failed",
+          });
           return;
         }
+        loadedSceneRef.current = { key: sceneKey, source: requestedSource };
         setScene(readScene(described));
         performance.measure(SCENE_DECODE_MEASURE, SCENE_DECODE_START);
-        dispatchSource({ type: "scene_ready" });
+        dispatchSource({
+          type: requestedSource === "package" ? "tiles_ready" : "scene_ready",
+        });
       } catch {
-        // The 2D venue is already usable; a scene that cannot load must not
-        // take it down with it.
+        // A package-specific failure costs one rung. A generated-scene failure
+        // costs 3D, because there is no source left below it before 2D.
         if (!cancelled) {
+          loadedSceneRef.current = null;
           setScene(null);
-          dispatchSource({ type: "load_failed" });
+          dispatchSource({
+            type: requestedSource === "package" ? "tiles_failed" : "load_failed",
+          });
         }
       }
     })();
@@ -1519,7 +1528,15 @@ export function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [render3d, params.dataset, params.version, dispatchSource]);
+  }, [
+    render3d,
+    sourceState.active,
+    sourceState.droppedFrom,
+    sourceState.tileRetriesLeft,
+    params.dataset,
+    params.version,
+    dispatchSource,
+  ]);
 
   useEffect(() => {
     loadFromParams();
@@ -1742,6 +1759,8 @@ export function App() {
               dispatchSource({ type: "context_restored" });
             }}
             onSceneAttachFailed={() => {
+              loadedSceneRef.current = null;
+              setScene(null);
               dispatchSource({ type: "load_failed" });
             }}
             networkEditing={
