@@ -771,8 +771,8 @@ export function buildNetworkLayers(): AnyLayer[] {
       filter: verticalLinkFilter(),
       layout: {
         // Glyph-independent label: the indoor style ships no `glyphs` source,
-        // so the visible copy is a registered SVG image per (direction, floor)
-        // pair, selected through the feature's `labelImage` id (see
+        // so the visible copy is a canvas-rasterized image per (direction,
+        // floor) pair, selected through the feature's `labelImage` id (see
         // verticalLinkLabels.ts). 12px right / 12px up keeps it beside the
         // [12,-12]-translated marker.
         "icon-image": ["get", "labelImage"],
