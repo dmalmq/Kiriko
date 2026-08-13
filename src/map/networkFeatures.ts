@@ -41,6 +41,26 @@ export interface ParsedNetwork {
   paths: NetworkFeature[];
 }
 
+/**
+ * One cross-floor (`HFLAG === 1`) reciprocal path pair, projected onto the
+ * active endpoint floor as a single semantic point. The coordinate is the
+ * active endpoint's exact junction position; no vertical LineString exists
+ * on any floor.
+ */
+export interface VerticalNetworkLink {
+  kind: "vertical-link";
+  pathId: number;
+  reversePathId: number;
+  endpointNodeId: number;
+  targetNodeId: number;
+  activeFloor: string;
+  targetFloor: string;
+  targetDirection: "up" | "down";
+  passageType: number;
+  coordinate: GeoJSON.Position;
+  selected: boolean;
+}
+
 /** Structural reason a network mutation was rejected; surfaced as editor copy. */
 export type NetworkMutationError =
   | "invalid_coordinate"
@@ -119,12 +139,14 @@ export function parseNetworkOverlay(dto: NetworkGeoJsonDto): ParsedNetwork {
     paths: parseCollection(dto.paths),
   };
 }
-
 /**
- * Project the parsed network onto one floor: every `net_path` on
- * `activeOrdinal` becomes a `kind:"path"` LineString and every `net_junction`
- * a `kind:"junction"` Point. Mirrors `buildRouteFeatures`' per-floor overlay
- * contract so the map renders only the active level's network.
+ * Project the parsed network onto one floor: every horizontal `net_path` on
+ * `activeOrdinal` becomes a `kind:"path"` LineString, every cross-floor
+ * (`HFLAG === 1`) reciprocal pair whose endpoint is on the active floor
+ * becomes one `kind:"vertical-link"` Point at that endpoint, and every
+ * `net_junction` a `kind:"junction"` Point. Mirrors `buildRouteFeatures`'
+ * per-floor overlay contract so the map renders only the active level's
+ * network. Malformed vertical metadata is dropped, never faked as a line.
  */
 export function buildNetworkFeatures(
   network: ParsedNetwork | null,
@@ -136,7 +158,43 @@ export function buildNetworkFeatures(
     return { type: "FeatureCollection", features };
   }
   const selectedConnection = render?.selectedConnection ?? null;
+  const junctionById = new Map<number, NetworkFeature>();
+  for (const junction of network.junctions) {
+    const nodeId = asFiniteNumber(junction.properties.NODEID);
+    if (nodeId !== null) {
+      junctionById.set(nodeId, junction);
+    }
+  }
+  const emittedVertical = new Set<string>();
   for (const path of network.paths) {
+    if (isVerticalPath(path)) {
+      const link = verticalLinkOf(path, junctionById, activeOrdinal, selectedConnection);
+      if (link === null) {
+        continue;
+      }
+      const key = `pair:${link.pathId}:${link.reversePathId}`;
+      if (emittedVertical.has(key)) {
+        continue;
+      }
+      emittedVertical.add(key);
+      features.push({
+        type: "Feature",
+        properties: {
+          kind: link.kind,
+          PATHID: link.pathId,
+          RPATHID: link.reversePathId,
+          endpointNodeId: link.endpointNodeId,
+          targetNodeId: link.targetNodeId,
+          activeFloor: link.activeFloor,
+          targetFloor: link.targetFloor,
+          targetDirection: link.targetDirection,
+          passageType: link.passageType,
+          selected: link.selected,
+        },
+        geometry: { type: "Point", coordinates: link.coordinate },
+      });
+      continue;
+    }
     if (path.ordinal === activeOrdinal) {
       const id = connectionIdOf(path);
       const selected =
@@ -150,8 +208,8 @@ export function buildNetworkFeatures(
           kind: "path",
           FNODEID: path.properties.FNODEID,
           TNODEID: path.properties.TNODEID,
-          PATHID: path.properties.PATHID,
-          RPATHID: path.properties.RPATHID,
+          PATHID: id?.pathId ?? path.properties.PATHID,
+          RPATHID: id?.reversePathId ?? path.properties.RPATHID,
           selected,
         },
         geometry: path.geometry,
@@ -317,6 +375,92 @@ function connectionKeyOf(path: NetworkFeature): string | null {
   return id !== null
     ? `pair:${id.pathId}:${id.reversePathId}`
     : `endpoints:${Math.min(f, t)}:${Math.max(f, t)}`;
+}
+
+/** Point coordinate of a junction feature, or null when not a Point. */
+function pointCoordinate(feature: NetworkFeature | undefined): GeoJSON.Position | null {
+  if (feature === undefined || feature.geometry.type !== "Point") {
+    return null;
+  }
+  return feature.geometry.coordinates;
+}
+
+/** The exporter sets `HFLAG === 1` exactly when endpoint ordinals differ. */
+function isVerticalPath(path: NetworkFeature): boolean {
+  return path.properties.HFLAG === 1;
+}
+
+/** Floor ordinal of an exporter floor-label property, or null when absent. */
+function floorOrdinalOfProperty(value: unknown): number | null {
+  return typeof value === "string" ? floorLabelToOrdinal(value) : null;
+}
+
+/**
+ * Resolve one directed vertical row onto the active floor: the active-floor
+ * endpoint becomes the marker coordinate and the other endpoint its target.
+ * Returns null for malformed metadata or when neither endpoint floor is
+ * active, so a broken semantic edge disappears instead of becoming a line.
+ */
+function verticalLinkOf(
+  path: NetworkFeature,
+  junctionById: Map<number, NetworkFeature>,
+  activeOrdinal: number,
+  selectedConnection: NetworkConnectionId | null,
+): VerticalNetworkLink | null {
+  const id = connectionIdOf(path);
+  const fromId = asFiniteNumber(path.properties.FNODEID);
+  const toId = asFiniteNumber(path.properties.TNODEID);
+  const fromOrdinal = floorOrdinalOfProperty(path.properties.FFLOOR);
+  const toOrdinal = floorOrdinalOfProperty(path.properties.TFOOLR);
+  if (id === null || fromId === null || toId === null || fromOrdinal === null || toOrdinal === null) {
+    return null;
+  }
+  const fromCoordinate = pointCoordinate(junctionById.get(fromId));
+  const toCoordinate = pointCoordinate(junctionById.get(toId));
+  if (fromCoordinate === null || toCoordinate === null) {
+    return null;
+  }
+  const passageType = asFiniteNumber(path.properties.passage_type) ?? 1;
+  const selected =
+    selectedConnection !== null &&
+    id.pathId === selectedConnection.pathId &&
+    id.reversePathId === selectedConnection.reversePathId;
+  let endpointNodeId: number;
+  let targetNodeId: number;
+  let activeFloor: string;
+  let targetFloor: string;
+  let targetOrdinal: number;
+  let coordinate: GeoJSON.Position;
+  if (fromOrdinal === activeOrdinal) {
+    endpointNodeId = fromId;
+    targetNodeId = toId;
+    activeFloor = String(path.properties.FFLOOR);
+    targetFloor = String(path.properties.TFOOLR);
+    targetOrdinal = toOrdinal;
+    coordinate = fromCoordinate;
+  } else if (toOrdinal === activeOrdinal) {
+    endpointNodeId = toId;
+    targetNodeId = fromId;
+    activeFloor = String(path.properties.TFOOLR);
+    targetFloor = String(path.properties.FFLOOR);
+    targetOrdinal = fromOrdinal;
+    coordinate = toCoordinate;
+  } else {
+    return null;
+  }
+  return {
+    kind: "vertical-link",
+    pathId: id.pathId,
+    reversePathId: id.reversePathId,
+    endpointNodeId,
+    targetNodeId,
+    activeFloor,
+    targetFloor,
+    targetDirection: targetOrdinal > activeOrdinal ? "up" : "down",
+    passageType,
+    coordinate,
+    selected,
+  };
 }
 
 /** Distinct logical connections keyed for degree counting, with their endpoints. */
