@@ -294,6 +294,13 @@ describe("the tiles rung", () => {
     expect(rendering().active).toBe("generated");
   });
 
+  it("descends quietly when the version has no activated package document", () => {
+    const state = reduceSceneSource(renderingTiles(), { type: "tiles_unavailable" }, MOTION);
+    expect(state.active).toBe("generated");
+    expect(state.droppedFrom).toBeNull();
+    expect(fallbackNotice(state)).toBeNull();
+  });
+
   it("falls one rung to generated when the tile scene will not load", () => {
     // Not to 2D: the venue always retains a generated scene (#30 section 1),
     // and dropping past it would discard 3D the device can render.

@@ -24,6 +24,7 @@ import type {
   ReviewIssue,
   ReviewerSummary,
 } from "../issues/types";
+import type { SceneCapabilityReport } from "../map/scene/sceneCapability";
 
 
 const LEVEL_2F: ViewerLevel = {
@@ -187,6 +188,25 @@ vi.mock("../bundle/loadKirikoBundle", () => ({
 
 vi.mock("../bundle/loadNetworkOverlay", () => ({
   loadNetworkOverlay: (...args: unknown[]) => loadNetworkOverlayMock(...args),
+}));
+
+const loadKirikoSceneMock = vi.fn();
+const readSceneMock = vi.fn((described: { meta: string }) => ({ testId: described.meta }));
+const probeSceneCapabilityMock = vi.fn<() => SceneCapabilityReport>(() => ({
+  supported: false,
+  missing: ["webgl2"],
+}));
+
+vi.mock("../bundle/loadKirikoScene", () => ({
+  loadKirikoScene: (...args: unknown[]) => loadKirikoSceneMock(...args),
+}));
+
+vi.mock("../map/scene/sceneFormat", () => ({
+  readScene: (...args: [{ meta: string }]) => readSceneMock(...args),
+}));
+
+vi.mock("../map/scene/sceneCapability", () => ({
+  probeSceneCapability: () => probeSceneCapabilityMock(),
 }));
 
 const routeKirikoBundleMock = vi.fn();
@@ -366,6 +386,9 @@ vi.mock("../map/IndoorMap", () => ({
         data-network-editing={String(props.networkEditing != null)}
         data-network-tool={props.networkEditing?.tool ?? ""}
         data-network-selection={props.networkEditing?.selection?.kind ?? ""}
+        data-scene-id={
+          (props.scene as unknown as { testId?: string } | null)?.testId ?? ""
+        }
       >
         <button
           type="button"
@@ -434,6 +457,11 @@ vi.mock("../map/IndoorMap", () => ({
               Place issue at map center
             </button>
           </>
+        ) : null}
+        {props.scene !== null ? (
+          <button type="button" onClick={props.onSceneAttachFailed}>
+            Fail scene attach
+          </button>
         ) : null}
         {(props.network?.junctions ?? []).map((j) => {
           const id = j.properties.NODEID;
@@ -524,6 +552,54 @@ async function renderDataset(
   });
   return result;
 }
+
+describe("App scene fallback", () => {
+  beforeEach(() => {
+    loadKirikoBundleMock.mockReset().mockResolvedValue(bundleLoadResult());
+    loadKirikoSceneMock.mockReset();
+    readSceneMock.mockClear();
+    probeSceneCapabilityMock.mockReset().mockReturnValue({ supported: true, missing: [] });
+    resetIssueMocks();
+    window.history.replaceState(
+      null,
+      "",
+      "/?dataset=tokyo-station&lang=en&scene=1",
+    );
+  });
+
+  afterEach(() => {
+    probeSceneCapabilityMock.mockReset().mockReturnValue({
+      supported: false,
+      missing: ["webgl2"],
+    });
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("loads and mounts generated geometry when an activated tile scene cannot attach", async () => {
+    loadKirikoSceneMock.mockImplementation(
+      (_src: string, _signal: AbortSignal, source: "generated" | "package" = "generated") =>
+        Promise.resolve({ meta: source, payload: new Uint8Array() }),
+    );
+
+    render(<App />);
+
+    await screen.findByText("3D Tiles");
+    expect(screen.getByTestId("indoor-map-stub").getAttribute("data-scene-id")).toBe(
+      "package",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Fail scene attach" }));
+
+    await waitFor(() => {
+      expect(loadKirikoSceneMock).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId("indoor-map-stub").getAttribute("data-scene-id")).toBe(
+        "generated",
+      );
+    });
+    expect(loadKirikoSceneMock.mock.calls[1]?.[2]).toBe("generated");
+    expect(screen.getByText("Generated 3D")).toBeTruthy();
+  });
+});
 
 describe("App", () => {
   beforeEach(() => {
