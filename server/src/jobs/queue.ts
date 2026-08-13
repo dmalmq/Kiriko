@@ -5,7 +5,7 @@ export type JobRunner = (payloadJson: string, signal: AbortSignal) => Promise<un
 
 export interface PublicationVersionDraft {
   venueId: number;
-  seq: number;
+  seq: number | "next";
   publicId: string;
   sourceBlobHash: string;
   sourceKind: "imdf" | "gdb";
@@ -123,10 +123,18 @@ export class JobQueue {
     kind: "publish_imdf",
     version: PublicationVersionDraft,
     payload: Record<string, unknown> = {},
-  ): { jobId: string; versionId: number } {
+    reserve?: (versionId: number) => void,
+  ): { jobId: string; versionId: number; seq: number } {
     this.assertOpen();
     const jobId = randomUUID();
-    const versionId = this.db.transaction(() => {
+    const accepted = this.db.transaction(() => {
+      const seq = version.seq === "next"
+        ? (
+            this.db
+              .prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM versions WHERE venue_id = ?")
+              .get(version.venueId) as { seq: number }
+          ).seq
+        : version.seq;
       const info = this.db
         .prepare(
           `INSERT INTO versions (
@@ -137,7 +145,7 @@ export class JobQueue {
         )
         .run(
           version.venueId,
-          version.seq,
+          seq,
           version.publicId,
           version.sourceBlobHash,
           version.sourceKind,
@@ -148,14 +156,15 @@ export class JobQueue {
           version.facilitiesBlobHash ?? null,
           version.synthesized === true ? 1 : 0,
         );
-      const insertedVersionId = Number(info.lastInsertRowid);
+      const versionId = Number(info.lastInsertRowid);
+      reserve?.(versionId);
       this.db
         .prepare("INSERT INTO jobs (id, kind, version_id, payload_json) VALUES (?, ?, ?, ?)")
-        .run(jobId, kind, insertedVersionId, JSON.stringify({ ...payload, versionId: insertedVersionId }));
-      return insertedVersionId;
+        .run(jobId, kind, versionId, JSON.stringify({ ...payload, versionId }));
+      return { versionId, seq };
     })();
     this.schedule(jobId);
-    return { jobId, versionId };
+    return { jobId, ...accepted };
   }
 
   /** Resolves when every runnable job in this process has finished (tests). */
