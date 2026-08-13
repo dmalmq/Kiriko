@@ -67,8 +67,11 @@ pub(crate) fn minimum_cost_maximum_matching(admissible_pairs: &[TransitPair]) ->
 
     loop {
         let mut distance = vec![f64::INFINITY; graph.len()];
+        let mut tie_break = vec![0_i32; graph.len() * pairs.len()];
+        let mut tie_reachable = vec![false; graph.len()];
         let mut predecessor: Vec<Option<(usize, usize)>> = vec![None; graph.len()];
         distance[source] = 0.0;
+        tie_reachable[source] = true;
 
         for _ in 1..graph.len() {
             let mut changed = false;
@@ -76,13 +79,35 @@ pub(crate) fn minimum_cost_maximum_matching(admissible_pairs: &[TransitPair]) ->
                 if !distance[from].is_finite() {
                     continue;
                 }
+                debug_assert!(tie_reachable[from]);
                 for (edge_index, edge) in graph[from].iter().enumerate() {
-                    if edge.capacity == 0 {
+                    if edge.capacity == 0 || edge.to == source {
                         continue;
                     }
                     let candidate = distance[from] + edge.cost;
-                    if candidate.total_cmp(&distance[edge.to]).is_lt() {
+                    let improves = match candidate.total_cmp(&distance[edge.to]) {
+                        std::cmp::Ordering::Less => true,
+                        std::cmp::Ordering::Equal => {
+                            !tie_reachable[edge.to]
+                                || tie_candidate_is_better(
+                                    &tie_break,
+                                    pairs.len(),
+                                    from,
+                                    edge.to,
+                                    edge.tie_delta,
+                                )
+                        }
+                        std::cmp::Ordering::Greater => false,
+                    };
+                    if improves {
                         distance[edge.to] = candidate;
+                        let from_tie = from * pairs.len()..(from + 1) * pairs.len();
+                        let to_tie = edge.to * pairs.len();
+                        tie_break.copy_within(from_tie, to_tie);
+                        if let Some((pair_index, delta)) = edge.tie_delta {
+                            tie_break[to_tie + pair_index] += i32::from(delta);
+                        }
+                        tie_reachable[edge.to] = true;
                         predecessor[edge.to] = Some((from, edge_index));
                         changed = true;
                     }
@@ -121,6 +146,29 @@ pub(crate) fn minimum_cost_maximum_matching(admissible_pairs: &[TransitPair]) ->
     matches
 }
 
+fn tie_candidate_is_better(
+    tie_break: &[i32],
+    pair_count: usize,
+    from: usize,
+    to: usize,
+    delta: Option<(usize, i8)>,
+) -> bool {
+    let from_start = from * pair_count;
+    let to_start = to * pair_count;
+    for pair_index in 0..pair_count {
+        let candidate = tie_break[from_start + pair_index]
+            + delta
+                .filter(|(changed_pair, _)| *changed_pair == pair_index)
+                .map_or(0, |(_, change)| i32::from(change));
+        match candidate.cmp(&tie_break[to_start + pair_index]) {
+            std::cmp::Ordering::Greater => return true,
+            std::cmp::Ordering::Less => return false,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    false
+}
+
 #[derive(Clone, Copy)]
 struct ResidualEdge {
     to: usize,
@@ -128,6 +176,7 @@ struct ResidualEdge {
     capacity: u8,
     cost: f64,
     pair_index: Option<usize>,
+    tie_delta: Option<(usize, i8)>,
 }
 
 fn add_edge(
@@ -145,6 +194,7 @@ fn add_edge(
         capacity: 1,
         cost,
         pair_index,
+        tie_delta: pair_index.map(|index| (index, 1)),
     });
     graph[to].push(ResidualEdge {
         to: from,
@@ -152,6 +202,7 @@ fn add_edge(
         capacity: 0,
         cost: -cost,
         pair_index: None,
+        tie_delta: pair_index.map(|index| (index, -1)),
     });
 }
 
@@ -208,6 +259,19 @@ mod tests {
             pair(1, 10, 1.0),
         ]);
         assert_eq!(ids(&matches), vec![(1, 10), (2, 11)]);
+    }
+
+    #[test]
+    fn matching_breaks_residual_path_equal_costs_by_node_ids() {
+        let matches = minimum_cost_maximum_matching(&[
+            pair(1, 10, 1.0),
+            pair(1, 11, 1.0),
+            pair(1, 12, 1.0),
+            pair(2, 11, 1.0),
+            pair(2, 12, 1.0),
+            pair(3, 10, 1.0),
+        ]);
+        assert_eq!(ids(&matches), vec![(1, 11), (2, 12), (3, 10)]);
     }
 
     #[test]
