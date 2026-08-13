@@ -135,10 +135,10 @@ pub(crate) fn minimum_cost_maximum_matching(admissible_pairs: &[TransitPair]) ->
     for lower_index in 0..lower_ids.len() {
         let lower_node = lower_start + lower_index;
         for edge in &graph[lower_node] {
-            if edge.capacity == 0 {
-                if let Some(pair_index) = edge.pair_index {
-                    matches.push(pairs[pair_index].clone());
-                }
+            if edge.capacity == 0
+                && let Some(pair_index) = edge.pair_index
+            {
+                matches.push(pairs[pair_index].clone());
             }
         }
     }
