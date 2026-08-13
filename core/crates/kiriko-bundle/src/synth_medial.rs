@@ -908,15 +908,56 @@ fn opening_axis(geom: &Value) -> Option<([f64; 2], [f64; 2])> {
     Some((mid, [dx / len, dy / len]))
 }
 
-/// One doorway's graph nodes: the opening midpoint plus, when walkable, the
-/// two axis stubs. Attach edges land on the stub of the attaching side; a
-/// side whose stub fails validation falls back to the midpoint.
+/// One doorway's graph nodes: the opening midpoint plus, when geometrically
+/// valid, two candidate axis sides. A side is materialized (its node and the
+/// midpoint-to-side edge) only when a skeleton or transit attachment uses it;
+/// a side never used stays a candidate. A direct midpoint attachment never
+/// materializes a side.
 struct DoorwayNodes {
     mid: usize,
-    fwd: Option<usize>, // midpoint + axis·δ
-    bwd: Option<usize>, // midpoint − axis·δ
+    fwd: Option<DoorwaySide>, // midpoint + axis·δ
+    bwd: Option<DoorwaySide>, // midpoint − axis·δ
     mid_pt: [f64; 2],
     axis: [f64; 2], // metre-frame unit vector
+}
+
+/// One candidate doorway side: its fixed geometry and, once a consumer has
+/// used it, the materialized route-node index.
+struct DoorwaySide {
+    point: [f64; 2],
+    node: Option<usize>,
+}
+
+/// Materialize a doorway side on demand: create its route node and the
+/// midpoint-to-side edge exactly once, then reuse the same index for every
+/// later consumer. The only code allowed to create a doorway side node or
+/// midpoint-to-side edge.
+fn materialize_doorway_side(
+    side: &mut DoorwaySide,
+    mid_idx: usize,
+    mid: [f64; 2],
+    ordinal: f64,
+    nodes: &mut Vec<RouteNode>,
+    edges: &mut Vec<RouteEdge>,
+) -> usize {
+    if let Some(index) = side.node {
+        return index;
+    }
+    let index = nodes.len();
+    nodes.push(RouteNode {
+        lon: side.point[0],
+        lat: side.point[1],
+        ordinal,
+    });
+    edges.push(RouteEdge {
+        from: mid_idx as u32,
+        to: index as u32,
+        weight: haversine_m(mid, side.point) as f32,
+        ordinal,
+        interior: Vec::new(),
+    });
+    side.node = Some(index);
+    index
 }
 
 /// Per-opening plan produced before skeleton emit: passage axis and the
@@ -1501,7 +1542,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             }
         }
 
-        // Doorway EMIT: midpoint, axis stubs, M↔stub edges, planned attaches.
+        // Doorway EMIT: midpoint, candidate axis sides, planned attaches.
         let mut doorway_nodes: Vec<DoorwayNodes> = Vec::new();
         for plan in &doorway_plans {
             let mid = plan.mid;
@@ -1530,71 +1571,55 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 mid_pt: mid,
                 axis,
             };
-            // Fixed stub order: +axis (fwd) then −axis (bwd).
+            // Fixed candidate order: +axis (fwd) then −axis (bwd). Valid
+            // candidates are stored, never emitted; a side node is created
+            // only when a consumer uses it.
             for (sign, is_fwd) in [(1.0_f64, true), (-1.0_f64, false)] {
                 let pt = stub_pt(sign);
                 if !stub_valid(pt) {
                     continue;
                 }
-                let idx = nodes.len();
-                nodes.push(RouteNode {
-                    lon: pt[0],
-                    lat: pt[1],
-                    ordinal: ord,
-                });
-                edges.push(RouteEdge {
-                    from: mid_idx as u32,
-                    to: idx as u32,
-                    weight: haversine_m(mid, pt) as f32,
-                    ordinal: ord,
-                    interior: Vec::new(),
-                });
+                let side = DoorwaySide {
+                    point: pt,
+                    node: None,
+                };
                 if is_fwd {
-                    doorway.fwd = Some(idx);
+                    doorway.fwd = Some(side);
                 } else {
-                    doorway.bwd = Some(idx);
+                    doorway.bwd = Some(side);
                 }
             }
 
             // Attach each planned blob target through the stub on ITS side,
-            // falling back to M when the stub is missing, the target sits
-            // nearer than the stub (junction steals the stub), or the
-            // stub→target segment leaves walkable space.
+            // materializing it only when the target lies past the stub along
+            // the passage direction, far enough that a nearer junction does
+            // not steal it, and the stub→target segment stays walkable.
+            // Otherwise the attach lands directly on the midpoint.
             for &(_root, local) in &plan.attaches {
                 let c = skeleton.nodes[local];
                 let side_dot =
                     axis[0] * (c[0] - mid[0]) * mx + axis[1] * (c[1] - mid[1]) * 111_320.0;
-                let stub = if side_dot >= 0.0 {
-                    doorway.fwd
+                let side = if side_dot >= 0.0 {
+                    doorway.fwd.as_mut()
                 } else {
-                    doorway.bwd
+                    doorway.bwd.as_mut()
                 };
-                let (t_idx, t_pt) = match stub {
-                    Some(i) => {
-                        let sp = [nodes[i].lon, nodes[i].lat];
-                        // Stub is useful only when the attach target lies past
-                        // it along the passage direction and far enough that
-                        // the stub is not swallowed by a nearer junction.
-                        let along =
-                            axis[0] * (c[0] - mid[0]) * mx + axis[1] * (c[1] - mid[1]) * 111_320.0;
-                        let sign = if side_dot >= 0.0 { 1.0 } else { -1.0 };
-                        let forward = along * sign > 0.0;
-                        let far_enough =
-                            haversine_m(c, mid) > DOORWAY_STUB_M + DOORWAY_STUB_JUNCTION_MARGIN_M;
-                        if forward && far_enough {
-                            (i, sp)
-                        } else {
-                            (mid_idx, mid)
-                        }
-                    }
-                    None => (mid_idx, mid),
-                };
-                let (t_idx, t_pt) = if t_idx != mid_idx
-                    && !segment_within_area(t_pt, c, &area, SEGMENT_OUTSIDE_TOL_M)
-                {
+                let use_side = side.as_ref().is_some_and(|side| {
+                    let sign = if side_dot >= 0.0 { 1.0 } else { -1.0 };
+                    let along =
+                        axis[0] * (c[0] - mid[0]) * mx + axis[1] * (c[1] - mid[1]) * 111_320.0;
+                    along * sign > 0.0
+                        && haversine_m(c, mid) > DOORWAY_STUB_M + DOORWAY_STUB_JUNCTION_MARGIN_M
+                        && segment_within_area(side.point, c, &area, SEGMENT_OUTSIDE_TOL_M)
+                });
+                let (t_idx, t_pt) = if use_side {
+                    let side = side.expect("use_side requires a valid candidate");
+                    let point = side.point;
+                    let index =
+                        materialize_doorway_side(side, mid_idx, mid, ord, &mut nodes, &mut edges);
+                    (index, point)
+                } else {
                     (mid_idx, mid)
-                } else {
-                    (t_idx, t_pt)
                 };
                 edges.push(RouteEdge {
                     from: t_idx as u32,
@@ -1715,7 +1740,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             let unit_area: Option<MultiPolygon<f64>> =
                 footprint.clone().map(|p| MultiPolygon::new(vec![p]));
             let mut attached = false;
-            for doorway in &doorway_nodes {
+            for doorway in &mut doorway_nodes {
                 let Some(boundary_d) = point_boundary_dist_m(doorway.mid_pt, geom) else {
                     continue;
                 };
@@ -1726,25 +1751,37 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 let dmx = 111_320.0 * doorway.mid_pt[1].to_radians().cos();
                 let dot = doorway.axis[0] * (tp[0] - doorway.mid_pt[0]) * dmx
                     + doorway.axis[1] * (tp[1] - doorway.mid_pt[1]) * 111_320.0;
-                let stub = if dot >= 0.0 { doorway.fwd } else { doorway.bwd };
-                let (t_idx, t_pt) = match stub {
-                    Some(i) => (i, [nodes[i].lon, nodes[i].lat]),
-                    None => (doorway.mid, doorway.mid_pt),
+                let reachable = |point: [f64; 2]| {
+                    unit_area.as_ref().is_some_and(|unit| {
+                        segment_within_area(*tp, point, unit, SEGMENT_OUTSIDE_TOL_M)
+                    })
                 };
-                // The stub must be reachable THROUGH the unit itself (its real
-                // door); otherwise fall back to the midpoint under the same
-                // rule, and skip the opening when neither is reachable.
-                let reachable = |pt: [f64; 2]| {
-                    unit_area
-                        .as_ref()
-                        .is_some_and(|u| segment_within_area(*tp, pt, u, SEGMENT_OUTSIDE_TOL_M))
-                };
-                let (t_idx, t_pt) = if reachable(t_pt) {
-                    (t_idx, t_pt)
-                } else if t_idx != doorway.mid && reachable(doorway.mid_pt) {
-                    (doorway.mid, doorway.mid_pt)
+                let doorway_mid = doorway.mid;
+                let doorway_mid_pt = doorway.mid_pt;
+                let side = if dot >= 0.0 {
+                    doorway.fwd.as_mut()
                 } else {
+                    doorway.bwd.as_mut()
+                };
+                let side_point = side.as_ref().map(|side| side.point);
+                let target = side_point
+                    .filter(|point| reachable(*point))
+                    .map(|point| (true, point))
+                    .or_else(|| reachable(doorway_mid_pt).then_some((false, doorway_mid_pt)));
+                let Some((use_side, t_pt)) = target else {
                     continue;
+                };
+                let t_idx = if use_side {
+                    materialize_doorway_side(
+                        side.expect("use_side requires a valid candidate"),
+                        doorway_mid,
+                        doorway_mid_pt,
+                        ord,
+                        &mut nodes,
+                        &mut edges,
+                    )
+                } else {
+                    doorway_mid
                 };
                 edges.push(RouteEdge {
                     from: idx as u32,
@@ -2810,14 +2847,19 @@ mod tests {
             !cross_spine,
             "no direct bridge edge duplicating the doorway path"
         );
-        // Midpoint degree: two stub edges, plus direct attaches when the
-        // centerline T-junction sits nearer than the stub (thin walkways
-        // ~1.1 m half-width < DOORWAY_STUB_M + margin). Stubs remain for
-        // geometry/transit; attach lands on M so the stub is not a detour.
-        let mid_deg = same_floor_degree(g, onode);
-        assert!(
-            (2..=4).contains(&mid_deg),
-            "midpoint keeps stub edges and at most two direct attaches, degree={mid_deg}"
+        // The thin walkways put both spines nearer than the stub: each spine
+        // attaches directly to the midpoint, and neither candidate stub is
+        // used, so no stub node may remain.
+        let group = doorway_group(g, &door);
+        assert_eq!(
+            group,
+            vec![onode],
+            "thin-walkway doorway has no useful stub"
+        );
+        assert_eq!(
+            same_floor_degree(g, onode),
+            2,
+            "midpoint bridges both spines directly"
         );
     }
 
@@ -3075,13 +3117,32 @@ mod tests {
     }
 
     #[test]
-    fn doorway_stubs_cross_the_passage_direction() {
-        // One 36 m × 11 m walkway with a doorway drawn across its middle (line
-        // along latitude). Passage is through the gate — perpendicular to the
-        // opening line (score tie → prefer the normal). Stubs flank the
-        // midpoint on that passage axis. The centerline attaches through a
-        // stub, or directly to the midpoint when the on-axis junction sits
-        // nearer than the stub (DOORWAY_STUB_M + margin).
+    fn doorway_side_materializes_once_for_multiple_consumers() {
+        let mid = [139.7, 35.6];
+        let point = [139.7, 35.6000107795];
+        let mut nodes = vec![RouteNode {
+            lon: mid[0],
+            lat: mid[1],
+            ordinal: 0.0,
+        }];
+        let mut edges = Vec::new();
+        let mut side = DoorwaySide { point, node: None };
+
+        let first = materialize_doorway_side(&mut side, 0, mid, 0.0, &mut nodes, &mut edges);
+        let second = materialize_doorway_side(&mut side, 0, mid, 0.0, &mut nodes, &mut edges);
+
+        assert_eq!(first, second);
+        assert_eq!(nodes.len(), 2, "one midpoint plus one side node");
+        assert_eq!(edges.len(), 1, "one midpoint-to-side edge");
+    }
+
+    #[test]
+    fn door_across_the_corridor_attaches_directly_without_stubs() {
+        // One 36 m × 11 m walkway with a doorway drawn across its middle:
+        // passage crosses the gate. The on-axis junction lands on the
+        // centerline ~0.2 m from the midpoint — nearer than the stub — so the
+        // single spine attaches directly to M and neither candidate side is
+        // materialized (the old eager emitter left two unused stubs here).
         let walk = rect(139.70000, 35.600002, 0.00040, 0.00010);
         let door = line(139.70000, 35.599995, 139.70000, 35.600005);
         let doc = document(
@@ -3100,44 +3161,20 @@ mod tests {
             .position(|n| [n.lon, n.lat] == dm)
             .expect("opening midpoint node exists");
         let group = doorway_group(g, &door);
-        assert_eq!(group.len(), 3, "midpoint plus both passage stubs");
-        // Midpoint degree is at least 2 (the two stubs). When the on-axis
-        // split lands nearer than the stub, attach goes to M directly
-        // (degree 3); otherwise attach goes through a stub (degree 2).
-        let mid_deg = same_floor_degree(g, onode);
-        assert!(
-            mid_deg == 2 || mid_deg == 3,
-            "midpoint touches stubs and at most one direct attach, degree={mid_deg}"
+        assert_eq!(
+            group,
+            vec![onode],
+            "the junction sits nearer than the stub: midpoint-only group, no stubs"
         );
-        // Stubs are perpendicular to the N–S opening line: same lat as mid, ±δ lon.
-        for &s in &group {
-            if s == onode {
-                continue;
-            }
-            assert!(
-                (g.nodes[s].lat - dm[1]).abs() < 1e-9,
-                "stub perpendicular to the opening line (same lat), got lon={} lat={}",
-                g.nodes[s].lon,
-                g.nodes[s].lat
-            );
-            assert!(
-                (g.nodes[s].lon - dm[0]).abs() > 1e-9,
-                "stub must leave the opening line, not sit on it"
-            );
-        }
-        // The centerline attaches through a stub OR directly to M when the
-        // T-junction is nearer than the stub (wide room, short approach).
-        let attached_via_stub = group.iter().any(|&s| {
-            s != onode
-                && g.edges.iter().any(|e| {
-                    let (a, b) = (e.from as usize, e.to as usize);
-                    (a == s && b != onode) || (b == s && a != onode)
-                })
-        });
-        let attached_via_mid = mid_deg == 3;
-        assert!(
-            attached_via_stub || attached_via_mid,
-            "centerline attaches through a stub or directly to M"
+        assert_eq!(
+            same_floor_degree(g, onode),
+            1,
+            "the single spine attaches directly to the midpoint"
+        );
+        assert_eq!(
+            component_count(g),
+            1,
+            "graph stays connected through the gate"
         );
     }
 
@@ -3198,10 +3235,12 @@ mod tests {
     }
 
     #[test]
-    fn outside_stub_side_is_dropped() {
+    fn direct_midpoint_attachment_does_not_materialize_unused_inside_stub() {
         // A threshold opening drawn along the walkway's outer (south) wall:
-        // passage is the wall normal. The stub pointing outside the walkable
-        // area is dropped; the midpoint and inside stub remain.
+        // passage is the wall normal. The centerline junction sits nearer
+        // than the stub (thin ~1.1 m half-width < DOORWAY_STUB_M + margin),
+        // so the attach lands directly on the midpoint and the valid inside
+        // candidate side must never be materialized.
         let walk = rect(139.70000, 35.60000, 0.00040, 0.00002);
         // E–W threshold on the south edge (along the wall).
         let door = line(139.69998, 35.599990, 139.70002, 35.599990);
@@ -3215,25 +3254,20 @@ mod tests {
         let build = synthesize_network_medial(&doc);
         let g = &build.graph;
         let dm = linestring_midpoint(&door).unwrap();
-        assert!(
-            g.nodes.iter().any(|n| [n.lon, n.lat] == dm),
-            "midpoint node exists"
-        );
+        let onode = g
+            .nodes
+            .iter()
+            .position(|n| [n.lon, n.lat] == dm)
+            .expect("opening midpoint node exists");
         let group = doorway_group(g, &door);
-        assert_eq!(group.len(), 2, "only the inside stub survives");
-        // Surviving stub is on the normal (N), not along the wall.
-        let stub = group.into_iter().find(|&i| {
-            let n = &g.nodes[i];
-            (n.lon - dm[0]).abs() > 1e-12 || (n.lat - dm[1]).abs() > 1e-12
-        });
-        let stub = stub.expect("inside stub present");
-        assert!(
-            (g.nodes[stub].lon - dm[0]).abs() < 1e-9,
-            "inside stub is on the wall normal (same lon)"
+        assert_eq!(
+            group,
+            vec![onode],
+            "the near centerline attaches directly to the midpoint; no unused stub remains"
         );
         assert!(
-            g.nodes[stub].lat > dm[1],
-            "inside stub is north of the south-wall threshold"
+            same_floor_degree(g, onode) >= 1,
+            "the midpoint remains attached to the routable graph"
         );
         assert_eq!(component_count(g), 1);
     }
@@ -3244,11 +3278,11 @@ mod tests {
         // opening is drawn along that wall (IMDF threshold). The surviving stub
         // must sit on the walkable side, offset perpendicular to the line —
         // never along the wall into either unit.
-        let walk = rect(139.70000, 35.60000, 0.00040, 0.00002);
+        let walk = rect(139.70000, 35.60000, 0.00040, 0.00008);
         // Room immediately south of the walkway (non-walkable category); north
-        // edge shares the walkway's south wall at lat 35.59999.
-        let room = rect(139.70000, 35.59998, 0.00040, 0.00002);
-        let door = line(139.69998, 35.599990, 139.70002, 35.599990);
+        // edge shares the walkway's south wall at lat 35.59996.
+        let room = rect(139.70000, 35.59992, 0.00040, 0.00008);
+        let door = line(139.69998, 35.599960, 139.70002, 35.599960);
         let doc = document(
             &[("l0", 0.0)],
             vec![
@@ -3537,7 +3571,11 @@ mod tests {
         let g = &build.graph;
         let dm = linestring_midpoint(&door).unwrap();
         let group = doorway_group(g, &door);
-        assert_eq!(group.len(), 3, "mid + both stubs");
+        assert_eq!(
+            group.len(),
+            1,
+            "foot sits ~0.2 m from M, nearer than the stub: midpoint-only group"
+        );
         let targets = doorway_attach_targets(g, &group);
         assert_eq!(targets.len(), 1, "one attach target: {targets:?}");
         let target = targets[0];
