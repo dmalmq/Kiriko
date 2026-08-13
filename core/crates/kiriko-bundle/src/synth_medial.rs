@@ -1,8 +1,8 @@
 //! Medial-axis routing-network synthesis (server-only, `netgen` feature).
 //!
 //! ArcGIS-Indoors-style pipeline producing real corridor centerlines:
-//!   1. per floor, union walkable units into a navigable area (obstacle
-//!      subtraction is available via `navigable_area` but currently unused);
+//!   1. per floor, union walkable units into a navigable area and subtract
+//!      non-walkable units, fixtures, kiosks, and buffered `detail` lines;
 //!   2. constrained-Delaunay-triangulate the navigable polygon and extract its
 //!      medial axis (Chin–Snoeyink–Wang) as centerlines;
 //!   3. build a graph from the centerlines, snap doorway `opening`s on as
@@ -105,6 +105,113 @@ pub(crate) fn navigable_area(walkables: &[&Value], obstacles: &[&Value]) -> Mult
         return merged;
     }
     merged.difference(&union_all(&obs))
+}
+
+/// Half-width (m) of the stadium buffer applied to `Detail` line segments
+/// before they are subtracted from the navigable area: a drawn wall, counter,
+/// or other linear detail blocks the passage it runs through.
+const OBSTACLE_BUFFER_M: f64 = 0.4;
+
+/// Stadium buffer of detail segment `a`–`b` (lon/lat): a rectangle of
+/// half-width [`OBSTACLE_BUFFER_M`] in the local metre frame at the segment
+/// midpoint's latitude, with disc end-caps, converted back to a lon/lat ring.
+/// `None` for a degenerate (zero-length or non-finite) segment.
+fn buffer_detail_line(a: [f64; 2], b: [f64; 2]) -> Option<Polygon<f64>> {
+    let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    let mx = 111_320.0 * mid[1].to_radians().cos();
+    let my = 111_320.0;
+    let to_m = |p: [f64; 2]| [(p[0] - mid[0]) * mx, (p[1] - mid[1]) * my];
+    let (am, bm) = (to_m(a), to_m(b));
+    let (dx, dy) = (bm[0] - am[0], bm[1] - am[1]);
+    let len = (dx * dx + dy * dy).sqrt();
+    if !len.is_finite() || len < 1e-9 {
+        return None; // degenerate segment
+    }
+    let (ux, uy) = (dx / len, dy / len); // unit vector along the segment
+    let (nx, ny) = (-uy, ux); // unit left normal
+    let w = OBSTACLE_BUFFER_M;
+    let cap = 8; // samples per semicircular end cap
+    let mut ring: Vec<Coord<f64>> = Vec::with_capacity(2 * cap + 6);
+    let mut push = |x: f64, y: f64| {
+        ring.push(Coord {
+            x: mid[0] + x / mx,
+            y: mid[1] + y / my,
+        });
+    };
+    // Top side, far end cap (around `b`), bottom side, near end cap (around
+    // `a`), closing implicitly back at the top-left corner.
+    push(am[0] + nx * w, am[1] + ny * w);
+    push(bm[0] + nx * w, bm[1] + ny * w);
+    for k in 1..cap {
+        let t = std::f64::consts::FRAC_PI_2 - std::f64::consts::PI * k as f64 / cap as f64;
+        push(
+            bm[0] + w * (ux * t.cos() + nx * t.sin()),
+            bm[1] + w * (uy * t.cos() + ny * t.sin()),
+        );
+    }
+    push(bm[0] - nx * w, bm[1] - ny * w);
+    push(am[0] - nx * w, am[1] - ny * w);
+    for k in 1..cap {
+        let t = -std::f64::consts::FRAC_PI_2 - std::f64::consts::PI * k as f64 / cap as f64;
+        push(
+            am[0] + w * (ux * t.cos() + nx * t.sin()),
+            am[1] + w * (uy * t.cos() + ny * t.sin()),
+        );
+    }
+    Some(Polygon::new(LineString::new(ring), Vec::new()))
+}
+
+/// Consecutive vertex pairs (segments) of a canonical `LineString` or
+/// `MultiLineString` geometry, in `[lon, lat]` form.
+fn detail_segments(geom: &Value) -> Vec<([f64; 2], [f64; 2])> {
+    let Some(obj) = geom.as_object() else {
+        return Vec::new();
+    };
+    let Some(coords) = obj.get("coordinates") else {
+        return Vec::new();
+    };
+    let parts: Vec<&Value> = match obj.get("type").and_then(Value::as_str) {
+        Some("LineString") => vec![coords],
+        Some("MultiLineString") => coords
+            .as_array()
+            .map(|parts| parts.iter().collect())
+            .unwrap_or_default(),
+        _ => return Vec::new(),
+    };
+    let mut segments = Vec::new();
+    for part in parts {
+        let verts = line_verts(part);
+        for pair in verts.windows(2) {
+            segments.push((pair[0], pair[1]));
+        }
+    }
+    segments
+}
+
+/// Canonical `Polygon` geometry value for a geo `Polygon` (exterior ring).
+fn polygon_geo_value(poly: &Polygon<f64>) -> Value {
+    let ring: Vec<Value> = poly
+        .exterior()
+        .0
+        .iter()
+        .map(|c| Value::Array(vec![Value::Number(c.x), Value::Number(c.y)]))
+        .collect();
+    Value::Object(std::collections::BTreeMap::from([
+        ("type".to_string(), Value::String("Polygon".to_string())),
+        (
+            "coordinates".to_string(),
+            Value::Array(vec![Value::Array(ring)]),
+        ),
+    ]))
+}
+
+/// Stadium-buffered obstacle geometry values for each non-degenerate segment
+/// of a `Detail` line; empty when the geometry yields no usable segments.
+fn detail_stadium_values(geom: &Value) -> Vec<Value> {
+    detail_segments(geom)
+        .into_iter()
+        .filter_map(|(a, b)| buffer_detail_line(a, b).map(|poly| polygon_geo_value(&poly)))
+        .collect()
 }
 
 /// Dissolve polygons into one `MultiPolygon` by folding pairwise `union`
@@ -1198,6 +1305,44 @@ pub(crate) fn shortcut_chords(
     added
 }
 
+/// Secondary-rank centerlines: any Skeleton/Bridge/Chord edge whose midpoint
+/// falls inside a non-walkway, non-transit unit (rooms etc.) is demoted to
+/// Secondary and charged 3× its metre length. Units are already subtracted
+/// from the navigable area before synthesis, so this is a defensive backstop
+/// for any residual overlap (e.g. an obstacle that a future pass stops
+/// subtracting); sloppy IMDF where a walkway overlaps a room on GDB
+/// conversion is otherwise carved out. Doorway / transit-attach edges never
+/// match (kinds filtered), and verticals are added after all floors. The 3×
+/// factor is applied on metres, before the global `meters_to_cost` conversion.
+fn rank_room_crossing_edges(
+    edges: &mut [RouteEdge],
+    nodes: &[RouteNode],
+    room_polys: &[Polygon<f64>],
+) {
+    if room_polys.is_empty() {
+        return;
+    }
+    for e in edges {
+        if !matches!(
+            e.attrs.kind,
+            EdgeKind::Skeleton | EdgeKind::Bridge | EdgeKind::Chord
+        ) {
+            continue;
+        }
+        let mid = [
+            (nodes[e.from as usize].lon + nodes[e.to as usize].lon) / 2.0,
+            (nodes[e.from as usize].lat + nodes[e.to as usize].lat) / 2.0,
+        ];
+        if room_polys
+            .iter()
+            .any(|p| p.contains(&Point::new(mid[0], mid[1])))
+        {
+            e.attrs.rank = PathwayRank::Secondary;
+            e.weight *= 3.0;
+        }
+    }
+}
+
 /// Synthesize a routing graph whose horizontal edges are true corridor
 /// centerlines (medial axis of the walkable area), with doorway `opening`s and
 /// transit units snapped on as junctions and transit stacked vertically across
@@ -1219,6 +1364,8 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
 
     for &ord in &ordinals {
         let mut walk: Vec<&Value> = Vec::new();
+        let mut obstacles: Vec<&Value> = Vec::new();
+        let mut buffered: Vec<Value> = Vec::new();
         let mut room_polys: Vec<Polygon<f64>> = Vec::new();
         let mut openings: Vec<OpeningAxis> = Vec::new();
         let mut transit: Vec<TransitUnit<'_>> = Vec::new();
@@ -1245,12 +1392,21 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         transit.push((c, category.to_string(), largest_polygon(geom), geom));
                     } else {
                         // Every other categorized unit (rooms, shops, service
-                        // areas, …) is a non-walkway, non-transit footprint:
-                        // centerlines whose midpoint crosses one of these are
-                        // re-ranked Secondary after emit (sloppy IMDF where a
-                        // walkway overlaps a room).
+                        // areas, …) is a non-walkable footprint: subtract it
+                        // from the navigable area so centerlines route around
+                        // it. Also kept for the room re-rank pass below.
+                        obstacles.push(geom);
                         room_polys.extend(geo_polygons(geom));
                     }
+                }
+                FeatureType::Fixture | FeatureType::Kiosk => {
+                    // Free-standing fixtures and kiosks block the passage.
+                    obstacles.push(geom);
+                }
+                FeatureType::Detail => {
+                    // Linear details (walls, counters, guardrails) block the
+                    // passage through their [`OBSTACLE_BUFFER_M`] stadium.
+                    buffered.extend(detail_stadium_values(geom));
                 }
                 FeatureType::Opening => {
                     if let Some(opening) = opening_axis(&f.id, geom) {
@@ -1266,7 +1422,8 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         if walk.is_empty() {
             continue;
         }
-        let area = navigable_area(&walk, &[]);
+        obstacles.extend(buffered.iter());
+        let area = navigable_area(&walk, &obstacles);
         if area.0.is_empty() {
             continue;
         }
@@ -1946,36 +2103,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             transit_all.push((idx as u32, *tp, category.clone(), ord, footprint.clone()));
         }
 
-        // Secondary-rank centerlines: any Skeleton/Bridge/Chord edge whose
-        // midpoint falls inside a non-walkway, non-transit unit (rooms etc.)
-        // is demoted to Secondary and charged 3× its metre length. This models
-        // sloppy IMDF where a walkway overlaps a room on GDB conversion — the
-        // medial axis (built from walkways alone) runs straight through the
-        // room, and routing through the room should cost more than along a
-        // real corridor. Doorway / transit-attach edges never match (kinds
-        // filtered), and verticals are added after all floors. The 3× factor
-        // is applied on metres, before the global `meters_to_cost` conversion.
-        if !room_polys.is_empty() {
-            for e in &mut edges[floor_edges_start..] {
-                if !matches!(
-                    e.attrs.kind,
-                    EdgeKind::Skeleton | EdgeKind::Bridge | EdgeKind::Chord
-                ) {
-                    continue;
-                }
-                let mid = [
-                    (nodes[e.from as usize].lon + nodes[e.to as usize].lon) / 2.0,
-                    (nodes[e.from as usize].lat + nodes[e.to as usize].lat) / 2.0,
-                ];
-                if room_polys
-                    .iter()
-                    .any(|p| p.contains(&Point::new(mid[0], mid[1])))
-                {
-                    e.attrs.rank = PathwayRank::Secondary;
-                    e.weight *= 3.0;
-                }
-            }
-        }
+        rank_room_crossing_edges(&mut edges[floor_edges_start..], &nodes, &room_polys);
     }
 
     // Vertical transitions: for each adjacent ordinal pair, group transit
@@ -2340,15 +2468,15 @@ mod tests {
     }
 
     #[test]
-    fn skeleton_through_a_room_is_secondary_and_tripled() {
+    fn room_overlapping_a_walkway_is_carved_out() {
         // Sloppy IMDF (GDB conversion): the `room` unit polygon OVERLAPS the
-        // east half of the walkway. The medial axis is built from the walkway
-        // alone, so centerline midpoints on the overlapped half sit inside the
-        // room → Secondary at 3× metres. The doorway attach crossing the same
-        // overlap must stay Primary.
+        // east half of the walkway. The room is an obstacle, so the navigable
+        // area is carved: no centerline midpoint may lie inside the room, the
+        // walkable remainder keeps Primary centerlines, and a doorway on the
+        // walkable half still attaches normally.
         let walk = rect(139.70000, 35.60000, 0.00040, 0.00008); // ~36 m × 9 m
         let room = rect(139.70010, 35.60000, 0.00016, 0.00016); // east-half overlap
-        let door = line(139.70008, 35.59996, 139.70013, 35.59996); // south wall
+        let door = line(139.69986, 35.59996, 139.69991, 35.59996); // south wall, walkable half
         let doc = document(
             &[("l0", 0.0)],
             vec![
@@ -2359,38 +2487,24 @@ mod tests {
         );
         let build = synthesize_network_medial(&doc);
         let g = &build.graph;
+        assert!(!g.edges.is_empty(), "walkable remainder still synthesizes");
 
-        let secondary: Vec<_> = g
-            .edges
-            .iter()
-            .filter(|e| e.attrs.rank == kiriko_route::PathwayRank::Secondary)
-            .collect();
+        let in_room = |lon: f64, lat: f64| {
+            (lon - 139.70010).abs() < 0.00008 && (lat - 35.60000).abs() < 0.00008
+        };
         assert!(
-            !secondary.is_empty(),
-            "room-overlapped centerlines are ranked secondary"
+            !g.edges.iter().any(|e| {
+                if e.attrs.kind != EdgeKind::Skeleton {
+                    return false;
+                }
+                let (a, b) = (&g.nodes[e.from as usize], &g.nodes[e.to as usize]);
+                let mid = [(a.lon + b.lon) / 2.0, (a.lat + b.lat) / 2.0];
+                in_room(mid[0], mid[1])
+            }),
+            "no centerline midpoint lies inside the carved room"
         );
-        for e in secondary {
-            let metres = haversine_m(
-                [g.nodes[e.from as usize].lon, g.nodes[e.from as usize].lat],
-                [g.nodes[e.to as usize].lon, g.nodes[e.to as usize].lat],
-            );
-            assert!(
-                (e.weight - kiriko_route::meters_to_cost(metres * 3.0)).abs() < 1.0,
-                "secondary weight is 3× metres: got {} expected {}",
-                e.weight,
-                kiriko_route::meters_to_cost(metres * 3.0)
-            );
-            assert!(
-                matches!(
-                    e.attrs.kind,
-                    EdgeKind::Skeleton | EdgeKind::Bridge | EdgeKind::Chord
-                ),
-                "only centerline kinds are re-ranked, got {:?}",
-                e.attrs.kind
-            );
-        }
 
-        // The walkway outside the room keeps its Primary centerlines.
+        // The walkable remainder keeps its Primary centerlines.
         assert!(
             g.edges.iter().any(|e| {
                 e.attrs.kind == EdgeKind::Skeleton
@@ -2399,21 +2513,179 @@ mod tests {
             "walkway outside the room stays primary"
         );
 
-        // Doorway attach edges crossing the same room are never re-ranked.
-        let doorway_edges: Vec<_> = g
-            .edges
-            .iter()
-            .filter(|e| e.attrs.kind == EdgeKind::Doorway)
-            .collect();
+        // A doorway on the walkable half still attaches normally.
         assert!(
-            !doorway_edges.is_empty(),
-            "fixture produces a doorway attach"
+            g.edges.iter().any(|e| e.attrs.kind == EdgeKind::Doorway),
+            "doorway on the walkable half still attaches"
+        );
+    }
+
+    #[test]
+    fn skeleton_through_a_room_is_secondary_and_tripled() {
+        // Units are subtracted from the navigable area during synthesis, so
+        // the room-crossing classify pass is tested directly on a hand-built
+        // graph: one Skeleton edge whose midpoint sits inside a room unit
+        // polygon is demoted to Secondary at 3× its metre length, while a
+        // Doorway edge crossing the same room stays Primary.
+        let room = rect(139.70010, 35.60000, 0.00016, 0.00016);
+        let room_polys = geo_polygons(&room);
+        let nodes = vec![
+            RouteNode {
+                lon: 139.70002, // room west edge
+                lat: 35.60000,
+                ordinal: 0.0,
+            },
+            RouteNode {
+                lon: 139.70018, // room east edge
+                lat: 35.60000,
+                ordinal: 0.0,
+            },
+        ];
+        let metres = haversine_m([nodes[0].lon, nodes[0].lat], [nodes[1].lon, nodes[1].lat]);
+        let mut edges = vec![
+            RouteEdge {
+                from: 0,
+                to: 1,
+                weight: metres as f32,
+                ordinal: 0.0,
+                interior: Vec::new(),
+                attrs: EdgeAttrs {
+                    kind: EdgeKind::Skeleton,
+                    ..EdgeAttrs::default()
+                },
+            },
+            RouteEdge {
+                from: 0,
+                to: 1,
+                weight: metres as f32,
+                ordinal: 0.0,
+                interior: Vec::new(),
+                attrs: EdgeAttrs {
+                    kind: EdgeKind::Doorway,
+                    ..EdgeAttrs::default()
+                },
+            },
+        ];
+        rank_room_crossing_edges(&mut edges, &nodes, &room_polys);
+        // Mirror the pipeline's final metres → cost conversion.
+        for e in &mut edges {
+            e.weight = kiriko_route::meters_to_cost(f64::from(e.weight));
+        }
+        let skeleton = &edges[0];
+        assert_eq!(
+            skeleton.attrs.rank,
+            PathwayRank::Secondary,
+            "room-crossing centerline is ranked secondary"
         );
         assert!(
-            doorway_edges
-                .iter()
-                .all(|e| e.attrs.rank == kiriko_route::PathwayRank::Primary),
+            (skeleton.weight - kiriko_route::meters_to_cost(metres * 3.0)).abs() < 1.0,
+            "secondary weight is 3× metres: got {} expected {}",
+            skeleton.weight,
+            kiriko_route::meters_to_cost(metres * 3.0)
+        );
+        let doorway = &edges[1];
+        assert_eq!(
+            doorway.attrs.rank,
+            PathwayRank::Primary,
             "doorway attach edges stay primary"
+        );
+        assert!(
+            (doorway.weight - kiriko_route::meters_to_cost(metres)).abs() < 1.0,
+            "doorway weight unchanged: got {} expected {}",
+            doorway.weight,
+            kiriko_route::meters_to_cost(metres)
+        );
+    }
+
+    /// True when edge `e`'s straight segment intersects `fixture` (an endpoint
+    /// inside the polygon counts): a centerline chord "crossing" the fixture.
+    fn segment_crosses_fixture(e: &RouteEdge, g: &RouteGraph, fixture: &Polygon<f64>) -> bool {
+        let a = Point::new(g.nodes[e.from as usize].lon, g.nodes[e.from as usize].lat);
+        let b = Point::new(g.nodes[e.to as usize].lon, g.nodes[e.to as usize].lat);
+        fixture.contains(&a)
+            || fixture.contains(&b)
+            || fixture.intersects(&geo::Line::new(a, b))
+    }
+
+    #[test]
+    fn fixture_hole_breaks_a_centerline_that_used_to_cross_it() {
+        // A wide walkway with a rectangular fixture in the middle. Without
+        // obstacle subtraction the medial axis is one spine straight through
+        // the fixture; with the fixture carved out of the navigable area the
+        // centerline loops around it, so no edge chord crosses the footprint.
+        let walk = rect(139.70000, 35.60000, 0.00040, 0.00012); // ~36 m × 13 m
+        let fixture = rect(139.70000, 35.60000, 0.00004, 0.00004); // ~3.6 m × 4.5 m
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("fx", FeatureType::Fixture, "l0", None, fixture.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        assert!(
+            !build.graph.edges.is_empty(),
+            "walkway still synthesizes centerlines"
+        );
+        let fx = geo_polygons(&fixture).pop().expect("fixture polygon");
+        assert!(
+            !build
+                .graph
+                .edges
+                .iter()
+                .any(|e| segment_crosses_fixture(e, &build.graph, &fx)),
+            "no edge chord passes through the fixture"
+        );
+    }
+
+    #[test]
+    fn detail_line_buffer_blocks_a_sub_metre_pinch() {
+        // A walkway corridor with a detail wall across it that leaves a 0.5 m
+        // gap (< MIN_PASSAGE_M = 0.8) between the buffered wall and the
+        // corridor edge: the wall plus its 0.4 m stadium buffer pinches the
+        // passage, so the two sides of the wall never connect into one graph.
+        let walk = rect(139.70000, 35.60000, 0.00040, 0.00006); // ~36 m × 6.7 m
+        // Vertical wall from 0.9 m above the south edge up to the north edge;
+        // after the 0.4 m buffer the south gap is 0.5 m (< MIN_PASSAGE_M).
+        let south = 35.59997;
+        let wall_bottom = south + (0.5 + OBSTACLE_BUFFER_M) / 111_320.0;
+        let wall = line(139.70000, wall_bottom, 139.70000, 35.60003);
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature("w", FeatureType::Unit, "l0", Some("walkway"), walk),
+                feature("wall", FeatureType::Detail, "l0", None, wall),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        assert!(
+            build.graph.edges.is_empty() || component_count(&build.graph) > 1,
+            "buffered wall pinches the passage"
+        );
+    }
+
+    #[test]
+    fn detail_line_buffer_covers_the_segment_and_skips_degenerate() {
+        let a = [139.7, 35.6];
+        let mx = 111_320.0 * 35.6_f64.to_radians().cos();
+        let b = [a[0] + 2.0 / mx, a[1]]; // 2 m east of `a`
+        let buf = buffer_detail_line(a, b).expect("non-degenerate segment buffers");
+        let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let side = |off_m: f64| Point::new(mid[0], mid[1] + off_m / 111_320.0);
+        assert!(buf.contains(&Point::new(a[0], a[1])), "endpoint inside");
+        assert!(buf.contains(&Point::new(mid[0], mid[1])), "midpoint inside");
+        assert!(buf.contains(&Point::new(b[0], b[1])), "endpoint inside");
+        assert!(
+            buf.contains(&side(0.2)),
+            "0.2 m to the side is inside the 0.4 m buffer"
+        );
+        assert!(
+            !buf.contains(&side(1.0)),
+            "1 m to the side is outside the buffer"
+        );
+        assert!(
+            buffer_detail_line(a, a).is_none(),
+            "zero-length segment is skipped"
         );
     }
 
