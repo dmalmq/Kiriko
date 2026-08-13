@@ -626,6 +626,7 @@ mod tests {
                     weight: 100.0,
                     ordinal: 0.0,
                     interior: vec![[139.001, 35.001]],
+                    attrs: EdgeAttrs::default(),
                 },
                 RouteEdge {
                     from: 1,
@@ -633,6 +634,7 @@ mod tests {
                     weight: 100.0,
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
             ],
         };
@@ -679,6 +681,7 @@ mod tests {
                 weight: 100.0,
                 ordinal: 0.0,
                 interior: vec![],
+                attrs: EdgeAttrs::default(),
             }],
         };
         // Both clicks land mid-edge (same edge) → straight slice between them.
@@ -735,6 +738,7 @@ mod tests {
                     weight: 100.0,
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
                 RouteEdge {
                     from: 1,
@@ -742,6 +746,7 @@ mod tests {
                     weight: 5000.0,
                     ordinal: 1.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
             ],
         };
@@ -785,6 +790,7 @@ mod tests {
                 weight: 100.0,
                 ordinal: 0.0,
                 interior: vec![[139.001, 35.001]],
+                attrs: EdgeAttrs::default(),
             }],
         }
     }
@@ -825,6 +831,7 @@ mod tests {
             weight: 10.0,
             ordinal: -1.0,
             interior: vec![],
+            attrs: EdgeAttrs::default(),
         });
         let cands = snap_candidates(
             &g,
@@ -876,6 +883,7 @@ mod tests {
                     weight: 182_000.0,
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
                 RouteEdge {
                     from: 0,
@@ -883,6 +891,7 @@ mod tests {
                     weight: 600_000.0,
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
             ],
         };
@@ -938,6 +947,7 @@ mod tests {
                     weight: 182_000.0,
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
                 RouteEdge {
                     from: 0,
@@ -945,6 +955,7 @@ mod tests {
                     weight: 600_000.0,
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
             ],
         };
@@ -1012,6 +1023,7 @@ mod tests {
                     weight: 200_000.0,
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
                 RouteEdge {
                     from: 2,
@@ -1019,6 +1031,7 @@ mod tests {
                     weight: 200_000.0, // tuned below
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
             ],
         };
@@ -1145,6 +1158,7 @@ mod tests {
                     weight: 100.0,
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
                 RouteEdge {
                     from: 1,
@@ -1152,6 +1166,7 @@ mod tests {
                     weight: 100.0,
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
             ],
         };
@@ -1199,6 +1214,7 @@ mod tests {
                     weight: 6000.0,
                     ordinal: 0.0,
                     interior: vec![[139.0, 35.002], [139.002, 35.002]],
+                    attrs: EdgeAttrs::default(),
                 },
                 RouteEdge {
                     from: 0,
@@ -1206,6 +1222,7 @@ mod tests {
                     weight: 1000.0,
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
                 RouteEdge {
                     from: 2,
@@ -1213,6 +1230,7 @@ mod tests {
                     weight: 1000.0,
                     ordinal: 0.0,
                     interior: vec![],
+                    attrs: EdgeAttrs::default(),
                 },
             ],
         };

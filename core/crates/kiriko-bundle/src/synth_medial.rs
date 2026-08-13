@@ -29,7 +29,7 @@ use crate::synth::{haversine_m, linestring_midpoint, point_boundary_dist_m, poly
 use crate::transit_match::{TransitPair, minimum_cost_maximum_matching};
 use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
-use kiriko_route::{RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode};
+use kiriko_route::{EdgeAttrs, RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode};
 
 /// Convert one canonical GeoJSON ring (`[[lon,lat],…]`) to a geo `LineString`.
 /// `None` for a ring with fewer than 4 positions (not a valid closed ring).
@@ -1015,6 +1015,7 @@ fn materialize_doorway_side(
         weight: haversine_m(mid, side.point) as f32,
         ordinal,
         interior: Vec::new(),
+        attrs: EdgeAttrs::default(),
     });
     side.node = Some(index);
     index
@@ -1593,6 +1594,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     as f32,
                 ordinal: ord,
                 interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
             });
         }
         let skeleton_range = base..nodes.len();
@@ -1693,6 +1695,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     weight: haversine_m(t_pt, c) as f32,
                     ordinal: ord,
                     interior: Vec::new(),
+                    attrs: EdgeAttrs::default(),
                 });
             }
             doorway_nodes.push(doorway);
@@ -1772,6 +1775,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 weight: d as f32,
                 ordinal: ord,
                 interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
             });
         }
 
@@ -1787,6 +1791,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 weight: haversine_m(skeleton.nodes[a], skeleton.nodes[b]) as f32,
                 ordinal: ord,
                 interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
             });
         }
 
@@ -1855,6 +1860,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     weight: haversine_m(*tp, t_pt) as f32,
                     ordinal: ord,
                     interior: Vec::new(),
+                    attrs: EdgeAttrs::default(),
                 });
                 attached = true;
             }
@@ -1880,6 +1886,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         weight: haversine_m(*tp, p) as f32,
                         ordinal: ord,
                         interior: Vec::new(),
+                        attrs: EdgeAttrs::default(),
                     });
                     break;
                 }
@@ -1942,6 +1949,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     weight: (pair.horizontal_distance_m + floor_cost(&category)) as f32,
                     ordinal: lower_ordinal,
                     interior: Vec::new(),
+                    attrs: EdgeAttrs::default(),
                 });
             }
             for (lower_id, _, _, _, _) in &lower {

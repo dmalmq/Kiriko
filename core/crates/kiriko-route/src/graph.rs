@@ -11,6 +11,62 @@ pub struct RouteNode {
     pub ordinal: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EdgeKind {
+    Imported = 0,
+    Skeleton = 1,
+    Doorway = 2,
+    Stub = 3,
+    Bridge = 4,
+    Chord = 5,
+    Vertical = 6,
+    TransitAttach = 7,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PathwayRank {
+    Primary = 1,
+    Secondary = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum VerticalKind {
+    Elevator = 1,
+    Escalator = 2,
+    Stairs = 3,
+}
+
+/// Quality attributes of a [`RouteEdge`]. `Default` is the imported-graph
+/// baseline, so every existing imported/test literal stays semantically
+/// identical when it sets `attrs: EdgeAttrs::default()`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdgeAttrs {
+    pub kind: EdgeKind,
+    pub rank: PathwayRank,
+    pub clearance_m: Option<f32>,
+    pub vertical: Option<VerticalKind>,
+}
+
+impl Default for EdgeAttrs {
+    fn default() -> Self {
+        Self {
+            kind: EdgeKind::Imported,
+            rank: PathwayRank::Primary,
+            clearance_m: None,
+            vertical: None,
+        }
+    }
+}
+
+impl EdgeAttrs {
+    pub fn is_default(self) -> bool {
+        self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteEdge {
     pub from: u32,
@@ -22,6 +78,23 @@ pub struct RouteEdge {
     /// Bend points strictly between `from` and `to`, in `from → to` order;
     /// empty when the edge is a straight chord between its endpoints.
     pub interior: Vec<[f64; 2]>,
+    /// Generation-quality attributes (kind, rank, clearance, vertical).
+    pub attrs: EdgeAttrs,
+}
+
+impl RouteEdge {
+    /// Straight edge with default (imported) attributes; used by synthesis
+    /// going forward.
+    pub fn new(from: u32, to: u32, weight: f32, ordinal: f64) -> Self {
+        Self {
+            from,
+            to,
+            weight,
+            ordinal,
+            interior: Vec::new(),
+            attrs: EdgeAttrs::default(),
+        }
+    }
 }
 
 /// Routing-cost units per metre. A [`RouteEdge::weight`] is expressed in
@@ -92,9 +165,32 @@ mod tests {
                 weight: 100.0,
                 ordinal: 0.0,
                 interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
             }],
             ..nodes_only.clone()
         };
         assert!(!with_edge.is_empty(), "an edge-bearing graph is routable");
+    }
+
+    #[test]
+    fn edge_attrs_default_is_imported_primary_unknown_clearance() {
+        let a = EdgeAttrs::default();
+        assert_eq!(a.kind, EdgeKind::Imported);
+        assert_eq!(a.rank, PathwayRank::Primary);
+        assert_eq!(a.clearance_m, None);
+        assert_eq!(a.vertical, None);
+        assert!(a.is_default());
+    }
+
+    #[test]
+    fn vertical_attrs_require_a_kind() {
+        let a = EdgeAttrs {
+            kind: EdgeKind::Vertical,
+            rank: PathwayRank::Primary,
+            clearance_m: None,
+            vertical: Some(VerticalKind::Elevator),
+        };
+        assert!(!a.is_default());
+        assert_eq!(a.vertical.is_some(), a.kind == EdgeKind::Vertical);
     }
 }

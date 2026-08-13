@@ -260,7 +260,7 @@ mod tests {
     use super::*;
     use crate::codec::{BundleDocument, BundleMetadata, BundleStats, encode_bundle};
     use kiriko_model::model::{ImdfManifest, ViewerLevel};
-    use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+    use kiriko_route::{EdgeAttrs, RouteEdge, RouteGraph, RouteNode};
     use std::collections::BTreeMap;
 
     fn bundle_with_graph(graph: RouteGraph) -> Vec<u8> {
@@ -345,6 +345,7 @@ mod tests {
                     weight: 90_000.0,
                     ordinal: 0.0,
                     interior: Vec::new(),
+                    attrs: EdgeAttrs::default(),
                 },
                 RouteEdge {
                     from: 0,
@@ -352,6 +353,7 @@ mod tests {
                     weight: 5_000.0,
                     ordinal: 0.0,
                     interior: Vec::new(),
+                    attrs: EdgeAttrs::default(),
                 },
             ],
         };
@@ -449,6 +451,7 @@ mod tests {
                 weight: 100.0,
                 ordinal: 0.5,
                 interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
             }],
         };
         let bundle = bundle_with_graph(graph);
@@ -481,6 +484,7 @@ mod tests {
                 weight: 90_000.0,
                 ordinal: 1.0,
                 interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
             }],
         };
         let net1 = export_network(&bundle_with_graph(g0.clone())).expect("first export");
@@ -519,6 +523,7 @@ mod tests {
                 weight: 100.5,
                 ordinal: 0.0,
                 interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
             }],
         };
         let net = export_network(&bundle_with_graph(g0.clone())).expect("export");

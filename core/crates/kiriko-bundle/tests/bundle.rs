@@ -1557,7 +1557,7 @@ fn bundle_with_graph(graph: kiriko_route::RouteGraph) -> Vec<u8> {
 
 #[test]
 fn network_round_trip_is_stable_across_two_export_build_cycles() {
-    use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+    use kiriko_route::{EdgeAttrs, RouteEdge, RouteGraph, RouteNode};
     // Integer millimetre costs and integer ordinals: a horizontal edge on F1
     // and a vertical edge up to F2.
     let g0 = RouteGraph {
@@ -1585,6 +1585,7 @@ fn network_round_trip_is_stable_across_two_export_build_cycles() {
                 weight: 90_000.0,
                 ordinal: 0.0,
                 interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
             },
             RouteEdge {
                 from: 0,
@@ -1592,6 +1593,7 @@ fn network_round_trip_is_stable_across_two_export_build_cycles() {
                 weight: 5_000.0,
                 ordinal: 0.0,
                 interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
             },
         ],
     };

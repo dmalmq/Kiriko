@@ -4,7 +4,7 @@ use std::fmt;
 use geojson::{FeatureCollection, GeoJson, Value};
 
 use crate::floor::floor_to_ordinal;
-use crate::graph::{RouteEdge, RouteGraph, RouteNode};
+use crate::graph::{EdgeAttrs, RouteEdge, RouteGraph, RouteNode};
 
 /// Non-fatal problem encountered while building a route graph.
 #[derive(Debug, Clone, PartialEq)]
@@ -149,6 +149,7 @@ pub fn build_route_graph(
             weight,
             ordinal,
             interior,
+            attrs: EdgeAttrs::default(),
         };
 
         // Reciprocal handling requires both PATHID and RPATHID; id-less paths

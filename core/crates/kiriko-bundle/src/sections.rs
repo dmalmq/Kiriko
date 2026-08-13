@@ -655,6 +655,13 @@ pub(crate) fn encode_graph(graph: &kiriko_route::RouteGraph) -> Result<Vec<u8>, 
             &edge.interior,
             node_count,
         )?;
+        // §12 (optional KVB) is not on the wire yet; attrs only travel as far
+        // as this invariant check for now.
+        debug_assert_eq!(
+            edge.attrs.vertical.is_some(),
+            edge.attrs.kind == kiriko_route::EdgeKind::Vertical,
+            "edge vertical attrs require the Vertical kind"
+        );
         let mut interior = Vec::with_capacity(edge.interior.len());
         for c in &edge.interior {
             interior.push([canonical_f64(c[0])?, canonical_f64(c[1])?]);
@@ -706,6 +713,7 @@ pub(crate) fn decode_graph(bytes: &[u8]) -> Result<kiriko_route::RouteGraph, Bun
             weight: edge.weight,
             ordinal: canonical_f64(edge.ordinal)?,
             interior,
+            attrs: kiriko_route::EdgeAttrs::default(),
         });
     }
     Ok(kiriko_route::RouteGraph { nodes, edges })
@@ -989,7 +997,7 @@ mod tests {
 
     #[test]
     fn graph_section_round_trips() {
-        use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+        use kiriko_route::{EdgeAttrs, RouteEdge, RouteGraph, RouteNode};
         let mut doc = minimal_document();
         doc.graph = Some(RouteGraph {
             nodes: vec![
@@ -1010,6 +1018,7 @@ mod tests {
                 weight: 12.5,
                 ordinal: 0.0,
                 interior: vec![],
+                attrs: EdgeAttrs::default(),
             }],
         });
         let bytes = crate::encode_bundle(&doc).expect("a document with a graph encodes");
@@ -1018,7 +1027,7 @@ mod tests {
     }
     #[test]
     fn graph_section_round_trips_edge_geometry() {
-        use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+        use kiriko_route::{EdgeAttrs, RouteEdge, RouteGraph, RouteNode};
         let mut doc = minimal_document();
         doc.graph = Some(RouteGraph {
             nodes: vec![
@@ -1039,6 +1048,7 @@ mod tests {
                 weight: 12.5,
                 ordinal: 0.0,
                 interior: vec![[139.001, 35.001]],
+                attrs: EdgeAttrs::default(),
             }],
         });
         let bytes = crate::encode_bundle(&doc).expect("encodes");
@@ -1227,7 +1237,7 @@ mod tests {
 
     #[test]
     fn graph_and_facilities_sections_coexist_in_ascending_directory_order() {
-        use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+        use kiriko_route::{EdgeAttrs, RouteEdge, RouteGraph, RouteNode};
         let mut doc = minimal_document();
         doc.graph = Some(RouteGraph {
             nodes: vec![
@@ -1248,6 +1258,7 @@ mod tests {
                 weight: 100.0,
                 ordinal: 0.0,
                 interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
             }],
         });
         doc.facilities = Some(kiriko_facilities::Facilities {
@@ -1350,7 +1361,7 @@ mod tests {
 
     #[test]
     fn rejects_negative_graph_edge_weight_on_encode() {
-        use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+        use kiriko_route::{EdgeAttrs, RouteEdge, RouteGraph, RouteNode};
         let graph = RouteGraph {
             nodes: vec![
                 RouteNode {
@@ -1370,6 +1381,7 @@ mod tests {
                 weight: -1.0,
                 ordinal: 0.0,
                 interior: vec![],
+                attrs: EdgeAttrs::default(),
             }],
         };
         assert!(

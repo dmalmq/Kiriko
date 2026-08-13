@@ -239,7 +239,7 @@ pub(crate) fn clip_graph(
     graph: &kiriko_route::RouteGraph,
     region: &ClipRegion,
 ) -> (kiriko_route::RouteGraph, u32, u32) {
-    use kiriko_route::{RouteEdge, RouteGraph};
+    use kiriko_route::{EdgeAttrs, RouteEdge, RouteGraph};
 
     let mut remap: Vec<Option<u32>> = Vec::with_capacity(graph.nodes.len());
     let mut nodes = Vec::new();
@@ -269,6 +269,7 @@ pub(crate) fn clip_graph(
             weight: edge.weight,
             ordinal: edge.ordinal,
             interior: edge.interior.clone(),
+            attrs: EdgeAttrs::default(),
         });
     }
     let dropped_edges = u32::try_from(graph.edges.len() - edges.len()).unwrap_or(u32::MAX);
@@ -296,7 +297,7 @@ mod tests {
     use super::*;
     use kiriko_facilities::{Facilities, Facility};
     use kiriko_model::canonical::Value;
-    use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+    use kiriko_route::{EdgeAttrs, RouteEdge, RouteGraph, RouteNode};
 
     /// A 0.001deg square at (139.000,35.000)-(139.001,35.001) — about 91m x 111m.
     fn square() -> Value {
@@ -411,6 +412,7 @@ mod tests {
             weight: 100.0,
             ordinal: 0.0,
             interior: Vec::new(),
+            attrs: EdgeAttrs::default(),
         }
     }
 

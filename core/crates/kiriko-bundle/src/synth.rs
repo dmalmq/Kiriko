@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
-use kiriko_route::{RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode};
+use kiriko_route::{EdgeAttrs, RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode};
 
 use crate::codec::BundleDocument;
 use crate::transit_match::{TransitPair, minimum_cost_maximum_matching};
@@ -480,6 +480,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                     weight: haversine_m(*op, hubs[h].pt) as f32,
                     ordinal: ord,
                     interior: Vec::new(),
+                    attrs: EdgeAttrs::default(),
                 });
             }
         }
@@ -527,6 +528,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                     weight: weight as f32,
                     ordinal: ord,
                     interior: Vec::new(),
+                    attrs: EdgeAttrs::default(),
                 });
             }
         }
@@ -554,6 +556,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                             weight: weight as f32,
                             ordinal: ord,
                             interior: Vec::new(),
+                            attrs: EdgeAttrs::default(),
                         });
                     }
                 }
@@ -617,6 +620,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                     weight: (pair.horizontal_distance_m + floor_cost(&category)) as f32,
                     ordinal: lower_ordinal,
                     interior: Vec::new(),
+                    attrs: EdgeAttrs::default(),
                 });
             }
             for candidate in &lower {
