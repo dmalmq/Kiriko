@@ -29,7 +29,10 @@ use crate::synth::{haversine_m, linestring_midpoint, point_boundary_dist_m, poly
 use crate::transit_match::{TransitPair, minimum_cost_maximum_matching};
 use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
-use kiriko_route::{EdgeAttrs, RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode};
+use kiriko_route::{
+    EdgeAttrs, EdgeKind, RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode,
+    vertical_from_key,
+};
 
 /// Convert one canonical GeoJSON ring (`[[lon,lat],…]`) to a geo `LineString`.
 /// `None` for a ring with fewer than 4 positions (not a valid closed ring).
@@ -360,6 +363,13 @@ fn boundary_clearance_m(p: [f64; 2], area: &MultiPolygon<f64>) -> f64 {
     }
     best
 }
+/// Boundary clearance as a present edge attribute: only finite and positive
+/// values become `Some`, so an unmeasured passage is `None` rather than a
+/// fake `Some(0.0)`.
+fn clearance_attr(c: f64) -> Option<f32> {
+    (c.is_finite() && c > 0.0).then_some(c as f32)
+}
+
 
 /// True when the leaf faces a flat endcap and remains inside a narrow channel
 /// immediately behind it. The endcap is perpendicular to the branch tangent;
@@ -1015,7 +1025,10 @@ fn materialize_doorway_side(
         weight: haversine_m(mid, side.point) as f32,
         ordinal,
         interior: Vec::new(),
-        attrs: EdgeAttrs::default(),
+        attrs: EdgeAttrs {
+            kind: EdgeKind::Stub,
+            ..EdgeAttrs::default()
+        },
     });
     side.node = Some(index);
     index
@@ -1587,6 +1600,11 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         }
         for &(a, b) in &skeleton.edges {
             let (i, j) = (base + a, base + b);
+            let midpoint = [
+                (nodes[i].lon + nodes[j].lon) / 2.0,
+                (nodes[i].lat + nodes[j].lat) / 2.0,
+            ];
+            let clearance = clearance_attr(boundary_clearance_m(midpoint, &area));
             edges.push(RouteEdge {
                 from: i as u32,
                 to: j as u32,
@@ -1594,7 +1612,11 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     as f32,
                 ordinal: ord,
                 interior: Vec::new(),
-                attrs: EdgeAttrs::default(),
+                attrs: EdgeAttrs {
+                    kind: EdgeKind::Skeleton,
+                    clearance_m: clearance,
+                    ..EdgeAttrs::default()
+                },
             });
         }
         let skeleton_range = base..nodes.len();
@@ -1695,7 +1717,10 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     weight: haversine_m(t_pt, c) as f32,
                     ordinal: ord,
                     interior: Vec::new(),
-                    attrs: EdgeAttrs::default(),
+                    attrs: EdgeAttrs {
+                        kind: EdgeKind::Doorway,
+                        ..EdgeAttrs::default()
+                    },
                 });
             }
             doorway_nodes.push(doorway);
@@ -1769,13 +1794,22 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 chord_blob[cra] = crb;
             }
             accepted_bridges.push((li, lj, d));
+            let midpoint = [
+                (skeleton.nodes[li][0] + skeleton.nodes[lj][0]) / 2.0,
+                (skeleton.nodes[li][1] + skeleton.nodes[lj][1]) / 2.0,
+            ];
+            let clearance = clearance_attr(boundary_clearance_m(midpoint, &area));
             edges.push(RouteEdge {
                 from: (base + li) as u32,
                 to: (base + lj) as u32,
                 weight: d as f32,
                 ordinal: ord,
                 interior: Vec::new(),
-                attrs: EdgeAttrs::default(),
+                attrs: EdgeAttrs {
+                    kind: EdgeKind::Bridge,
+                    clearance_m: clearance,
+                    ..EdgeAttrs::default()
+                },
             });
         }
 
@@ -1791,7 +1825,10 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 weight: haversine_m(skeleton.nodes[a], skeleton.nodes[b]) as f32,
                 ordinal: ord,
                 interior: Vec::new(),
-                attrs: EdgeAttrs::default(),
+                attrs: EdgeAttrs {
+                    kind: EdgeKind::Chord,
+                    ..EdgeAttrs::default()
+                },
             });
         }
 
@@ -1860,7 +1897,10 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     weight: haversine_m(*tp, t_pt) as f32,
                     ordinal: ord,
                     interior: Vec::new(),
-                    attrs: EdgeAttrs::default(),
+                    attrs: EdgeAttrs {
+                        kind: EdgeKind::TransitAttach,
+                        ..EdgeAttrs::default()
+                    },
                 });
                 attached = true;
             }
@@ -1886,7 +1926,10 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         weight: haversine_m(*tp, p) as f32,
                         ordinal: ord,
                         interior: Vec::new(),
-                        attrs: EdgeAttrs::default(),
+                        attrs: EdgeAttrs {
+                            kind: EdgeKind::TransitAttach,
+                            ..EdgeAttrs::default()
+                        },
                     });
                     break;
                 }
@@ -1949,7 +1992,11 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     weight: (pair.horizontal_distance_m + floor_cost(&category)) as f32,
                     ordinal: lower_ordinal,
                     interior: Vec::new(),
-                    attrs: EdgeAttrs::default(),
+                    attrs: EdgeAttrs {
+                        kind: EdgeKind::Vertical,
+                        vertical: vertical_from_key(&category),
+                        ..EdgeAttrs::default()
+                    },
                 });
             }
             for (lower_id, _, _, _, _) in &lower {
@@ -2173,6 +2220,84 @@ mod tests {
         });
         assert!(vertical, "a vertical transit edge links the floors");
     }
+
+    #[test]
+    fn skeleton_edges_carry_kind() {
+        // Two floors, each with the two-walkway + opening doorway fixture, plus
+        // stairs stacked across floors: centerline edges must be typed
+        // `Skeleton` with measured clearance, and the cross-floor stair pair
+        // typed `Vertical`.
+        let features = vec![
+            feature(
+                "wa0",
+                FeatureType::Unit,
+                "l0",
+                Some("walkway"),
+                rect(139.70000, 35.600000, 0.00040, 0.00001),
+            ),
+            feature(
+                "wb0",
+                FeatureType::Unit,
+                "l0",
+                Some("walkway"),
+                rect(139.70000, 35.600014, 0.00040, 0.00001),
+            ),
+            feature(
+                "door0",
+                FeatureType::Opening,
+                "l0",
+                None,
+                line(139.70000, 35.600004, 139.70000, 35.600010),
+            ),
+            feature(
+                "s0",
+                FeatureType::Unit,
+                "l0",
+                Some("stairs"),
+                rect(139.70000, 35.600007, 0.00006, 0.00001),
+            ),
+            feature(
+                "wa1",
+                FeatureType::Unit,
+                "l1",
+                Some("walkway"),
+                rect(139.70000, 35.600000, 0.00040, 0.00001),
+            ),
+            feature(
+                "wb1",
+                FeatureType::Unit,
+                "l1",
+                Some("walkway"),
+                rect(139.70000, 35.600014, 0.00040, 0.00001),
+            ),
+            feature(
+                "door1",
+                FeatureType::Opening,
+                "l1",
+                None,
+                line(139.70000, 35.600004, 139.70000, 35.600010),
+            ),
+            feature(
+                "s1",
+                FeatureType::Unit,
+                "l1",
+                Some("stairs"),
+                rect(139.70000, 35.600007, 0.00006, 0.00001),
+            ),
+        ];
+        let build =
+            synthesize_network_medial(&document(&[("l0", 0.0), ("l1", 1.0)], features));
+        assert!(
+            build.graph.edges.iter().any(|e| e.attrs.kind == EdgeKind::Skeleton
+                && e.attrs.clearance_m.is_some_and(|c| c > 0.0)),
+            "centerline edges carry measured clearance"
+        );
+        assert!(
+            build.graph.edges.iter().any(|e| e.attrs.kind == EdgeKind::Vertical),
+            "stacked transit is typed Vertical"
+        );
+    }
+
 
     /// Canonical axis-aligned rectangle `Polygon` centered at `(cx, cy)`.
     fn rect(cx: f64, cy: f64, w: f64, h: f64) -> Value {
