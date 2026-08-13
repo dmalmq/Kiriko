@@ -23,9 +23,9 @@ export default defineConfig({
   // Software-GL runners (no GPU, shared cores) can take tens of seconds for a
   // scene page to reach its first idle; the helper-level idle waits carry the
   // same headroom. Asserted contracts are unchanged — only the wait budget.
-  timeout: 180_000,
+  timeout: 300_000,
   expect: {
-    timeout: 45_000,
+    timeout: 90_000,
   },
   projects: [
     {
