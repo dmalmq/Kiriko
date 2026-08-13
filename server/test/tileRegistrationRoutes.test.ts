@@ -20,7 +20,7 @@ import { cleanupTestApps, loginCookie, makeTestApp } from "./helpers";
 import { corridorPackageGlb, rootTransform } from "../../tests/fixtures/tileRegistration";
 import { venuePlaneFromBundle } from "./tileRegistrationFixtures";
 import { tilesetFixture } from "../../tests/fixtures/tileFixtures";
-import { evaluationTarget, findEvaluation, storeEvaluation } from "../src/tiles/activation";
+import { evaluationTarget, findEvaluation, reserveActivation, storeEvaluation } from "../src/tiles/activation";
 
 afterEach(cleanupTestApps);
 
@@ -356,6 +356,40 @@ describe("tile activation", () => {
       )
       .get(packageId);
     expect(stored).toEqual({ profileId: "default", state: "activated" });
+  });
+
+  it("releases an activation reservation when recovery fails its draft version", async () => {
+    const venue = await publishedVenue("Interrupted activation publication");
+    const packageId = await ingestCorridor(venue);
+    await evaluate(venue, packageId);
+    const evaluation = findEvaluation(venue.app.db, packageId);
+    expect(evaluation).not.toBeNull();
+    const draft = venue.app.db
+      .prepare(
+        `INSERT INTO versions
+           (venue_id, seq, public_id, source_blob_hash, source_kind, status)
+         SELECT venue_id, 2, lower(hex(randomblob(32))), source_blob_hash, source_kind, 'draft'
+         FROM versions WHERE id = ?`,
+      )
+      .run(venue.versionId);
+    const draftVersionId = Number(draft.lastInsertRowid);
+    expect(reserveActivation(venue.app.db, evaluation!.id, draftVersionId, 1)).toBe(true);
+
+    venue.app.db
+      .prepare(
+        `UPDATE versions
+         SET status = 'failed', error = '{"code":"interrupted_by_restart"}'
+         WHERE id = ?`,
+      )
+      .run(draftVersionId);
+
+    const stored = venue.app.db
+      .prepare(
+        `SELECT state, activating_version_id AS activatingVersionId
+         FROM tile_activations WHERE package_id = ?`,
+      )
+      .get(packageId);
+    expect(stored).toEqual({ state: "evaluated", activatingVersionId: null });
   });
 
   it("retries a failed activation at a fresh version sequence", async () => {

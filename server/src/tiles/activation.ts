@@ -237,20 +237,6 @@ export function reserveActivation(
   return result.changes === 1;
 }
 
-/** Release a failed publication without touching the evaluation evidence. */
-export function releaseActivation(
-  db: Database,
-  evaluationId: number,
-  activatingVersionId: number,
-): boolean {
-  const result = db.prepare(
-    `UPDATE tile_activations
-     SET activating_version_id = NULL, activating_by = NULL, activating_at = NULL
-     WHERE id = ? AND state = 'evaluated' AND activating_version_id = ?`,
-  ).run(evaluationId, activatingVersionId);
-  return result.changes === 1;
-}
-
 /**
  * Bind an evaluation to the immutable version its activation produced, and to
  * the render document derived for it.
