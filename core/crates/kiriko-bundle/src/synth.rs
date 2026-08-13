@@ -891,10 +891,34 @@ mod tests {
         // independent nearest-neighbor linking BOTH lowers prefer the 1 m
         // upper (fan-in), while a full two-pair assignment exists.
         let features = vec![
-            feature("l0-a", FeatureType::Unit, "L0", Some("stairs"), polygon(&square(0.0, 0.0, d))),
-            feature("l0-b", FeatureType::Unit, "L0", Some("stairs"), polygon(&square(1.9 * d, 0.0, d))),
-            feature("l1-a", FeatureType::Unit, "L1", Some("stairs"), polygon(&square(1.0 * d, 0.0, d))),
-            feature("l1-b", FeatureType::Unit, "L1", Some("stairs"), polygon(&square(3.0 * d, 0.0, d))),
+            feature(
+                "l0-a",
+                FeatureType::Unit,
+                "L0",
+                Some("stairs"),
+                polygon(&square(0.0, 0.0, d)),
+            ),
+            feature(
+                "l0-b",
+                FeatureType::Unit,
+                "L0",
+                Some("stairs"),
+                polygon(&square(1.9 * d, 0.0, d)),
+            ),
+            feature(
+                "l1-a",
+                FeatureType::Unit,
+                "L1",
+                Some("stairs"),
+                polygon(&square(1.0 * d, 0.0, d)),
+            ),
+            feature(
+                "l1-b",
+                FeatureType::Unit,
+                "L1",
+                Some("stairs"),
+                polygon(&square(3.0 * d, 0.0, d)),
+            ),
         ];
         let build = synthesize_network(&document(&[("L0", 0.0), ("L1", 1.0)], features));
         let vertical: Vec<_> = build
@@ -906,7 +930,11 @@ mod tests {
                     != build.graph.nodes[edge.to as usize].ordinal
             })
             .collect();
-        assert_eq!(vertical.len(), 2, "maximum-cardinality assignment links both stairs");
+        assert_eq!(
+            vertical.len(),
+            2,
+            "maximum-cardinality assignment links both stairs"
+        );
         let mut upper_ids: Vec<u32> = vertical.iter().map(|edge| edge.to).collect();
         upper_ids.sort_unstable();
         upper_ids.dedup();
@@ -927,8 +955,10 @@ mod tests {
                 )
             })
             .collect();
-        let build =
-            synthesize_network(&document(&[("L0", 0.0), ("L1", 1.0), ("L2", 2.0)], features));
+        let build = synthesize_network(&document(
+            &[("L0", 0.0), ("L1", 1.0), ("L2", 2.0)],
+            features,
+        ));
         let vertical = build
             .graph
             .edges

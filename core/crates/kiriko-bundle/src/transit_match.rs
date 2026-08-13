@@ -26,17 +26,13 @@ pub(crate) struct TransitPair {
 /// Pairs with non-finite or negative distances are dropped; duplicate
 /// `(lower, upper)` IDs keep the shortest distance. The output is sorted by
 /// `(lower_node_id, upper_node_id)`.
-pub(crate) fn minimum_cost_maximum_matching(
-    admissible_pairs: &[TransitPair],
-) -> Vec<TransitPair> {
+pub(crate) fn minimum_cost_maximum_matching(admissible_pairs: &[TransitPair]) -> Vec<TransitPair> {
     // 1. Keep finite non-negative distances and sort deterministically by
     // (lower ID, upper ID, distance) so every later choice is input-order
     // invariant.
     let mut pairs: Vec<TransitPair> = admissible_pairs
         .iter()
-        .filter(|pair| {
-            pair.horizontal_distance_m.is_finite() && pair.horizontal_distance_m >= 0.0
-        })
+        .filter(|pair| pair.horizontal_distance_m.is_finite() && pair.horizontal_distance_m >= 0.0)
         .cloned()
         .collect();
     pairs.sort_by(|a, b| {
@@ -86,7 +82,13 @@ pub(crate) fn minimum_cost_maximum_matching(
             + upper_ids
                 .binary_search(&pair.upper_node_id)
                 .expect("pair upper id must be a collected upper id");
-        add_edge(&mut graph, from, to, pair.horizontal_distance_m, Some(pair_index));
+        add_edge(
+            &mut graph,
+            from,
+            to,
+            pair.horizontal_distance_m,
+            Some(pair_index),
+        );
     }
 
     // 6-7. Successive shortest augmenting paths: Bellman-Ford per unit of
@@ -211,11 +213,8 @@ mod tests {
 
     #[test]
     fn matching_avoids_nearest_neighbor_fan_in() {
-        let matches = minimum_cost_maximum_matching(&[
-            pair(1, 10, 1.0),
-            pair(2, 10, 1.1),
-            pair(2, 11, 2.0),
-        ]);
+        let matches =
+            minimum_cost_maximum_matching(&[pair(1, 10, 1.0), pair(2, 10, 1.1), pair(2, 11, 2.0)]);
         assert_eq!(ids(&matches), vec![(1, 10), (2, 11)]);
     }
 
