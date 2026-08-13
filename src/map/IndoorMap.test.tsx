@@ -9,6 +9,7 @@ import {
   INDOOR_SOURCE_ID,
   LAYER_NETWORK_JUNCTION_HIT,
   LAYER_NETWORK_PATH_HIT,
+  LAYER_NETWORK_VERTICAL_LINK_HIT,
   NETWORK_SOURCE_ID,
   ROUTE_SOURCE_ID,
 } from "./featureLayers";
@@ -1682,6 +1683,36 @@ describe("IndoorMap network editing", () => {
       connectionId: { pathId: 1, reversePathId: 2 },
     });
   });
+  it("reports a connection pick from a translated vertical marker", () => {
+    const net = editing();
+    const { map } = renderMap(baseProps({ networkEditing: net }));
+    map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [];
+    map.queryByLayer[LAYER_NETWORK_VERTICAL_LINK_HIT] = [
+      { properties: { PATHID: 7, RPATHID: 8 } },
+    ];
+    map.queryByLayer[LAYER_NETWORK_PATH_HIT] = [];
+    act(() => {
+      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 2 } });
+    });
+    expect(net.onPick).toHaveBeenCalledWith({
+      kind: "connection",
+      connectionId: { pathId: 7, reversePathId: 8 },
+    });
+  });
+
+  it("keeps a junction ahead of a vertical marker at the same query point", () => {
+    const net = editing();
+    const { map } = renderMap(baseProps({ networkEditing: net }));
+    map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [{ properties: { NODEID: 10 } }];
+    map.queryByLayer[LAYER_NETWORK_VERTICAL_LINK_HIT] = [
+      { properties: { PATHID: 7, RPATHID: 8 } },
+    ];
+    act(() => {
+      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 2 } });
+    });
+    expect(net.onPick).toHaveBeenCalledWith({ kind: "junction", nodeId: 10 });
+  });
+
 
   it("prefers a junction over a connection under the same click", () => {
     const net = editing();
@@ -1765,6 +1796,17 @@ describe("IndoorMap network editing", () => {
     });
     expect(map.canvas.style.cursor).toBe("pointer");
   });
+  it("uses a pointer cursor over a vertical marker", () => {
+    const { map } = renderMap(baseProps({ networkEditing: editing({ tool: "select" }) }));
+    map.queryByLayer[LAYER_NETWORK_VERTICAL_LINK_HIT] = [
+      { properties: { PATHID: 7, RPATHID: 8 } },
+    ];
+    act(() => {
+      map.emit("mousemove", { point: { x: 1, y: 1 } });
+    });
+    expect(map.canvas.style.cursor).toBe("pointer");
+  });
+
 
   it("restores ordinary selection after editing ends", () => {
     const onSelectFeature = vi.fn();
