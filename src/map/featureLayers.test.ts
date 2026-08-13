@@ -232,8 +232,11 @@ describe("vertical network link layers", () => {
     ) as SymbolLayerSpecification | undefined;
     expect(label?.type).toBe("symbol");
     expect(label?.source).toBe(NETWORK_SOURCE_ID);
-    expect(JSON.stringify(label?.layout?.["text-field"])).toContain("targetDirection");
-    expect(JSON.stringify(label?.layout?.["text-field"])).toContain("targetFloor");
+    // Glyph-independent: the indoor style has no `glyphs` source, so the
+    // visible copy must be a registered style image picked by feature
+    // property — never a style-glyph text-field.
+    expect(label?.layout?.["icon-image"]).toEqual(["get", "labelImage"]);
+    expect(label?.layout?.["text-field"]).toBeUndefined();
     expect(JSON.stringify(label)).not.toMatch(/stairs|escalator|elevator/i);
   });
 });

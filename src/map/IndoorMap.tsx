@@ -46,6 +46,7 @@ import {
 } from "./featureLayers";
 import { LAYER_GROUP_IDS, type LayerVisibility } from "./layerGroups";
 import { buildRouteFeatures } from "./routeFeatures";
+import { registerVerticalLinkLabelImages } from "./verticalLinkLabels";
 import {
   buildNetworkFeatures,
   type NetworkConnectionId,
@@ -334,9 +335,15 @@ function setNetworkSourceData(
     return;
   }
   const ordinal = activeOrdinalFor(venue, levelId);
-  source.setData(
-    buildNetworkFeatures(ordinal === null ? null : network ?? null, ordinal ?? 0, render),
+  const features = buildNetworkFeatures(
+    ordinal === null ? null : network ?? null,
+    ordinal ?? 0,
+    render,
   );
+  // The indoor style ships no glyphs, so vertical-link labels are registered
+  // style images (one per direction/floor pair) referenced via `labelImage`.
+  registerVerticalLinkLabelImages(map, features.features);
+  source.setData(features);
 }
 
 /** Per-floor highlight state from the App-owned editing projection. */

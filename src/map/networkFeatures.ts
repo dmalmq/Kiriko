@@ -1,4 +1,5 @@
 import type { NetworkGeoJsonDto } from "../bundle/wasm";
+import { verticalLinkLabelImageName } from "./verticalLinkLabels";
 
 /**
  * Parse an exported network `FLOOR` label back to a level ordinal — the
@@ -190,6 +191,9 @@ export function buildNetworkFeatures(
           targetDirection: link.targetDirection,
           passageType: link.passageType,
           selected: link.selected,
+          // Style-image id for the glyph-independent label (see
+          // verticalLinkLabels.ts); consumed by the label layer's icon-image.
+          labelImage: verticalLinkLabelImageName(link.targetDirection, link.targetFloor),
         },
         geometry: { type: "Point", coordinates: link.coordinate },
       });

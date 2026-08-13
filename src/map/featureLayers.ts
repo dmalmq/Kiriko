@@ -770,21 +770,17 @@ export function buildNetworkLayers(): AnyLayer[] {
       source: NETWORK_SOURCE_ID,
       filter: verticalLinkFilter(),
       layout: {
-        "text-field": [
-          "concat",
-          ["case", ["==", ["get", "targetDirection"], "up"], "↑ ", "↓ "],
-          ["get", "targetFloor"],
-        ],
-        "text-size": 11,
-        "text-offset": [1.2, -1.2],
-        "text-anchor": "left",
-        "text-allow-overlap": true,
+        // Glyph-independent label: the indoor style ships no `glyphs` source,
+        // so the visible copy is a registered SVG image per (direction, floor)
+        // pair, selected through the feature's `labelImage` id (see
+        // verticalLinkLabels.ts). 12px right / 12px up keeps it beside the
+        // [12,-12]-translated marker.
+        "icon-image": ["get", "labelImage"],
+        "icon-anchor": "left",
+        "icon-offset": [12, -12],
+        "icon-allow-overlap": true,
       },
-      paint: {
-        "text-color": "#d81b8c",
-        "text-halo-color": "#ffffff",
-        "text-halo-width": 1,
-      },
+      paint: {},
     },
     {
       id: LAYER_NETWORK_JUNCTION,

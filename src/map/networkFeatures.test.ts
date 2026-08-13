@@ -179,6 +179,25 @@ describe("vertical network link projection", () => {
     });
   });
 
+  it("tags every vertical marker with a glyph-free label image id", () => {
+    const down = buildNetworkFeatures(verticalNetwork(), 0).features.filter(
+      (feature) => feature.properties?.kind === "vertical-link",
+    );
+    expect(down[0]?.properties).toMatchObject({
+      targetDirection: "up",
+      targetFloor: "F2",
+      labelImage: "vertical-link-label-up-F2",
+    });
+    const up = buildNetworkFeatures(verticalNetwork(), 1).features.filter(
+      (feature) => feature.properties?.kind === "vertical-link",
+    );
+    expect(up[0]?.properties).toMatchObject({
+      targetDirection: "down",
+      targetFloor: "F1",
+      labelImage: "vertical-link-label-down-F1",
+    });
+  });
+
   it("selects a vertical marker by canonical reciprocal identity", () => {
     const links = buildNetworkFeatures(verticalNetwork(), 0, {
       selectedJunctionId: null,
