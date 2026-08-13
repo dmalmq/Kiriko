@@ -657,7 +657,7 @@ export function buildFacilityLayers(): AnyLayer[] {
   ];
 }
 
-const verticalLinkFilter = (): FilterSpecification => [
+const verticalLinkFilter = (): ExpressionSpecification => [
   "==",
   ["get", "kind"],
   "vertical-link",
@@ -737,7 +737,7 @@ export function buildNetworkLayers(): AnyLayer[] {
       id: LAYER_NETWORK_VERTICAL_LINK_SELECTED,
       type: "circle",
       source: NETWORK_SOURCE_ID,
-      filter: ["all", verticalLinkFilter() as ExpressionSpecification, ["==", ["get", "selected"], true]],
+      filter: ["all", verticalLinkFilter(), ["==", ["get", "selected"], true]],
       paint: {
         "circle-radius": 8,
         "circle-color": "#4F46E5",
