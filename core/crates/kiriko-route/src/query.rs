@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use crate::geo_math::haversine_m;
 use crate::graph::{RouteEdge, RouteGraph, meters_to_cost};
 
 /// A query endpoint: position plus venue level ordinal.
@@ -38,17 +39,6 @@ pub struct Route {
 struct TaggedVertex {
     coord: [f64; 2],
     ordinal: f64,
-}
-
-const EARTH_RADIUS_M: f64 = 6_371_000.0;
-
-/// Great-circle distance in metres.
-fn haversine_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
-    let (lat1, lat2) = (lat1.to_radians(), lat2.to_radians());
-    let dlat = lat2 - lat1;
-    let dlon = (lon2 - lon1).to_radians();
-    let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-    2.0 * EARTH_RADIUS_M * a.sqrt().asin()
 }
 
 #[derive(Clone, Copy, PartialEq)]
