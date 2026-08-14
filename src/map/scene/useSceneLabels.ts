@@ -16,7 +16,7 @@ import type { LoadedVenue, LocaleCode, ViewerFeature } from "../../imdf/types";
 import { markerIconFor } from "../markerIcons";
 import type { ParsedNetwork } from "../networkFeatures";
 import { verticalLinkLabelText } from "../verticalLinkLabels";
-import { conveyanceDirections, type ConveyanceDirection } from "./conveyanceDirection";
+import { conveyanceDirections, type ConveyanceDirection } from "./verticalLinks";
 import { rampGlyph } from "./conveyanceGlyphs";
 import {
   layoutSceneLabels,

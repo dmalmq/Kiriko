@@ -31,8 +31,23 @@ import type {
   Map as MapLibreMap,
 } from "maplibre-gl";
 import type { SceneBatchView, SceneView, SemanticRoleName } from "./sceneFormat";
-import { decodeFeatureId, MAX_PICKABLE_FEATURES, type PickCandidate } from "./scenePick";
+import type { NetworkConnectionId } from "../networkFeatures";
 import {
+  buildConnectorMesh,
+  type ConnectorEndpoint,
+  type ConnectorInput,
+  type ConnectorMesh,
+} from "./sceneConnectors";
+import {
+  decodeFeatureId,
+  MAX_PICKABLE_FEATURES,
+  PICK_ALPHA_CONNECTOR,
+  type PickCandidate,
+} from "./scenePick";
+import {
+  CONNECTOR_COLOR,
+  CONNECTOR_SELECTED_WIDTH_PX,
+  CONNECTOR_WIDTH_PX,
   ROLE_COLORS,
   ROLE_DEPTH_BIAS,
   ROLE_PAINT_ORDER,
@@ -169,6 +184,99 @@ void main() {
     float((shifted >> 8) & 0xffu),
     float((shifted >> 16) & 0xffu),
     255.0
+  ) / 255.0;
+  outLocalPosition = vec4(v_localPos, 1.0);
+}
+`;
+
+/**
+ * The inter-floor connector pass. Attribute locations are its own; the program
+ * shares nothing with the surface pass but the frame.
+ */
+const ATTR_CONNECTOR_POSITION = 0;
+const ATTR_CONNECTOR_OTHER = 1;
+const ATTR_CONNECTOR_SIDE = 2;
+const ATTR_CONNECTOR_ID = 3;
+
+/**
+ * One vertex shader for both connector passes, so the ribbon a reviewer clicks
+ * is exactly the ribbon they can see. GPU picking is per-pixel and has no hit
+ * tolerance, so any disagreement between the two would be a target that misses.
+ *
+ * The width is applied in screen space: a world-width ribbon would vanish at
+ * venue zoom and swallow the floor at door zoom, and rebuilding geometry per
+ * zoom step would churn a buffer on every wheel tick.
+ */
+const CONNECTOR_VERTEX_SHADER = `#version 300 es
+precision highp float;
+precision highp int;
+uniform mat4 u_matrix;
+uniform vec2 u_viewport;
+uniform float u_halfWidth;
+uniform float u_selectedHalfWidth;
+uniform uint u_selected;
+layout(location = ${ATTR_CONNECTOR_POSITION}) in vec3 a_position;
+layout(location = ${ATTR_CONNECTOR_OTHER}) in vec3 a_other;
+layout(location = ${ATTR_CONNECTOR_SIDE}) in float a_side;
+layout(location = ${ATTR_CONNECTOR_ID}) in uint a_connector;
+flat out uint v_connector;
+out vec3 v_localPos;
+void main() {
+  vec4 own = u_matrix * vec4(a_position, 1.0);
+  vec4 opposite = u_matrix * vec4(a_other, 1.0);
+  // Guard the perspective divide: an endpoint behind the eye has w <= 0, and
+  // the quad is clipped anyway — it must not become NaN on the way there.
+  vec2 ownScreen = own.xy / max(abs(own.w), 1e-6) * u_viewport;
+  vec2 oppositeScreen = opposite.xy / max(abs(opposite.w), 1e-6) * u_viewport;
+  vec2 delta = oppositeScreen - ownScreen;
+  // A purely vertical link projects both ends onto one screen point when the
+  // camera looks straight down. Falling back to a fixed axis keeps it a visible
+  // stub instead of a degenerate triangle.
+  vec2 direction = length(delta) < 1e-4 ? vec2(0.0, 1.0) : normalize(delta);
+  vec2 normal = vec2(-direction.y, direction.x);
+  float halfWidth = (u_selected != 0u && a_connector + 1u == u_selected)
+    ? u_selectedHalfWidth
+    : u_halfWidth;
+  vec2 offset = normal * a_side * halfWidth / u_viewport;
+  gl_Position = vec4(own.xy + offset * abs(own.w), own.zw);
+  v_connector = a_connector;
+  v_localPos = a_position;
+}
+`;
+
+const CONNECTOR_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+precision highp int;
+uniform vec3 u_color;
+uniform vec3 u_selectedColor;
+uniform float u_opacity;
+uniform uint u_selected;
+flat in uint v_connector;
+out vec4 outColor;
+void main() {
+  // One interaction colour for the selected link and the network's own hue for
+  // the rest: #32 allows no second hue here.
+  vec3 rgb = (u_selected != 0u && v_connector + 1u == u_selected) ? u_selectedColor : u_color;
+  outColor = vec4(rgb * u_opacity, u_opacity);
+}
+`;
+
+const CONNECTOR_PICK_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+precision highp int;
+flat in uint v_connector;
+in vec3 v_localPos;
+layout(location = 0) out vec4 outFeature;
+layout(location = 1) out vec4 outLocalPosition;
+void main() {
+  // Shifted by one so a cleared target stays "no hit"; alpha records which
+  // pass wrote the pixel, because both share the 24-bit index space.
+  uint shifted = v_connector + 1u;
+  outFeature = vec4(
+    float(shifted & 0xffu),
+    float((shifted >> 8) & 0xffu),
+    float((shifted >> 16) & 0xffu),
+    ${PICK_ALPHA_CONNECTOR}.0
   ) / 255.0;
   outLocalPosition = vec4(v_localPos, 1.0);
 }
@@ -380,7 +488,37 @@ export class SceneLayer implements CustomLayerInterface {
     width: number;
     height: number;
   } | null = null;
-  /** The frame's view-projection, kept so a pick can render the same camera. */
+  private _stats: SceneLayerStats;
+  private _connectorProgram: WebGLProgram | null = null;
+  private _connectorPickProgram: WebGLProgram | null = null;
+  private _connectorUniforms: {
+    matrix: WebGLUniformLocation;
+    viewport: WebGLUniformLocation;
+    halfWidth: WebGLUniformLocation;
+    selectedHalfWidth: WebGLUniformLocation;
+    selected: WebGLUniformLocation;
+    color: WebGLUniformLocation;
+    selectedColor: WebGLUniformLocation;
+    opacity: WebGLUniformLocation;
+  } | null = null;
+  private _connectorPickUniforms: {
+    matrix: WebGLUniformLocation;
+    viewport: WebGLUniformLocation;
+    halfWidth: WebGLUniformLocation;
+    selectedHalfWidth: WebGLUniformLocation;
+    selected: WebGLUniformLocation;
+  } | null = null;
+  private _connectorBuffers: {
+    vao: WebGLVertexArrayObject;
+    position: WebGLBuffer;
+    other: WebGLBuffer;
+    side: WebGLBuffer;
+    ids: WebGLBuffer;
+  } | null = null;
+  private _connectorInputs: readonly ConnectorInput[] = [];
+  private _connectorMesh: ConnectorMesh | null = null;
+  /** Selected connector index shifted by one; `0` means none. */
+  private _selectedConnector = 0;
   private _viewProjection: Float64Array | null = null;
   private _pickWarmed = false;
   private _worldInverseCache: Float64Array | null = null;
@@ -400,7 +538,6 @@ export class SceneLayer implements CustomLayerInterface {
     opaque: PlannedBatch<BatchResources>[];
     translucent: PlannedBatch<BatchResources>[];
   } | null = null;
-  private _stats: SceneLayerStats;
 
   constructor(scene: SceneView, options: SceneLayerOptions = {}) {
     this._scene = scene;
@@ -454,6 +591,7 @@ export class SceneLayer implements CustomLayerInterface {
     this._buildProgram(gl);
     this._buildBatches(gl);
     this._buildPick(gl);
+    this._buildConnectors(gl);
     // Upload is everything between having the scene and being able to draw it:
     // programs, buffers, vertex arrays, pick targets.
     this._stats = { ...this._stats, uploadMs: performance.now() - started };
@@ -517,6 +655,11 @@ export class SceneLayer implements CustomLayerInterface {
       gl.depthMask(false);
       drawCalls += this._drawBatches(gl, uniforms, viewProjection, plan.translucent);
       gl.depthMask(true);
+      // The connector draws last of all: it is the subject of a cross-floor
+      // inspection, and a floor the reviewer is deliberately looking through
+      // must not also hide the edge they are looking for. Depth test stays on,
+      // so a solid wall in front of it still wins.
+      drawCalls += this._drawConnectors(gl, viewProjection);
       const visible = plan.opaque.length + plan.translucent.length;
       this._stats = { ...this._stats, drawCalls, visibleBatches: visible };
       // The first pick a driver runs pays for validating the multi-target float
@@ -603,33 +746,17 @@ export class SceneLayer implements CustomLayerInterface {
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
       gl.useProgram(program);
-      for (const batch of this._batches) {
-        // Only what the reviewer can see is pickable: a hidden floor or a
-        // hidden ceiling must not intercept a click on the room below it.
-        if (!batchPickable(batch, this._visibility())) {
-          continue;
-        }
-        const matrix = this._multiply(viewProjection, batch.matrix);
-        for (let index = 0; index < 16; index += 1) {
-          this._matrixF32[index] = matrix[index]!;
-        }
-        gl.uniformMatrix4fv(uniforms.matrix, false, this._matrixF32);
-        gl.uniform3f(
-          uniforms.localOrigin,
-          batch.quantizationOrigin[0],
-          batch.quantizationOrigin[1],
-          batch.quantizationOrigin[2],
-        );
-        gl.uniform3f(
-          uniforms.localScale,
-          batch.quantizationScale[0],
-          batch.quantizationScale[1],
-          batch.quantizationScale[2],
-        );
-        gl.polygonOffset(0, batch.depthBias);
-        gl.bindVertexArray(batch.vao);
-        gl.drawArrays(gl.TRIANGLES, 0, batch.vertexCount);
-      }
+      // The pick pass mirrors the colour pass exactly, including which phase
+      // owns the depth buffer: see-through geometry writes no depth there, so
+      // if it wrote depth here a conveyance shell would intercept clicks meant
+      // for the connector drawn inside it — a target that misses the thing the
+      // reviewer is looking straight at.
+      const plan = this._plan();
+      gl.depthMask(true);
+      this._pickBatches(gl, uniforms, viewProjection, plan.opaque);
+      gl.depthMask(false);
+      this._pickBatches(gl, uniforms, viewProjection, plan.translucent);
+      this._pickConnectors(gl, viewProjection);
 
       // With MRT, `readPixels` samples whichever attachment `readBuffer` names;
       // without switching it the second read would re-sample the id colour.
@@ -640,13 +767,24 @@ export class SceneLayer implements CustomLayerInterface {
       if (featureIndex < 0) {
         return null;
       }
+      gl.readBuffer(gl.COLOR_ATTACHMENT1);
+      const localPixel = new Float32Array(4);
+      gl.readPixels(pixelX, pixelY, 1, 1, gl.RGBA, gl.FLOAT, localPixel);
+      if (idPixel[3] === PICK_ALPHA_CONNECTOR) {
+        // A connector belongs to no single floor, so it answers with the
+        // connection the editor selects by rather than a scene feature.
+        return this._connectorMesh?.connectionIds[featureIndex] === undefined
+          ? null
+          : {
+              kind: "connector",
+              connectorIndex: featureIndex,
+              localPoint: [localPixel[0] ?? 0, localPixel[1] ?? 0, localPixel[2] ?? 0],
+            };
+      }
       const feature = this._scene.features[featureIndex];
       if (feature === undefined) {
         return null;
       }
-      gl.readBuffer(gl.COLOR_ATTACHMENT1);
-      const localPixel = new Float32Array(4);
-      gl.readPixels(pixelX, pixelY, 1, 1, gl.RGBA, gl.FLOAT, localPixel);
 
       return {
         kind: "surface",
@@ -864,6 +1002,256 @@ export class SceneLayer implements CustomLayerInterface {
   setShowContextLevels(show: boolean): void {
     this._showContextLevels = show;
     this._drawPlan = null;
+  }
+
+  /**
+   * The cross-floor links to draw as edges between floor planes. Replaces the
+   * previous set whole: the graph and the shown floors change together, and a
+   * connector that outlived either would be a line to a floor nobody is
+   * looking at.
+   */
+  setConnectors(connectors: readonly ConnectorInput[]): void {
+    this._connectorInputs = connectors;
+    const gl = this._gl;
+    if (gl !== null && !this._contextLost) {
+      this._uploadConnectors(gl);
+    }
+    this._map?.triggerRepaint();
+  }
+
+  /** Emphasise one connection, or none. Unknown ids clear the emphasis. */
+  setSelectedConnection(connectionId: NetworkConnectionId | null): void {
+    const index =
+      connectionId === null
+        ? -1
+        : (this._connectorMesh?.connectionIds.findIndex(
+            (candidate) =>
+              candidate.pathId === connectionId.pathId &&
+              candidate.reversePathId === connectionId.reversePathId,
+          ) ?? -1);
+    this._selectedConnector = index < 0 ? 0 : index + 1;
+    this._map?.triggerRepaint();
+  }
+
+  /** The connection one connector index stands for, or `null`. */
+  connectionAt(connectorIndex: number): NetworkConnectionId | null {
+    return this._connectorMesh?.connectionIds[connectorIndex] ?? null;
+  }
+
+  /**
+   * The connector programs and their one vertex array. Both passes share the
+   * vertex shader, so the ribbon that answers a click is the ribbon on screen.
+   */
+  private _buildConnectors(gl: WebGL2RenderingContext): void {
+    this._connectorProgram = linkProgram(
+      gl,
+      CONNECTOR_VERTEX_SHADER,
+      CONNECTOR_FRAGMENT_SHADER,
+    );
+    this._connectorPickProgram = linkProgram(
+      gl,
+      CONNECTOR_VERTEX_SHADER,
+      CONNECTOR_PICK_FRAGMENT_SHADER,
+    );
+    const uniform = (program: WebGLProgram, name: string): WebGLUniformLocation => {
+      const location = gl.getUniformLocation(program, name);
+      if (location === null) {
+        throw new Error(`scene: connector uniform ${name} is missing`);
+      }
+      return location;
+    };
+    this._connectorUniforms = {
+      matrix: uniform(this._connectorProgram, "u_matrix"),
+      viewport: uniform(this._connectorProgram, "u_viewport"),
+      halfWidth: uniform(this._connectorProgram, "u_halfWidth"),
+      selectedHalfWidth: uniform(this._connectorProgram, "u_selectedHalfWidth"),
+      selected: uniform(this._connectorProgram, "u_selected"),
+      color: uniform(this._connectorProgram, "u_color"),
+      selectedColor: uniform(this._connectorProgram, "u_selectedColor"),
+      opacity: uniform(this._connectorProgram, "u_opacity"),
+    };
+    this._connectorPickUniforms = {
+      matrix: uniform(this._connectorPickProgram, "u_matrix"),
+      viewport: uniform(this._connectorPickProgram, "u_viewport"),
+      halfWidth: uniform(this._connectorPickProgram, "u_halfWidth"),
+      selectedHalfWidth: uniform(this._connectorPickProgram, "u_selectedHalfWidth"),
+      selected: uniform(this._connectorPickProgram, "u_selected"),
+    };
+
+    const vao = gl.createVertexArray();
+    const position = gl.createBuffer();
+    const other = gl.createBuffer();
+    const side = gl.createBuffer();
+    const ids = gl.createBuffer();
+    if (!vao || !position || !other || !side || !ids) {
+      throw new Error("scene: WebGL failed to create a connector resource");
+    }
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, position);
+    gl.enableVertexAttribArray(ATTR_CONNECTOR_POSITION);
+    gl.vertexAttribPointer(ATTR_CONNECTOR_POSITION, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, other);
+    gl.enableVertexAttribArray(ATTR_CONNECTOR_OTHER);
+    gl.vertexAttribPointer(ATTR_CONNECTOR_OTHER, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, side);
+    gl.enableVertexAttribArray(ATTR_CONNECTOR_SIDE);
+    gl.vertexAttribPointer(ATTR_CONNECTOR_SIDE, 1, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, ids);
+    gl.enableVertexAttribArray(ATTR_CONNECTOR_ID);
+    gl.vertexAttribIPointer(ATTR_CONNECTOR_ID, 1, gl.UNSIGNED_INT, 0, 0);
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    this._connectorBuffers = { vao, position, other, side, ids };
+    this._uploadConnectors(gl);
+  }
+
+  /**
+   * Rebuild and upload the ribbon vertices. Endpoints resolve through the
+   * layer's own frame and resolved floor planes, so a connector lands on the
+   * same planes the floors are drawn on rather than near them.
+   */
+  private _uploadConnectors(gl: WebGL2RenderingContext): void {
+    const buffers = this._connectorBuffers;
+    if (buffers === null) {
+      return;
+    }
+    const localOf = (endpoint: ConnectorEndpoint): readonly [number, number, number] =>
+      this.localFromLngLat(endpoint.lng, endpoint.lat, endpoint.levelIndex);
+    const mesh = buildConnectorMesh(this._connectorInputs, localOf);
+    if (mesh.connectionIds.length >= MAX_PICKABLE_FEATURES) {
+      throw new Error("scene: more cross-floor connectors than the pick codec can address");
+    }
+    this._connectorMesh = mesh;
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.position, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffers.other);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.other, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffers.side);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.side, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffers.ids);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.ids, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  }
+
+  /** Viewport in device pixels, halved — the shader offsets in NDC. */
+  private _halfViewport(gl: WebGL2RenderingContext): [number, number] {
+    return [Math.max(1, gl.drawingBufferWidth) / 2, Math.max(1, gl.drawingBufferHeight) / 2];
+  }
+
+  /**
+   * Render one pass of pickable batches into the id target. Visibility comes
+   * from the draw plan, pickability from policy: a see-through active-floor
+   * surface is still a target, a retained context floor never is.
+   */
+  private _pickBatches(
+    gl: WebGL2RenderingContext,
+    uniforms: NonNullable<SceneLayer["_pickUniforms"]>,
+    viewProjection: Float64Array,
+    entries: readonly PlannedBatch<BatchResources>[],
+  ): void {
+    for (const entry of entries) {
+      const batch = entry.batch;
+      if (!batchPickable(batch, this._visibility())) {
+        continue;
+      }
+      const matrix = this._multiply(viewProjection, batch.matrix);
+      for (let index = 0; index < 16; index += 1) {
+        this._matrixF32[index] = matrix[index]!;
+      }
+      gl.uniformMatrix4fv(uniforms.matrix, false, this._matrixF32);
+      gl.uniform3f(
+        uniforms.localOrigin,
+        batch.quantizationOrigin[0],
+        batch.quantizationOrigin[1],
+        batch.quantizationOrigin[2],
+      );
+      gl.uniform3f(
+        uniforms.localScale,
+        batch.quantizationScale[0],
+        batch.quantizationScale[1],
+        batch.quantizationScale[2],
+      );
+      gl.polygonOffset(0, batch.depthBias);
+      gl.bindVertexArray(batch.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, batch.vertexCount);
+    }
+  }
+
+  private _drawConnectors(gl: WebGL2RenderingContext, viewProjection: Float64Array): number {
+    const program = this._connectorProgram;
+    const uniforms = this._connectorUniforms;
+    const buffers = this._connectorBuffers;
+    const mesh = this._connectorMesh;
+    if (program === null || uniforms === null || buffers === null || mesh === null) {
+      return 0;
+    }
+    if (mesh.vertexCount === 0) {
+      return 0;
+    }
+    const matrix = this._multiply(viewProjection, this._model);
+    for (let index = 0; index < 16; index += 1) {
+      this._matrixF32[index] = matrix[index]!;
+    }
+    const [halfWidth, halfHeight] = this._halfViewport(gl);
+    const ratio = gl.drawingBufferWidth / Math.max(1, this._cssWidth(gl));
+    gl.useProgram(program);
+    gl.uniformMatrix4fv(uniforms.matrix, false, this._matrixF32);
+    gl.uniform2f(uniforms.viewport, halfWidth, halfHeight);
+    gl.uniform1f(uniforms.halfWidth, (CONNECTOR_WIDTH_PX * ratio) / 2);
+    gl.uniform1f(uniforms.selectedHalfWidth, (CONNECTOR_SELECTED_WIDTH_PX * ratio) / 2);
+    gl.uniform1ui(uniforms.selected, this._selectedConnector);
+    gl.uniform3f(uniforms.color, CONNECTOR_COLOR[0], CONNECTOR_COLOR[1], CONNECTOR_COLOR[2]);
+    gl.uniform3f(
+      uniforms.selectedColor,
+      INTERACTION_COLOR[0],
+      INTERACTION_COLOR[1],
+      INTERACTION_COLOR[2],
+    );
+    gl.uniform1f(uniforms.opacity, 1);
+    gl.polygonOffset(0, 0);
+    gl.bindVertexArray(buffers.vao);
+    gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
+    gl.bindVertexArray(null);
+    return 1;
+  }
+
+  private _pickConnectors(gl: WebGL2RenderingContext, viewProjection: Float64Array): void {
+    const program = this._connectorPickProgram;
+    const uniforms = this._connectorPickUniforms;
+    const buffers = this._connectorBuffers;
+    const mesh = this._connectorMesh;
+    if (
+      program === null ||
+      uniforms === null ||
+      buffers === null ||
+      mesh === null ||
+      mesh.vertexCount === 0
+    ) {
+      return;
+    }
+    const matrix = this._multiply(viewProjection, this._model);
+    for (let index = 0; index < 16; index += 1) {
+      this._matrixF32[index] = matrix[index]!;
+    }
+    const [halfWidth, halfHeight] = this._halfViewport(gl);
+    const ratio = gl.drawingBufferWidth / Math.max(1, this._cssWidth(gl));
+    gl.useProgram(program);
+    gl.uniformMatrix4fv(uniforms.matrix, false, this._matrixF32);
+    gl.uniform2f(uniforms.viewport, halfWidth, halfHeight);
+    gl.uniform1f(uniforms.halfWidth, (CONNECTOR_WIDTH_PX * ratio) / 2);
+    gl.uniform1f(uniforms.selectedHalfWidth, (CONNECTOR_SELECTED_WIDTH_PX * ratio) / 2);
+    gl.uniform1ui(uniforms.selected, this._selectedConnector);
+    gl.polygonOffset(0, 0);
+    gl.bindVertexArray(buffers.vao);
+    gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
+    gl.bindVertexArray(null);
+  }
+
+  /** The canvas' CSS width, for the device-pixel ratio the ribbon scales by. */
+  private _cssWidth(gl: WebGL2RenderingContext): number {
+    const canvas = gl.canvas;
+    return canvas instanceof HTMLCanvasElement ? canvas.clientWidth : gl.drawingBufferWidth;
   }
 
   /** The floor selection every policy decision reads. */
@@ -1162,8 +1550,27 @@ export class SceneLayer implements CustomLayerInterface {
         gl.deleteTexture(this._pickTargets.position);
         gl.deleteRenderbuffer(this._pickTargets.depth);
       }
+      if (this._connectorBuffers) {
+        gl.deleteBuffer(this._connectorBuffers.position);
+        gl.deleteBuffer(this._connectorBuffers.other);
+        gl.deleteBuffer(this._connectorBuffers.side);
+        gl.deleteBuffer(this._connectorBuffers.ids);
+        gl.deleteVertexArray(this._connectorBuffers.vao);
+      }
+      if (this._connectorProgram) {
+        gl.deleteProgram(this._connectorProgram);
+      }
+      if (this._connectorPickProgram) {
+        gl.deleteProgram(this._connectorPickProgram);
+      }
     }
     this._batches = [];
+    this._connectorBuffers = null;
+    this._connectorProgram = null;
+    this._connectorPickProgram = null;
+    this._connectorUniforms = null;
+    this._connectorPickUniforms = null;
+    this._connectorMesh = null;
     this._drawPlan = null;
     this._program = null;
     this._uniforms = null;

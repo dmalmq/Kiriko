@@ -14,7 +14,7 @@
  *
  * This module is pure. Projection and DOM live with the overlay that calls it.
  */
-import type { ConveyanceDirection } from "./conveyanceDirection";
+import type { ConveyanceDirection } from "./verticalLinks";
 
 /**
  * Priority tiers, highest first. `nextAction` and `destination` belong to guided

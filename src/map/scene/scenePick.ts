@@ -13,8 +13,17 @@ import type { SemanticRoleName } from "./sceneFormat";
 /** Indices addressable by the 24-bit colour encoding, after the shift. */
 export const MAX_PICKABLE_FEATURES = 0xff_ff_ff - 1;
 
+/**
+ * Which pass wrote a pick pixel, carried in the id target's alpha. Surfaces and
+ * connectors share the 24-bit index space, so the writer has to be recorded
+ * somewhere: an index alone cannot say whether it means the scene's fifth
+ * feature or the graph's fifth cross-floor link.
+ */
+export const PICK_ALPHA_SURFACE = 255;
+export const PICK_ALPHA_CONNECTOR = 254;
+
 /** One scene surface under the pointer, as the GPU pass reports it. */
-export interface PickCandidate {
+export interface SurfacePickCandidate {
   kind: "surface";
   /** Index into the scene's features — the handle the renderer holds. */
   featureIndex: number;
@@ -39,6 +48,26 @@ export interface PickCandidate {
   featureMinZ: number;
   featureMaxZ: number;
 }
+
+/**
+ * One inter-floor connector under the pointer. It reports the connection the
+ * network editor already selects by, not a scene feature: the link is graph
+ * evidence drawn between two floor planes, and it belongs to no single floor.
+ */
+export interface ConnectorPickCandidate {
+  kind: "connector";
+  /** Index into the connector mesh the layer last built. */
+  connectorIndex: number;
+  /** Venue-local metres under the pointer, read from the position target. */
+  localPoint: readonly [number, number, number];
+}
+
+/**
+ * What the pick pass found. The two variants are deliberately not merged: a
+ * surface answers with a floor and a role, a connector answers with a
+ * connection, and code that handles one must say what it does with the other.
+ */
+export type PickCandidate = SurfacePickCandidate | ConnectorPickCandidate;
 
 /**
  * Pack a feature index into an RGBA8 colour, shifted so that all-zero stays

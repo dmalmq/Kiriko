@@ -159,6 +159,24 @@ export const CONVEYANCE_SHELL_OPACITY = 0.3;
 export const OPENING_THRESHOLD_OPACITY = 0.2;
 
 /**
+ * The inter-floor connector's own colour: the network overlay's magenta, so the
+ * edge between two floors reads as the same graph the 2D review view draws.
+ * A selected connector switches to Ai Indigo — #32 allows exactly one
+ * interaction hue and no second one here.
+ */
+export const CONNECTOR_COLOR: readonly [number, number, number] = [0.847, 0.106, 0.549];
+
+/**
+ * Ribbon width in CSS pixels, and the wider width a selected connector gets.
+ *
+ * Screen width, not world width: GPU picking is exact per-pixel with no hit
+ * tolerance, so the drawn ribbon *is* the target, and a hairline would be
+ * unclickable at every zoom the reviewer actually uses.
+ */
+export const CONNECTOR_WIDTH_PX = 7;
+export const CONNECTOR_SELECTED_WIDTH_PX = 10;
+
+/**
  * How long adjacent floors stay visible as context when the floor changes —
  * inside #32's 140–180 ms motion window. Long enough to see where the floor
  * you left went, short enough that it is not a state you sit in.

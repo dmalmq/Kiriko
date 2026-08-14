@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { SemanticRoleName } from "./sceneFormat";
 import {
+  CONNECTOR_COLOR,
+  CONNECTOR_SELECTED_WIDTH_PX,
+  CONNECTOR_WIDTH_PX,
   CONTEXT_HANDOFF_MS,
   CONTEXT_LEVEL_OPACITY,
   CONVEYANCE_SHELL_OPACITY,
   OCCLUDER_FADE_OPACITY,
+  OPENING_THRESHOLD_OPACITY,
   ROLE_COLORS,
   ROLE_DEPTH_BIAS,
   ROLE_PAINT_ORDER,
-  OPENING_THRESHOLD_OPACITY,
   UPPER_FLOOR_OPACITY,
   batchOpacity,
   batchPickable,
@@ -258,6 +261,24 @@ describe("conveyance shells", () => {
     expect(batchOpacity({ levelIndex: 0, role: "Opening" }, pair)).toBe(
       Math.min(UPPER_FLOOR_OPACITY, OPENING_THRESHOLD_OPACITY),
     );
+  });
+});
+
+describe("inter-floor connectors", () => {
+  it("stays clickable at every zoom a reviewer uses", () => {
+    // The drawn ribbon is the pick target: GPU picking is exact per-pixel, so a
+    // hairline connector would be a line nobody can hit.
+    expect(CONNECTOR_WIDTH_PX).toBeGreaterThanOrEqual(6);
+    expect(CONNECTOR_WIDTH_PX).toBeLessThanOrEqual(8);
+    expect(CONNECTOR_SELECTED_WIDTH_PX).toBeGreaterThan(CONNECTOR_WIDTH_PX);
+  });
+
+  it("borrows the network's own hue rather than inventing a second one", () => {
+    // #d81b8c, the colour the 2D network overlay already draws paths in.
+    expect(CONNECTOR_COLOR.map((channel) => Math.round(channel * 255))).toEqual([216, 27, 140]);
+    for (const role of ALL_ROLES) {
+      expect(CONNECTOR_COLOR).not.toEqual(ROLE_COLORS[role]);
+    }
   });
 });
 
