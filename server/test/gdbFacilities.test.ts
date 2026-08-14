@@ -777,8 +777,13 @@ describe("POST /api/gdb/generate-network", () => {
       payload: { venueId },
     });
     expect(res.statusCode, res.body).toBe(202);
-    const { versionId, seq } = res.json() as { versionId: number; seq: number };
+    const { versionId, seq, estimatedDurationSeconds } = res.json() as {
+      versionId: number;
+      seq: number;
+      estimatedDurationSeconds: number | null;
+    };
     expect(seq).toBe(2);
+    expect(estimatedDurationSeconds).toBeNull();
     await app.queue.idle();
 
     const row = app.db
@@ -791,6 +796,155 @@ describe("POST /api/gdb/generate-network", () => {
     expect(fake.compileCalls[0]!.metadata["synthesizeNetwork"]).toBe(true);
     expect(fake.compileCalls[0]!.metadata["networkJunctionsGeoJson"]).toBeUndefined();
     expect(fake.compileCalls[0]!.metadata["facilitiesGeoJson"]).toBe(FACILITIES_GEOJSON);
+  });
+
+  it("estimates a generation from completed routing jobs for the same venue", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await publishBaseWithFacilities(app, cookie);
+    const first = await app.inject({
+      method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+      payload: { venueId },
+    });
+    expect(first.statusCode, first.body).toBe(202);
+    const firstBody: unknown = first.json();
+    if (
+      firstBody === null ||
+      typeof firstBody !== "object" ||
+      !("jobId" in firstBody) ||
+      typeof firstBody.jobId !== "string"
+    ) {
+      throw new Error("generate-network response omitted jobId");
+    }
+    await app.queue.idle();
+    app.db
+      .prepare("UPDATE jobs SET created_at = ?, updated_at = ? WHERE id = ?")
+      .run("2026-08-01 00:00:00", "2026-08-01 00:00:45", firstBody.jobId);
+
+    const second = await app.inject({
+      method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+      payload: { venueId },
+    });
+
+    expect(second.statusCode, second.body).toBe(202);
+    expect(second.json()).toMatchObject({ estimatedDurationSeconds: 45 });
+  });
+
+  it("excludes synthesized tile activation jobs from duration samples", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await publishBaseWithFacilities(app, cookie);
+    const tileActivation = await app.inject({
+      method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+      payload: { venueId },
+    });
+    expect(tileActivation.statusCode, tileActivation.body).toBe(202);
+    const tileActivationBody: unknown = tileActivation.json();
+    if (
+      tileActivationBody === null ||
+      typeof tileActivationBody !== "object" ||
+      !("jobId" in tileActivationBody) ||
+      typeof tileActivationBody.jobId !== "string"
+    ) {
+      throw new Error("generate-network response omitted jobId");
+    }
+    await app.queue.idle();
+    app.db
+      .prepare(
+        `UPDATE jobs
+            SET created_at = ?,
+                updated_at = ?,
+                payload_json = json_remove(
+                  json_set(payload_json, '$.tilesDescriptorJson', '{}'),
+                  '$.operation'
+                )
+          WHERE id = ?`,
+      )
+      .run(
+        "2026-08-01 00:00:00",
+        "2026-08-01 00:02:00",
+        tileActivationBody.jobId,
+      );
+
+    const generated = await app.inject({
+      method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+      payload: { venueId },
+    });
+
+    expect(generated.statusCode, generated.body).toBe(202);
+    expect(generated.json()).toMatchObject({ estimatedDurationSeconds: null });
+  });
+
+  it("uses the 75th-percentile duration instead of an optimistic average", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await publishBaseWithFacilities(app, cookie);
+
+    for (const durationSeconds of [10, 20, 30, 40]) {
+      const generated = await app.inject({
+        method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+        payload: { venueId },
+      });
+      expect(generated.statusCode, generated.body).toBe(202);
+      const body: unknown = generated.json();
+      if (
+        body === null ||
+        typeof body !== "object" ||
+        !("jobId" in body) ||
+        typeof body.jobId !== "string"
+      ) {
+        throw new Error("generate-network response omitted jobId");
+      }
+      await app.queue.idle();
+      app.db
+        .prepare("UPDATE jobs SET created_at = ?, updated_at = ? WHERE id = ?")
+        .run(
+          "2026-08-01 00:00:00",
+          `2026-08-01 00:00:${String(durationSeconds).padStart(2, "0")}`,
+          body.jobId,
+        );
+    }
+
+    const estimated = await app.inject({
+      method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+      payload: { venueId },
+    });
+
+    expect(estimated.statusCode, estimated.body).toBe(202);
+    expect(estimated.json()).toMatchObject({ estimatedDurationSeconds: 30 });
+  });
+
+  it("falls back to completed routing jobs from another venue", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const sampledVenueId = await publishBaseWithFacilities(app, cookie);
+    const sampled = await app.inject({
+      method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+      payload: { venueId: sampledVenueId },
+    });
+    expect(sampled.statusCode, sampled.body).toBe(202);
+    const sampledBody: unknown = sampled.json();
+    if (
+      sampledBody === null ||
+      typeof sampledBody !== "object" ||
+      !("jobId" in sampledBody) ||
+      typeof sampledBody.jobId !== "string"
+    ) {
+      throw new Error("generate-network response omitted jobId");
+    }
+    await app.queue.idle();
+    app.db
+      .prepare("UPDATE jobs SET created_at = ?, updated_at = ? WHERE id = ?")
+      .run("2026-08-01 00:00:00", "2026-08-01 00:00:30", sampledBody.jobId);
+    const newVenueId = await publishBaseWithFacilities(app, cookie);
+
+    const generated = await app.inject({
+      method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+      payload: { venueId: newVenueId },
+    });
+
+    expect(generated.statusCode, generated.body).toBe(202);
+    expect(generated.json()).toMatchObject({ estimatedDurationSeconds: 30 });
   });
 
 

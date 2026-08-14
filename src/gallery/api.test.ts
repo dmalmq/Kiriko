@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { api, ApiError, datasetBundleUrl, gdbErrorMessage, publishErrorMessage, viewerHref } from "./api";
 
 afterEach(() => {
@@ -354,20 +354,39 @@ describe("augmentGdb", () => {
 });
 
 describe("generateNetwork", () => {
-  it("posts venueId and returns the accepted job", async () => {
+  it("posts venueId and returns the accepted job with its duration estimate", async () => {
     const fetchSpy = vi.fn(
       (..._args: unknown[]) =>
         Promise.resolve(
-          new Response(JSON.stringify({ jobId: "j2", versionId: 3, seq: 3 }), { status: 202 }),
+          new Response(JSON.stringify({ jobId: "j2", versionId: 3, seq: 3, estimatedDurationSeconds: 45 }), { status: 202 }),
         ),
     );
     vi.stubGlobal("fetch", fetchSpy);
     const out = await api.generateNetwork(9);
-    expect(out).toEqual({ jobId: "j2", versionId: 3, seq: 3 });
+    expect(out).toEqual({ jobId: "j2", versionId: 3, seq: 3, estimatedDurationSeconds: 45 });
+    expectTypeOf(out).toEqualTypeOf<{
+      jobId: string;
+      versionId: number;
+      seq: number;
+      estimatedDurationSeconds: number | null;
+    }>();
     const call = fetchSpy.mock.calls[0]!;
     expect(call[0]).toBe("/api/gdb/generate-network");
     const init = call[1] as RequestInit;
     expect(JSON.parse(init.body as string)).toEqual({ venueId: 9 });
+  });
+
+  it("rejects a malformed duration estimate from the server", async () => {
+    mockFetch(202, {
+      jobId: "j2",
+      versionId: 3,
+      seq: 3,
+      estimatedDurationSeconds: 0,
+    });
+
+    await expect(api.generateNetwork(9)).rejects.toMatchObject({
+      status: 502,
+    });
   });
 
   it("throws the parsed GdbError on failure", async () => {
