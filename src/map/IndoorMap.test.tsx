@@ -1901,6 +1901,15 @@ describe("IndoorMap scene floor elevation", () => {
     });
     utils.unmount();
   });
+
+  it("reports the planes the see-through policy decided on", () => {
+    // Elevation, not selection, decides which floor of a retained pair is
+    // looked through, so the number that decided it has to be readable.
+    const utils = render(<IndoorMap {...baseProps({ scene, levelId: "level-1" })} />);
+    expect([...currentSceneDiagnostics().levelPlanesM]).toEqual([8, 12]);
+    utils.unmount();
+  });
+
   it("does not recreate terrain when the active plane is unchanged", () => {
     const { map, rerender } = renderMap(baseProps({ scene, levelId: "level-1" }));
 

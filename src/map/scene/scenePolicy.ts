@@ -25,12 +25,17 @@ export const ROLE_COLORS: Record<SemanticRoleName, readonly [number, number, num
   Structure: [0.835, 0.855, 0.891],
   Ceiling: [0.835, 0.855, 0.891],
   Opening: [0.604, 0.639, 0.698],
-  Elevator: [0.835, 0.855, 0.891],
-  Escalator: [0.835, 0.855, 0.891],
-  Stairs: [0.835, 0.855, 0.891],
-  Ramp: [0.835, 0.855, 0.891],
+  // Conveyance shells share the cool structure family and separate by value,
+  // not by a new hue: #32 keeps Ai Indigo for interaction and reserves amber
+  // for review. Kind identity is carried by the pictogram and the direction
+  // chevron; the tint only keeps two adjacent forms from merging into one mass.
+  Elevator: [0.718, 0.757, 0.839],
+  Escalator: [0.663, 0.714, 0.808],
+  Stairs: [0.773, 0.804, 0.871],
+  Ramp: [0.824, 0.847, 0.902],
   Context: [0.835, 0.855, 0.891],
-  Conveyance: [0.835, 0.855, 0.891],
+  // An untyped conveyance never borrows a kind the source never stated.
+  Conveyance: [0.741, 0.773, 0.835],
 };
 
 /** Lower paints first. Coplanar surfaces rely on this being total per role. */
@@ -119,6 +124,41 @@ export const CONTEXT_LEVEL_OPACITY = 0.22;
 export const OCCLUDER_FADE_OPACITY = 0.15;
 
 /**
+ * The higher floor of a retained route pair renders at this opacity — #32
+ * section 6's route-floor band, applied by elevation rather than by selection.
+ *
+ * A cross-floor connection is only legible if the floor above it is see-through:
+ * with both floors drawn by selection alone, an active floor sitting above its
+ * route partner hid the connector and the whole floor below it. The lower floor
+ * of the pair keeps full semantic opacity, so the reviewer reads the connection
+ * against solid geometry rather than against two ghosts.
+ */
+export const UPPER_FLOOR_OPACITY = 0.25;
+
+/**
+ * A conveyance shell renders at this opacity, always.
+ *
+ * The shell is a neutral volume standing in for machinery the source never
+ * described (#19), and it is the one form whose whole purpose is to say that a
+ * route leaves the floor here. Drawn opaque it hid the graph inside it, which
+ * is the question the reviewer opened 3D to answer. It stays a visible form —
+ * both faces blend, so a shell still reads as a volume — without becoming the
+ * lid on its own evidence.
+ */
+export const CONVEYANCE_SHELL_OPACITY = 0.3;
+
+/**
+ * A portal renders at this opacity, always.
+ *
+ * A portal is the evidence that a boundary can be passed, and #32 section 9
+ * draws it as a gap or threshold edge — a closed leaf only where the source
+ * states one, which the generated scene never does. Drawn opaque, the portals
+ * standing at a conveyance's boundary became the solid box the shell had just
+ * stopped being.
+ */
+export const OPENING_THRESHOLD_OPACITY = 0.2;
+
+/**
  * How long adjacent floors stay visible as context when the floor changes —
  * inside #32's 140–180 ms motion window. Long enough to see where the floor
  * you left went, short enough that it is not a state you sit in.
@@ -127,6 +167,15 @@ export const CONTEXT_HANDOFF_MS = 160;
 
 /** Roles classified as protected-corridor occluders (#32's fade set). */
 const PROTECTED_CORRIDOR_ROLES: Record<string, true> = { Ceiling: true };
+
+/** Transport forms: the roles whose shells must never hide the graph inside. */
+const CONVEYANCE_ROLES: Record<string, true> = {
+  Elevator: true,
+  Escalator: true,
+  Stairs: true,
+  Ramp: true,
+  Conveyance: true,
+};
 
 export interface BatchVisibility {
   levelIndex: number;
@@ -143,6 +192,65 @@ export interface VisibilityState {
   /** Registered levels for the one route floor retained as quiet context. */
   contextLevelIndices: readonly number[];
   showContextLevels: boolean;
+  /**
+   * Resolved plane per scene level, venue-local metres, indexed as
+   * `scene.levels`. Elevation decides which floor of a retained pair is the one
+   * being looked through; an index this array does not answer for carries no
+   * ordering, and the pair falls back to the selection-keyed treatment rather
+   * than inventing one.
+   */
+  levelPlanesM: readonly number[];
+}
+
+/** One level's plane in millimetres, or `null` when the scene carries none. */
+function planeMillimetres(state: VisibilityState, levelIndex: number): number | null {
+  const plane = state.levelPlanesM[levelIndex];
+  if (plane === undefined || !Number.isFinite(plane)) {
+    return null;
+  }
+  return Math.round(plane * 1000);
+}
+
+/**
+ * The lowest plane among the retained pair, or `null` when any member of it has
+ * no plane — one unknown member means the stack order is unknown, and a guessed
+ * order would silently pick which floor to look through.
+ */
+function lowestPairPlaneMm(state: VisibilityState): number | null {
+  let lowest: number | null = null;
+  // Deliberately two loops over the two index lists: this runs per batch per
+  // frame, so it must not allocate a joined array to iterate.
+  for (const index of state.activeLevelIndices) {
+    const mm = planeMillimetres(state, index);
+    if (mm === null) return null;
+    lowest = lowest === null || mm < lowest ? mm : lowest;
+  }
+  for (const index of state.contextLevelIndices) {
+    const mm = planeMillimetres(state, index);
+    if (mm === null) return null;
+    lowest = lowest === null || mm < lowest ? mm : lowest;
+  }
+  return lowest;
+}
+
+/**
+ * How visible one level is: hidden, full, the see-through treatment given to
+ * the higher floor of a retained pair, or quiet context.
+ */
+function levelOpacity(levelIndex: number, state: VisibilityState): number {
+  const active = state.activeLevelIndices.includes(levelIndex);
+  const paired = state.contextLevelIndices.includes(levelIndex);
+  if (!active && !paired && !state.showContextLevels) {
+    return 0;
+  }
+  if (state.contextLevelIndices.length > 0 && (active || paired)) {
+    const lowest = lowestPairPlaneMm(state);
+    const mine = planeMillimetres(state, levelIndex);
+    if (lowest !== null && mine !== null) {
+      return mine <= lowest ? 1 : UPPER_FLOOR_OPACITY;
+    }
+  }
+  return active ? 1 : CONTEXT_LEVEL_OPACITY;
 }
 
 /**
@@ -151,19 +259,80 @@ export interface VisibilityState {
  * per-floor number rather than a per-venue one.
  */
 export function batchOpacity(batch: BatchVisibility, state: VisibilityState): number {
-  if (state.activeLevelIndices.includes(batch.levelIndex)) {
-    return Object.hasOwn(HIDDEN_ROLES_ON_ACTIVE_LEVEL, batch.role) ? 0 : 1;
+  const floor = levelOpacity(batch.levelIndex, state);
+  if (floor === 0) {
+    return 0;
   }
   if (
-    !state.showContextLevels &&
-    !state.contextLevelIndices.includes(batch.levelIndex)
+    Object.hasOwn(HIDDEN_ROLES_ON_ACTIVE_LEVEL, batch.role) &&
+    state.activeLevelIndices.includes(batch.levelIndex)
   ) {
     return 0;
   }
-  // A context floor's ceiling is the one thing standing between the camera and
-  // the floor the reviewer is on, so it fades further than the rest of that
-  // floor — the only geometry in the scene that fades for the camera at all.
-  return Object.hasOwn(PROTECTED_CORRIDOR_ROLES, batch.role)
-    ? OCCLUDER_FADE_OPACITY
-    : CONTEXT_LEVEL_OPACITY;
+  // Nothing is ever drawn more solidly than the floor carrying it, so a fade
+  // set can only ever quieten a surface further.
+  if (Object.hasOwn(PROTECTED_CORRIDOR_ROLES, batch.role)) {
+    return Math.min(floor, OCCLUDER_FADE_OPACITY);
+  }
+  if (Object.hasOwn(CONVEYANCE_ROLES, batch.role)) {
+    return Math.min(floor, CONVEYANCE_SHELL_OPACITY);
+  }
+  if (batch.role === "Opening") {
+    return Math.min(floor, OPENING_THRESHOLD_OPACITY);
+  }
+  return floor;
+}
+
+/**
+ * Whether a batch may answer a click. See-through is a state treatment, not
+ * absence: a conveyance shell and the floor being looked through are both
+ * still the active floor, and both stay selectable. A hidden batch and a
+ * context floor never intercept a click — a retained route floor is reference,
+ * not a target, and a hidden ceiling must not stand in front of the room below
+ * it.
+ */
+export function batchPickable(batch: BatchVisibility, state: VisibilityState): boolean {
+  return (
+    state.activeLevelIndices.includes(batch.levelIndex) && batchOpacity(batch, state) > 0
+  );
+}
+
+export interface PlannedBatch<T extends BatchVisibility> {
+  batch: T;
+  opacity: number;
+}
+
+/**
+ * Split the scene into the two passes a blended frame needs.
+ *
+ * Solid geometry draws first and owns the depth buffer. See-through geometry
+ * draws after it, bottom floor first: the camera never goes under the model, so
+ * ascending elevation is back-to-front, and a translucent surface that wrote
+ * depth — or drew before the floor beneath it — would erase exactly the floor
+ * the reviewer is looking through it to see.
+ */
+export function planSceneDraw<T extends BatchVisibility>(
+  batches: readonly T[],
+  state: VisibilityState,
+): { opaque: PlannedBatch<T>[]; translucent: PlannedBatch<T>[] } {
+  const opaque: PlannedBatch<T>[] = [];
+  const translucent: PlannedBatch<T>[] = [];
+  for (const batch of batches) {
+    const opacity = batchOpacity(batch, state);
+    if (opacity <= 0) {
+      continue;
+    }
+    (opacity >= 1 ? opaque : translucent).push({ batch, opacity });
+  }
+  translucent.sort((left, right) => {
+    // A level with no plane sorts to the back: it cannot be shown to be in
+    // front of anything, so it must not paint over geometry that can.
+    const leftPlane = planeMillimetres(state, left.batch.levelIndex) ?? Number.NEGATIVE_INFINITY;
+    const rightPlane = planeMillimetres(state, right.batch.levelIndex) ?? Number.NEGATIVE_INFINITY;
+    return (
+      leftPlane - rightPlane ||
+      ROLE_PAINT_ORDER[left.batch.role] - ROLE_PAINT_ORDER[right.batch.role]
+    );
+  });
+  return { opaque, translucent };
 }

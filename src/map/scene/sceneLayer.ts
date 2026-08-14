@@ -37,7 +37,10 @@ import {
   ROLE_DEPTH_BIAS,
   ROLE_PAINT_ORDER,
   ROLE_VERTICAL_NUDGE_MM,
-  batchOpacity,
+  batchPickable,
+  planSceneDraw,
+  type PlannedBatch,
+  type VisibilityState,
 } from "./scenePolicy";
 import {
   composeModelMatrix,
@@ -240,6 +243,12 @@ export interface SceneDiagnostics {
   levelCount: number;
   /** Canonical level ids in the document's own index order. */
   levelIds: readonly string[];
+  /**
+   * Resolved plane per level, venue-local metres, in the same index order.
+   * Elevation is what decides which floor of a retained pair is looked
+   * through, so the harness has to be able to read the number that decided it.
+   */
+  levelPlanesM: readonly number[];
   activeLevelIndices(): number[];
   /** Registered levels retained as non-pickable route context. */
   contextLevelIndices(): number[];
@@ -381,6 +390,16 @@ export class SceneLayer implements CustomLayerInterface {
   private _activeLevelIndices: number[];
   private _contextLevelIndices: number[];
   private _showContextLevels: boolean;
+  private readonly _levelPlanesM: readonly number[];
+  /**
+   * The frame's two passes, recomputed only when the floor selection changes.
+   * A camera move repaints far more often than a floor changes, and the plan
+   * depends on neither the camera nor the clock.
+   */
+  private _drawPlan: {
+    opaque: PlannedBatch<BatchResources>[];
+    translucent: PlannedBatch<BatchResources>[];
+  } | null = null;
   private _stats: SceneLayerStats;
 
   constructor(scene: SceneView, options: SceneLayerOptions = {}) {
@@ -396,6 +415,7 @@ export class SceneLayer implements CustomLayerInterface {
       .map((index) => Math.floor(index))
       .filter((index) => index >= 0 && index < scene.levels.length);
     this._showContextLevels = options.showContextLevels ?? false;
+    this._levelPlanesM = scene.levels.map((level) => level.resolvedPlaneZ);
 
     const anchor = sceneAnchor(scene.header.frameOriginEcef);
     this._model = composeModelMatrix(
@@ -487,32 +507,17 @@ export class SceneLayer implements CustomLayerInterface {
       gl.uniform1ui(uniforms.selected, this._selectedFeature);
       gl.uniform1ui(uniforms.hovered, this._hoveredFeature);
 
-      let visible = 0;
-      for (const batch of this._batches) {
-        const opacity = batchOpacity(batch, {
-          activeLevelIndices: this._activeLevelIndices,
-          contextLevelIndices: this._contextLevelIndices,
-          showContextLevels: this._showContextLevels,
-        });
-        if (opacity <= 0) {
-          continue;
-        }
-        visible += 1;
-        const color = ROLE_COLORS[batch.role];
-        // f64 compose, downcast once: the translation is already anchor-
-        // relative, so f32 keeps sub-millimetre resolution across the venue.
-        const matrix = this._multiply(viewProjection, batch.matrix);
-        for (let index = 0; index < 16; index += 1) {
-          this._matrixF32[index] = matrix[index]!;
-        }
-        gl.uniformMatrix4fv(uniforms.matrix, false, this._matrixF32);
-        gl.uniform3f(uniforms.baseColor, color[0], color[1], color[2]);
-        gl.uniform1f(uniforms.opacity, opacity);
-        gl.polygonOffset(0, batch.depthBias);
-        gl.bindVertexArray(batch.vao);
-        gl.drawArrays(gl.TRIANGLES, 0, batch.vertexCount);
-        drawCalls += 1;
-      }
+      const plan = this._plan();
+      gl.depthMask(true);
+      drawCalls += this._drawBatches(gl, uniforms, viewProjection, plan.opaque);
+      // See-through geometry must not own the depth buffer. A surface the
+      // reviewer is looking through would otherwise reject the floor behind it
+      // — the subject of a cross-floor connection view — and the result would
+      // depend on the order batches happened to be built in.
+      gl.depthMask(false);
+      drawCalls += this._drawBatches(gl, uniforms, viewProjection, plan.translucent);
+      gl.depthMask(true);
+      const visible = plan.opaque.length + plan.translucent.length;
       this._stats = { ...this._stats, drawCalls, visibleBatches: visible };
       // The first pick a driver runs pays for validating the multi-target float
       // path — measured near 20 ms against 2 ms warm. Spending it here, once,
@@ -601,13 +606,7 @@ export class SceneLayer implements CustomLayerInterface {
       for (const batch of this._batches) {
         // Only what the reviewer can see is pickable: a hidden floor or a
         // hidden ceiling must not intercept a click on the room below it.
-        if (
-          batchOpacity(batch, {
-            activeLevelIndices: this._activeLevelIndices,
-            contextLevelIndices: this._contextLevelIndices,
-            showContextLevels: this._showContextLevels,
-          }) < 1
-        ) {
+        if (!batchPickable(batch, this._visibility())) {
           continue;
         }
         const matrix = this._multiply(viewProjection, batch.matrix);
@@ -848,6 +847,7 @@ export class SceneLayer implements CustomLayerInterface {
     this._activeLevelIndices = levelIndices
       .map((index) => Math.floor(index))
       .filter((index) => index >= 0 && index <= last);
+    this._drawPlan = null;
   }
 
   /** Retain registered levels for one route floor as quiet, non-pickable context. */
@@ -856,12 +856,57 @@ export class SceneLayer implements CustomLayerInterface {
     this._contextLevelIndices = levelIndices
       .map((index) => Math.floor(index))
       .filter((index) => index >= 0 && index <= last);
+    this._drawPlan = null;
     this._map?.triggerRepaint();
   }
 
   /** Show or hide the other floors as quiet context. */
   setShowContextLevels(show: boolean): void {
     this._showContextLevels = show;
+    this._drawPlan = null;
+  }
+
+  /** The floor selection every policy decision reads. */
+  private _visibility(): VisibilityState {
+    return {
+      activeLevelIndices: this._activeLevelIndices,
+      contextLevelIndices: this._contextLevelIndices,
+      showContextLevels: this._showContextLevels,
+      levelPlanesM: this._levelPlanesM,
+    };
+  }
+
+  private _plan(): {
+    opaque: PlannedBatch<BatchResources>[];
+    translucent: PlannedBatch<BatchResources>[];
+  } {
+    this._drawPlan ??= planSceneDraw(this._batches, this._visibility());
+    return this._drawPlan;
+  }
+
+  private _drawBatches(
+    gl: WebGL2RenderingContext,
+    uniforms: NonNullable<SceneLayer["_uniforms"]>,
+    viewProjection: Float64Array,
+    entries: readonly PlannedBatch<BatchResources>[],
+  ): number {
+    for (const entry of entries) {
+      const batch = entry.batch;
+      const color = ROLE_COLORS[batch.role];
+      // f64 compose, downcast once: the translation is already anchor-
+      // relative, so f32 keeps sub-millimetre resolution across the venue.
+      const matrix = this._multiply(viewProjection, batch.matrix);
+      for (let index = 0; index < 16; index += 1) {
+        this._matrixF32[index] = matrix[index]!;
+      }
+      gl.uniformMatrix4fv(uniforms.matrix, false, this._matrixF32);
+      gl.uniform3f(uniforms.baseColor, color[0], color[1], color[2]);
+      gl.uniform1f(uniforms.opacity, entry.opacity);
+      gl.polygonOffset(0, batch.depthBias);
+      gl.bindVertexArray(batch.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, batch.vertexCount);
+    }
+    return entries.length;
   }
 
   /** What the last frame cost, for the performance harness and diagnostics. */
@@ -885,6 +930,7 @@ export class SceneLayer implements CustomLayerInterface {
       sourceHash: this._scene.header.sourceHash,
       levelCount: this._scene.levels.length,
       levelIds: this._scene.levels.map((level) => level.canonicalId),
+      levelPlanesM: this._levelPlanesM,
       activeLevelIndices: () => [...this._activeLevelIndices],
       contextLevelIndices: () => [...this._contextLevelIndices],
     };
@@ -913,6 +959,7 @@ export class SceneLayer implements CustomLayerInterface {
   markContextLost(): void {
     this._contextLost = true;
     this._batches = [];
+    this._drawPlan = null;
     this._program = null;
     this._uniforms = null;
     this._pickProgram = null;
@@ -1039,6 +1086,7 @@ export class SceneLayer implements CustomLayerInterface {
       // Paint order is the renderer's own concern, not the producer's: batches
       // arrive keyed by (level, role) and are composited by role here.
       .sort((left, right) => ROLE_PAINT_ORDER[left.role] - ROLE_PAINT_ORDER[right.role]);
+    this._drawPlan = null;
   }
 
   private _createBatch(gl: WebGL2RenderingContext, batch: SceneBatchView): BatchResources {
@@ -1116,6 +1164,7 @@ export class SceneLayer implements CustomLayerInterface {
       }
     }
     this._batches = [];
+    this._drawPlan = null;
     this._program = null;
     this._uniforms = null;
     this._pickProgram = null;
