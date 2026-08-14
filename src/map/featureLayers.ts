@@ -75,6 +75,10 @@ export const LAYER_NETWORK_VERTICAL_LINK_HIT = "indoor-network-vertical-link-hit
 export const LAYER_NETWORK_VERTICAL_LINK = "indoor-network-vertical-link";
 export const LAYER_NETWORK_VERTICAL_LINK_SELECTED = "indoor-network-vertical-link-selected";
 export const LAYER_NETWORK_VERTICAL_LINK_LABEL = "indoor-network-vertical-link-label";
+/** Near-invisible fill over conveyance unit footprints, hit-tested above the
+ * ordinary unit fills so 3D picks on an elevator/escalator/… resolve to the
+ * conveyance rather than the walkway or room beneath it. */
+export const LAYER_NETWORK_CONVEYANCE_HIT = "indoor-network-conveyance-hit";
 
 /** Layers that participate in click / hover hit-testing. */
 export const CLICKABLE_LAYER_IDS: readonly string[] = [
@@ -116,6 +120,20 @@ export const TRANSIT_CATEGORIES = [
 export const UNENCLOSED_CATEGORIES = ["unenclosedarea", "opentobelow"] as const;
 
 export const NONPUBLIC_CATEGORIES = ["nonpublic"] as const;
+
+/**
+ * Unit categories that carry a conveyance (transit machinery plus ramps, which
+ * the walkway bucket owns). The 3D conveyance pick surface hit-tests exactly
+ * these footprints, above every ordinary unit fill.
+ */
+export const CONVEYANCE_CATEGORIES = [
+  "elevator",
+  "escalator",
+  "stairs",
+  "steps",
+  "ramp",
+  "movingwalkway",
+] as const;
 
 /** First 8 chars of `__category`; "restroom" covers all 11 restroom.* enum values. */
 const restroomPrefix: ExpressionSpecification = [
@@ -676,6 +694,25 @@ const verticalTranslate: [number, number] = [12, -12];
  */
 export function buildNetworkLayers(): AnyLayer[] {
   return [
+    // Near-invisible conveyance hit surface on the indoor source. Assembled
+    // with the network overlay so it renders above every ordinary unit fill:
+    // a pick on an elevator/escalator/stairs/steps/ramp/moving-walkway
+    // footprint hits this layer first, never the walkway or room below it.
+    {
+      id: LAYER_NETWORK_CONVEYANCE_HIT,
+      type: "fill",
+      source: INDOOR_SOURCE_ID,
+      filter: [
+        "all",
+        ["==", ["get", "__feature_type"], "unit"],
+        ["!=", ["get", "__restricted"], true],
+        ["in", ["get", "__category"], ["literal", [...CONVEYANCE_CATEGORIES]]],
+      ],
+      paint: {
+        "fill-color": "#000000",
+        "fill-opacity": 0.01,
+      },
+    },
     // Wide, near-invisible hit targets sit beneath the thin visible overlay so
     // editing clicks land on 1.5px paths / 2.5px junctions reliably.
     {

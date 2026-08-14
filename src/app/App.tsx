@@ -38,6 +38,7 @@ import { loadNetworkOverlay } from "../bundle/loadNetworkOverlay";
 import {
   networkConnectivity,
   serializeNetwork,
+  type NetworkConnectionId,
   type ParsedNetwork,
 } from "../map/networkFeatures";
 import {
@@ -52,6 +53,7 @@ import {
 } from "../map/networkEditor";
 import { NetworkEditorToolbar } from "../components/NetworkEditorToolbar";
 import { NetworkInspectorPanel } from "../components/NetworkInspectorPanel";
+import { CrossFloorConnectionsPanel } from "../components/CrossFloorConnectionsPanel";
 import { ZoomCluster } from "../components/ZoomCluster";
 import { SignInModal } from "../gallery/SignInModal";
 import { VenueLoadError } from "../errors/VenueLoadError";
@@ -70,6 +72,7 @@ import {
   type IndoorMapControls,
   type IssuePlacementAnchor,
   type IssueReviewMapProps,
+  type VerticalConnectionMapProps,
 } from "../map/IndoorMap";
 import { defaultLayerVisibility, type MapLayerGroup } from "../map/layerGroups";
 import { projectPins } from "../map/useIssuePins";
@@ -438,6 +441,12 @@ export function App() {
     "idle" | "loading" | "ready" | "error"
   >("idle");
   const [networkLoadAttempt, setNetworkLoadAttempt] = useState(0);
+  // Cross-floor connection selection, shared between the 接続フロア QA list and
+  // the 3D conveyance/edge surfaces. App owns the value; IndoorMap renders
+  // the selection (camera, edge emphasis, partner floor context).
+  const [selectedConnection, setSelectedConnection] = useState<NetworkConnectionId | null>(null);
+  // The 接続フロア chip toggles the QA list panel.
+  const [connectionsPanelOpen, setConnectionsPanelOpen] = useState(false);
   const [editor, setEditor] = useState<NetworkEditorState | null>(null);
   const [discardArmed, setDiscardArmed] = useState(false);
   const dispatchEditor = useCallback((action: NetworkEditorAction) => {
@@ -632,6 +641,8 @@ export function App() {
     setReviewNetwork(null);
     setNetworkLoadState("idle");
     setNetworkLoadAttempt(0);
+    setSelectedConnection(null);
+    setConnectionsPanelOpen(false);
     setEditor(null);
     setDiscardArmed(false);
     resetNetworkSave();
@@ -752,6 +763,8 @@ export function App() {
     }
     setEditor(null);
     setDiscardArmed(false);
+    setSelectedConnection(null);
+    setConnectionsPanelOpen(false);
     setReviewActive(false);
   }, [reviewActive, editor, editorDirty]);
 
@@ -919,6 +932,16 @@ export function App() {
           }
         : null,
     [directions.active, directions.destination, directions.origin, directions.route, directionsAvailable, onDirectionsPick],
+  );
+
+  // Cross-floor connection selection: null outside network review, so the map
+  // only renders the selected 3D edge while the review overlay is on.
+  const verticalConnections = useMemo<VerticalConnectionMapProps | null>(
+    () =>
+      reviewActive && editedNetwork !== null
+        ? { selected: selectedConnection, onSelect: setSelectedConnection }
+        : null,
+    [reviewActive, editedNetwork, selectedConnection],
   );
 
   const searchResults = useMemo(() => {
@@ -1122,6 +1145,7 @@ export function App() {
     setSelectedFacility(null);
     dispatch({ type: "select_feature", featureId: null });
     setDiscardArmed(false);
+    setConnectionsPanelOpen(false);
     setEditor(createNetworkEditorState(reviewNetwork));
   }, [reviewNetwork, networkLoadState]);
   enterEditRef.current = beginNetworkEdit;
@@ -1456,22 +1480,27 @@ export function App() {
   // the document. The initial generated rung probes the package once before
   // settling; after a package attach failure, generated is loaded explicitly.
   const render3d = sourceState.active !== "fallback2d";
+  const sceneKey =
+    params.dataset === null ? null : `${params.dataset}:${params.version ?? "latest"}`;
+  // Which rung of the ladder the scene comes from. Derived outside the effect so
+  // the effect re-runs when the *request* changes and not merely when the
+  // ladder's bookkeeping does: a retry counter ticking down while a fetch is in
+  // flight used to abort that fetch and start the identical one again.
+  const requestedSceneSource: "package" | "generated" =
+    sourceState.active === "tiles" ||
+    (sourceState.active === "generated" &&
+      sourceState.droppedFrom === null &&
+      sourceState.tileRetriesLeft > 0)
+      ? "package"
+      : "generated";
   useEffect(() => {
-    if (!render3d || params.dataset === null) {
+    if (!render3d || params.dataset === null || sceneKey === null) {
       loadedSceneRef.current = null;
       setScene(null);
       return;
     }
     const dataset = params.dataset;
-    const sceneKey = `${dataset}:${params.version ?? "latest"}`;
-    const packageCandidate =
-      sourceState.active === "tiles"
-      || (
-        sourceState.active === "generated"
-        && sourceState.droppedFrom === null
-        && sourceState.tileRetriesLeft > 0
-      );
-    const requestedSource = packageCandidate ? "package" : "generated";
+    const requestedSource = requestedSceneSource;
     if (
       loadedSceneRef.current?.key === sceneKey
       && loadedSceneRef.current.source === requestedSource
@@ -1530,9 +1559,8 @@ export function App() {
     };
   }, [
     render3d,
-    sourceState.active,
-    sourceState.droppedFrom,
-    sourceState.tileRetriesLeft,
+    sceneKey,
+    requestedSceneSource,
     params.dataset,
     params.version,
     dispatchSource,
@@ -1746,6 +1774,7 @@ export function App() {
             onSelectFeature={onMapSelectFeature}
             issueReview={issueReview}
             directions={directionsMapProps}
+            verticalConnections={verticalConnections}
             onControls={onControls}
             facilities={bundleProvenance?.facilities ?? []}
             onSelectFacility={setSelectedFacility}
@@ -2018,11 +2047,20 @@ export function App() {
                   {ui.reviewNetwork[locale]}
                 </button>
                 {reviewActive && reviewReport ? (
-                  <span className="review-report" role="status">
-                    {ui.reviewConnected[locale]} {Math.round(reviewReport.largestFraction * 100)}% ·{" "}
-                    {reviewReport.components} {ui.reviewIslands[locale]} ·{" "}
-                    {reviewReport.floorsInLargest} {ui.reviewFloors[locale]}
-                  </span>
+                  <>
+                    <span className="review-report" role="status">
+                      {ui.reviewConnected[locale]} {Math.round(reviewReport.largestFraction * 100)}% ·{" "}
+                      {reviewReport.components} {ui.reviewIslands[locale]} ·{" "}
+                    </span>
+                    <button
+                      type="button"
+                      className={connectionsPanelOpen ? "chip chip--selected" : "chip"}
+                      aria-pressed={connectionsPanelOpen}
+                      onClick={() => setConnectionsPanelOpen((open) => !open)}
+                    >
+                      {reviewReport.floorsInLargest} {ui.reviewFloors[locale]}
+                    </button>
+                  </>
                 ) : null}
                 {reviewActive && editor === null ? (
                   compact ? (
@@ -2122,6 +2160,16 @@ export function App() {
                 onClose={() => dispatchEditor({ type: "clear_selection" })}
                 onMove={startNetworkMove}
                 onDelete={() => dispatchEditor({ type: "delete_selection" })}
+              />
+            ) : null}
+            {showMap && connectionsPanelOpen && reviewActive && editor === null ? (
+              <CrossFloorConnectionsPanel
+                network={editedNetwork}
+                activeOrdinal={activeOrdinal}
+                selected={selectedConnection}
+                locale={locale}
+                onSelect={setSelectedConnection}
+                onClose={() => setConnectionsPanelOpen(false)}
               />
             ) : null}
             <FloorStack

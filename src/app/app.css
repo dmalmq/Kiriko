@@ -610,6 +610,72 @@ button {
   margin-top: 12px;
 }
 
+/* ── Cross-floor connections panel ────────────────────── */
+
+.floating-panel--connections {
+  width: 360px;
+}
+
+.cross-floor-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cross-floor-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  line-height: 18px;
+  text-align: left;
+  transition: background 0.15s ease-out, border-color 0.15s ease-out;
+}
+
+.cross-floor-link:hover {
+  background: var(--color-chip-fill);
+}
+
+.cross-floor-link--selected {
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.cross-floor-link__kind {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cross-floor-link__target {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--color-muted);
+}
+
+.cross-floor-link--selected .cross-floor-link__target {
+  color: var(--color-accent);
+}
+
+.cross-floor-link-empty {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--color-muted);
+}
+
 /* ── Search panel ──────────────────────────────────────── */
 
 .search-panel {

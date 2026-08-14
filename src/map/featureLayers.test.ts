@@ -18,6 +18,9 @@ import {
   LAYER_ROUTE_ENDPOINT,
   LAYER_ROUTE_CONNECTOR,
   NETWORK_SOURCE_ID,
+  INDOOR_SOURCE_ID,
+  CONVEYANCE_CATEGORIES,
+  LAYER_NETWORK_CONVEYANCE_HIT,
   LAYER_NETWORK_VERTICAL_LINK,
   LAYER_NETWORK_VERTICAL_LINK_HIT,
   LAYER_NETWORK_VERTICAL_LINK_LABEL,
@@ -238,6 +241,51 @@ describe("vertical network link layers", () => {
     expect(label?.layout?.["icon-image"]).toEqual(["get", "labelImage"]);
     expect(label?.layout?.["text-field"]).toBeUndefined();
     expect(JSON.stringify(label)).not.toMatch(/stairs|escalator|elevator/i);
+  });
+});
+
+describe("conveyance hit layer", () => {
+  it("hit-tests the six conveyance categories on the indoor source, above the unit fills", () => {
+    const layers = buildNetworkLayers();
+    const hit = layers.find((layer) => layer.id === LAYER_NETWORK_CONVEYANCE_HIT);
+    expect(hit, "conveyance hit layer exists").toBeDefined();
+    expect(hit!.type).toBe("fill");
+    expect(hit!.source).toBe(INDOOR_SOURCE_ID);
+    expect(hit!.filter).toEqual([
+      "all",
+      ["==", ["get", "__feature_type"], "unit"],
+      ["!=", ["get", "__restricted"], true],
+      ["in", ["get", "__category"], ["literal", [...CONVEYANCE_CATEGORIES]]],
+    ]);
+    // Effectively invisible: the same near-invisible convention the network
+    // hit targets use, so picks land on it without tinting the map.
+    expect((hit as FillLayerSpecification).paint?.["fill-opacity"]).toBe(0.01);
+  });
+
+  it("covers exactly the six conveyance unit categories", () => {
+    expect([...CONVEYANCE_CATEGORIES]).toEqual([
+      "elevator",
+      "escalator",
+      "stairs",
+      "steps",
+      "ramp",
+      "movingwalkway",
+    ]);
+  });
+
+  it("sits above the ordinary unit fills in the indoor style", () => {
+    const style = buildIndoorStyle(theme);
+    const ids = style.layers.map((layer) => layer.id);
+    expect(ids).toContain(LAYER_NETWORK_CONVEYANCE_HIT);
+    expect(ids.indexOf(LAYER_NETWORK_CONVEYANCE_HIT)).toBeGreaterThan(
+      ids.indexOf(LAYER_WALKWAY_FILL),
+    );
+    expect(ids.indexOf(LAYER_NETWORK_CONVEYANCE_HIT)).toBeGreaterThan(
+      ids.indexOf(LAYER_TRANSIT_FILL),
+    );
+    expect(ids.indexOf(LAYER_NETWORK_CONVEYANCE_HIT)).toBeGreaterThan(
+      ids.indexOf(LAYER_STRUCTURE_FILL),
+    );
   });
 });
 
