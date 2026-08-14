@@ -14,6 +14,9 @@ import { useEffect } from "react";
 import type { Map as MapLibreMap } from "maplibre-gl";
 import type { LoadedVenue, LocaleCode, ViewerFeature } from "../../imdf/types";
 import { markerIconFor } from "../markerIcons";
+import type { ParsedNetwork } from "../networkFeatures";
+import { verticalLinkLabelText } from "../verticalLinkLabels";
+import { conveyanceDirections, type ConveyanceDirection } from "./conveyanceDirection";
 import { rampGlyph } from "./conveyanceGlyphs";
 import {
   layoutSceneLabels,
@@ -58,6 +61,16 @@ const LANDMARK_TYPES: Record<string, true> = {
   kiosk: true,
 };
 
+/**
+ * Prose for the directed badge's accessible name. The visible chevron itself
+ * is language-neutral (arrow + floor token, like the 2D overlay); only the
+ * spoken name needs words, in both locales.
+ */
+const DIRECTION_WORDS: Record<"up" | "down", Record<LocaleCode, string>> = {
+  up: { ja: "上り", en: "up" },
+  down: { ja: "下り", en: "down" },
+};
+
 export interface UseSceneLabelsArgs {
   map: MapLibreMap | null;
   layer: SceneLayer | null;
@@ -68,6 +81,12 @@ export interface UseSceneLabelsArgs {
   /** Guidance caps labels harder than overview does (#32). */
   mode: LabelMode;
   enabled: boolean;
+  /**
+   * The parsed routing graph, when it is loaded. Conveyance badges show their
+   * direction chevron only from this evidence; null renders today's plain
+   * badges.
+   */
+  network: ParsedNetwork | null;
   /** Mirrors the flat overlay's contract: id plus the feature's own centre. */
   onSelect: (featureId: string, center: [number, number]) => void;
 }
@@ -91,6 +110,7 @@ export function collectSceneLabelCandidates(
   levelId: string,
   locale: LocaleCode,
   selectedFeatureId: string | null,
+  directions: ReadonlyMap<string, ConveyanceDirection>,
 ): Omit<LabelCandidate, "screen" | "size">[] {
   const candidates: Omit<LabelCandidate, "screen" | "size">[] = [];
   for (const feature of venue.featuresById.values()) {
@@ -108,6 +128,7 @@ export function collectSceneLabelCandidates(
     if (text === "" && !conveyance) {
       continue;
     }
+    const direction = conveyance ? directions.get(feature.id) : undefined;
     candidates.push({
       id: feature.id,
       // A selected conveyance keeps its badge rather than losing its pictogram
@@ -118,6 +139,9 @@ export function collectSceneLabelCandidates(
       // selected conveyance both ways.
       protected: selected,
       ...(conveyance ? { icon: conveyanceIcon(category) } : {}),
+      // Graph evidence only; absent when no vertical link matched this
+      // conveyance, exactly like today's plain badge.
+      ...(direction === undefined ? {} : { direction }),
     });
   }
   return candidates;
@@ -129,6 +153,13 @@ function estimateSize(candidate: Omit<LabelCandidate, "screen" | "size">): {
   height: number;
 } {
   if (candidate.icon !== undefined) {
+    // A directed badge carries the pictogram plus the direction chevron, so it
+    // is a wide pill instead of the round 28 px badge. Same 7 px-per-character
+    // rule as the pill face below, plus the badge's own padding.
+    if (candidate.direction !== undefined) {
+      const chevron = verticalLinkLabelText(candidate.direction.arrow, candidate.direction.targetFloor);
+      return { width: 28 + 16 + chevron.length * 7, height: 28 };
+    }
     return { width: 28, height: 28 };
   }
   // 7 px per character is the measured average for the pill's 12 px face, plus
@@ -140,6 +171,7 @@ function estimateSize(candidate: Omit<LabelCandidate, "screen" | "size">): {
 function renderLabels(
   overlay: HTMLDivElement,
   placed: readonly PlacedLabel[],
+  locale: LocaleCode,
   onSelect: (label: PlacedLabel) => void,
 ): void {
   overlay.replaceChildren();
@@ -174,10 +206,26 @@ function renderLabels(
     if (label.icon === undefined) {
       button.textContent = label.text;
       button.title = label.text;
-    } else {
+    } else if (label.direction === undefined) {
       button.innerHTML = label.icon;
       button.setAttribute("aria-label", label.text === "" ? label.tier : label.text);
       button.title = label.text;
+    } else {
+      // Directed badge: the pictogram plus the static direction chevron (arrow
+      // + target floor token, the same neutral vocabulary as the 2D overlay).
+      // The chevron is aria-hidden; the button's accessible name carries the
+      // direction in the active locale.
+      const chevron = document.createElement("span");
+      chevron.className = "scene-label__chevron";
+      chevron.textContent = verticalLinkLabelText(label.direction.arrow, label.direction.targetFloor);
+      chevron.setAttribute("aria-hidden", "true");
+      const word = DIRECTION_WORDS[label.direction.arrow][locale];
+      const accessible = `${label.text} ${word} ${label.direction.targetFloor}`.trim();
+      button.innerHTML = label.icon;
+      button.append(chevron);
+      button.classList.add("scene-label--chevron");
+      button.setAttribute("aria-label", accessible === "" ? label.tier : accessible);
+      button.title = accessible === "" ? label.text : accessible;
     }
     button.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -201,6 +249,7 @@ export function useSceneLabels({
   selectedFeatureId,
   mode,
   enabled,
+  network,
   onSelect,
 }: UseSceneLabelsArgs): void {
   useEffect(() => {
@@ -215,7 +264,21 @@ export function useSceneLabels({
     // Labels anchor on the floor's plane; every source level registered to a
     // floor sits on the same one, so the first is as good as any.
     const levelIndex = layer.levelIndicesOf(levelId)[0] ?? 0;
-    const base = collectSceneLabelCandidates(venue, levelId, locale, selectedFeatureId);
+    // Direction evidence comes from the routing graph only, keyed by the
+    // active floor's conveyance footprints. A null network (review off, or a
+    // bundle with no graph) yields an empty map and today's plain badges.
+    const directions = conveyanceDirections(
+      network,
+      venue.levels,
+      levelId,
+      [...venue.featuresById.values()].filter(
+        (feature) =>
+          feature.levelId === levelId &&
+          feature.category !== null &&
+          Object.hasOwn(CONVEYANCE_CATEGORIES, feature.category),
+      ),
+    );
+    const base = collectSceneLabelCandidates(venue, levelId, locale, selectedFeatureId, directions);
     const anchors = new Map<string, [number, number, number]>();
     for (const candidate of base) {
       const feature = venue.featuresById.get(candidate.id);
@@ -258,7 +321,7 @@ export function useSceneLabels({
           size: estimateSize(candidate),
         };
       });
-      renderLabels(overlay, layoutSceneLabels(candidates, { viewport, mode, reserved }), (label) => {
+      renderLabels(overlay, layoutSceneLabels(candidates, { viewport, mode, reserved }), locale, (label) => {
         const centre = venue.featuresById.get(label.id)?.center ?? null;
         if (centre !== null) {
           onSelect(label.id, centre);
@@ -285,5 +348,5 @@ export function useSceneLabels({
       }
       overlay.remove();
     };
-  }, [map, layer, venue, levelId, locale, selectedFeatureId, mode, enabled, onSelect]);
+  }, [map, layer, venue, levelId, locale, selectedFeatureId, mode, enabled, network, onSelect]);
 }

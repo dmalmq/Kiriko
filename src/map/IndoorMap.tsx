@@ -1123,6 +1123,9 @@ export function IndoorMap({
     // Guidance is a tighter frame than review: four labels against six (#32).
     mode: directions?.active === true ? "navigation" : "overview",
     enabled: layerVisibility.labels,
+    // Conveyance chevrons come from the routing graph; null keeps the plain
+    // badges exactly as before.
+    network: network ?? null,
     onSelect: onMarkerSelect,
   });
 

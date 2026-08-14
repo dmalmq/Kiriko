@@ -3066,6 +3066,27 @@ button {
   display: block;
 }
 
+/* Directed conveyance badge: the pictogram plus a static direction chevron
+   (arrow + target floor token, graph-evidenced per #32 §9). The chevron turns
+   the round badge into a pill so it has room; it sits on the badge's own
+   panel fill and halo, so it stays legible over the pale conveyance shell and
+   a dark map alike, and it adds no animation or transition of its own — the
+   reduced-motion block above still governs the label's motion. */
+.scene-label--badge.scene-label--chevron {
+  border-radius: 999px;
+  padding: 0 8px 0 3px;
+  gap: 3px;
+}
+
+.scene-label__chevron {
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--color-accent);
+  white-space: nowrap;
+}
+
 .scene-label--selection {
   --marker-bg: var(--color-selected);
   border-color: var(--color-selected);
