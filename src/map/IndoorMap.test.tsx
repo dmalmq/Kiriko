@@ -1708,7 +1708,7 @@ describe("IndoorMap network editing", () => {
     const { map } = renderMap(baseProps({ networkEditing: net }));
     map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [];
     map.queryByLayer[LAYER_NETWORK_VERTICAL_LINK_HIT] = [
-      { properties: { PATHID: 7, RPATHID: 8 } },
+      { properties: { PATHID: 8, RPATHID: 7 } },
     ];
     map.queryByLayer[LAYER_NETWORK_PATH_HIT] = [];
     act(() => {
@@ -1731,6 +1731,23 @@ describe("IndoorMap network editing", () => {
       map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 2 } });
     });
     expect(net.onPick).toHaveBeenCalledWith({ kind: "junction", nodeId: 10 });
+  });
+
+  it("keeps a vertical marker ahead of an ordinary path at the same query point", () => {
+    const net = editing();
+    const { map } = renderMap(baseProps({ networkEditing: net }));
+    map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [];
+    map.queryByLayer[LAYER_NETWORK_VERTICAL_LINK_HIT] = [
+      { properties: { PATHID: 7, RPATHID: 8 } },
+    ];
+    map.queryByLayer[LAYER_NETWORK_PATH_HIT] = [{ properties: { PATHID: 1, RPATHID: 2 } }];
+    act(() => {
+      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 2 } });
+    });
+    expect(net.onPick).toHaveBeenCalledWith({
+      kind: "connection",
+      connectionId: { pathId: 7, reversePathId: 8 },
+    });
   });
 
   it("uses a pointer cursor over a vertical marker", () => {
