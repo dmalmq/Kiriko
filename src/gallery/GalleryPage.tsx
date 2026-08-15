@@ -26,6 +26,22 @@ const ui = {
   importGdb: { ja: "Geodatabase を取り込む", en: "Import Geodatabase" },
   inspecting: { ja: "検査中…", en: "Inspecting…" },
   generatingRouting: { ja: "経路を生成中…", en: "Generating routing…" },
+  estimatingRoutingDuration: {
+    ja: "所要時間を見積もっています…",
+    en: "Estimating duration…",
+  },
+  estimatingRoutingDurationA11y: {
+    ja: "所要時間を見積もっています",
+    en: "Estimating duration",
+  },
+  routingRemainingSeconds: {
+    ja: (seconds: number) => `残り約${seconds}秒`,
+    en: (seconds: number) => `About ${seconds} ${seconds === 1 ? "second" : "seconds"} remaining`,
+  },
+  routingOverdue: {
+    ja: "通常より時間がかかっています — サーバーで処理を続けています。",
+    en: "Taking longer than usual — still processing.",
+  },
   routingGenerated: { ja: "経路を生成しました", en: "Routing generated" },
   exportingNetwork: { ja: "ネットワークを書き出し中…", en: "Exporting network…" },
   networkExported: { ja: "ネットワークを書き出しました", en: "Network exported" },
@@ -101,6 +117,14 @@ type AddDataFlow =
       error: GdbError | null;
     };
 
+interface RoutingProgressState {
+  venueId: number;
+  venueName: string;
+  startedAtMs: number;
+  estimatedDurationSeconds: number | null;
+  timedOut: boolean;
+}
+
 type TopLevelOwner = "gdb" | "add-data" | "routing";
 
 export function GalleryPage() {
@@ -120,6 +144,8 @@ export function GalleryPage() {
   const [addData, setAddData] = useState<AddDataFlow>({ phase: "idle" });
   const [generatingId, setGeneratingId] = useState<number | null>(null);
   const [routingJob, setRoutingJob] = useState<{ venueId: number; jobId: string } | null>(null);
+  const [routingProgress, setRoutingProgress] = useState<RoutingProgressState | null>(null);
+  const [routingClockMs, setRoutingClockMs] = useState(() => Date.now());
   const gdbInputRef = useRef<HTMLInputElement>(null);
   const gdbTargetRef = useRef<GdbTarget>({ mode: "create" });
   const aliveRef = useRef(true);
@@ -163,6 +189,7 @@ export function GalleryPage() {
     setGeneratingId(null);
     setRoutingJob(null);
     setGdbNotice(null);
+    setRoutingProgress(null);
     gdbTargetRef.current = { mode: "create" };
     if (gdbInputRef.current) gdbInputRef.current.value = "";
   };
@@ -229,6 +256,16 @@ export function GalleryPage() {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  useEffect(() => {
+    if (routingProgress === null) return;
+    const timer = window.setInterval(() => {
+      setRoutingClockMs(Date.now());
+    }, 1_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [routingProgress]);
 
   const openCreateUpload = () => {
     if (acceptedOwner !== null) return;
@@ -668,6 +705,18 @@ export function GalleryPage() {
     const noticeGeneration = noticeGenerationRef.current;
     const sessionGeneration = sessionGenerationRef.current;
     setGeneratingId(venue.id);
+    setRoutingClockMs(Date.now());
+    setRoutingProgress((current) =>
+      current?.venueId === venue.id
+        ? { ...current, timedOut: false }
+        : {
+            venueId: venue.id,
+            venueName: venue.name,
+            startedAtMs: Date.now(),
+            estimatedDurationSeconds: null,
+            timedOut: false,
+          },
+    );
     setGdbNotice(accepted === null ? ui.generatingRouting[locale] : ui.processingContinues[locale]);
     void (async () => {
       try {
@@ -677,6 +726,11 @@ export function GalleryPage() {
           if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
           if (generation === routingGenerationRef.current) {
             setRoutingJob(accepted);
+            setRoutingProgress((current) =>
+              current?.venueId === venue.id
+                ? { ...current, estimatedDurationSeconds: res.estimatedDurationSeconds }
+                : current,
+            );
           }
         }
         if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
@@ -686,17 +740,24 @@ export function GalleryPage() {
         if (job.status === "done") {
           if (canTouchNotice) {
             setRoutingJob(null);
+            setRoutingProgress(null);
             setGdbNotice(ui.routingGenerated[locale]);
           }
           await reload();
         } else if (job.status === "timeout") {
           if (canTouchNotice) {
             setRoutingJob(accepted);
+            setRoutingProgress((current) =>
+              current?.venueId === venue.id
+                ? { ...current, timedOut: true }
+                : current,
+            );
             setGdbNotice(ui.processingContinues[locale]);
           }
         } else {
           if (canTouchNotice) {
             setRoutingJob(null);
+            setRoutingProgress(null);
             setGdbNotice(gdbErrorMessage({ code: "gdb_conversion_failed", message: job.error }, locale));
           }
           await reload();
@@ -709,8 +770,14 @@ export function GalleryPage() {
         ) {
           if (accepted !== null) {
             setRoutingJob(accepted);
+            setRoutingProgress((current) =>
+              current?.venueId === venue.id
+                ? { ...current, timedOut: true }
+                : current,
+            );
             setGdbNotice(ui.processingContinues[locale]);
           } else {
+            setRoutingProgress(null);
             setGdbNotice(gdbErrorMessage(err as GdbError, locale));
           }
         }
@@ -852,6 +919,31 @@ export function GalleryPage() {
     const q = filter.trim().toLowerCase();
     return q === "" || venue.name.toLowerCase().includes(q) || venue.slug.includes(q);
   });
+  const routingEstimateSeconds = routingProgress?.estimatedDurationSeconds ?? null;
+  const routingTimedOut = routingProgress?.timedOut ?? false;
+  const routingElapsedSeconds =
+    routingProgress === null
+      ? 0
+      : Math.max(0, Math.floor((routingClockMs - routingProgress.startedAtMs) / 1_000));
+  const routingOverdue =
+    routingEstimateSeconds !== null && routingElapsedSeconds >= routingEstimateSeconds;
+  const routingRemainingSeconds =
+    routingEstimateSeconds === null
+      ? null
+      : Math.max(0, routingEstimateSeconds - routingElapsedSeconds);
+  const routingProgressPercent =
+    routingEstimateSeconds === null
+      ? null
+      : routingOverdue
+        ? 90
+        : Math.min(90, Math.round((routingElapsedSeconds / routingEstimateSeconds) * 100));
+  const routingProgressText = routingOverdue
+    ? ui.routingOverdue[locale]
+    : routingTimedOut
+      ? ui.processingContinues[locale]
+      : routingRemainingSeconds === null
+        ? ui.estimatingRoutingDurationA11y[locale]
+        : ui.routingRemainingSeconds[locale](routingRemainingSeconds);
 
   return (
     <div className="gallery">
@@ -1008,7 +1100,43 @@ export function GalleryPage() {
       ) : null}
       {gdbFlow.phase === "inspecting" ? <div className="gallery-toast">{ui.inspecting[locale]}</div> : null}
       {gdbFlow.phase === "error" ? <div className="gallery-toast gallery-toast--error">{gdbFlow.message}</div> : null}
-      {gdbNotice !== null ? (
+      {routingProgress !== null ? (
+        <div className="gallery-toast gallery-progress">
+          <div className="gallery-progress__heading" role="status">
+            <strong>{ui.generatingRouting[locale]}</strong>
+            <span>{routingProgress.venueName}</span>
+          </div>
+          <div
+            className="progress-track gallery-progress__track"
+            role="progressbar"
+            aria-label={ui.generatingRouting[locale]}
+            aria-valuemin={routingProgressPercent === null ? undefined : 0}
+            aria-valuemax={routingProgressPercent === null ? undefined : 100}
+            aria-valuenow={routingProgressPercent ?? undefined}
+            aria-valuetext={routingProgressText}
+          >
+            <div
+              className={
+                routingProgressPercent === null
+                  ? "progress-fill gallery-progress__fill gallery-progress__fill--indeterminate"
+                  : "progress-fill gallery-progress__fill"
+              }
+              {...(routingProgressPercent === null
+                ? {}
+                : { style: { width: `${routingProgressPercent}%` } })}
+            />
+          </div>
+          <span className="gallery-progress__estimate" aria-hidden="true">
+            {routingOverdue
+              ? ui.routingOverdue[locale]
+              : routingTimedOut
+                ? ui.processingContinues[locale]
+                : routingRemainingSeconds === null
+                  ? ui.estimatingRoutingDuration[locale]
+                  : ui.routingRemainingSeconds[locale](routingRemainingSeconds)}
+          </span>
+        </div>
+      ) : gdbNotice !== null ? (
         <div className="gallery-toast" role="status">{gdbNotice}</div>
       ) : null}
       {gdbFlow.phase === "review" ? (

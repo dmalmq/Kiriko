@@ -63,7 +63,7 @@ const MULTI_FLOOR_SCENE = scene([
 
 describe("resolveSceneFloorState", () => {
   it("returns the active scene levels and their shared plane", () => {
-    expect(resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "b1", null)).toEqual({
+    expect(resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "b1", null, null)).toEqual({
       activeLevelIndices: [0],
       contextLevelIndices: [],
       activePlaneM: 8,
@@ -72,7 +72,7 @@ describe("resolveSceneFloorState", () => {
 
   it("chooses the next route floor and all of its composite levels as context", () => {
     expect(
-      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "b1", route([-1, 0])),
+      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "b1", route([-1, 0]), null),
     ).toEqual({
       activeLevelIndices: [0],
       contextLevelIndices: [1, 2],
@@ -82,7 +82,7 @@ describe("resolveSceneFloorState", () => {
 
   it("chooses the previous route floor when the active floor is final", () => {
     expect(
-      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "f2", route([-1, 0, 1]))
+      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "f2", route([-1, 0, 1]), null)
         .contextLevelIndices,
     ).toEqual([1, 2]);
   });
@@ -93,25 +93,25 @@ describe("resolveSceneFloorState", () => {
         LEVELS,
         "b1",
         route([-1, 0, 1, -1]),
+        null,
       ).contextLevelIndices,
     ).toEqual([3]);
   });
 
-
   it("collapses consecutive same-floor segments before choosing context", () => {
     expect(
-      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "b1", route([-1, -1, 0]))
+      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "b1", route([-1, -1, 0]), null)
         .contextLevelIndices,
     ).toEqual([1, 2]);
     expect(
-      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "f1-east", route([-1, 0, 0, 1]))
+      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "f1-east", route([-1, 0, 0, 1]), null)
         .contextLevelIndices,
     ).toEqual([3]);
   });
 
   it("does not invent context when the active floor is absent from the route", () => {
     expect(
-      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "f2", route([-1, 0]))
+      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "f2", route([-1, 0]), null)
         .contextLevelIndices,
     ).toEqual([]);
   });
@@ -122,7 +122,7 @@ describe("resolveSceneFloorState", () => {
       sceneLevel("b1", 8.0004),
       sceneLevel("f1-east", 12),
     ]);
-    expect(resolveSceneFloorState(composite, LEVELS, "b1", null)).toEqual({
+    expect(resolveSceneFloorState(composite, LEVELS, "b1", null, null)).toEqual({
       activeLevelIndices: [0, 1],
       contextLevelIndices: [],
       activePlaneM: 8,
@@ -130,13 +130,13 @@ describe("resolveSceneFloorState", () => {
   });
 
   it("keeps active indices but rejects absent, non-finite, or disagreeing planes", () => {
-    expect(resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "missing", null)).toEqual({
+    expect(resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "missing", null, null)).toEqual({
       activeLevelIndices: [],
       contextLevelIndices: [],
       activePlaneM: null,
     });
     expect(
-      resolveSceneFloorState(scene([sceneLevel("b1", Number.NaN)]), LEVELS, "b1", null),
+      resolveSceneFloorState(scene([sceneLevel("b1", Number.NaN)]), LEVELS, "b1", null, null),
     ).toMatchObject({ activeLevelIndices: [0], activePlaneM: null });
     expect(
       resolveSceneFloorState(
@@ -144,16 +144,63 @@ describe("resolveSceneFloorState", () => {
         LEVELS,
         "b1",
         null,
+        null,
       ),
     ).toMatchObject({ activeLevelIndices: [0, 1], activePlaneM: null });
   });
 
   it("omits an unmapped context floor without losing the active floor", () => {
     const activeOnly = scene([sceneLevel("b1", 8)]);
-    expect(resolveSceneFloorState(activeOnly, LEVELS, "b1", route([-1, 0]))).toEqual({
+    expect(resolveSceneFloorState(activeOnly, LEVELS, "b1", route([-1, 0]), null)).toEqual({
       activeLevelIndices: [0],
       contextLevelIndices: [],
       activePlaneM: 8,
     });
+  });
+
+  it("adds a partner floor above the active floor as context", () => {
+    expect(
+      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "b1", null, 1)
+        .contextLevelIndices,
+    ).toEqual([3]);
+  });
+
+  it("adds a partner floor below the active floor as context", () => {
+    expect(
+      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "f2", null, -1)
+        .contextLevelIndices,
+    ).toEqual([0]);
+  });
+
+  it("unions a partner floor with a route context floor without duplicates", () => {
+    // Route context is ordinal 0 (f1-east/f1-west); the partner names the same
+    // floor, so the union must not repeat indices 1 and 2.
+    expect(
+      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "b1", route([-1, 0]), 0)
+        .contextLevelIndices,
+    ).toEqual([1, 2]);
+  });
+
+  it("ignores a partner on the active floor itself", () => {
+    expect(
+      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "f1-east", null, 0)
+        .contextLevelIndices,
+    ).toEqual([]);
+  });
+
+  it("ignores a partner ordinal with no scene level registered", () => {
+    expect(
+      resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "b1", null, 2)
+        .contextLevelIndices,
+    ).toEqual([]);
+  });
+
+  it("leaves today's behaviour untouched when the partner is null", () => {
+    const withRoute = resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "b1", route([-1, 0]), null);
+    const withPartnerOnly = resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "b1", null, 1);
+    expect(withRoute.contextLevelIndices).toEqual([1, 2]);
+    expect(withPartnerOnly.contextLevelIndices).toEqual([3]);
+    // A null partner on top of an empty route stays empty, exactly as before.
+    expect(resolveSceneFloorState(MULTI_FLOOR_SCENE, LEVELS, "f2", null, null).contextLevelIndices).toEqual([]);
   });
 });

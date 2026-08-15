@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactElement,
@@ -37,7 +38,9 @@ import {
   applyThemePaintProperties,
   CLICKABLE_LAYER_IDS,
   FACILITY_SOURCE_ID,
+  CONVEYANCE_CATEGORIES,
   LAYER_FACILITY_SYMBOL,
+  LAYER_NETWORK_CONVEYANCE_HIT,
   LAYER_NETWORK_JUNCTION_HIT,
   LAYER_NETWORK_PATH_HIT,
   LAYER_NETWORK_VERTICAL_LINK_HIT,
@@ -46,6 +49,7 @@ import {
 } from "./featureLayers";
 import { LAYER_GROUP_IDS, type LayerVisibility } from "./layerGroups";
 import { buildRouteFeatures } from "./routeFeatures";
+import { registerVerticalLinkLabelImages } from "./verticalLinkLabels";
 import {
   buildNetworkFeatures,
   type NetworkConnectionId,
@@ -58,6 +62,121 @@ import { FACILITY_PIN_IMAGE, MARKER_ICON_URLS } from "./facilityIcons";
 import { useFeatureMarkers } from "./useFeatureMarkers";
 import { useIssuePins, type MapIssuePin } from "./useIssuePins";
 import { levelIdsForOrdinal, ordinalOfLevel } from "../state/floorGroups";
+import {
+  conveyanceLinks,
+  linkEndsOnFloor,
+  verticalLinks,
+  type VerticalLink,
+} from "./scene/verticalLinks";
+import type { ConnectorInput } from "./scene/sceneConnectors";
+import type { SurfacePickCandidate, PickCandidate } from "./scene/scenePick";
+
+
+/**
+ * The surface a pick reports, or `null` when it found a connector instead.
+ * Every caller has to answer for both: a connector belongs to no floor and
+ * carries no canonical feature, so it can never stand in for a surface.
+ */
+function surfaceOf(pick: PickCandidate | null): SurfacePickCandidate | null {
+  return pick !== null && pick.kind === "surface" ? pick : null;
+}
+
+/** The scene level index a canonical floor ordinal renders on, if any. */
+function sceneLevelIndexForOrdinal(
+  scene: SceneView,
+  venue: LoadedVenue,
+  ordinal: number,
+): number | null {
+  const canonicalIds = new Set(levelIdsForOrdinal(venue.levels, ordinal));
+  const index = scene.levels.findIndex((level) => canonicalIds.has(level.canonicalId));
+  return index < 0 ? null : index;
+}
+
+/**
+ * The connectors to draw: every cross-floor link touching a floor currently on
+ * screen, resolved onto the scene levels whose planes it spans. A link whose
+ * floors the scene does not carry is dropped rather than drawn to a guess.
+ */
+function connectorsForFloors(
+  scene: SceneView,
+  venue: LoadedVenue,
+  links: readonly VerticalLink[],
+  shownOrdinals: readonly number[],
+): ConnectorInput[] {
+  const connectors: ConnectorInput[] = [];
+  for (const link of links) {
+    if (
+      !shownOrdinals.includes(link.lower.ordinal) &&
+      !shownOrdinals.includes(link.upper.ordinal)
+    ) {
+      continue;
+    }
+    const lowerIndex = sceneLevelIndexForOrdinal(scene, venue, link.lower.ordinal);
+    const upperIndex = sceneLevelIndexForOrdinal(scene, venue, link.upper.ordinal);
+    if (lowerIndex === null || upperIndex === null) {
+      continue;
+    }
+    connectors.push({
+      connectionId: link.connectionId,
+      lower: {
+        lng: link.lower.coordinate[0],
+        lat: link.lower.coordinate[1],
+        levelIndex: lowerIndex,
+      },
+      upper: {
+        lng: link.upper.coordinate[0],
+        lat: link.upper.coordinate[1],
+        levelIndex: upperIndex,
+      },
+    });
+  }
+  return connectors;
+}
+
+/** Canonical floor ordinals the scene is currently drawing. */
+function shownOrdinalsOf(
+  scene: SceneView,
+  venue: LoadedVenue,
+  floorState: SceneFloorState,
+): number[] {
+  const ordinals = new Set<number>();
+  const add = (index: number): void => {
+    const canonicalId = scene.levels[index]?.canonicalId;
+    const ordinal = canonicalId === undefined ? null : ordinalOfLevel(venue.levels, canonicalId);
+    if (ordinal !== null) {
+      ordinals.add(ordinal);
+    }
+  };
+  floorState.activeLevelIndices.forEach(add);
+  floorState.contextLevelIndices.forEach(add);
+  return [...ordinals];
+}
+
+/**
+ * The floor a selected connection reaches from the active one — the partner the
+ * scene retains as context so the edge between them is visible end to end.
+ */
+function partnerOrdinalOf(
+  links: readonly VerticalLink[],
+  selected: NetworkConnectionId | null,
+  activeOrdinal: number | null,
+): number | null {
+  if (selected === null || activeOrdinal === null) {
+    return null;
+  }
+  const link = links.find(
+    (candidate) =>
+      candidate.connectionId.pathId === selected.pathId &&
+      candidate.connectionId.reversePathId === selected.reversePathId,
+  );
+  if (link === undefined) {
+    return null;
+  }
+  const ends = linkEndsOnFloor(link, activeOrdinal);
+  // A connection selected from another floor still names its own two floors;
+  // the partner is then the lower one rather than nothing.
+  return ends === null ? link.lower.ordinal : ends.far.ordinal;
+}
 
 const PLACE_AT_CENTER_LABEL = {
   ja: "地図の中心に配置",
@@ -126,6 +245,17 @@ export interface NetworkEditingMapProps {
   centerActionLabel: string;
 }
 
+/**
+ * Cross-floor connection selection, owned by App. One nullable boundary like
+ * the other projections: the map reports what the reviewer clicked — a
+ * connector edge, or a conveyance standing on one — and renders whatever App
+ * says is selected.
+ */
+export interface VerticalConnectionMapProps {
+  selected: NetworkConnectionId | null;
+  onSelect: (connectionId: NetworkConnectionId | null) => void;
+}
+
 export interface IndoorMapProps {
   venue: LoadedVenue;
   levelId: string;
@@ -149,6 +279,8 @@ export interface IndoorMapProps {
   network?: ParsedNetwork | null;
   /** Active network-editing controller; null when not editing. */
   networkEditing?: NetworkEditingMapProps | null;
+  /** Cross-floor connection selection; null when the reviewer is not inspecting one. */
+  verticalConnections?: VerticalConnectionMapProps | null;
   /**
    * The venue's 3D scene, when one is loaded and 3D was chosen. `null` keeps
    * the viewer exactly 2D — no layer is created and the camera stays flat.
@@ -334,9 +466,15 @@ function setNetworkSourceData(
     return;
   }
   const ordinal = activeOrdinalFor(venue, levelId);
-  source.setData(
-    buildNetworkFeatures(ordinal === null ? null : network ?? null, ordinal ?? 0, render),
+  const features = buildNetworkFeatures(
+    ordinal === null ? null : network ?? null,
+    ordinal ?? 0,
+    render,
   );
+  // The indoor style ships no glyphs, so vertical-link labels are registered
+  // style images (one per direction/floor pair) referenced via `labelImage`.
+  registerVerticalLinkLabelImages(map, features.features);
+  source.setData(features);
 }
 
 /** Per-floor highlight state from the App-owned editing projection. */
@@ -349,12 +487,12 @@ function networkRenderState(editing: NetworkEditingMapProps): NetworkRenderState
     pendingJunctionId: tool === "connect" ? pendingNodeId : null,
   };
 }
-
 /**
  * Resolve a click/center point to a semantic network pick. Move (and, for a
  * bare click, Add) want a coordinate; every other tool hit-tests the wide
  * junction layer, then the translated vertical marker, then the wide path
- * layer before falling back to a coordinate.
+ * layer, before falling back to a coordinate. Connection picks normalize the
+ * reciprocal id pair so `pathId < reversePathId` always holds.
  */
 function networkPickAt(
   map: MapLibreMap,
@@ -786,6 +924,7 @@ export function IndoorMap({
   onSelectFacility,
   network,
   networkEditing = null,
+  verticalConnections = null,
   scene = null,
   onSceneContextLost,
   onSceneContextRestored,
@@ -847,6 +986,33 @@ export function IndoorMap({
   onSceneAttachFailedRef.current = onSceneAttachFailed;
   onSceneContextLostRef.current = onSceneContextLost;
   onSceneContextRestoredRef.current = onSceneContextRestored;
+  const verticalConnectionsRef = useRef(verticalConnections);
+  verticalConnectionsRef.current = verticalConnections;
+  const links = useMemo(() => verticalLinks(network ?? null), [network]);
+  const linksRef = useRef(links);
+  linksRef.current = links;
+  const activeOrdinal = ordinalOfLevel(venue.levels, levelId);
+  const partnerOrdinal = useMemo(
+    () => partnerOrdinalOf(links, verticalConnections?.selected ?? null, activeOrdinal),
+    [links, verticalConnections?.selected, activeOrdinal],
+  );
+  const partnerOrdinalRef = useRef(partnerOrdinal);
+  partnerOrdinalRef.current = partnerOrdinal;
+  /**
+   * The connection behind each of this floor's conveyances, so a click on the
+   * escalator a reviewer can see selects the link they were hunting for.
+   */
+  const conveyanceConnections = useMemo(() => {
+    const conveyances = [...venue.featuresById.values()].filter(
+      (feature) =>
+        feature.levelId === levelId &&
+        feature.category !== null &&
+        CONVEYANCE_CATEGORIES.some((category) => category === feature.category),
+    );
+    return conveyanceLinks(network ?? null, venue.levels, levelId, conveyances);
+  }, [network, venue, levelId]);
+  const conveyanceConnectionsRef = useRef(conveyanceConnections);
+  conveyanceConnectionsRef.current = conveyanceConnections;
   selectedIdRef.current = selectedFeatureId;
   visibilityRef.current = layerVisibility;
   onControlsRef.current = onControls;
@@ -878,8 +1044,24 @@ export function IndoorMap({
               currentVenue.levels,
               currentLevelId,
               route,
+              partnerOrdinalRef.current,
             );
       desiredSceneFloorStateRef.current = floorState;
+      if (currentScene !== null) {
+        // The edges on screen follow the floors on screen: same state, same
+        // moment, so a connector can never outlive the floor it explains.
+        sceneLayerRef.current?.setConnectors(
+          connectorsForFloors(
+            currentScene,
+            currentVenue,
+            linksRef.current,
+            shownOrdinalsOf(currentScene, currentVenue, floorState),
+          ),
+        );
+        sceneLayerRef.current?.setSelectedConnection(
+          verticalConnectionsRef.current?.selected ?? null,
+        );
+      }
       const applyDesiredSceneLevels = (): void => {
         const desired = desiredSceneFloorStateRef.current;
         sceneLayerRef.current?.setActiveLevels(desired.activeLevelIndices);
@@ -1057,6 +1239,16 @@ export function IndoorMap({
       });
       return;
     }
+    // The chevron badge is the most obvious target on a conveyance, so it means
+    // the same thing as clicking the shell: select the connection the graph
+    // states, and the conveyance itself, so the detail panel still answers.
+    const connections = verticalConnectionsRef.current;
+    if (connections != null) {
+      const link = conveyanceConnectionsRef.current.get(featureId);
+      if (link !== undefined) {
+        connections.onSelect(link.connectionId);
+      }
+    }
     onSelectRef.current(featureId);
   }, []);
 
@@ -1116,6 +1308,9 @@ export function IndoorMap({
     // Guidance is a tighter frame than review: four labels against six (#32).
     mode: directions?.active === true ? "navigation" : "overview",
     enabled: layerVisibility.labels,
+    // Conveyance chevrons come from the routing graph; null keeps the plain
+    // badges exactly as before.
+    network: network ?? null,
     onSelect: onMarkerSelect,
   });
 
@@ -1149,6 +1344,7 @@ export function IndoorMap({
             venueRef.current.levels,
             levelIdRef.current,
             directionsRef.current?.route ?? null,
+            partnerOrdinalRef.current,
           );
     const initialFloorUrl = floorElevationTileUrl(
       initialFloorState.activePlaneM ?? Number.NaN,
@@ -1212,6 +1408,7 @@ export function IndoorMap({
       const featureId = readFeatureId(features[0]?.properties);
       const sceneLayer = sceneLayerRef.current;
       const scenePick = sceneLayer?.pickAt(event.point.x, event.point.y) ?? null;
+      const sceneSurface = surfaceOf(scenePick);
       // Where the click landed. MapLibre unprojects a pointer onto the map plane
       // at zero elevation, which is the right answer in 2D and the wrong one on
       // a pitched 3D camera — a click on an upper floor reports a position
@@ -1229,10 +1426,10 @@ export function IndoorMap({
           // The clicked feature's own level (grouped same-ordinal levels all
           // render) beats the representative level; bare clicks use representative.
           levelId:
-            scenePick?.levelId ?? readLevelId(features[0]?.properties) ?? levelIdRef.current,
+            sceneSurface?.levelId ?? readLevelId(features[0]?.properties) ?? levelIdRef.current,
           longitude: clicked.lng,
           latitude: clicked.lat,
-          featureId: scenePick === null ? featureId : scenePick.canonicalFeatureId,
+          featureId: sceneSurface === null ? featureId : sceneSurface.canonicalFeatureId,
         });
         return;
       }
@@ -1254,6 +1451,37 @@ export function IndoorMap({
         // a pitched camera.
         editing.onPick(networkPickAt(map, event.point, clicked, editing.tool));
         return;
+      }
+      const connections = verticalConnectionsRef.current;
+      if (connections !== null) {
+        // The edge itself, first: it is drawn wide enough to hit precisely so a
+        // reviewer can click the connection rather than hunt the marker beside
+        // it. Then the conveyance standing on it — the escalator they can see.
+        if (scenePick?.kind === "connector") {
+          const connectionId = sceneLayer?.connectionAt(scenePick.connectorIndex) ?? null;
+          if (connectionId !== null) {
+            connections.onSelect(connectionId);
+            return;
+          }
+        }
+        const conveyanceId =
+          sceneSurface?.canonicalFeatureId ??
+          readFeatureId(
+            map.queryRenderedFeatures(event.point, {
+              layers: [LAYER_NETWORK_CONVEYANCE_HIT],
+            })[0]?.properties,
+          );
+        const link =
+          conveyanceId === null
+            ? undefined
+            : conveyanceConnectionsRef.current.get(conveyanceId);
+        if (link !== undefined) {
+          connections.onSelect(link.connectionId);
+          // The conveyance is still selected as a feature, so the detail panel
+          // keeps answering for what it is as well as where it goes.
+          onSelectRef.current(conveyanceId);
+          return;
+        }
       }
       const facilityHit = map.queryRenderedFeatures(event.point, {
         layers: [LAYER_FACILITY_SYMBOL],
@@ -1278,7 +1506,9 @@ export function IndoorMap({
         // clicking bare floor clears the selection in 2D, so it means the same
         // thing here rather than selecting a whole storey.
         onSelectRef.current(
-          scenePick.role === "Context" ? null : scenePick.canonicalFeatureId,
+          sceneSurface === null || sceneSurface.role === "Context"
+            ? null
+            : sceneSurface.canonicalFeatureId,
         );
         return;
       }
@@ -1311,9 +1541,10 @@ export function IndoorMap({
         requestAnimationFrame(() => {
           scenePickPendingRef.current = false;
           const hit = sceneLayer.pickAt(event.point.x, event.point.y);
-          const hoverable = hit !== null && hit.role !== "Context";
-          sceneLayer.setHoveredFeature(hoverable ? hit.featureIndex : -1);
-          const canonical = hoverable ? hit.canonicalFeatureId : null;
+          const surface = surfaceOf(hit);
+          const hoverable = surface !== null && surface.role !== "Context";
+          sceneLayer.setHoveredFeature(hoverable ? surface.featureIndex : -1);
+          const canonical = hoverable ? surface.canonicalFeatureId : null;
           const previous = hoverIdRef.current;
           if (previous !== canonical) {
             if (previous != null) {
@@ -1324,7 +1555,10 @@ export function IndoorMap({
             }
             hoverIdRef.current = canonical;
           }
-          map.getCanvas().style.cursor = canonical != null ? "pointer" : "";
+          // A connector carries no canonical feature, so it cannot light one up
+          // — but it is a target, and the cursor has to say so.
+          map.getCanvas().style.cursor =
+            canonical != null || hit?.kind === "connector" ? "pointer" : "";
         });
         return;
       }
@@ -1358,9 +1592,10 @@ export function IndoorMap({
         return;
       }
       const hit = sceneLayer.pickAt(point.x, point.y);
-      const hoverable = hit !== null && hit.role !== "Context";
-      sceneLayer.setHoveredFeature(hoverable ? hit.featureIndex : -1);
-      const canonical = hoverable ? hit.canonicalFeatureId : null;
+      const surface = surfaceOf(hit);
+      const hoverable = surface !== null && surface.role !== "Context";
+      sceneLayer.setHoveredFeature(hoverable ? surface.featureIndex : -1);
+      const canonical = hoverable ? surface.canonicalFeatureId : null;
       const previous = hoverIdRef.current;
       if (previous !== canonical) {
         if (previous != null) {
@@ -1371,7 +1606,8 @@ export function IndoorMap({
         }
         hoverIdRef.current = canonical;
       }
-      map.getCanvas().style.cursor = canonical != null ? "pointer" : "";
+      map.getCanvas().style.cursor =
+        canonical != null || hit?.kind === "connector" ? "pointer" : "";
     };
 
     const onMouseLeave = (): void => {
@@ -1701,6 +1937,44 @@ export function IndoorMap({
     syncOverlays();
   }, [directions, network, networkEditing, facilities, layerVisibility, venue, levelId, syncOverlays]);
 
+  // The graph or the selected connection changed without the floor changing.
+  // Both decide which edges are drawn and which one is emphasised, and the
+  // partner floor the selection retains is part of the same answer — so this
+  // goes back through the one floor-state path rather than a second one.
+  useEffect(() => {
+    const map = mapRef.current;
+    const currentScene = sceneRef.current;
+    if (map == null || currentScene === null) {
+      return;
+    }
+    syncSceneFloorState(map, currentScene, levelId, directions?.route ?? null, venue);
+  }, [links, partnerOrdinal, verticalConnections?.selected, levelId, venue, directions?.route, syncSceneFloorState]);
+
+  // A connection chosen from the list is not necessarily on screen. Centre on
+  // the end that sits on the floor being viewed, so the edge the reviewer just
+  // asked about is in front of them; zoom and pitch stay theirs.
+  useEffect(() => {
+    const map = mapRef.current;
+    const selected = verticalConnections?.selected ?? null;
+    if (map == null || selected === null) {
+      return;
+    }
+    const link = links.find(
+      (candidate) =>
+        candidate.connectionId.pathId === selected.pathId &&
+        candidate.connectionId.reversePathId === selected.reversePathId,
+    );
+    if (link === undefined) {
+      return;
+    }
+    const ends = activeOrdinal === null ? null : linkEndsOnFloor(link, activeOrdinal);
+    const centre = (ends?.near ?? link.lower).coordinate;
+    map.easeTo({
+      center: [centre[0], centre[1]],
+      duration: prefersReducedMotion() ? 0 : EASE_DURATION_MS,
+    });
+  }, [verticalConnections?.selected, links, activeOrdinal]);
+
   // Theme switch: paint properties only — never rebuild style/map.
   useEffect(() => {
     const map = mapRef.current;
@@ -1740,6 +2014,7 @@ export function IndoorMap({
           venueRef.current.levels,
           levelIdRef.current,
           directionsRef.current?.route ?? null,
+          partnerOrdinalRef.current,
         );
         layer = new SceneLayer(scene, {
           id: SCENE_LAYER_ID,

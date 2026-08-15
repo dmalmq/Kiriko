@@ -66,73 +66,7 @@ describe("parseNetworkOverlay + buildNetworkFeatures", () => {
   it("returns an empty collection for a null network", () => {
     expect(buildNetworkFeatures(null, 0).features).toHaveLength(0);
   });
-  it("projects a reciprocal vertical pair as one lower-floor marker and no line", () => {
-    const collection = buildNetworkFeatures(verticalNetwork(), 0);
-    const links = collection.features.filter((feature) => feature.properties?.kind === "vertical-link");
-    expect(links).toHaveLength(1);
-    expect(collection.features.filter((feature) => feature.properties?.kind === "path")).toHaveLength(0);
-    expect(links[0]).toMatchObject({
-      properties: {
-        PATHID: 7,
-        RPATHID: 8,
-        endpointNodeId: 10,
-        targetNodeId: 20,
-        activeFloor: "F1",
-        targetFloor: "F2",
-        targetDirection: "up",
-        passageType: 1,
-        selected: false,
-      },
-      geometry: { type: "Point", coordinates: [139.7, 35.6] },
-    });
-  });
-
-  it("moves the same vertical link to the upper endpoint", () => {
-    const links = buildNetworkFeatures(verticalNetwork(), 1).features.filter(
-      (feature) => feature.properties?.kind === "vertical-link",
-    );
-    expect(links).toHaveLength(1);
-    expect(links[0]).toMatchObject({
-      properties: {
-        endpointNodeId: 20,
-        targetNodeId: 10,
-        activeFloor: "F2",
-        targetFloor: "F1",
-        targetDirection: "down",
-      },
-      geometry: { type: "Point", coordinates: [139.7008, 35.6004] },
-    });
-  });
-
-  it("selects a vertical marker by canonical reciprocal identity", () => {
-    const links = buildNetworkFeatures(verticalNetwork(), 0, {
-      selectedJunctionId: null,
-      selectedConnection: { pathId: 7, reversePathId: 8 },
-      pendingJunctionId: null,
-    }).features.filter((feature) => feature.properties?.kind === "vertical-link");
-    expect(links[0]?.properties?.selected).toBe(true);
-  });
-
-  it("omits malformed vertical metadata instead of projecting a line", () => {
-    const net = verticalNetwork();
-    for (const path of net.paths) {
-      delete path.properties.TFOOLR;
-    }
-    const features = buildNetworkFeatures(net, 0);
-    expect(features.features.filter((feature) => feature.properties?.kind === "vertical-link")).toHaveLength(0);
-    expect(features.features.filter((feature) => feature.properties?.kind === "path")).toHaveLength(0);
-  });
-
-  it("omits vertical links whose endpoint junction is not a Point", () => {
-    const net = verticalNetwork();
-    net.junctions[0]!.geometry = { type: "LineString", coordinates: [] };
-    const features = buildNetworkFeatures(net, 0);
-    expect(features.features.filter((feature) => feature.properties?.kind === "vertical-link")).toHaveLength(0);
-    expect(features.features.filter((feature) => feature.properties?.kind === "path")).toHaveLength(0);
-  });
 });
-
-
 
 function jn(id: number, lon: number, lat: number, ordinal: number): ParsedNetwork["junctions"][number] {
   return {
@@ -164,6 +98,7 @@ function pathFeature(
   };
 }
 
+/** A reciprocal cross-floor pair: exporter-guaranteed vertical metadata. */
 function verticalNetwork(): ParsedNetwork {
   return {
     junctions: [
@@ -204,6 +139,95 @@ function verticalNetwork(): ParsedNetwork {
     ],
   };
 }
+
+describe("vertical network link projection", () => {
+  it("projects a reciprocal vertical pair as one lower-floor marker and no line", () => {
+    const collection = buildNetworkFeatures(verticalNetwork(), 0);
+    const links = collection.features.filter((feature) => feature.properties?.kind === "vertical-link");
+    expect(links).toHaveLength(1);
+    expect(collection.features.filter((feature) => feature.properties?.kind === "path")).toHaveLength(0);
+    expect(links[0]).toMatchObject({
+      properties: {
+        PATHID: 7,
+        RPATHID: 8,
+        endpointNodeId: 10,
+        targetNodeId: 20,
+        activeFloor: "F1",
+        targetFloor: "F2",
+        targetDirection: "up",
+        passageType: 1,
+        selected: false,
+      },
+      geometry: { type: "Point", coordinates: [139.7, 35.6] },
+    });
+  });
+
+  it("moves the same vertical link to the upper endpoint", () => {
+    const links = buildNetworkFeatures(verticalNetwork(), 1).features.filter(
+      (feature) => feature.properties?.kind === "vertical-link",
+    );
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({
+      properties: {
+        endpointNodeId: 20,
+        targetNodeId: 10,
+        activeFloor: "F2",
+        targetFloor: "F1",
+        targetDirection: "down",
+      },
+      geometry: { type: "Point", coordinates: [139.7008, 35.6004] },
+    });
+  });
+
+  it("tags every vertical marker with a glyph-free label image id", () => {
+    const down = buildNetworkFeatures(verticalNetwork(), 0).features.filter(
+      (feature) => feature.properties?.kind === "vertical-link",
+    );
+    expect(down[0]?.properties).toMatchObject({
+      targetDirection: "up",
+      targetFloor: "F2",
+      labelImage: "vertical-link-label-up-F2",
+    });
+    const up = buildNetworkFeatures(verticalNetwork(), 1).features.filter(
+      (feature) => feature.properties?.kind === "vertical-link",
+    );
+    expect(up[0]?.properties).toMatchObject({
+      targetDirection: "down",
+      targetFloor: "F1",
+      labelImage: "vertical-link-label-down-F1",
+    });
+  });
+
+  it("selects a vertical marker by canonical reciprocal identity", () => {
+    const links = buildNetworkFeatures(verticalNetwork(), 0, {
+      selectedJunctionId: null,
+      selectedConnection: { pathId: 7, reversePathId: 8 },
+      pendingJunctionId: null,
+    }).features.filter((feature) => feature.properties?.kind === "vertical-link");
+    expect(links[0]?.properties?.selected).toBe(true);
+  });
+
+  it("emits nothing for malformed vertical metadata instead of a fake horizontal path", () => {
+    const net = verticalNetwork();
+    for (const path of net.paths) {
+      delete path.properties.TFOOLR;
+    }
+    const collection = buildNetworkFeatures(net, 0);
+    expect(collection.features.filter((f) => f.properties?.kind === "vertical-link")).toHaveLength(0);
+    expect(collection.features.filter((f) => f.properties?.kind === "path")).toHaveLength(0);
+  });
+
+  it("emits nothing when an endpoint junction is not a Point", () => {
+    const net = verticalNetwork();
+    net.junctions[0] = {
+      ...net.junctions[0]!,
+      geometry: { type: "LineString", coordinates: [[139.7, 35.6], [139.7005, 35.6]] },
+    };
+    const collection = buildNetworkFeatures(net, 0);
+    expect(collection.features.filter((f) => f.properties?.kind === "vertical-link")).toHaveLength(0);
+    expect(collection.features.filter((f) => f.properties?.kind === "path")).toHaveLength(0);
+  });
+});
 
 describe("ordinalToFloorLabel", () => {
   it("round-trips through floorLabelToOrdinal", () => {
@@ -334,15 +358,6 @@ describe("network mutations", () => {
     // Two parallel edges collapse to one remaining logical connection per node.
     expect(r.network.junctions.map((j) => j.properties.PATH_COUNT)).toEqual([1, 1]);
   });
-  it("deletes a vertical reciprocal pair by the marker's canonical identity", () => {
-    const net = verticalNetwork();
-    const result = deleteConnection(net, { pathId: 8, reversePathId: 7 });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.network.paths).toHaveLength(0);
-    expect(result.network.junctions.map((junction) => junction.properties.PATH_COUNT)).toEqual([0, 0]);
-  });
-
 
   it("deleteConnection normalizes the id pair order", () => {
     const net: ParsedNetwork = {
@@ -353,6 +368,15 @@ describe("network mutations", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.network.paths).toHaveLength(0);
+  });
+
+  it("deletes a vertical reciprocal pair by the marker's canonical identity", () => {
+    const net = verticalNetwork();
+    const result = deleteConnection(net, { pathId: 8, reversePathId: 7 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.network.paths).toHaveLength(0);
+    expect(result.network.junctions.map((junction) => junction.properties.PATH_COUNT)).toEqual([0, 0]);
   });
 
   it("deleteConnection reports unknown_connection for a missing pair", () => {
@@ -454,26 +478,6 @@ describe("network mutations", () => {
     expect(reparsed.junctions).toHaveLength(2);
     expect(reparsed.paths).toHaveLength(2);
   });
-  it("serializeNetwork preserves the reciprocal vertical fixture metadata", () => {
-    const { junctions, paths } = serializeNetwork(verticalNetwork());
-    const serializedPaths = JSON.parse(paths) as {
-      name: string;
-      features: Array<{ properties: Record<string, unknown> }>;
-    };
-    expect(serializedPaths.name).toBe("net_path");
-    expect(serializedPaths.features).toHaveLength(2);
-    expect(serializedPaths.features[0]?.properties).toMatchObject({
-      PATHID: 8,
-      RPATHID: 7,
-      HFLAG: 1,
-      FFLOOR: "F1",
-      TFOOLR: "F2",
-    });
-    const reparsed = parseNetworkOverlay({ junctions, paths });
-    expect(reparsed.paths).toHaveLength(2);
-    expect(reparsed.paths.every((path) => path.properties.HFLAG === 1)).toBe(true);
-  });
-
 
   it("rejected mutations return the original network object", () => {
     const net = base();

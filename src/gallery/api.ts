@@ -244,6 +244,45 @@ export interface GdbImportNetworkResponse {
   publicVersionId: string;
 }
 
+export interface GenerateNetworkAccepted {
+  jobId: string;
+  versionId: number;
+  seq: number;
+  estimatedDurationSeconds: number | null;
+}
+
+function parseGenerateNetworkAccepted(value: unknown): GenerateNetworkAccepted {
+  if (value === null || typeof value !== "object") {
+    throw new ApiError(502, "invalid generate-network response");
+  }
+  const estimatedDurationSeconds =
+    "estimatedDurationSeconds" in value ? value.estimatedDurationSeconds : undefined;
+  const estimateValid =
+    estimatedDurationSeconds === null ||
+    (typeof estimatedDurationSeconds === "number" &&
+      Number.isInteger(estimatedDurationSeconds) &&
+      estimatedDurationSeconds > 0);
+  if (
+    !("jobId" in value) ||
+    typeof value.jobId !== "string" ||
+    !("versionId" in value) ||
+    typeof value.versionId !== "number" ||
+    !Number.isInteger(value.versionId) ||
+    !("seq" in value) ||
+    typeof value.seq !== "number" ||
+    !Number.isInteger(value.seq) ||
+    !estimateValid
+  ) {
+    throw new ApiError(502, "invalid generate-network response");
+  }
+  return {
+    jobId: value.jobId,
+    versionId: value.versionId,
+    seq: value.seq,
+    estimatedDurationSeconds,
+  };
+}
+
 function abortError(): Error {
   if (typeof DOMException !== "undefined") {
     return new DOMException("Aborted", "AbortError");
@@ -609,7 +648,7 @@ export const api = {
 
   async generateNetwork(
     venueId: number,
-  ): Promise<{ jobId: string; versionId: number; seq: number }> {
+  ): Promise<GenerateNetworkAccepted> {
     const res = await fetch("/api/gdb/generate-network", {
       method: "POST",
       credentials: "same-origin",
@@ -621,7 +660,8 @@ export const api = {
       try { parsed = (await res.json()) as GdbError; } catch { /* non-JSON */ }
       throw parsed;
     }
-    return (await res.json()) as { jobId: string; versionId: number; seq: number };
+    const body: unknown = await res.json();
+    return parseGenerateNetworkAccepted(body);
   },
 
   async exportNetwork(venueId: number): Promise<{ blob: Blob; filename: string }> {

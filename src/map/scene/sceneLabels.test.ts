@@ -222,4 +222,57 @@ describe("layoutSceneLabels", () => {
     );
     expect(placed.map((label) => label.id)).toEqual(["visible"]);
   });
+
+  it("carries a conveyance's graph-evidenced direction through to the placed label", () => {
+    const placed = layoutSceneLabels(
+      [
+        candidate({
+          id: "escalator",
+          tier: "conveyance",
+          direction: { arrow: "up", targetFloor: "F3" },
+          size: { width: 72, height: 28 },
+        }),
+      ],
+      { viewport: VIEWPORT, mode: "overview" },
+    );
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.direction).toEqual({ arrow: "up", targetFloor: "F3" });
+  });
+
+  it("leaves the direction field absent when no graph evidence matched the conveyance", () => {
+    const placed = layoutSceneLabels(
+      [candidate({ id: "elevator", tier: "conveyance" })],
+      { viewport: VIEWPORT, mode: "overview" },
+    );
+    expect(placed).toHaveLength(1);
+    expect("direction" in placed[0]!).toBe(false);
+  });
+
+  it("fits a directed badge's wider size into the layout without overlap", () => {
+    const placed = layoutSceneLabels(
+      [
+        candidate({
+          id: "esc-a",
+          tier: "conveyance",
+          direction: { arrow: "up", targetFloor: "F2" },
+          size: { width: 72, height: 28 },
+          screen: { x: 700, y: 400 },
+        }),
+        candidate({
+          id: "esc-b",
+          tier: "conveyance",
+          direction: { arrow: "down", targetFloor: "B1" },
+          size: { width: 72, height: 28 },
+          screen: { x: 720, y: 400 },
+        }),
+      ],
+      { viewport: VIEWPORT, mode: "overview" },
+    );
+    expect(placed).toHaveLength(2);
+    for (let outer = 0; outer < placed.length; outer += 1) {
+      for (let inner = outer + 1; inner < placed.length; inner += 1) {
+        expect(overlaps(placed[outer]!.box, placed[inner]!.box)).toBe(false);
+      }
+    }
+  });
 });

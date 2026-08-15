@@ -610,6 +610,72 @@ button {
   margin-top: 12px;
 }
 
+/* ── Cross-floor connections panel ────────────────────── */
+
+.floating-panel--connections {
+  width: 360px;
+}
+
+.cross-floor-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cross-floor-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  line-height: 18px;
+  text-align: left;
+  transition: background 0.15s ease-out, border-color 0.15s ease-out;
+}
+
+.cross-floor-link:hover {
+  background: var(--color-chip-fill);
+}
+
+.cross-floor-link--selected {
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.cross-floor-link__kind {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cross-floor-link__target {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--color-muted);
+}
+
+.cross-floor-link--selected .cross-floor-link__target {
+  color: var(--color-accent);
+}
+
+.cross-floor-link-empty {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--color-muted);
+}
+
 /* ── Search panel ──────────────────────────────────────── */
 
 .search-panel {
@@ -2138,6 +2204,80 @@ button {
   border-color: var(--color-error);
 }
 
+.gallery-progress {
+  width: min(400px, calc(100vw - (2 * var(--space-4))));
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+}
+
+.gallery-progress__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.gallery-progress__heading strong {
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.gallery-progress__heading span {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+}
+
+.progress-track.gallery-progress__track {
+  height: 6px;
+}
+
+.progress-fill.gallery-progress__fill {
+  transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.gallery-progress__fill--indeterminate {
+  width: 40%;
+  animation: gallery-progress-scan 1.4s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+.gallery-progress__estimate {
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+@keyframes gallery-progress-scan {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gallery-progress__fill--indeterminate {
+    width: 100%;
+    animation: none;
+    opacity: 0.45;
+    transform: none;
+  }
+}
+
 .facility-popup {
   position: fixed;
   bottom: var(--space-4);
@@ -2990,6 +3130,27 @@ button {
 
 .scene-label--badge svg {
   display: block;
+}
+
+/* Directed conveyance badge: the pictogram plus a static direction chevron
+   (arrow + target floor token, graph-evidenced per #32 §9). The chevron turns
+   the round badge into a pill so it has room; it sits on the badge's own
+   panel fill and halo, so it stays legible over the pale conveyance shell and
+   a dark map alike, and it adds no animation or transition of its own — the
+   reduced-motion block above still governs the label's motion. */
+.scene-label--badge.scene-label--chevron {
+  border-radius: 999px;
+  padding: 0 8px 0 3px;
+  gap: 3px;
+}
+
+.scene-label__chevron {
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--color-accent);
+  white-space: nowrap;
 }
 
 .scene-label--selection {

@@ -4,7 +4,10 @@ use std::fmt;
 use geojson::{FeatureCollection, GeoJson, Value};
 
 use crate::floor::floor_to_ordinal;
-use crate::graph::{RouteEdge, RouteGraph, RouteNode};
+use crate::graph::{
+    EdgeAttrs, EdgeKind, PathwayRank, RouteEdge, RouteGraph, RouteNode, kind_from_key,
+    vertical_from_key,
+};
 
 /// Non-fatal problem encountered while building a route graph.
 #[derive(Debug, Clone, PartialEq)]
@@ -149,6 +152,7 @@ pub fn build_route_graph(
             weight,
             ordinal,
             interior,
+            attrs: attrs_from_properties(&feature.properties),
         };
 
         // Reciprocal handling requires both PATHID and RPATHID; id-less paths
@@ -265,9 +269,57 @@ fn prop<'a>(
     properties.as_ref()?.get(key)
 }
 
+/// Read the four generation-quality keys from a path feature's properties:
+/// `EDGE_KIND`, `PATHWAY_RANK`, `CLEARANCE_M`, `TRANSITION_CATEGORY`.
+/// Missing or unrecognized values fall back to `EdgeAttrs::default()`, so
+/// reference networks without the keys import exactly as before.
+///
+/// The record is validated as a whole against the §12 invariant —
+/// `vertical.is_some()` iff `kind == vertical` — and a row that violates it
+/// (e.g. `EDGE_KIND=vertical` with no `TRANSITION_CATEGORY`) imports as the
+/// full default, never as a half-vertical edge. This mirrors the bundle §12
+/// path, where such a row invalidates the section atomically.
+fn attrs_from_properties(
+    properties: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> EdgeAttrs {
+    let kind = prop(properties, "EDGE_KIND")
+        .and_then(|v| v.as_str())
+        .and_then(kind_from_key)
+        .unwrap_or(EdgeKind::Imported);
+    let rank = prop(properties, "PATHWAY_RANK")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| match n {
+            1 => Some(PathwayRank::Primary),
+            2 => Some(PathwayRank::Secondary),
+            _ => None,
+        })
+        .unwrap_or(PathwayRank::Primary);
+    // A clearance beyond f32 range is nonsense, not data: treat it as absent
+    // (`None`, never `0.0`). The GeoJSON parser already rejects non-finite
+    // numbers, so `as_f64` can only yield finite values here.
+    let clearance_m = prop(properties, "CLEARANCE_M")
+        .and_then(|v| v.as_f64())
+        .map(|c| c as f32)
+        .filter(|c| c.is_finite());
+    let vertical = prop(properties, "TRANSITION_CATEGORY")
+        .and_then(|v| v.as_str())
+        .and_then(vertical_from_key);
+    let attrs = EdgeAttrs {
+        kind,
+        rank,
+        clearance_m,
+        vertical,
+    };
+    if (attrs.kind == EdgeKind::Vertical) != attrs.vertical.is_some() {
+        return EdgeAttrs::default();
+    }
+    attrs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::VerticalKind;
 
     const JUNCTIONS: &str = r#"{"type":"FeatureCollection","features":[
       {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
@@ -465,6 +517,76 @@ mod tests {
             conflicts,
             N - 1,
             "each collision after the first is reported once"
+        );
+    }
+
+    #[test]
+    fn skeleton_secondary_attrs_round_trip_from_path_properties() {
+        const J: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+          {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}}]}"#;
+        const P: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100,"EDGE_KIND":"skeleton","PATHWAY_RANK":2},
+           "geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}}]}"#;
+        let b = build_route_graph(J, P, &[0.0]).unwrap();
+        assert_eq!(b.graph.edges.len(), 1);
+        let attrs = b.graph.edges[0].attrs;
+        assert_eq!(attrs.kind, EdgeKind::Skeleton);
+        assert_eq!(attrs.rank, PathwayRank::Secondary);
+        assert_eq!(attrs.clearance_m, None);
+        assert_eq!(attrs.vertical, None);
+    }
+
+    #[test]
+    fn vertical_attrs_import_all_four_keys() {
+        const J: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+          {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}}]}"#;
+        const P: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":5000,"EDGE_KIND":"vertical","PATHWAY_RANK":2,"CLEARANCE_M":1.5,"TRANSITION_CATEGORY":"elevator"},
+           "geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}}]}"#;
+        let b = build_route_graph(J, P, &[0.0]).unwrap();
+        let attrs = b.graph.edges[0].attrs;
+        assert_eq!(attrs.kind, EdgeKind::Vertical);
+        assert_eq!(attrs.rank, PathwayRank::Secondary);
+        assert_eq!(attrs.clearance_m, Some(1.5));
+        assert_eq!(attrs.vertical, Some(VerticalKind::Elevator));
+    }
+
+    #[test]
+    fn vertical_without_a_transition_category_is_the_default_record() {
+        // The §12 invariant is `vertical.is_some()` iff `kind == vertical`
+        // (enforced on the bundle path). A GeoJSON row that names EDGE_KIND
+        // "vertical" but omits TRANSITION_CATEGORY would otherwise import as
+        // kind = Vertical, vertical = None — half a vertical edge. Treat the
+        // whole record as the imported default instead, exactly like a row
+        // with an unknown discriminant.
+        const J: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+          {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}}]}"#;
+        const P: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":5000,"EDGE_KIND":"vertical","PATHWAY_RANK":2,"CLEARANCE_M":1.5},
+           "geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}}]}"#;
+        let b = build_route_graph(J, P, &[0.0]).unwrap();
+        assert!(
+            b.graph.edges[0].attrs.is_default(),
+            "kind=vertical without TRANSITION_CATEGORY must import as the default record: {:?}",
+            b.graph.edges[0].attrs
+        );
+    }
+
+    #[test]
+    fn unknown_attr_values_fall_back_to_defaults() {
+        const J: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+          {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}}]}"#;
+        const P: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100,"EDGE_KIND":"hoverboard","PATHWAY_RANK":9,"CLEARANCE_M":"tall","TRANSITION_CATEGORY":"portal"},
+           "geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}}]}"#;
+        let b = build_route_graph(J, P, &[0.0]).unwrap();
+        assert!(
+            b.graph.edges[0].attrs.is_default(),
+            "unrecognized wire values must import as the imported-graph default"
         );
     }
 }

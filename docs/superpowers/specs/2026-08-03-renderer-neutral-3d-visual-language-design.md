@@ -92,7 +92,8 @@ default; opacity is a state treatment, not a source-fidelity signal.
 | `surface.public` | `#E9EDF4` | Public room/unit surface |
 | `surface.service` | `#F0EBE0` | Service and amenity room surface |
 | `surface.restricted` | `#D5DAE3` | Restricted/non-public surface; semantics also appear in labels/details |
-| `structure.primary` | `#D5DAE3` with `#C8CEDA` semantic edges | Walls, slabs, shafts, columns, and neutral conveyance shells |
+| `structure.primary` | `#D5DAE3` with `#C8CEDA` semantic edges | Walls, slabs, shafts, and columns |
+| `structure.conveyance` | Neutral stone with per-kind tint and silhouette edge, at permanent see-through shell opacity | Elevator, escalator, stairs/steps, ramp, and generic conveyance shells; see section 9 |
 | `structure.context` | `#D5DAE3` at contextual opacity | Nearby non-active or non-navigable mass |
 | `surface.ceiling` | `#D5DAE3` | Classified ceiling; visibility follows section 6 |
 | `opening.portal` | `#9AA3B2` edge/gap treatment | Door, opening, and portal evidence |
@@ -155,13 +156,22 @@ than Generated 3D.
   element fades only while it intersects a protected camera corridor to the
   active route, canonical selection, next-action conveyance, destination, or
   priority label.
-- Navigable floor surfaces and the active route never fade because of camera
-  occlusion.
+- In ordinary single-floor navigation, navigable floor surfaces and the active
+  route never fade because of camera occlusion.
+
+When a cross-floor connection view shows a pair of floors, the lower floor of
+the pair renders at full semantic opacity and the higher floor renders
+see-through at roughly 25% opacity, including its navigable floor surfaces.
+Elevation, not selection, decides the see-through treatment. This is a
+deliberate exception to the ordinary single-floor rules above: an opaque upper
+floor makes the inter-floor connector unreadable, which was a real reported
+defect.
 
 A faded semantic occluder targets 12–18% opacity. Ordinary contextual mass
-targets 20–28%. The active floor's navigable surfaces and non-obstructing
-structure stay at full semantic opacity. Opacity changes use a short 140–180 ms
-ease in normal motion and switch immediately under reduced motion.
+targets 20–28%. In ordinary single-floor navigation, the active floor's
+navigable surfaces and non-obstructing structure stay at full semantic opacity.
+Opacity changes use a short 140–180 ms ease in normal motion and switch
+immediately under reduced motion.
 
 ### Route overview and floor handoff
 
@@ -240,6 +250,12 @@ Elevator, escalator, stairs/steps, ramp, landing, shaft, and portal each have a
 stable category silhouette plus the existing JIS pictogram where available.
 The renderer may use detailed source geometry when present, but the semantic
 identity comes from the category silhouette/pictogram, not machinery detail.
+Neutral conveyance shells — elevator, escalator, stairs/steps, ramp, and
+generic conveyance volumes — render as permanently see-through shells with a
+per-kind tint and a silhouette edge. A shell is never opaque: it exists to
+explain the routing graph it encloses, and opacity would hide that graph. The
+see-through state is a constant material treatment, not an occlusion-driven
+fade; dynamic fading of otherwise-opaque structure still follows section 6.
 
 - **Elevator:** neutral shaft/door frame plus elevator pictogram.
 - **Escalator:** inclined neutral bed or footprint with aligned chevrons and
@@ -251,11 +267,14 @@ identity comes from the category silhouette/pictogram, not machinery detail.
 - **Portal/opening:** deliberate gap or threshold edge; a closed door leaf is
   shown only when source evidence supports it.
 
-Direction is always encoded by a static arrow or chevron. Animation may
-reinforce direction in a future navigation implementation, but it cannot be the
-only direction cue and is absent under reduced motion. A route-selected
-conveyance uses Ai Indigo outline/mist treatment; amber is not a route-handoff
-color because it is reserved for Review/warning semantics.
+Direction is always encoded by a static arrow or chevron, and only from graph
+evidence: a chevron is drawn when the routing graph states an up/down
+connection for that feature, and direction is never inferred from geometry,
+names, or category when the graph does not state it. Animation may reinforce
+direction in a future navigation implementation, but it cannot be the only
+direction cue and is absent under reduced motion. A route-selected conveyance
+uses Ai Indigo outline/mist treatment; amber is not a route-handoff color
+because it is reserved for Review/warning semantics.
 
 ## 10. Interaction states
 

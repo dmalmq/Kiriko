@@ -14,6 +14,7 @@
  *
  * This module is pure. Projection and DOM live with the overlay that calls it.
  */
+import type { ConveyanceDirection } from "./verticalLinks";
 
 /**
  * Priority tiers, highest first. `nextAction` and `destination` belong to guided
@@ -107,6 +108,12 @@ export interface LabelCandidate {
   protected: boolean;
   /** Inline SVG for a badge label, when this candidate is a conveyance. */
   icon?: string;
+  /**
+   * Graph-evidenced direction for a conveyance badge: the arrow plus the
+   * target floor token, present only when a vertical network path matched
+   * this feature's footprint. Absent otherwise — never a placeholder.
+   */
+  direction?: ConveyanceDirection;
 }
 
 export interface PlacedLabel {
@@ -114,6 +121,8 @@ export interface PlacedLabel {
   tier: LabelTier;
   text: string;
   icon?: string;
+  /** Carried through from the candidate so the overlay can render the chevron. */
+  direction?: ConveyanceDirection;
   anchor: { x: number; y: number };
   box: { x: number; y: number; width: number; height: number };
   /** Anchor-to-box line, present only when displacement earned one. */
@@ -237,6 +246,7 @@ export function layoutSceneLabels(
       tier: candidate.tier,
       text: candidate.text,
       ...(candidate.icon === undefined ? {} : { icon: candidate.icon }),
+      ...(candidate.direction === undefined ? {} : { direction: candidate.direction }),
       anchor,
       box: chosen,
       leader:

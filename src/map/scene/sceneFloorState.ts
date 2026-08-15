@@ -67,6 +67,7 @@ export function resolveSceneFloorState(
   venueLevels: ViewerLevel[],
   activeLevelId: string,
   route: RouteResultDto | null,
+  partnerOrdinal: number | null,
 ): SceneFloorState {
   const activeLevelIndices: number[] = [];
   scene.levels.forEach((level, index) => {
@@ -75,15 +76,33 @@ export function resolveSceneFloorState(
     }
   });
 
-  const routeContextOrdinal = contextOrdinal(venueLevels, activeLevelId, route);
+  // Context floors contribute their registered scene levels as a union, in
+  // first-seen order. Both the route's neighbouring floor and a selected
+  // cross-floor link's partner floor feed the same set, so a partner that is
+  // also the route context floor cannot duplicate an index.
   const contextLevelIndices: number[] = [];
-  if (routeContextOrdinal !== null) {
-    const contextIds = new Set(levelIdsForOrdinal(venueLevels, routeContextOrdinal));
+  const contextIndexSet = new Set<number>();
+  const addOrdinalContext = (ordinal: number): void => {
+    const contextIds = new Set(levelIdsForOrdinal(venueLevels, ordinal));
     scene.levels.forEach((level, index) => {
-      if (contextIds.has(level.canonicalId)) {
+      if (contextIds.has(level.canonicalId) && !contextIndexSet.has(index)) {
+        contextIndexSet.add(index);
         contextLevelIndices.push(index);
       }
     });
+  };
+
+  const routeContextOrdinal = contextOrdinal(venueLevels, activeLevelId, route);
+  if (routeContextOrdinal !== null) {
+    addOrdinalContext(routeContextOrdinal);
+  }
+
+  // A partner on the active floor itself (or an unmapped active floor) adds
+  // nothing: the partner floor is only context when it is a *different* floor,
+  // and a phantom ordinal must never surface as a scene index.
+  const activeOrdinal = ordinalOfLevel(venueLevels, activeLevelId);
+  if (partnerOrdinal !== null && activeOrdinal !== null && partnerOrdinal !== activeOrdinal) {
+    addOrdinalContext(partnerOrdinal);
   }
 
   return {

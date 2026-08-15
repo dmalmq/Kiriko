@@ -21,6 +21,7 @@
  * station-scale geodatabases.
  */
 import { Type } from "@sinclair/typebox";
+import type Database from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
 import { requireProducerSession, requireSession } from "../auth/guard";
 import { inspectGdbArchive, convertGdbLayers } from "./convert";
@@ -45,6 +46,58 @@ import { packageNetworkGdbZip } from "./exportGdb";
 import { storedPlanClipsToSelection } from "./plan";
 
 const TENANT_ID = 1;
+
+interface GenerationDurationRow {
+  durationSeconds: number;
+}
+
+function recentGenerationDurations(
+  db: Database.Database,
+  venueId: number | null,
+): GenerationDurationRow[] {
+  const venueFilter = venueId === null ? "" : "AND v.venue_id = ?";
+  const statement = db.prepare(
+    `SELECT (julianday(j.updated_at) - julianday(j.created_at)) * 86400 AS durationSeconds
+       FROM jobs j
+       JOIN versions v ON v.id = j.version_id
+      WHERE j.kind = 'publish_imdf'
+        AND j.status = 'done'
+        AND v.synthesized = 1
+        AND (
+          json_extract(j.payload_json, '$.operation') = 'generate_network'
+          OR (
+            json_type(j.payload_json, '$.operation') IS NULL
+            AND json_extract(j.payload_json, '$.synthesizeNetwork') = 1
+            AND json_type(j.payload_json, '$.tilesDescriptorJson') IS NULL
+          )
+        )
+        AND julianday(j.updated_at) > julianday(j.created_at)
+        ${venueFilter}
+      ORDER BY j.created_at DESC
+      LIMIT 20`,
+  );
+  return (
+    venueId === null ? statement.all() : statement.all(venueId)
+  ) as GenerationDurationRow[];
+}
+
+function estimateNetworkGenerationSeconds(
+  db: Database.Database,
+  venueId: number,
+): number | null {
+  const venueDurations = recentGenerationDurations(db, venueId);
+  const durations =
+    venueDurations.length > 0
+      ? venueDurations
+      : recentGenerationDurations(db, null);
+  const seconds = durations
+    .map((row) => row.durationSeconds)
+    .filter((duration) => Number.isFinite(duration) && duration > 0)
+    .sort((a, b) => a - b);
+  if (seconds.length === 0) return null;
+  const percentileIndex = Math.ceil(seconds.length * 0.75) - 1;
+  return Math.max(1, Math.round(seconds[percentileIndex]!));
+}
 
 
 // The GDAL process queue (gdalProcess.ts) now enforces a real, cancelling
@@ -700,7 +753,12 @@ export function registerGdbRoutes(app: FastifyInstance): void {
           venueId: Type.Integer({ minimum: 1 }),
         }),
         response: {
-          202: Type.Object({ jobId: Type.String(), versionId: Type.Number(), seq: Type.Number() }),
+          202: Type.Object({
+            jobId: Type.String(),
+            versionId: Type.Number(),
+            seq: Type.Number(),
+            estimatedDurationSeconds: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
+          }),
           404: Type.Object({ error: Type.String() }),
         },
       },
@@ -730,6 +788,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         return reply.code(404).send({ error: "no_base_version" });
       }
 
+      const estimatedDurationSeconds = estimateNetworkGenerationSeconds(db, venueId);
       const maxRow = db
         .prepare("SELECT MAX(seq) AS m FROM versions WHERE venue_id = ?")
         .get(venueId) as { m: number | null };
@@ -748,6 +807,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
           synthesized: true,
         },
         {
+          operation: "generate_network",
           facilitiesGeoJsonHash: base.f ?? undefined,
           synthesizeNetwork: true,
           // DECISION: forward the venue's stored clip choice.
@@ -767,7 +827,7 @@ export function registerGdbRoutes(app: FastifyInstance): void {
         },
       );
       const { jobId, versionId } = accepted;
-      return reply.code(202).send({ jobId, versionId, seq: nextSeq });
+      return reply.code(202).send({ jobId, versionId, seq: nextSeq, estimatedDurationSeconds });
     },
   );
 

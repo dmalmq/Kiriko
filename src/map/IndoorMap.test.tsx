@@ -1691,6 +1691,18 @@ describe("IndoorMap network editing", () => {
       connectionId: { pathId: 1, reversePathId: 2 },
     });
   });
+
+  it("prefers a junction over a connection under the same click", () => {
+    const net = editing();
+    const { map } = renderMap(baseProps({ networkEditing: net }));
+    map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [{ properties: { NODEID: 8 } }];
+    map.queryByLayer[LAYER_NETWORK_PATH_HIT] = [{ properties: { PATHID: 1, RPATHID: 2 } }];
+    act(() => {
+      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 2 } });
+    });
+    expect(net.onPick).toHaveBeenCalledWith({ kind: "junction", nodeId: 8 });
+  });
+
   it("reports a connection pick from a translated vertical marker", () => {
     const net = editing();
     const { map } = renderMap(baseProps({ networkEditing: net }));
@@ -1738,16 +1750,15 @@ describe("IndoorMap network editing", () => {
     });
   });
 
-
-  it("prefers a junction over a connection under the same click", () => {
-    const net = editing();
-    const { map } = renderMap(baseProps({ networkEditing: net }));
-    map.queryByLayer[LAYER_NETWORK_JUNCTION_HIT] = [{ properties: { NODEID: 8 } }];
-    map.queryByLayer[LAYER_NETWORK_PATH_HIT] = [{ properties: { PATHID: 1, RPATHID: 2 } }];
+  it("uses a pointer cursor over a vertical marker", () => {
+    const { map } = renderMap(baseProps({ networkEditing: editing({ tool: "select" }) }));
+    map.queryByLayer[LAYER_NETWORK_VERTICAL_LINK_HIT] = [
+      { properties: { PATHID: 7, RPATHID: 8 } },
+    ];
     act(() => {
-      map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 2 } });
+      map.emit("mousemove", { point: { x: 1, y: 1 } });
     });
-    expect(net.onPick).toHaveBeenCalledWith({ kind: "junction", nodeId: 8 });
+    expect(map.canvas.style.cursor).toBe("pointer");
   });
 
   it("reports a bare coordinate when nothing is under the click", () => {
@@ -1821,17 +1832,6 @@ describe("IndoorMap network editing", () => {
     });
     expect(map.canvas.style.cursor).toBe("pointer");
   });
-  it("uses a pointer cursor over a vertical marker", () => {
-    const { map } = renderMap(baseProps({ networkEditing: editing({ tool: "select" }) }));
-    map.queryByLayer[LAYER_NETWORK_VERTICAL_LINK_HIT] = [
-      { properties: { PATHID: 7, RPATHID: 8 } },
-    ];
-    act(() => {
-      map.emit("mousemove", { point: { x: 1, y: 1 } });
-    });
-    expect(map.canvas.style.cursor).toBe("pointer");
-  });
-
 
   it("restores ordinary selection after editing ends", () => {
     const onSelectFeature = vi.fn();
@@ -1918,6 +1918,15 @@ describe("IndoorMap scene floor elevation", () => {
     });
     utils.unmount();
   });
+
+  it("reports the planes the see-through policy decided on", () => {
+    // Elevation, not selection, decides which floor of a retained pair is
+    // looked through, so the number that decided it has to be readable.
+    const utils = render(<IndoorMap {...baseProps({ scene, levelId: "level-1" })} />);
+    expect([...currentSceneDiagnostics().levelPlanesM]).toEqual([8, 12]);
+    utils.unmount();
+  });
+
   it("does not recreate terrain when the active plane is unchanged", () => {
     const { map, rerender } = renderMap(baseProps({ scene, levelId: "level-1" }));
 

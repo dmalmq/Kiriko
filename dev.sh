@@ -35,6 +35,7 @@ fi
 # The Vite dev/preview proxies hardcode http://127.0.0.1:8790, so overriding
 # KIRIKO_PORT here also requires editing vite.config.ts.
 export KIRIKO_PORT="${KIRIKO_PORT:-8790}"
+FRONTEND_PORT=5173
 export KIRIKO_DATA_DIR="${KIRIKO_DATA_DIR:-./data}"
 
 # The same directory the backend will use. `pnpm dev:server` runs with cwd
@@ -98,12 +99,13 @@ kill_tree() {
 # PIDs listening on KIRIKO_PORT, one per line (empty when the port is free).
 # Git Bash on Windows has no lsof, so fall back to parsing netstat.
 listening_pids() {
+  local port="$1"
   if command -v lsof >/dev/null 2>&1; then
-    lsof -ti "tcp:${KIRIKO_PORT}" -sTCP:LISTEN 2>/dev/null || true
+    lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true
   elif command -v netstat >/dev/null 2>&1; then
     # Windows netstat -ano columns: proto local foreign state pid
     netstat -ano 2>/dev/null |
-      awk -v port=":${KIRIKO_PORT}$" \
+      awk -v port=":${port}$" \
         '$1 == "TCP" && $2 ~ port && $4 == "LISTENING" { print $5 }' |
       sort -u
   fi
@@ -113,7 +115,7 @@ listening_pids() {
 # readiness probe would report success while the backend started here dies with
 # EADDRINUSE — leaving Vite proxying to the stale server. Refuse to start (or
 # clear it out with KIRIKO_KILL_STALE=1) rather than serve stale code.
-STALE_PIDS="$(listening_pids)"
+STALE_PIDS="$(listening_pids "${KIRIKO_PORT}")"
 if [ -n "${STALE_PIDS}" ]; then
   STALE_LIST="$(echo "${STALE_PIDS}" | tr '\n' ' ')"
   if [ "${KIRIKO_KILL_STALE:-0}" = "1" ]; then
@@ -122,10 +124,10 @@ if [ -n "${STALE_PIDS}" ]; then
       kill_tree "${pid}"
     done
     for _ in $(seq 1 10); do
-      [ -z "$(listening_pids)" ] && break
+      [ -z "$(listening_pids "${KIRIKO_PORT}")" ] && break
       sleep 1
     done
-    if [ -n "$(listening_pids)" ]; then
+    if [ -n "$(listening_pids "${KIRIKO_PORT}")" ]; then
       echo "Port ${KIRIKO_PORT} is still held after the kill; stop it manually." >&2
       exit 1
     fi
@@ -135,6 +137,19 @@ if [ -n "${STALE_PIDS}" ]; then
     echo "stale server. Re-run with KIRIKO_KILL_STALE=1 ./dev.sh to replace it." >&2
     exit 1
   fi
+fi
+
+# Vite's `--host` can bind the wildcard address even when another dev server
+# already owns localhost's IPv6 address on the same port. Both then appear to
+# have started, but `http://localhost:5173` reaches the unrelated process.
+# Refuse the ambiguous state before doing the expensive addon builds.
+FRONTEND_PIDS="$(listening_pids "${FRONTEND_PORT}")"
+if [ -n "${FRONTEND_PIDS}" ]; then
+  FRONTEND_LIST="$(echo "${FRONTEND_PIDS}" | tr '\n' ' ')"
+  echo "Frontend port ${FRONTEND_PORT} is already in use by pid(s) ${FRONTEND_LIST}." >&2
+  echo "Stop those processes before running ./dev.sh; otherwise localhost may" >&2
+  echo "open an unrelated application even though Kiriko also appears to start." >&2
+  exit 1
 fi
 
 # Start the backend. `predev:server` rebuilds the @kiriko/node addon first, so

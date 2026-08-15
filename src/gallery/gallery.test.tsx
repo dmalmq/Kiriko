@@ -2,7 +2,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { VenueSummary } from "./api";
+import type { GenerateNetworkAccepted, VenueSummary } from "./api";
 
 const me = vi.fn();
 const listVenues = vi.fn();
@@ -15,7 +15,7 @@ const augmentGdb = vi.fn();
 const getGdbMapping = vi.fn();
 const waitForJob = vi.fn();
 const deleteVenue = vi.fn();
-const generateNetwork = vi.fn();
+const generateNetwork = vi.fn<(venueId: number) => Promise<GenerateNetworkAccepted>>();
 const exportNetwork = vi.fn();
 const logout = vi.fn();
 const login = vi.fn();
@@ -38,7 +38,7 @@ vi.mock("./api", async (importOriginal) => {
       getGdbMapping: (...args: unknown[]) => getGdbMapping(...args),
       waitForJob: (...args: unknown[]) => waitForJob(...args),
       deleteVenue: (...args: unknown[]) => deleteVenue(...args),
-      generateNetwork: (...args: unknown[]) => generateNetwork(...args),
+      generateNetwork: (venueId: number) => generateNetwork(venueId),
       exportNetwork: (...args: unknown[]) => exportNetwork(...args),
       logout: () => logout(),
       login: (...args: unknown[]) => login(...args),
@@ -824,6 +824,260 @@ describe("GalleryPage edit mapping", () => {
 });
 
 describe("GalleryPage generate routing", () => {
+  it("shows an indeterminate routing progress panel while the server is estimating", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "venue-only",
+        name: "Venue Only",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: false,
+      },
+    ]);
+    const accepted = deferred<{
+      jobId: string;
+      versionId: number;
+      seq: number;
+      estimatedDurationSeconds: number | null;
+    }>();
+    generateNetwork.mockReturnValue(accepted.promise);
+
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("Venue Only")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Generate routing" }));
+
+    const progress = screen.getByRole("progressbar", { name: "Generating routing…" });
+    expect(progress.getAttribute("aria-valuenow")).toBeNull();
+    expect(progress.getAttribute("aria-valuetext")).toBe("Estimating duration");
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("Venue Only");
+    expect(status.textContent).toContain("Generating routing");
+  });
+
+  it("shows the server estimate while routing is still running", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "venue-only",
+        name: "Venue Only",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: false,
+      },
+    ]);
+    generateNetwork.mockResolvedValue({
+      jobId: "estimated-route",
+      versionId: 2,
+      seq: 2,
+      estimatedDurationSeconds: 45,
+    });
+    const running = deferred<{ status: "done" }>();
+    waitForJob.mockReturnValue(running.promise);
+
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("Venue Only")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Generate routing" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("0");
+    });
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuetext")).toBe(
+      "About 45 seconds remaining",
+    );
+  });
+
+  it("tracks elapsed time and caps the bar when generation exceeds its estimate", async () => {
+    vi.useFakeTimers({ now: 0 });
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "venue-only",
+        name: "Venue Only",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: false,
+      },
+    ]);
+    generateNetwork.mockResolvedValue({
+      jobId: "overdue-route",
+      versionId: 2,
+      seq: 2,
+      estimatedDurationSeconds: 100,
+    });
+    const running = deferred<{ status: "done" }>();
+    waitForJob.mockReturnValue(running.promise);
+    const view = render(<GalleryPage />);
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      screen.getByText("Venue Only");
+      await act(async () => {
+        screen.getByRole("button", { name: "EN" }).click();
+      });
+      await act(async () => {
+        screen.getByRole("button", { name: "Generate routing" }).click();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50_000);
+      });
+      const midpoint = screen.getByRole("progressbar");
+      expect(midpoint.getAttribute("aria-valuenow")).toBe("50");
+      expect(midpoint.getAttribute("aria-valuetext")).toBe("About 50 seconds remaining");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(51_000);
+      });
+
+      const progress = screen.getByRole("progressbar");
+      expect(progress.getAttribute("aria-valuenow")).toBe("90");
+      expect(progress.getAttribute("aria-valuetext")).toBe(
+        "Taking longer than usual — still processing.",
+      );
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("replaces progress with the completion notice when the job finishes", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "venue-only",
+        name: "Venue Only",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: false,
+      },
+    ]);
+    generateNetwork.mockResolvedValue({
+      jobId: "completed-route",
+      versionId: 2,
+      seq: 2,
+      estimatedDurationSeconds: 45,
+    });
+    waitForJob.mockResolvedValue({ status: "done" });
+
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("Venue Only")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Generate routing" }));
+
+    await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain("Routing generated");
+  });
+
+  it("replaces progress with an error notice when generation is rejected", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "venue-only",
+        name: "Venue Only",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: false,
+      },
+    ]);
+    generateNetwork.mockRejectedValue({
+      code: "no_base_version",
+      message: "missing base",
+    });
+
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("Venue Only")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Generate routing" }));
+
+    await waitFor(() => expect(screen.queryByRole("progressbar")).toBeNull());
+    expect(screen.getByRole("status").textContent).toContain("Import failed.");
+  });
+
+  it("replaces progress with an error notice when the accepted job fails", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "venue-only",
+        name: "Venue Only",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: false,
+      },
+    ]);
+    generateNetwork.mockResolvedValue({
+      jobId: "failed-route",
+      versionId: 2,
+      seq: 2,
+      estimatedDurationSeconds: 45,
+    });
+    waitForJob.mockResolvedValue({ status: "error", error: "compile failed" });
+
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("Venue Only")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Generate routing" }));
+
+    await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "The selected layers could not be converted.",
+    );
+  });
+
   it("shows Generate routing on a venue-only dataset and calls generateNetwork on click", async () => {
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValue([
@@ -842,7 +1096,12 @@ describe("GalleryPage generate routing", () => {
         hasNetwork: false,
       },
     ]);
-    generateNetwork.mockResolvedValue({ jobId: "j", versionId: 2, seq: 2 });
+    generateNetwork.mockResolvedValue({
+      jobId: "j",
+      versionId: 2,
+      seq: 2,
+      estimatedDurationSeconds: null,
+    });
     waitForJob.mockResolvedValue({ status: "done" });
 
     const user = userEvent.setup();
@@ -875,7 +1134,12 @@ describe("GalleryPage generate routing", () => {
         hasNetwork: false,
       },
     ]);
-    generateNetwork.mockResolvedValue({ jobId: "generate-timeout", versionId: 2, seq: 2 });
+    generateNetwork.mockResolvedValue({
+      jobId: "generate-timeout",
+      versionId: 2,
+      seq: 2,
+      estimatedDurationSeconds: null,
+    });
     waitForJob.mockResolvedValueOnce({ status: "timeout" }).mockResolvedValueOnce({ status: "done" });
 
     const user = userEvent.setup();
@@ -885,7 +1149,7 @@ describe("GalleryPage generate routing", () => {
     await user.click(screen.getByRole("button", { name: "Generate routing" }));
 
     await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("generate-timeout"));
-    expect(screen.getByRole("status").textContent).toContain("still running");
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuetext")).toContain("still running");
     await user.click(screen.getByRole("button", { name: "Import Geodatabase" }));
     expect(screen.queryByRole("dialog", { name: "Review GDB layer mappings" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Check status" }));
@@ -915,7 +1179,7 @@ describe("GalleryPage generate routing", () => {
         hasGraph: true,
       },
     ]);
-    const accepted = deferred<{ jobId: string; versionId: number; seq: number }>();
+    const accepted = deferred<GenerateNetworkAccepted>();
     generateNetwork.mockReturnValue(accepted.promise);
     waitForJob.mockResolvedValueOnce({ status: "timeout" });
     deleteVenue.mockResolvedValue(undefined);
@@ -954,12 +1218,17 @@ describe("GalleryPage generate routing", () => {
     expect(screen.queryByRole("button", { name: "Check status" })).toBeNull();
 
     await act(async () => {
-      accepted.resolve({ jobId: "slow-route", versionId: 2, seq: 2 });
+      accepted.resolve({
+        jobId: "slow-route",
+        versionId: 2,
+        seq: 2,
+        estimatedDurationSeconds: null,
+      });
       await accepted.promise;
     });
 
     await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("slow-route"));
-    expect(screen.getByRole("status").textContent).toContain("still running");
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuetext")).toContain("still running");
     expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
     expect(generateNetwork).toHaveBeenCalledTimes(1);
   });
@@ -981,7 +1250,12 @@ describe("GalleryPage generate routing", () => {
         hasNetwork: false,
       },
     ]);
-    generateNetwork.mockResolvedValue({ jobId: "generate-timeout", versionId: 2, seq: 2 });
+    generateNetwork.mockResolvedValue({
+      jobId: "generate-timeout",
+      versionId: 2,
+      seq: 2,
+      estimatedDurationSeconds: null,
+    });
     waitForJob.mockResolvedValueOnce({ status: "timeout" }).mockResolvedValueOnce({ status: "done" });
     deleteVenue.mockResolvedValue(undefined);
 
@@ -1297,7 +1571,7 @@ describe("GalleryPage async GDB flow isolation", () => {
     me.mockResolvedValueOnce({ id: 1, username: "daniel", role: "admin" }).mockResolvedValueOnce(null);
     listVenues.mockResolvedValue([{ ...VENUE, id: 42, slug: "venue", name: "Venue", hasNetwork: false }]);
     logout.mockResolvedValue(undefined);
-    const generation = deferred<{ jobId: string; versionId: number; seq: number }>();
+    const generation = deferred<GenerateNetworkAccepted>();
     generateNetwork.mockReturnValue(generation.promise);
     waitForJob.mockResolvedValue({ status: "done" });
 
@@ -1311,7 +1585,12 @@ describe("GalleryPage async GDB flow isolation", () => {
     await waitFor(() => expect(screen.getByRole("dialog", { name: "Sign in to Kiriko" })).toBeTruthy());
 
     await act(async () => {
-      generation.resolve({ jobId: "route", versionId: 2, seq: 2 });
+      generation.resolve({
+        jobId: "route",
+        versionId: 2,
+        seq: 2,
+        estimatedDurationSeconds: null,
+      });
       await generation.promise;
     });
 
@@ -1323,7 +1602,7 @@ describe("GalleryPage async GDB flow isolation", () => {
   it("invalidates in-flight routing generation on unmount", async () => {
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValue([{ ...VENUE, id: 42, slug: "venue", name: "Venue", hasNetwork: false }]);
-    const generation = deferred<{ jobId: string; versionId: number; seq: number }>();
+    const generation = deferred<GenerateNetworkAccepted>();
     generateNetwork.mockReturnValue(generation.promise);
     waitForJob.mockResolvedValue({ status: "done" });
 
@@ -1336,7 +1615,12 @@ describe("GalleryPage async GDB flow isolation", () => {
 
     unmount();
     await act(async () => {
-      generation.resolve({ jobId: "route", versionId: 2, seq: 2 });
+      generation.resolve({
+        jobId: "route",
+        versionId: 2,
+        seq: 2,
+        estimatedDurationSeconds: null,
+      });
       await generation.promise;
     });
 
@@ -1455,10 +1739,15 @@ describe("GalleryPage async lifecycle blockers", () => {
     listVenues.mockResolvedValue([venue]).mockResolvedValueOnce([venue]).mockResolvedValueOnce([venue]);
     logout.mockResolvedValue(undefined);
     login.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
-    const oldGeneration = deferred<{ jobId: string; versionId: number; seq: number }>();
+    const oldGeneration = deferred<GenerateNetworkAccepted>();
     generateNetwork
       .mockReturnValueOnce(oldGeneration.promise)
-      .mockResolvedValueOnce({ jobId: "new-route", versionId: 3, seq: 3 });
+      .mockResolvedValueOnce({
+        jobId: "new-route",
+        versionId: 3,
+        seq: 3,
+        estimatedDurationSeconds: null,
+      });
     waitForJob.mockResolvedValue({ status: "done" });
 
     const user = userEvent.setup();
@@ -1478,7 +1767,12 @@ describe("GalleryPage async lifecycle blockers", () => {
     await user.click(screen.getByRole("button", { name: "Generate routing" }));
     await waitFor(() => expect(generateNetwork).toHaveBeenCalledTimes(2));
     await act(async () => {
-      oldGeneration.resolve({ jobId: "old-route", versionId: 2, seq: 2 });
+      oldGeneration.resolve({
+        jobId: "old-route",
+        versionId: 2,
+        seq: 2,
+        estimatedDurationSeconds: null,
+      });
       await oldGeneration.promise;
     });
     expect(waitForJob).not.toHaveBeenCalledWith("old-route");
@@ -1525,7 +1819,7 @@ describe("GalleryPage async lifecycle blockers", () => {
     const venue = { ...VENUE, id: 42, slug: "venue", name: "Venue", hasNetwork: false, hasGraph: true };
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValue([venue]);
-    const generation = deferred<{ jobId: string; versionId: number; seq: number }>();
+    const generation = deferred<GenerateNetworkAccepted>();
     generateNetwork.mockReturnValue(generation.promise);
     waitForJob.mockResolvedValue({ status: "done" });
     exportNetwork.mockResolvedValue({
@@ -1544,10 +1838,15 @@ describe("GalleryPage async lifecycle blockers", () => {
     expect(exportButton.disabled).toBe(true);
     await user.click(exportButton);
     expect(exportNetwork).not.toHaveBeenCalled();
-    expect(screen.getByRole("status").textContent).toBe("Generating routing…");
+    expect(screen.getByRole("status").textContent).toContain("Generating routing…");
 
     await act(async () => {
-      generation.resolve({ jobId: "route", versionId: 2, seq: 2 });
+      generation.resolve({
+        jobId: "route",
+        versionId: 2,
+        seq: 2,
+        estimatedDurationSeconds: null,
+      });
       await generation.promise;
     });
 
@@ -1560,7 +1859,7 @@ describe("GalleryPage async lifecycle blockers", () => {
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValue([venue]);
     const exported = deferred<{ blob: Blob; filename: string }>();
-    const generation = deferred<{ jobId: string; versionId: number; seq: number }>();
+    const generation = deferred<GenerateNetworkAccepted>();
     exportNetwork.mockReturnValue(exported.promise);
     generateNetwork.mockReturnValue(generation.promise);
     waitForJob.mockResolvedValue({ status: "done" });
@@ -1574,7 +1873,7 @@ describe("GalleryPage async lifecycle blockers", () => {
     await user.click(screen.getByRole("button", { name: "EN" }));
     await user.click(screen.getByRole("button", { name: "Export network" }));
     await user.click(screen.getByRole("button", { name: "Generate routing" }));
-    expect(screen.getByRole("status").textContent).toBe("Generating routing…");
+    expect(screen.getByRole("status").textContent).toContain("Generating routing…");
 
     await act(async () => {
       exported.resolve({
@@ -1585,9 +1884,14 @@ describe("GalleryPage async lifecycle blockers", () => {
     });
 
     expect(createObjectURL).not.toHaveBeenCalled();
-    expect(screen.getByRole("status").textContent).toBe("Generating routing…");
+    expect(screen.getByRole("status").textContent).toContain("Generating routing…");
     await act(async () => {
-      generation.resolve({ jobId: "route", versionId: 2, seq: 2 });
+      generation.resolve({
+        jobId: "route",
+        versionId: 2,
+        seq: 2,
+        estimatedDurationSeconds: null,
+      });
       await generation.promise;
     });
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Routing generated"));
@@ -1597,7 +1901,7 @@ describe("GalleryPage async lifecycle blockers", () => {
     const venue = { ...VENUE, id: 42, slug: "venue", name: "Venue", hasNetwork: false };
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValue([venue]);
-    const generation = deferred<{ jobId: string; versionId: number; seq: number }>();
+    const generation = deferred<GenerateNetworkAccepted>();
     generateNetwork.mockReturnValue(generation.promise);
     waitForJob.mockResolvedValue({ status: "done" });
     inspectGdb.mockResolvedValue({ blobHash: "b".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });
@@ -1614,10 +1918,15 @@ describe("GalleryPage async lifecycle blockers", () => {
     );
     expect(inspectGdb).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: "Review GDB layer mappings" })).toBeNull();
-    expect(screen.getByRole("status").textContent).toBe("Generating routing…");
+    expect(screen.getByRole("status").textContent).toContain("Generating routing…");
 
     await act(async () => {
-      generation.resolve({ jobId: "route", versionId: 2, seq: 2 });
+      generation.resolve({
+        jobId: "route",
+        versionId: 2,
+        seq: 2,
+        estimatedDurationSeconds: null,
+      });
       await generation.promise;
     });
 
@@ -1674,7 +1983,7 @@ describe("GalleryPage async lifecycle blockers", () => {
     listVenues.mockResolvedValue([venue]);
     const addDataNetwork = deferred<{ networkBlobHash: string; nodeCount: number; edgeCount: number; floors: string[] }>();
     inspectGdbNetwork.mockReturnValue(addDataNetwork.promise);
-    const generation = deferred<{ jobId: string; versionId: number; seq: number }>();
+    const generation = deferred<GenerateNetworkAccepted>();
     generateNetwork.mockReturnValue(generation.promise);
 
     const user = userEvent.setup();
@@ -1689,7 +1998,7 @@ describe("GalleryPage async lifecycle blockers", () => {
     await user.click(screen.getByRole("button", { name: "Generate routing" }));
 
     expect(screen.queryByRole("dialog", { name: "Add routing / facilities" })).toBeNull();
-    expect(screen.getByRole("status").textContent).toBe("Generating routing…");
+    expect(screen.getByRole("status").textContent).toContain("Generating routing…");
     await act(async () => {
       addDataNetwork.resolve({ networkBlobHash: "n".repeat(64), nodeCount: 120, edgeCount: 340, floors: ["1F"] });
       await addDataNetwork.promise;
@@ -1889,7 +2198,12 @@ describe("GalleryPage async lifecycle blockers", () => {
     const refreshed = { ...venue, name: "Generated Fresh" };
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValueOnce([venue]).mockResolvedValue([refreshed]);
-    generateNetwork.mockResolvedValue({ jobId: "old-generate", versionId: 2, seq: 2 });
+    generateNetwork.mockResolvedValue({
+      jobId: "old-generate",
+      versionId: 2,
+      seq: 2,
+      estimatedDurationSeconds: null,
+    });
     const oldJob = deferred<{ status: "done" }>();
     waitForJob.mockReturnValue(oldJob.promise);
     inspectGdb.mockResolvedValue({ blobHash: "b".repeat(64), inspection: gdbInspection, suggestedPlan: gdbPlan });

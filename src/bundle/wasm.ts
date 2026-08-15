@@ -109,6 +109,8 @@ export type SectionCapability =
  */
 export interface CapabilityReportDto {
   graph: SectionCapability;
+  /** Availability of §12, the graph's per-edge generation-quality attrs. */
+  graphAttrs: SectionCapability;
   facilities: SectionCapability;
   spatialContext: SectionCapability;
   sceneSources: SectionCapability;
