@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use crate::geo_math::haversine_m;
-use crate::graph::{RouteEdge, RouteGraph, VerticalKind, meters_to_cost};
+use crate::graph::{RouteEdge, RouteGraph, TravelDirection, VerticalKind, meters_to_cost};
 
 /// Request-time travel mode. One stored graph, several profiles: filters
 /// edges at A* without rewriting `RouteEdge::weight`.
@@ -90,6 +90,13 @@ fn edge_allowed(edge: &RouteEdge, profile: &RouteProfile) -> bool {
     true
 }
 
+fn travel_from_to(direction: TravelDirection) -> bool {
+    direction == TravelDirection::Both || direction == TravelDirection::Forward
+}
+
+fn travel_to_from(direction: TravelDirection) -> bool {
+    direction == TravelDirection::Both || direction == TravelDirection::Reverse
+}
 
 /// A query endpoint: position plus venue level ordinal.
 #[derive(Debug, Clone, Copy)]
@@ -283,6 +290,13 @@ pub fn route_with(
             if o.edge_index != d.edge_index {
                 continue;
             }
+            let along_edge = &graph.edges[o.edge_index];
+            if o.along < d.along && along_edge.flags.direction == TravelDirection::Reverse {
+                continue;
+            }
+            if o.along > d.along && along_edge.flags.direction == TravelDirection::Forward {
+                continue;
+            }
             if !edge_allowed(&graph.edges[o.edge_index], profile) {
                 continue;
             }
@@ -314,8 +328,14 @@ pub fn route_with(
         if from >= n || to >= n {
             continue;
         }
-        adj[from].push((to, ei, e.weight));
-        adj[to].push((from, ei, e.weight));
+        match e.flags.direction {
+            TravelDirection::Both => {
+                adj[from].push((to, ei, e.weight));
+                adj[to].push((from, ei, e.weight));
+            }
+            TravelDirection::Forward => adj[from].push((to, ei, e.weight)),
+            TravelDirection::Reverse => adj[to].push((from, ei, e.weight)),
+        }
         let m = haversine_m(
             graph.nodes[from].lon,
             graph.nodes[from].lat,
@@ -352,7 +372,14 @@ pub fn route_with(
         let o_from_cost = f64::from(oe.weight) * o.along / o.total.max(f64::EPSILON) + conn;
         let o_to_cost =
             f64::from(oe.weight) * (o.total - o.along) / o.total.max(f64::EPSILON) + conn;
-        for (node, g0) in [(oe.from as usize, o_from_cost), (oe.to as usize, o_to_cost)] {
+        let mut seeds = Vec::new();
+        if travel_to_from(oe.flags.direction) {
+            seeds.push((oe.from as usize, o_from_cost));
+        }
+        if travel_from_to(oe.flags.direction) {
+            seeds.push((oe.to as usize, o_to_cost));
+        }
+        for (node, g0) in seeds {
             let better = match (dist[node], seed_origin_edge[node]) {
                 (d, _) if g0 < d => true,
                 (d, Some(be)) if g0 == d && o.edge_index < be => true,
@@ -378,7 +405,14 @@ pub fn route_with(
     let mut goal_count = 0usize;
     for d in &dcands {
         let de = &graph.edges[d.edge_index];
-        for node in [de.from as usize, de.to as usize] {
+        let mut ends = Vec::new();
+        if travel_from_to(de.flags.direction) {
+            ends.push(de.from as usize);
+        }
+        if travel_to_from(de.flags.direction) {
+            ends.push(de.to as usize);
+        }
+        for node in ends {
             if !is_goal[node] {
                 is_goal[node] = true;
                 goal_count += 1;
@@ -437,7 +471,14 @@ pub fn route_with(
         let conn = connector_cost(&dest, d);
         let d_from_cost = f64::from(de.weight) * d.along / d.total.max(f64::EPSILON);
         let d_to_cost = f64::from(de.weight) * (d.total - d.along) / d.total.max(f64::EPSILON);
-        for (node, partial) in [(de.from as usize, d_from_cost), (de.to as usize, d_to_cost)] {
+        let mut ends = Vec::new();
+        if travel_from_to(de.flags.direction) {
+            ends.push((de.from as usize, d_from_cost));
+        }
+        if travel_to_from(de.flags.direction) {
+            ends.push((de.to as usize, d_to_cost));
+        }
+        for (node, partial) in ends {
             if !dist[node].is_finite() {
                 continue;
             }
@@ -1669,4 +1710,105 @@ mod tests {
             .expect("unknown clearance must not fail a wheelchair query");
     }
 
+    fn two_node_edge(flags: EdgeFlags) -> RouteGraph {
+        RouteGraph {
+            nodes: vec![
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 1000.0,
+                ordinal: 0.0,
+                interior: vec![],
+                attrs: EdgeAttrs::default(),
+                flags,
+            }],
+        }
+    }
+
+    #[test]
+    fn forward_only_edge_does_not_route_backwards() {
+        let g = two_node_edge(EdgeFlags {
+            direction: TravelDirection::Forward,
+            ..Default::default()
+        });
+        let a = Point3 {
+            lon: 139.0,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        let b = Point3 {
+            lon: 139.001,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        route_with(&g, a, b, &RouteProfile::walking()).expect("forward walk is allowed");
+        assert!(
+            route_with(&g, b, a, &RouteProfile::walking()).is_none(),
+            "forward-only edge must not route from to back to from"
+        );
+    }
+
+    #[test]
+    fn barrier_edge_is_skipped() {
+        let g = two_node_edge(EdgeFlags {
+            barrier: true,
+            ..Default::default()
+        });
+        let a = Point3 {
+            lon: 139.0,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        let b = Point3 {
+            lon: 139.001,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        assert!(
+            route_with(&g, a, b, &RouteProfile::walking()).is_none(),
+            "barrier edges are skipped on the walking profile"
+        );
+        let mut allow = RouteProfile::walking();
+        allow.allow_barriers = true;
+        route_with(&g, a, b, &allow).expect("allow_barriers routes a barrier edge");
+    }
+
+    #[test]
+    fn hours_window_skips_outside() {
+        let g = two_node_edge(EdgeFlags {
+            start_minute: 600,
+            end_minute: 720,
+            ..Default::default()
+        });
+        let a = Point3 {
+            lon: 139.0,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        let b = Point3 {
+            lon: 139.001,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        let mut open = RouteProfile::walking();
+        open.at_minutes = Some(660);
+        route_with(&g, a, b, &open).expect("inside the window routes");
+        let mut closed = RouteProfile::walking();
+        closed.at_minutes = Some(800);
+        assert!(
+            route_with(&g, a, b, &closed).is_none(),
+            "outside the window the edge is skipped"
+        );
+    }
 }
