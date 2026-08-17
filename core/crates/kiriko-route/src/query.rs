@@ -2,7 +2,67 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use crate::geo_math::haversine_m;
-use crate::graph::{RouteEdge, RouteGraph, meters_to_cost};
+use crate::graph::{RouteEdge, RouteGraph, VerticalKind, meters_to_cost};
+
+/// Request-time travel mode. One stored graph, several profiles: filters
+/// edges at A* without rewriting `RouteEdge::weight`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteProfile {
+    pub skip_stairs: bool,
+    pub skip_escalators: bool,
+    /// IndoorAtlas-style default: skip edges flagged accessible-only.
+    /// No-op until `RouteEdge` carries that flag.
+    pub exclude_accessible_only: bool,
+    /// Kallmann `2r < cl`. `None` does not filter. Unknown (`None`)
+    /// clearance on an edge is allowed.
+    pub min_clearance_m: Option<f32>,
+    /// Minutes from midnight; `None` ignores time windows.
+    pub at_minutes: Option<u16>,
+    /// When false (default), skip `BARRIER` edges. Unused until flags exist.
+    pub allow_barriers: bool,
+}
+
+impl RouteProfile {
+    pub fn walking() -> Self {
+        Self {
+            skip_stairs: false,
+            skip_escalators: false,
+            exclude_accessible_only: true,
+            min_clearance_m: None,
+            at_minutes: None,
+            allow_barriers: false,
+        }
+    }
+
+    pub fn wheelchair() -> Self {
+        Self {
+            skip_stairs: true,
+            skip_escalators: true,
+            exclude_accessible_only: false,
+            min_clearance_m: Some(0.8),
+            at_minutes: None,
+            allow_barriers: false,
+        }
+    }
+}
+
+fn edge_allowed(edge: &RouteEdge, profile: &RouteProfile) -> bool {
+    if let Some(v) = edge.attrs.vertical {
+        if profile.skip_stairs && v == VerticalKind::Stairs {
+            return false;
+        }
+        if profile.skip_escalators && v == VerticalKind::Escalator {
+            return false;
+        }
+    }
+    if let (Some(min), Some(c)) = (profile.min_clearance_m, edge.attrs.clearance_m) {
+        if c < min {
+            return false;
+        }
+    }
+    true
+}
+
 
 /// A query endpoint: position plus venue level ordinal.
 #[derive(Debug, Clone, Copy)]
@@ -117,10 +177,13 @@ const SNAP_CANDIDATES: usize = 3;
 /// distance (ties by edge index). When no same-floor edge exists, the single
 /// nearest off-floor edge — the fallback for floors the network does not
 /// cover.
-fn snap_candidates(graph: &RouteGraph, p: &Point3) -> Vec<EdgeSnap> {
+fn snap_candidates(graph: &RouteGraph, p: &Point3, profile: &RouteProfile) -> Vec<EdgeSnap> {
     let mut same: Vec<(usize, EdgeSnap, f64)> = Vec::new();
     let mut best_off: Option<(EdgeSnap, f64)> = None;
     for (i, e) in graph.edges.iter().enumerate() {
+        if !edge_allowed(e, profile) {
+            continue;
+        }
         let poly = graph.edge_polyline(e);
         let (proj, along, total) = project_point_on_polyline(&poly, p.lon, p.lat);
         let dist = haversine_m(p.lon, p.lat, proj[0], proj[1]);
@@ -163,13 +226,24 @@ fn connector_cost(p: &Point3, s: &EdgeSnap) -> f64 {
 /// junction-free walk. Returns floor-grouped corridor polylines that hug the
 /// edge geometry, or `None` when the projections are disconnected.
 pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> {
+    route_with(graph, origin, dest, &RouteProfile::walking())
+}
+
+/// [`route`] with a travel-mode profile. Disallowed edges are omitted from
+/// snap, adjacency, the A* heuristic scale `k`, and same-edge direct walks.
+pub fn route_with(
+    graph: &RouteGraph,
+    origin: Point3,
+    dest: Point3,
+    profile: &RouteProfile,
+) -> Option<Route> {
     // Reject non-finite endpoint coordinates with a controlled `None` — never
     // a panic or NaN-poisoned comparison (which would trap the WASM instance).
     if !endpoint_is_finite(&origin) || !endpoint_is_finite(&dest) {
         return None;
     }
-    let ocands = snap_candidates(graph, &origin);
-    let dcands = snap_candidates(graph, &dest);
+    let ocands = snap_candidates(graph, &origin, profile);
+    let dcands = snap_candidates(graph, &dest, profile);
     if ocands.is_empty() || dcands.is_empty() {
         return None;
     }
@@ -180,6 +254,9 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
     for o in &ocands {
         for d in &dcands {
             if o.edge_index != d.edge_index {
+                continue;
+            }
+            if !edge_allowed(&graph.edges[o.edge_index], profile) {
                 continue;
             }
             let r = same_edge_route(graph, o, d);
@@ -203,6 +280,9 @@ pub fn route(graph: &RouteGraph, origin: Point3, dest: Point3) -> Option<Route> 
     let mut adj: Vec<Vec<(usize, usize, f32)>> = vec![Vec::new(); n]; // (next, edge_index, weight)
     let mut k = f64::INFINITY;
     for (ei, e) in graph.edges.iter().enumerate() {
+        if !edge_allowed(e, profile) {
+            continue;
+        }
         let (from, to) = (e.from as usize, e.to as usize);
         if from >= n || to >= n {
             continue;
@@ -795,6 +875,7 @@ mod tests {
                 lat: 35.0009,
                 ordinal: 0.0,
             },
+            &RouteProfile::walking(),
         );
         let s = cands.first().expect("snaps to the only edge");
         assert_eq!(s.edge_index, 0);
@@ -830,6 +911,7 @@ mod tests {
                 lat: 35.0,
                 ordinal: 0.0,
             },
+            &RouteProfile::walking(),
         );
         assert_eq!(g.edges[cands[0].edge_index].ordinal, 0.0);
         assert!(
@@ -1026,8 +1108,8 @@ mod tests {
             ],
         };
 
-        let oc = snap_candidates(&graph, &origin);
-        let dc = snap_candidates(&graph, &dest);
+        let oc = snap_candidates(&graph, &origin, &RouteProfile::walking());
+        let dc = snap_candidates(&graph, &dest, &RouteProfile::walking());
         assert_eq!(oc[0].edge_index, 1, "nearer origin snap is edge 1");
         assert_eq!(dc[0].edge_index, 1, "nearer dest snap is edge 1");
         let o0 = *oc.iter().find(|s| s.edge_index == 0).unwrap();
@@ -1116,6 +1198,7 @@ mod tests {
                 lat: 35.0009,
                 ordinal: 5.0,
             },
+            &RouteProfile::walking(),
         );
         assert_eq!(cands.len(), 1, "single off-floor fallback candidate");
         assert_eq!(cands[0].edge_index, 0);
@@ -1253,4 +1336,283 @@ mod tests {
             "route passes through the shortcut junction"
         );
     }
+
+    fn diamond_vertical_graph() -> RouteGraph {
+        // A=0 (139,35,0), S0=1 (139.001,35,0), E0=2 (139,35.001,0),
+        // S1=3 (139.001,35,1), E1=4 (139,35.001,1), B=5 (139.001,35.001,1).
+        RouteGraph {
+            nodes: vec![
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.001,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 1.0,
+                },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.001,
+                    ordinal: 1.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.001,
+                    ordinal: 1.0,
+                },
+            ],
+            edges: vec![
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 1000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs::default(),
+                },
+                RouteEdge {
+                    from: 0,
+                    to: 2,
+                    weight: 1000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs::default(),
+                },
+                RouteEdge {
+                    from: 3,
+                    to: 5,
+                    weight: 1000.0,
+                    ordinal: 1.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs::default(),
+                },
+                RouteEdge {
+                    from: 4,
+                    to: 5,
+                    weight: 1000.0,
+                    ordinal: 1.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs::default(),
+                },
+                RouteEdge {
+                    from: 1,
+                    to: 3,
+                    weight: 10_000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs {
+                        kind: EdgeKind::Vertical,
+                        rank: PathwayRank::Primary,
+                        clearance_m: None,
+                        vertical: Some(VerticalKind::Stairs),
+                    },
+                },
+                RouteEdge {
+                    from: 2,
+                    to: 4,
+                    weight: 16_000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs {
+                        kind: EdgeKind::Vertical,
+                        rank: PathwayRank::Primary,
+                        clearance_m: None,
+                        vertical: Some(VerticalKind::Elevator),
+                    },
+                },
+            ],
+        }
+    }
+
+    fn route_coords(r: &Route) -> Vec<[f64; 2]> {
+        r.segments.iter().flat_map(|s| s.coordinates.clone()).collect()
+    }
+
+    #[test]
+    fn walking_profile_takes_the_cheaper_stairs() {
+        let g = diamond_vertical_graph();
+        let origin = Point3 {
+            lon: 139.0,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        let dest = Point3 {
+            lon: 139.001,
+            lat: 35.001,
+            ordinal: 1.0,
+        };
+        let walking = route_with(&g, origin, dest, &RouteProfile::walking()).expect("walking routes");
+        let coords = route_coords(&walking);
+        assert!(
+            coords.iter().any(|c| (c[0] - 139.001).abs() < 1e-9 && (c[1] - 35.0).abs() < 1e-9),
+            "walking path visits the stair landing, got {coords:?}"
+        );
+        let wheelchair =
+            route_with(&g, origin, dest, &RouteProfile::wheelchair()).expect("wheelchair routes");
+        assert!(
+            walking.total_weight < wheelchair.total_weight,
+            "stairs are cheaper than the elevator: walking {} wheelchair {}",
+            walking.total_weight,
+            wheelchair.total_weight
+        );
+    }
+
+    #[test]
+    fn wheelchair_profile_skips_stairs_and_uses_elevator() {
+        let g = diamond_vertical_graph();
+        let origin = Point3 {
+            lon: 139.0,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        let dest = Point3 {
+            lon: 139.001,
+            lat: 35.001,
+            ordinal: 1.0,
+        };
+        let walking = route_with(&g, origin, dest, &RouteProfile::walking()).expect("walking routes");
+        let wheelchair =
+            route_with(&g, origin, dest, &RouteProfile::wheelchair()).expect("wheelchair routes");
+        let w_coords = route_coords(&wheelchair);
+        assert!(
+            w_coords
+                .iter()
+                .any(|c| (c[0] - 139.0).abs() < 1e-9 && (c[1] - 35.001).abs() < 1e-9),
+            "wheelchair path visits the elevator landing, got {w_coords:?}"
+        );
+        let visits_stairs = w_coords
+            .iter()
+            .any(|c| (c[0] - 139.001).abs() < 1e-9 && (c[1] - 35.0).abs() < 1e-9);
+        assert_eq!(
+            visits_stairs,
+            false,
+            "wheelchair must not visit the stair landing, got {w_coords:?}"
+        );
+        let walk_coords = route_coords(&walking);
+        assert!(
+            walk_coords
+                .iter()
+                .any(|c| (c[0] - 139.001).abs() < 1e-9 && (c[1] - 35.0).abs() < 1e-9),
+            "walking still prefers stairs"
+        );
+    }
+
+    #[test]
+    fn wheelchair_rejects_sub_clearance_edge() {
+        let g = RouteGraph {
+            nodes: vec![
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 1000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs {
+                        clearance_m: Some(0.4),
+                        ..EdgeAttrs::default()
+                    },
+                },
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 3000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs {
+                        clearance_m: Some(1.2),
+                        ..EdgeAttrs::default()
+                    },
+                },
+            ],
+        };
+        let origin = Point3 {
+            lon: 139.0,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        let dest = Point3 {
+            lon: 139.001,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        let walking = route_with(&g, origin, dest, &RouteProfile::walking()).expect("walking routes");
+        assert!(
+            (walking.total_weight - 1000.0).abs() < 1.0,
+            "walking takes the cheap narrow edge, got {}",
+            walking.total_weight
+        );
+        let wheelchair =
+            route_with(&g, origin, dest, &RouteProfile::wheelchair()).expect("wheelchair routes");
+        assert!(
+            (wheelchair.total_weight - 3000.0).abs() < 1.0,
+            "wheelchair takes the wide edge, got {}",
+            wheelchair.total_weight
+        );
+    }
+
+    #[test]
+    fn unknown_clearance_is_allowed_for_wheelchair() {
+        let g = RouteGraph {
+            nodes: vec![
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 1000.0,
+                ordinal: 0.0,
+                interior: vec![],
+                attrs: EdgeAttrs {
+                    clearance_m: None,
+                    ..EdgeAttrs::default()
+                },
+            }],
+        };
+        let origin = Point3 {
+            lon: 139.0,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        let dest = Point3 {
+            lon: 139.001,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        route_with(&g, origin, dest, &RouteProfile::wheelchair())
+            .expect("unknown clearance must not fail a wheelchair query");
+    }
+
 }
