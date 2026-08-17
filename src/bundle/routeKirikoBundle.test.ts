@@ -91,6 +91,28 @@ describe("routeKirikoBundle", () => {
     expect(worker.terminate).toHaveBeenCalledTimes(1);
   });
 
+  it("includes profile on the route request when given", async () => {
+    const buffer = new TextEncoder().encode("kvb1-fixture").buffer;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(okResponse(buffer)));
+
+    const profile = { accessible: true };
+    const promise = routeKirikoBundle(SRC, ORIGIN, DESTINATION, undefined, profile);
+    await vi.waitFor(() => expect(createdWorkers).toHaveLength(1));
+
+    const worker = createdWorkers[0]!;
+    const [message] = worker.postMessage.mock.calls[0]!;
+    expect(message).toEqual({
+      type: "route",
+      buffer,
+      origin: ORIGIN,
+      destination: DESTINATION,
+      profile,
+    });
+
+    worker.dispatchEvent(new MessageEvent("message", { data: { type: "routed", route: ROUTE } }));
+    await expect(promise).resolves.toEqual(ROUTE);
+  });
+
   it("resolves null when the worker reports no path (or no graph)", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(okResponse(new ArrayBuffer(4))));
 

@@ -74,6 +74,7 @@ export async function routeBundleMessage(
       new Uint8Array(request.buffer),
       request.origin,
       request.destination,
+      request.profile ?? null,
     );
     return { type: "routed", route };
   } catch {

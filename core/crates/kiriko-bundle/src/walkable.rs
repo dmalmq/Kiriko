@@ -214,14 +214,25 @@ fn ring_coords(v: &Value) -> Vec<[f64; 2]> {
         .unwrap_or_default()
 }
 
-/// Route over the document's embedded graph, then pull the polyline tight
-/// against the venue's walkable floors. `None` when the document has no graph
-/// or no path connects the snapped endpoints — the same contract as
-/// [`kiriko_route::route`]. Exposed for tests; the WASM adapter wires the
-/// same two steps itself.
+/// Route over the document's embedded graph with the walking profile, then
+/// pull the polyline tight against the venue's walkable floors. `None` when
+/// the document has no graph or no path connects the snapped endpoints —
+/// the same contract as [`kiriko_route::route`]. Exposed for tests; the WASM
+/// adapter wires the same two steps itself. Use [`route_smoothed_with`] for
+/// a travel-mode profile.
 pub fn route_smoothed(document: &BundleDocument, origin: Point3, dest: Point3) -> Option<Route> {
+    route_smoothed_with(document, origin, dest, &kiriko_route::RouteProfile::walking())
+}
+
+/// [`route_smoothed`] with a travel-mode profile.
+pub fn route_smoothed_with(
+    document: &BundleDocument,
+    origin: Point3,
+    dest: Point3,
+    profile: &kiriko_route::RouteProfile,
+) -> Option<Route> {
     let graph = document.graph.as_ref()?;
-    let raw = kiriko_route::route(graph, origin, dest)?;
+    let raw = kiriko_route::route_with(graph, origin, dest, profile)?;
     let floors = walkable_floors(document);
     Some(kiriko_route::smooth_route(raw, &floors))
 }

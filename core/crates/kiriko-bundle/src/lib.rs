@@ -42,4 +42,4 @@ pub use export::{ExportError, NetworkGeoJson, export_network, ordinal_to_floor_l
 pub use resolve::{FloorOverride, ResolutionProfile};
 pub use scene_adapter::scene_projection;
 pub use scene_compile::{SceneProfile, VenueFloorGeometry, venue_floor_geometry};
-pub use walkable::{route_smoothed, walkable_floors};
+pub use walkable::{route_smoothed, route_smoothed_with, walkable_floors};

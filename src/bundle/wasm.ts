@@ -186,6 +186,12 @@ export interface RouteEndpoint {
   ordinal: number;
 }
 
+/** Query-time travel mode for `routeBundle`. Omitted/`null` walks. */
+export interface RouteProfileDto {
+  accessible?: boolean;
+  minClearanceM?: number | null;
+}
+
 /** Computed route: corridor polyline segments, total edge weight, and the
  *  origin/destination projected onto the network ([lon, lat, ordinal]). */
 export interface RouteResultDto {
@@ -266,6 +272,7 @@ export function routeBundle(
   bytes: Uint8Array,
   origin: RouteEndpoint,
   destination: RouteEndpoint,
+  profile?: RouteProfileDto | null,
 ): RouteResultDto | null {
   return routeBundleWasm(
     bytes,
@@ -275,6 +282,7 @@ export function routeBundle(
     destination.longitude,
     destination.latitude,
     destination.ordinal,
+    profile ?? null,
   ) as RouteResultDto | null;
 }
 

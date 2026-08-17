@@ -5,7 +5,7 @@
  * by the worker and its caller, `loadKirikoBundle.ts`.
  */
 import type { VenueLoadErrorCode } from "../errors/VenueLoadError";
-import type { DecodedVenueDto, FacilityDto, RouteEndpoint, RouteResultDto } from "./wasm";
+import type { DecodedVenueDto, FacilityDto, RouteEndpoint, RouteProfileDto, RouteResultDto } from "./wasm";
 
 /** `buffer` is always transferred (not cloned) to the worker. */
 export interface BundleDecodeRequest {
@@ -23,6 +23,8 @@ export interface BundleRouteRequest {
   buffer: ArrayBuffer;
   origin: RouteEndpoint;
   destination: RouteEndpoint;
+  /** Omitted → walking. */
+  profile?: RouteProfileDto;
 }
 
 /**

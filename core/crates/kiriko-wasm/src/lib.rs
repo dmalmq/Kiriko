@@ -20,8 +20,8 @@ use kiriko_bundle::{
 };
 use kiriko_model::canonical::{Object as CanonicalObject, Value as CanonicalValue};
 use kiriko_model::model::{Bounds, ImdfManifest, VenueFeature, ViewerLevel, ViewerWarning};
-use kiriko_route::{Point3, Route};
-use serde::Serialize;
+use kiriko_route::{Point3, Route, RouteProfile};
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
 
@@ -326,22 +326,59 @@ impl From<Route> for RouteDto {
     }
 }
 
+/// JS `routeBundle` profile: `{ accessible?: boolean, minClearanceM?: number | null }`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteProfileJs {
+    accessible: Option<bool>,
+    min_clearance_m: Option<f32>,
+}
+
+/// `null` / `undefined` / `{}` / deserialize failure → walking. `accessible: true`
+/// → wheelchair, then a finite `minClearanceM` overwrites the constructor default.
+fn profile_from_js(value: &JsValue) -> RouteProfile {
+    if value.is_null() || value.is_undefined() {
+        return RouteProfile::walking();
+    }
+    let Ok(dto) = serde_wasm_bindgen::from_value::<RouteProfileJs>(value.clone()) else {
+        return RouteProfile::walking();
+    };
+    let mut profile = if dto.accessible == Some(true) {
+        RouteProfile::wheelchair()
+    } else {
+        RouteProfile::walking()
+    };
+    if let Some(clearance) = dto.min_clearance_m {
+        if clearance.is_finite() {
+            profile.min_clearance_m = Some(clearance);
+        }
+    }
+    profile
+}
+
 /// Non-wasm core of [`route_bundle`]: route over the document's embedded
 /// graph section. `None` when the bundle has no graph (no network was
 /// compiled in) or when the snapped endpoints are disconnected.
-fn route_in_document(document: &BundleDocument, origin: Point3, dest: Point3) -> Option<RouteDto> {
+fn route_in_document(
+    document: &BundleDocument,
+    origin: Point3,
+    dest: Point3,
+    profile: &RouteProfile,
+) -> Option<RouteDto> {
     let graph = document.graph.as_ref()?;
-    let raw = kiriko_route::route(graph, origin, dest)?;
+    let raw = kiriko_route::route_with(graph, origin, dest, profile)?;
     let floors = kiriko_bundle::walkable_floors(document);
     Some(RouteDto::from(kiriko_route::smooth_route(raw, &floors)))
 }
 
 /// Route over a `kvb1` bundle's embedded network graph. `o_*`/`d_*` are the
-/// origin/destination as lon/lat plus level ordinal. Returns `null` when the
-/// bundle carries no graph section or no path connects the snapped
-/// endpoints; otherwise `{ nodes: [{lon, lat, ordinal}], totalWeight }`,
-/// serialized with the same json-compatible `serde-wasm-bindgen` serializer
-/// as [`to_js`]. Bundle-format failures throw (unlike [`decode_bundle_js`],
+/// origin/destination as lon/lat plus level ordinal. `profile` is a JS object
+/// `{ accessible?, minClearanceM? }`; `null` / `undefined` / `{}` walks.
+/// Returns `null` when the bundle carries no graph section or no path
+/// connects the snapped endpoints; otherwise
+/// `{ segments, totalWeight, originProjected, destProjected }`, serialized
+/// with the same json-compatible `serde-wasm-bindgen` serializer as
+/// [`to_js`]. Bundle-format failures throw (unlike [`decode_bundle_js`],
 /// which reports them structurally).
 #[wasm_bindgen(js_name = "routeBundle")]
 pub fn route_bundle(
@@ -352,6 +389,7 @@ pub fn route_bundle(
     d_lon: f64,
     d_lat: f64,
     d_ord: f64,
+    profile: JsValue,
 ) -> Result<JsValue, JsError> {
     let document = decode_bundle(bundle).map_err(|e| JsError::new(&e.message))?;
     let origin = Point3 {
@@ -364,7 +402,7 @@ pub fn route_bundle(
         lat: d_lat,
         ordinal: d_ord,
     };
-    let Some(route) = route_in_document(&document, origin, dest) else {
+    let Some(route) = route_in_document(&document, origin, dest, &profile_from_js(&profile)) else {
         return Ok(JsValue::NULL);
     };
     route
@@ -649,6 +687,7 @@ mod tests {
                 lat: 35.0,
                 ordinal: 0.0,
             },
+            &RouteProfile::walking(),
         )
         .expect("node 1 to node 2 must route");
         assert!(!route.segments.is_empty());
@@ -735,6 +774,7 @@ mod tests {
                     lat: 35.0,
                     ordinal: 0.0,
                 },
+                &RouteProfile::walking(),
             )
             .is_none(),
             "a bundle with no graph section must not route"
@@ -754,10 +794,132 @@ mod tests {
             ordinal: 0.0,
         };
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(route_in_document(&document, Point3 { lon: bad, ..ok }, ok).is_none());
-            assert!(route_in_document(&document, ok, Point3 { lat: bad, ..ok }).is_none());
-            assert!(route_in_document(&document, ok, Point3 { ordinal: bad, ..ok }).is_none());
+            assert!(route_in_document(&document, Point3 { lon: bad, ..ok }, ok, &RouteProfile::walking()).is_none());
+            assert!(route_in_document(&document, ok, Point3 { lat: bad, ..ok }, &RouteProfile::walking()).is_none());
+            assert!(route_in_document(&document, ok, Point3 { ordinal: bad, ..ok }, &RouteProfile::walking()).is_none());
         }
+    }
+
+
+    fn diamond_vertical_graph() -> kiriko_route::RouteGraph {
+        use kiriko_route::{EdgeAttrs, EdgeKind, PathwayRank, RouteEdge, RouteGraph, RouteNode, VerticalKind};
+        RouteGraph {
+            nodes: vec![
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.001,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 1.0,
+                },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.001,
+                    ordinal: 1.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.001,
+                    ordinal: 1.0,
+                },
+            ],
+            edges: vec![
+                RouteEdge {
+                    from: 0,
+                    to: 1,
+                    weight: 1000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs::default(),
+                },
+                RouteEdge {
+                    from: 0,
+                    to: 2,
+                    weight: 1000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs::default(),
+                },
+                RouteEdge {
+                    from: 3,
+                    to: 5,
+                    weight: 1000.0,
+                    ordinal: 1.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs::default(),
+                },
+                RouteEdge {
+                    from: 4,
+                    to: 5,
+                    weight: 1000.0,
+                    ordinal: 1.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs::default(),
+                },
+                RouteEdge {
+                    from: 1,
+                    to: 3,
+                    weight: 10_000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs {
+                        kind: EdgeKind::Vertical,
+                        rank: PathwayRank::Primary,
+                        clearance_m: None,
+                        vertical: Some(VerticalKind::Stairs),
+                    },
+                },
+                RouteEdge {
+                    from: 2,
+                    to: 4,
+                    weight: 16_000.0,
+                    ordinal: 0.0,
+                    interior: vec![],
+                    attrs: EdgeAttrs {
+                        kind: EdgeKind::Vertical,
+                        rank: PathwayRank::Primary,
+                        clearance_m: None,
+                        vertical: Some(VerticalKind::Elevator),
+                    },
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn route_in_document_walking_and_wheelchair_differ_on_diamond() {
+        let mut document = decode_bundle(&compile_with_graph()).expect("bundle decodes");
+        document.graph = Some(diamond_vertical_graph());
+        let origin = Point3 {
+            lon: 139.0,
+            lat: 35.0,
+            ordinal: 0.0,
+        };
+        let dest = Point3 {
+            lon: 139.001,
+            lat: 35.001,
+            ordinal: 1.0,
+        };
+        let walking = route_in_document(&document, origin, dest, &RouteProfile::walking())
+            .expect("walking routes");
+        let wheelchair = route_in_document(&document, origin, dest, &RouteProfile::wheelchair())
+            .expect("wheelchair routes");
+        assert_eq!(walking.total_weight, 12_000.0);
+        assert_eq!(wheelchair.total_weight, 18_000.0);
+        assert_ne!(walking.total_weight, wheelchair.total_weight);
     }
 
     #[test]

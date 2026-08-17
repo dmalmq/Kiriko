@@ -1,7 +1,7 @@
 import { VenueLoadError } from "../errors/VenueLoadError";
 import { BUNDLE_WORKER_FAILED_MESSAGE } from "./types";
 import type { BundleRouteRequest } from "./types";
-import type { RouteEndpoint, RouteResultDto } from "./wasm";
+import type { RouteEndpoint, RouteProfileDto, RouteResultDto } from "./wasm";
 import BundleWorker from "./bundle.worker?worker&inline";
 
 function isFiniteNumber(value: unknown): value is number {
@@ -62,6 +62,7 @@ export async function routeKirikoBundle(
   origin: RouteEndpoint,
   destination: RouteEndpoint,
   signal?: AbortSignal,
+  profile?: RouteProfileDto | null,
 ): Promise<RouteResultDto | null> {
   if (signal?.aborted) {
     throw new DOMException("Aborted", "AbortError");
@@ -175,7 +176,10 @@ export async function routeKirikoBundle(
     worker.addEventListener("messageerror", onMessageError);
     signal?.addEventListener("abort", onAbort, { once: true });
 
-    const request: BundleRouteRequest = { type: "route", buffer, origin, destination };
+    const request: BundleRouteRequest =
+      profile == null
+        ? { type: "route", buffer, origin, destination }
+        : { type: "route", buffer, origin, destination, profile };
     try {
       worker.postMessage(request, [buffer]);
     } catch {

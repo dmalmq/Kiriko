@@ -160,8 +160,30 @@ describe("routeBundleMessage", () => {
 
     const buffer = new Uint8Array([9, 8, 7]).buffer as ArrayBuffer;
     const response = await routeBundleMessage(routeRequest(buffer));
-    expect(routeBundleMock).toHaveBeenCalledWith(new Uint8Array(buffer), ORIGIN, DESTINATION);
+    expect(routeBundleMock).toHaveBeenCalledWith(new Uint8Array(buffer), ORIGIN, DESTINATION, null);
     expect(response).toEqual({ type: "routed", route });
+  });
+
+  it("passes an accessible profile through to wasm", async () => {
+    initKirikoWasmMock.mockResolvedValue(undefined);
+    routeBundleMock.mockReturnValue(null);
+
+    const buffer = new Uint8Array([9, 8, 7]).buffer as ArrayBuffer;
+    const profile = { accessible: true };
+    const response = await routeBundleMessage({
+      type: "route",
+      buffer,
+      origin: ORIGIN,
+      destination: DESTINATION,
+      profile,
+    });
+    expect(routeBundleMock).toHaveBeenCalledWith(
+      new Uint8Array(buffer),
+      ORIGIN,
+      DESTINATION,
+      profile,
+    );
+    expect(response).toEqual({ type: "routed", route: null });
   });
 
   it("maps a null wasm route (no graph or no path) to a routed response carrying null", async () => {
