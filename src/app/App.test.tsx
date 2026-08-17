@@ -1834,6 +1834,31 @@ describe("App directions mode", () => {
     expect(screen.getByText(/55\s*m/)).toBeTruthy();
   });
 
+  it("hides Wheelchair until Directions is on", async () => {
+    const user = userEvent.setup();
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    expect(screen.queryByRole("button", { name: "Wheelchair" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Directions" }));
+    expect(screen.getByRole("button", { name: "Wheelchair" })).toBeTruthy();
+  });
+
+  it("re-routes with accessible:true when Wheelchair is pressed", async () => {
+    const user = userEvent.setup();
+    routeKirikoBundleMock.mockResolvedValue(ROUTE_RESULT);
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await user.click(screen.getByRole("button", { name: "Directions" }));
+    await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
+    await user.click(screen.getByRole("button", { name: "Tap map for directions" }));
+    await waitFor(() => expect(routeKirikoBundleMock).toHaveBeenCalled());
+    routeKirikoBundleMock.mockClear();
+    await user.click(screen.getByRole("button", { name: "Wheelchair" }));
+    await waitFor(() => {
+      expect(routeKirikoBundleMock).toHaveBeenCalled();
+      const args = routeKirikoBundleMock.mock.calls[0];
+      expect(args[args.length - 1]).toEqual({ accessible: true });
+    });
+  });
+
   it("hides Review network when the bundle has no graph", async () => {
     await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), false);
     expect(screen.queryByRole("button", { name: "Review network" })).toBeNull();

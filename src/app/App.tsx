@@ -113,6 +113,7 @@ const ui = {
   attribution: { ja: "IMDF venue data © Company", en: "IMDF venue data © Company" },
   openInKiriko: { ja: "Kiriko で開く", en: "Open in Kiriko" },
   directions: { ja: "経路案内", en: "Directions" },
+  directionsAccessible: { ja: "車椅子", en: "Wheelchair" },
   reviewNetwork: { ja: "ネットワークを確認", en: "Review network" },
   reviewConnected: { ja: "接続率", en: "connected" },
   reviewIslands: { ja: "分割数", en: "islands" },
@@ -341,6 +342,7 @@ interface DirectionsState {
   status: DirectionsStatus;
   /** Destination pre-set by "Route here"; consumed on the next origin tap. */
   pendingDestination: RouteEndpoint | null;
+  accessible: boolean;
 }
 
 const INITIAL_DIRECTIONS: DirectionsState = {
@@ -350,6 +352,7 @@ const INITIAL_DIRECTIONS: DirectionsState = {
   route: null,
   status: "idle",
   pendingDestination: null,
+  accessible: false,
 };
 
 export function App() {
@@ -684,14 +687,17 @@ export function App() {
   }, [bundleProvenance, embed]);
 
   const fireRoute = useCallback(
-    (origin: RouteEndpoint, destination: RouteEndpoint) => {
+    (origin: RouteEndpoint, destination: RouteEndpoint, accessible: boolean) => {
       if (pinnedBundleUrl === null) {
         return;
       }
       const token = directionsTokenRef.current + 1;
       directionsTokenRef.current = token;
       setDirections((current) => ({ ...current, destination, route: null, status: "loading" }));
-      void routeKirikoBundle(pinnedBundleUrl, origin, destination).then(
+      const routed = accessible
+        ? routeKirikoBundle(pinnedBundleUrl, origin, destination, undefined, { accessible: true })
+        : routeKirikoBundle(pinnedBundleUrl, origin, destination);
+      void routed.then(
         (route) => {
           if (directionsTokenRef.current === token) {
             setDirections((current) => ({ ...current, route, status: "idle" }));
@@ -720,7 +726,7 @@ export function App() {
         // "Route here" pre-set the destination; this first tap is the origin.
         const dest = directions.pendingDestination;
         setDirections((current) => ({ ...current, origin: endpoint, pendingDestination: null }));
-        fireRoute(endpoint, dest);
+        fireRoute(endpoint, dest, directions.accessible);
         return;
       }
       if (directions.origin === null || directions.destination !== null) {
@@ -735,15 +741,23 @@ export function App() {
         }));
         return;
       }
-      fireRoute(directions.origin, endpoint);
+      fireRoute(directions.origin, endpoint, directions.accessible);
     },
-    [directions.origin, directions.destination, directions.pendingDestination, fireRoute, state],
+    [directions.accessible, directions.origin, directions.destination, directions.pendingDestination, fireRoute, state],
   );
 
   const clearDirections = useCallback(() => {
     directionsTokenRef.current += 1;
     setDirections((current) => ({ ...INITIAL_DIRECTIONS, active: current.active }));
   }, []);
+
+  const toggleAccessible = useCallback(() => {
+    const nextAccessible = directions.accessible === false;
+    setDirections((current) => ({ ...current, accessible: nextAccessible }));
+    if (directions.origin !== null && directions.destination !== null) {
+      fireRoute(directions.origin, directions.destination, nextAccessible);
+    }
+  }, [directions.accessible, directions.destination, directions.origin, fireRoute]);
 
   const toggleDirections = useCallback(() => {
     directionsTokenRef.current += 1;
@@ -2038,6 +2052,16 @@ export function App() {
                 >
                   {ui.directions[locale]}
                 </button>
+                {directions.active ? (
+                  <button
+                    type="button"
+                    className={directions.accessible ? "chip chip--selected" : "chip"}
+                    aria-pressed={directions.accessible}
+                    onClick={toggleAccessible}
+                  >
+                    {ui.directionsAccessible[locale]}
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className={reviewActive ? "chip chip--selected" : "chip"}
