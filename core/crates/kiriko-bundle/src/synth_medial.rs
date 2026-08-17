@@ -26,8 +26,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::codec::BundleDocument;
 use crate::synth::{
-    haversine_m, linestring_midpoint, point_boundary_dist_m, polygon_centroid, vertical_cost_m,
-    vertical_kind,
+    flags_from_accessibility, haversine_m, linestring_midpoint, point_boundary_dist_m,
+    polygon_centroid, vertical_cost_m, vertical_kind,
 };
 use crate::transit_match::{TransitPair, minimum_cost_maximum_matching};
 use kiriko_model::canonical::Value;
@@ -961,10 +961,10 @@ fn choose_spacing(area: &MultiPolygon<f64>, original: usize) -> Option<f64> {
 
 /// One floor's transit unit: centroid, category, largest footprint polygon
 /// (for vertical matching), and the source geometry (for doorway matching).
-type TransitUnit<'a> = ([f64; 2], String, Option<Polygon<f64>>, &'a Value);
+type TransitUnit<'a> = ([f64; 2], String, Option<Polygon<f64>>, &'a Value, Vec<String>);
 
 /// Cross-floor transit record accumulated while scanning ordinals.
-type TransitAllEntry = (u32, [f64; 2], String, f64, Option<Polygon<f64>>);
+type TransitAllEntry = (u32, [f64; 2], String, f64, Option<Polygon<f64>>, Vec<String>);
 
 /// Union-find root with path compression (over a `parent` slice).
 fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
@@ -1001,13 +1001,14 @@ struct OpeningAxis {
     direction: [f64; 2],
     arc_length_m: f64,
     chord_length_m: f64,
+    accessibility: Vec<String>,
 }
 
 /// An opening's midpoint plus unit LINE direction (metre frame at the
 /// midpoint's latitude) from its first→last vertex of the longest part, with
 /// measured arc and chord lengths. The doorway loop scores this against its
 /// normal to pick the passage axis. `None` for degenerate geometry.
-fn opening_axis(feature_id: &str, geom: &Value) -> Option<OpeningAxis> {
+fn opening_axis(feature_id: &str, geom: &Value, accessibility: &[String]) -> Option<OpeningAxis> {
     let obj = geom.as_object()?;
     let coords = obj.get("coordinates")?;
     let verts: Vec<[f64; 2]> = match obj.get("type")?.as_str()? {
@@ -1047,6 +1048,7 @@ fn opening_axis(feature_id: &str, geom: &Value) -> Option<OpeningAxis> {
         direction: [dx / chord_length_m, dy / chord_length_m],
         arc_length_m,
         chord_length_m,
+        accessibility: accessibility.to_vec(),
     })
 }
 
@@ -1146,6 +1148,7 @@ struct DoorwayPlan {
     /// Opening LineString length (IMDF physical width). Stamped onto
     /// `EdgeKind::Doorway` edges as `clearance_m`.
     arc_length_m: f64,
+    accessibility: Vec<String>,
     /// `(blob_root, skeleton_local_target)` sorted by root for determinism.
     attaches: Vec<(usize, usize)>,
 }
@@ -1391,7 +1394,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         }
                         Some(category) if is_transit(category) => {
                             if let Some(c) = polygon_centroid(geom) {
-                                transit.push((c, category.to_string(), largest_polygon(geom), geom));
+                                transit.push((c, category.to_string(), largest_polygon(geom), geom, f.accessibility.clone()));
                             }
                         }
                         // Every other unit — rooms, shops, service areas, and
@@ -1415,7 +1418,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     buffered.extend(detail_stadium_values(geom));
                 }
                 FeatureType::Opening => {
-                    if let Some(opening) = opening_axis(&f.id, geom) {
+                    if let Some(opening) = opening_axis(&f.id, geom, &f.accessibility) {
                         if let Some(warning) = opening_geometry_review(&opening, ord) {
                             warnings.push(warning);
                         }
@@ -1522,7 +1525,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 seen_roots.insert(root, ());
             }
         }
-        for (tp, _, footprint, _) in &transit {
+        for (tp, _, footprint, _, _) in &transit {
             let unit_area = footprint.clone().map(|p| MultiPolygon::new(vec![p]));
             let mut areas: Vec<&MultiPolygon<f64>> = vec![&area];
             if let Some(unit) = unit_area.as_ref() {
@@ -1753,6 +1756,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 mid,
                 axis,
                 arc_length_m: opening.arc_length_m,
+                accessibility: opening.accessibility.clone(),
                 attaches,
             });
         }
@@ -1896,7 +1900,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         clearance_m: clearance_attr(plan.arc_length_m),
                         ..EdgeAttrs::default()
                     },
-                    flags: Default::default(),
+                    flags: flags_from_accessibility(&plan.accessibility),
                 });
             }
             doorway_nodes.push(doorway);
@@ -2016,7 +2020,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         // but across a wall or track bed is not). A unit with no usable
         // doorway falls back to the nearest centerline node reachable without
         // leaving walkable space or the unit.
-        for (tp, category, footprint, geom) in &transit {
+        for (tp, category, footprint, geom, access) in &transit {
             let idx = nodes.len();
             nodes.push(RouteNode {
                 lon: tp[0],
@@ -2114,7 +2118,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     break;
                 }
             }
-            transit_all.push((idx as u32, *tp, category.clone(), ord, footprint.clone()));
+            transit_all.push((idx as u32, *tp, category.clone(), ord, footprint.clone(), access.clone()));
         }
 
         rank_room_crossing_edges(&mut edges[floor_edges_start..], &nodes, &room_polys);
@@ -2129,7 +2133,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         let lower_ordinal = ordinal_pair[0];
         let upper_ordinal = ordinal_pair[1];
         let mut lower_categories: BTreeSet<String> = BTreeSet::new();
-        for (_, _, category, ordinal, _) in &transit_all {
+        for (_, _, category, ordinal, _, _) in &transit_all {
             if *ordinal == lower_ordinal {
                 lower_categories.insert(category.clone());
             }
@@ -2137,22 +2141,22 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
         for category in lower_categories {
             let lower: Vec<_> = transit_all
                 .iter()
-                .filter(|(_, _, candidate_category, ordinal, _)| {
+                .filter(|(_, _, candidate_category, ordinal, _, _)| {
                     *ordinal == lower_ordinal && candidate_category == &category
                 })
                 .collect();
             let upper: Vec<_> = transit_all
                 .iter()
-                .filter(|(_, _, candidate_category, ordinal, _)| {
+                .filter(|(_, _, candidate_category, ordinal, _, _)| {
                     *ordinal == upper_ordinal && candidate_category == &category
                 })
                 .collect();
             let admissible: Vec<TransitPair> = lower
                 .iter()
-                .flat_map(|(lower_id, lower_point, _, _, lower_footprint)| {
+                .flat_map(|(lower_id, lower_point, _, _, lower_footprint, _)| {
                     upper
                         .iter()
-                        .filter_map(|(upper_id, upper_point, _, _, upper_footprint)| {
+                        .filter_map(|(upper_id, upper_point, _, _, upper_footprint, _)| {
                             let distance = haversine_m(*lower_point, *upper_point);
                             let linkable = distance <= VERTICAL_MATCH_M
                                 || footprints_overlap(lower_footprint, upper_footprint);
@@ -2169,6 +2173,20 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 matches.iter().map(|pair| pair.lower_node_id).collect();
             for pair in matches {
                 let kind = vertical_kind(&category);
+                let lower_acc = lower
+                    .iter()
+                    .find(|entry| entry.0 == pair.lower_node_id)
+                    .map(|entry| entry.5.as_slice())
+                    .unwrap_or(&[]);
+                let upper_acc = upper
+                    .iter()
+                    .find(|entry| entry.0 == pair.upper_node_id)
+                    .map(|entry| entry.5.as_slice())
+                    .unwrap_or(&[]);
+                let mut flags = flags_from_accessibility(lower_acc);
+                if flags_from_accessibility(upper_acc).wheelchair == false {
+                    flags.wheelchair = false;
+                }
                 edges.push(RouteEdge {
                     from: pair.lower_node_id,
                     to: pair.upper_node_id,
@@ -2180,10 +2198,10 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         vertical: Some(kind),
                         ..EdgeAttrs::default()
                     },
-                    flags: Default::default(),
+                    flags,
                 });
             }
-            for (lower_id, _, _, _, _) in &lower {
+            for (lower_id, _, _, _, _, _) in &lower {
                 if !matched_lower.contains(lower_id) {
                     warnings.push(RouteBuildWarning {
                         code: "synth_transit_no_link".into(),
@@ -2320,6 +2338,17 @@ mod tests {
         category: Option<&str>,
         geometry: Value,
     ) -> kiriko_model::model::VenueFeature {
+        feature_with_accessibility(id, feature_type, level_id, category, geometry, &[])
+    }
+
+    fn feature_with_accessibility(
+        id: &str,
+        feature_type: FeatureType,
+        level_id: &str,
+        category: Option<&str>,
+        geometry: Value,
+        accessibility: &[&str],
+    ) -> kiriko_model::model::VenueFeature {
         kiriko_model::model::VenueFeature {
             id: id.to_string(),
             feature_type,
@@ -2329,7 +2358,7 @@ mod tests {
             labels: BTreeMap::new(),
             alt_labels: BTreeMap::new(),
             category: category.map(str::to_string),
-            accessibility: Vec::new(),
+            accessibility: accessibility.iter().map(|s| (*s).to_string()).collect(),
             restriction: None,
             source_properties: BTreeMap::new(),
         }
@@ -3717,6 +3746,105 @@ mod tests {
         );
     }
 
+    /// Two thin walkways joined by one north–south opening at lon 139.7.
+    fn two_walkway_door_doc(door_access: &[&str]) -> BundleDocument {
+        let door = line(139.70000, 35.600004, 139.70000, 35.600010);
+        document(
+            &[("l0", 0.0)],
+            vec![
+                feature(
+                    "wa",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600000, 0.00040, 0.00001),
+                ),
+                feature(
+                    "wb",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600014, 0.00040, 0.00001),
+                ),
+                feature_with_accessibility(
+                    "door",
+                    FeatureType::Opening,
+                    "l0",
+                    None,
+                    door,
+                    door_access,
+                ),
+            ],
+        )
+    }
+
+    fn doorway_flags(g: &kiriko_route::RouteGraph) -> Vec<kiriko_route::EdgeFlags> {
+        g.edges
+            .iter()
+            .filter(|e| e.attrs.kind == EdgeKind::Doorway)
+            .map(|e| e.flags)
+            .collect()
+    }
+
+    #[test]
+    fn accessibility_wheelchair_tag_sets_doorway_flag() {
+        let build = synthesize_network_medial(&two_walkway_door_doc(&["wheelchair"]));
+        let flags = doorway_flags(&build.graph);
+        assert!(flags.is_empty() == false, "expected doorway edges");
+        for f in flags {
+            assert_eq!(f.wheelchair, true);
+            assert_eq!(f.accessible_only, false);
+        }
+    }
+
+    #[test]
+    fn accessibility_assisted_only_blocks_wheelchair_profile() {
+        let build = synthesize_network_medial(&two_walkway_door_doc(&["assisted"]));
+        let g = &build.graph;
+        let flags = doorway_flags(g);
+        assert!(flags.is_empty() == false, "expected doorway edges");
+        for f in flags {
+            assert_eq!(f.wheelchair, false);
+            assert_eq!(f.accessible_only, false);
+        }
+        let origin = kiriko_route::Point3 {
+            lon: 139.70000,
+            lat: 35.600000,
+            ordinal: 0.0,
+        };
+        let dest = kiriko_route::Point3 {
+            lon: 139.70000,
+            lat: 35.600014,
+            ordinal: 0.0,
+        };
+        assert!(
+            kiriko_route::route_with(g, origin, dest, &kiriko_route::RouteProfile::walking())
+                .is_some(),
+            "walking still uses an assisted-only doorway"
+        );
+        assert!(
+            kiriko_route::route_with(
+                g,
+                origin,
+                dest,
+                &kiriko_route::RouteProfile::wheelchair()
+            )
+            .is_none(),
+            "wheelchair profile cannot traverse a non-wheelchair doorway"
+        );
+    }
+
+    #[test]
+    fn accessibility_empty_list_keeps_wheelchair_true() {
+        let build = synthesize_network_medial(&two_walkway_door_doc(&[]));
+        let flags = doorway_flags(&build.graph);
+        assert!(flags.is_empty() == false, "expected doorway edges");
+        for f in flags {
+            assert_eq!(f.wheelchair, true);
+            assert_eq!(f.accessible_only, false);
+        }
+    }
+
     #[test]
     fn nearby_openings_share_one_doorway_bridge() {
         // Two doorways ~1.5 m apart in the same wall between the same two
@@ -4663,7 +4791,7 @@ mod tests {
                 ]),
             ),
         ]));
-        let opening = opening_axis("opening-1", &geom).expect("axis parses");
+        let opening = opening_axis("opening-1", &geom, &[]).expect("axis parses");
         assert_eq!(opening.feature_id, "opening-1");
         assert!(
             (opening.mid[0] - 139.03125).abs() < 1e-9 && (opening.mid[1] - 35.0).abs() < 1e-9,
@@ -4806,6 +4934,7 @@ mod tests {
             direction: [1.0, 0.0],
             arc_length_m: 8.0,
             chord_length_m: 4.0,
+            accessibility: Vec::new(),
         };
         let warning = opening_geometry_review(&opening, 2.0).expect("warning");
         assert_eq!(warning.code, "synth_opening_geometry_review");

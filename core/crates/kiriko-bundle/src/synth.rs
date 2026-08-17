@@ -22,12 +22,32 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
 use kiriko_route::{
-    EdgeAttrs, EdgeKind, RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild, RouteNode,
-    VerticalKind,
+    EdgeAttrs, EdgeFlags, EdgeKind, RouteBuildWarning, RouteEdge, RouteGraph, RouteGraphBuild,
+    RouteNode, VerticalKind,
 };
 
 use crate::codec::BundleDocument;
 use crate::transit_match::{TransitPair, minimum_cost_maximum_matching};
+
+/// IMDF `accessibility[]` → traversal flags. An empty list is the public
+/// default (`wheelchair = true`). A non-empty list is wheelchair-ok only
+/// when it names `"wheelchair"` (case-insensitive). IMDF openings never
+/// express accessible-only.
+pub(crate) fn flags_from_accessibility(accessibility: &[String]) -> EdgeFlags {
+    let wheelchair = if accessibility.is_empty() {
+        true
+    } else {
+        accessibility
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("wheelchair"))
+    };
+    EdgeFlags {
+        wheelchair,
+        accessible_only: false,
+        ..EdgeFlags::default()
+    }
+}
+
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
 
 /// Adjacency tolerance (metres): an opening links to a hub, and a transit hub
@@ -357,6 +377,7 @@ struct Hub<'a> {
     pt: [f64; 2],
     geom: &'a Value,
     transit: Option<&'a str>,
+    accessibility: Vec<String>,
 }
 
 /// Kind tag used only to keep a level's node vector deterministically sorted.
@@ -388,13 +409,13 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
     let mut edges: Vec<RouteEdge> = Vec::new();
     let mut warnings: Vec<RouteBuildWarning> = Vec::new();
     // Transit nodes across every floor: (node index, centroid, category, ordinal).
-    let mut transit_all: Vec<(u32, [f64; 2], String, f64)> = Vec::new();
+    let mut transit_all: Vec<(u32, [f64; 2], String, f64, Vec<String>)> = Vec::new();
 
     for &ord in &ordinals {
         // Node-bearing units on this floor: walkways and transit units. Each
         // gets a hub node at its centroid; `transit` tags the transit kind.
         let mut hubs: Vec<Hub<'_>> = Vec::new();
-        let mut openings: Vec<[f64; 2]> = Vec::new();
+        let mut openings: Vec<([f64; 2], Vec<String>)> = Vec::new();
 
         for f in &document.features {
             let Some(level_id) = f.level_id.as_deref() else {
@@ -419,12 +440,13 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                             pt,
                             geom,
                             transit: transit.then_some(category),
+                            accessibility: f.accessibility.clone(),
                         });
                     }
                 }
                 FeatureType::Opening => {
                     if let Some(m) = linestring_midpoint(geom) {
-                        openings.push(m);
+                        openings.push((m, f.accessibility.clone()));
                     }
                 }
                 _ => {}
@@ -434,8 +456,9 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         // Keep only openings adjacent to at least one hub; record adjacencies
         // (indices into `hubs`). Openings are the standard IMDF connectivity
         // signal, joining walkways and transit units through their doorways.
-        let mut kept_openings: Vec<([f64; 2], Vec<usize>)> = Vec::new();
-        for &op in &openings {
+        let mut kept_openings: Vec<([f64; 2], Vec<usize>, Vec<String>)> = Vec::new();
+        for (op, access) in &openings {
+            let op = *op;
             let adj: Vec<usize> = hubs
                 .iter()
                 .enumerate()
@@ -453,7 +476,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                     ),
                 });
             } else {
-                kept_openings.push((op, adj));
+                kept_openings.push((op, adj, access.clone()));
             }
         }
 
@@ -462,7 +485,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         for (i, h) in hubs.iter().enumerate() {
             combined.push((h.pt, 0, Tag::Hub(i)));
         }
-        for (i, (pt, _)) in kept_openings.iter().enumerate() {
+        for (i, (pt, _, _)) in kept_openings.iter().enumerate() {
             combined.push((*pt, 1, Tag::Opening(i)));
         }
         combined.sort_by(|a, b| {
@@ -489,7 +512,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         }
 
         // Horizontal: each opening links to every adjacent hub.
-        for (k, (op, adj)) in kept_openings.iter().enumerate() {
+        for (k, (op, adj, access)) in kept_openings.iter().enumerate() {
             for &h in adj {
                 edges.push(RouteEdge {
                     from: opening_idx[k],
@@ -501,7 +524,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                         kind: EdgeKind::Doorway,
                         ..EdgeAttrs::default()
                     },
-                    flags: Default::default(),
+                    flags: flags_from_accessibility(access),
                 });
             }
         }
@@ -595,7 +618,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         // Record transit hubs for the vertical-linking pass.
         for (i, h) in hubs.iter().enumerate() {
             if let Some(category) = h.transit {
-                transit_all.push((hub_idx[i], h.pt, category.to_string(), ord));
+                transit_all.push((hub_idx[i], h.pt, category.to_string(), ord, h.accessibility.clone()));
             }
         }
     }
@@ -608,7 +631,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         let lower_ordinal = ordinal_pair[0];
         let upper_ordinal = ordinal_pair[1];
         let mut lower_categories: BTreeSet<String> = BTreeSet::new();
-        for (_, _, candidate_category, ordinal) in &transit_all {
+        for (_, _, candidate_category, ordinal, _) in &transit_all {
             if *ordinal == lower_ordinal {
                 lower_categories.insert(candidate_category.clone());
             }
@@ -616,20 +639,20 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         for category in lower_categories {
             let lower: Vec<_> = transit_all
                 .iter()
-                .filter(|(_, _, candidate_category, ordinal)| {
+                .filter(|(_, _, candidate_category, ordinal, _)| {
                     *ordinal == lower_ordinal && candidate_category == &category
                 })
                 .collect();
             let upper: Vec<_> = transit_all
                 .iter()
-                .filter(|(_, _, candidate_category, ordinal)| {
+                .filter(|(_, _, candidate_category, ordinal, _)| {
                     *ordinal == upper_ordinal && candidate_category == &category
                 })
                 .collect();
             let admissible: Vec<TransitPair> = lower
                 .iter()
-                .flat_map(|(lower_id, lower_point, _, _)| {
-                    upper.iter().filter_map(|(upper_id, upper_point, _, _)| {
+                .flat_map(|(lower_id, lower_point, _, _, _)| {
+                    upper.iter().filter_map(|(upper_id, upper_point, _, _, _)| {
                         let distance = haversine_m(*lower_point, *upper_point);
                         (distance <= VERTICAL_MATCH_M).then_some(TransitPair {
                             lower_node_id: *lower_id,
@@ -644,6 +667,20 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                 matches.iter().map(|pair| pair.lower_node_id).collect();
             for pair in matches {
                 let kind = vertical_kind(&category);
+                let lower_acc = lower
+                    .iter()
+                    .find(|entry| entry.0 == pair.lower_node_id)
+                    .map(|entry| entry.4.as_slice())
+                    .unwrap_or(&[]);
+                let upper_acc = upper
+                    .iter()
+                    .find(|entry| entry.0 == pair.upper_node_id)
+                    .map(|entry| entry.4.as_slice())
+                    .unwrap_or(&[]);
+                let mut flags = flags_from_accessibility(lower_acc);
+                if flags_from_accessibility(upper_acc).wheelchair == false {
+                    flags.wheelchair = false;
+                }
                 edges.push(RouteEdge {
                     from: pair.lower_node_id,
                     to: pair.upper_node_id,
@@ -655,7 +692,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                         vertical: Some(kind),
                         ..EdgeAttrs::default()
                     },
-                    flags: Default::default(),
+                    flags,
                 });
             }
             for candidate in &lower {
