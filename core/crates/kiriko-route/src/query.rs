@@ -49,7 +49,7 @@ impl RouteProfile {
     }
 }
 
-fn edge_allowed(edge: &RouteEdge, profile: &RouteProfile) -> bool {
+pub fn edge_allowed(edge: &RouteEdge, profile: &RouteProfile) -> bool {
     if let Some(v) = edge.attrs.vertical {
         if profile.skip_stairs && v == VerticalKind::Stairs {
             return false;

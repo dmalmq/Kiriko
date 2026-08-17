@@ -14,5 +14,5 @@ pub use graph::{
     RouteNode, TravelDirection, VerticalKind, kind_from_key, kind_key, meters_to_cost,
     vertical_from_key, vertical_key,
 };
-pub use query::{Point3, Route, RouteProfile, RouteSegment, route, route_with};
+pub use query::{Point3, Route, RouteProfile, RouteSegment, edge_allowed, route, route_with};
 pub use smooth::{WalkableFloor, WalkablePolygon, smooth_route};
