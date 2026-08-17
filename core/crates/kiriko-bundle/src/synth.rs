@@ -501,6 +501,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                         kind: EdgeKind::Doorway,
                         ..EdgeAttrs::default()
                     },
+                    flags: Default::default(),
                 });
             }
         }
@@ -552,6 +553,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                         kind: EdgeKind::Skeleton,
                         ..EdgeAttrs::default()
                     },
+                    flags: Default::default(),
                 });
             }
         }
@@ -583,6 +585,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                                 kind: EdgeKind::Skeleton,
                                 ..EdgeAttrs::default()
                             },
+                            flags: Default::default(),
                         });
                     }
                 }
@@ -652,6 +655,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                         vertical: Some(kind),
                         ..EdgeAttrs::default()
                     },
+                    flags: Default::default(),
                 });
             }
             for candidate in &lower {

@@ -844,6 +844,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 0,
@@ -852,6 +853,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 3,
@@ -860,6 +862,7 @@ mod tests {
                     ordinal: 1.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 4,
@@ -868,6 +871,7 @@ mod tests {
                     ordinal: 1.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 1,
@@ -881,6 +885,7 @@ mod tests {
                         clearance_m: None,
                         vertical: Some(VerticalKind::Stairs),
                     },
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 2,
@@ -894,6 +899,7 @@ mod tests {
                         clearance_m: None,
                         vertical: Some(VerticalKind::Elevator),
                     },
+                    flags: Default::default(),
                 },
             ],
         }

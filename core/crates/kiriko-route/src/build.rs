@@ -153,6 +153,7 @@ pub fn build_route_graph(
             ordinal,
             interior,
             attrs: attrs_from_properties(&feature.properties),
+            flags: Default::default(),
         };
 
         // Reciprocal handling requires both PATHID and RPATHID; id-less paths

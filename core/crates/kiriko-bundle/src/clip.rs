@@ -270,6 +270,7 @@ pub(crate) fn clip_graph(
             ordinal: edge.ordinal,
             interior: edge.interior.clone(),
             attrs: edge.attrs,
+            flags: edge.flags,
         });
     }
     let dropped_edges = u32::try_from(graph.edges.len() - edges.len()).unwrap_or(u32::MAX);
@@ -413,6 +414,7 @@ mod tests {
             ordinal: 0.0,
             interior: Vec::new(),
             attrs: EdgeAttrs::default(),
+            flags: Default::default(),
         }
     }
 

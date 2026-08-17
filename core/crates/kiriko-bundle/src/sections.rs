@@ -712,6 +712,7 @@ pub(crate) fn decode_graph(bytes: &[u8]) -> Result<kiriko_route::RouteGraph, Bun
             ordinal: canonical_f64(edge.ordinal)?,
             interior,
             attrs: kiriko_route::EdgeAttrs::default(),
+            flags: Default::default(),
         });
     }
     Ok(kiriko_route::RouteGraph { nodes, edges })
@@ -1161,6 +1162,7 @@ mod tests {
                 ordinal: 0.0,
                 interior: vec![],
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         });
         let bytes = crate::encode_bundle(&doc).expect("a document with a graph encodes");
@@ -1191,6 +1193,7 @@ mod tests {
                 ordinal: 0.0,
                 interior: vec![[139.001, 35.001]],
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         });
         let bytes = crate::encode_bundle(&doc).expect("encodes");
@@ -1263,6 +1266,7 @@ mod tests {
                 ordinal: 0.0,
                 interior: Vec::new(),
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         });
         let bytes = crate::encode_bundle(&doc).expect("a default-attrs document encodes");
@@ -1763,6 +1767,7 @@ mod tests {
                 ordinal: 0.0,
                 interior: Vec::new(),
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         });
         doc.facilities = Some(kiriko_facilities::Facilities {
@@ -1886,6 +1891,7 @@ mod tests {
                 ordinal: 0.0,
                 interior: vec![],
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         };
         assert!(

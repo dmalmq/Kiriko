@@ -362,6 +362,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: Vec::new(),
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 0,
@@ -370,6 +371,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: Vec::new(),
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
             ],
         };
@@ -468,6 +470,7 @@ mod tests {
                 ordinal: 0.5,
                 interior: Vec::new(),
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         };
         let bundle = bundle_with_graph(graph);
@@ -501,6 +504,7 @@ mod tests {
                 ordinal: 1.0,
                 interior: Vec::new(),
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         };
         let net1 = export_network(&bundle_with_graph(g0.clone())).expect("first export");
@@ -540,6 +544,7 @@ mod tests {
                 ordinal: 0.0,
                 interior: Vec::new(),
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         };
         let net = export_network(&bundle_with_graph(g0.clone())).expect("export");
@@ -585,6 +590,7 @@ mod tests {
                     clearance_m: Some(1.5),
                     vertical: Some(kiriko_route::VerticalKind::Elevator),
                 },
+                flags: Default::default(),
             }],
         };
         let net = export_network(&bundle_with_graph(graph.clone())).expect("export");

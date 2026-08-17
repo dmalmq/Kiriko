@@ -383,6 +383,7 @@ mod tests {
                     m(20.0, 0.0),
                 ],
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         }
     }
@@ -564,6 +565,7 @@ mod tests {
                     m(20.0, 2.0),
                 ],
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         };
         doc.graph = Some(graph.clone());

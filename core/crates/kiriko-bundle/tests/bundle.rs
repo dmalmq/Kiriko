@@ -1586,6 +1586,7 @@ fn network_round_trip_is_stable_across_two_export_build_cycles() {
                 ordinal: 0.0,
                 interior: Vec::new(),
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             },
             RouteEdge {
                 from: 0,
@@ -1594,6 +1595,7 @@ fn network_round_trip_is_stable_across_two_export_build_cycles() {
                 ordinal: 0.0,
                 interior: Vec::new(),
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             },
         ],
     };

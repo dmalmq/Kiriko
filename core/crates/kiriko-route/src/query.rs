@@ -11,15 +11,16 @@ pub struct RouteProfile {
     pub skip_stairs: bool,
     pub skip_escalators: bool,
     /// IndoorAtlas-style default: skip edges flagged accessible-only.
-    /// No-op until `RouteEdge` carries that flag.
     pub exclude_accessible_only: bool,
     /// Kallmann `2r < cl`. `None` does not filter. Unknown (`None`)
     /// clearance on an edge is allowed.
     pub min_clearance_m: Option<f32>,
     /// Minutes from midnight; `None` ignores time windows.
     pub at_minutes: Option<u16>,
-    /// When false (default), skip `BARRIER` edges. Unused until flags exist.
+    /// When false (default), skip `BARRIER` edges.
     pub allow_barriers: bool,
+    /// When true, skip edges with `flags.wheelchair == false`.
+    pub require_wheelchair: bool,
 }
 
 impl RouteProfile {
@@ -31,6 +32,7 @@ impl RouteProfile {
             min_clearance_m: None,
             at_minutes: None,
             allow_barriers: false,
+            require_wheelchair: false,
         }
     }
 
@@ -42,6 +44,7 @@ impl RouteProfile {
             min_clearance_m: Some(0.8),
             at_minutes: None,
             allow_barriers: false,
+            require_wheelchair: true,
         }
     }
 }
@@ -58,6 +61,30 @@ fn edge_allowed(edge: &RouteEdge, profile: &RouteProfile) -> bool {
     if let (Some(min), Some(c)) = (profile.min_clearance_m, edge.attrs.clearance_m) {
         if c < min {
             return false;
+        }
+    }
+    if edge.flags.barrier && profile.allow_barriers == false {
+        return false;
+    }
+    if profile.exclude_accessible_only && edge.flags.accessible_only {
+        return false;
+    }
+    if profile.require_wheelchair && edge.flags.wheelchair == false {
+        return false;
+    }
+    if let Some(t) = profile.at_minutes {
+        let start = edge.flags.start_minute;
+        let end = edge.flags.end_minute;
+        if start >= 0 && end >= 0 {
+            let t = i32::from(t);
+            let inside = if start <= end {
+                t >= start && t < end
+            } else {
+                t >= start || t < end
+            };
+            if inside == false {
+                return false;
+            }
         }
     }
     true
@@ -697,6 +724,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![[139.001, 35.001]],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 1,
@@ -705,6 +733,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
             ],
         };
@@ -752,6 +781,7 @@ mod tests {
                 ordinal: 0.0,
                 interior: vec![],
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         };
         // Both clicks land mid-edge (same edge) → straight slice between them.
@@ -809,6 +839,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 1,
@@ -817,6 +848,7 @@ mod tests {
                     ordinal: 1.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
             ],
         };
@@ -861,6 +893,7 @@ mod tests {
                 ordinal: 0.0,
                 interior: vec![[139.001, 35.001]],
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
         }
     }
@@ -903,6 +936,7 @@ mod tests {
             ordinal: -1.0,
             interior: vec![],
             attrs: EdgeAttrs::default(),
+            flags: Default::default(),
         });
         let cands = snap_candidates(
             &g,
@@ -956,6 +990,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 0,
@@ -964,6 +999,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
             ],
         };
@@ -1020,6 +1056,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 0,
@@ -1028,6 +1065,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
             ],
         };
@@ -1096,6 +1134,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 2,
@@ -1104,6 +1143,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
             ],
         };
@@ -1232,6 +1272,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 1,
@@ -1240,6 +1281,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
             ],
         };
@@ -1288,6 +1330,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![[139.0, 35.002], [139.002, 35.002]],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 0,
@@ -1296,6 +1339,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 2,
@@ -1304,6 +1348,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
             ],
         };
@@ -1381,6 +1426,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 0,
@@ -1389,6 +1435,7 @@ mod tests {
                     ordinal: 0.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 3,
@@ -1397,6 +1444,7 @@ mod tests {
                     ordinal: 1.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 4,
@@ -1405,6 +1453,7 @@ mod tests {
                     ordinal: 1.0,
                     interior: vec![],
                     attrs: EdgeAttrs::default(),
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 1,
@@ -1418,6 +1467,7 @@ mod tests {
                         clearance_m: None,
                         vertical: Some(VerticalKind::Stairs),
                     },
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 2,
@@ -1431,6 +1481,7 @@ mod tests {
                         clearance_m: None,
                         vertical: Some(VerticalKind::Elevator),
                     },
+                    flags: Default::default(),
                 },
             ],
         }
@@ -1535,6 +1586,7 @@ mod tests {
                         clearance_m: Some(0.4),
                         ..EdgeAttrs::default()
                     },
+                    flags: Default::default(),
                 },
                 RouteEdge {
                     from: 0,
@@ -1546,6 +1598,7 @@ mod tests {
                         clearance_m: Some(1.2),
                         ..EdgeAttrs::default()
                     },
+                    flags: Default::default(),
                 },
             ],
         };
@@ -1599,6 +1652,7 @@ mod tests {
                     clearance_m: None,
                     ..EdgeAttrs::default()
                 },
+                flags: Default::default(),
             }],
         };
         let origin = Point3 {

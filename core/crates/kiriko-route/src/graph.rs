@@ -134,6 +134,51 @@ pub struct RouteEdge {
     pub interior: Vec<[f64; 2]>,
     /// Generation-quality attributes (kind, rank, clearance, vertical).
     pub attrs: EdgeAttrs,
+    /// Traversal flags (direction, barrier, hours, accessibility).
+    pub flags: EdgeFlags,
+}
+
+/// Travel allowed relative to the stored `from → to` orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum TravelDirection {
+    #[default]
+    Both = 0,
+    Forward = 1,
+    Reverse = 2,
+}
+
+/// Query-time traversal flags persisted on KVB §13. Default is bidirectional,
+/// open, wheelchair-ok, not accessible-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EdgeFlags {
+    pub direction: TravelDirection,
+    pub barrier: bool,
+    pub gate: bool,
+    pub start_minute: i32,
+    pub end_minute: i32,
+    pub wheelchair: bool,
+    pub accessible_only: bool,
+}
+
+impl Default for EdgeFlags {
+    fn default() -> Self {
+        Self {
+            direction: TravelDirection::Both,
+            barrier: false,
+            gate: false,
+            start_minute: -1,
+            end_minute: -1,
+            wheelchair: true,
+            accessible_only: false,
+        }
+    }
+}
+
+impl EdgeFlags {
+    pub fn is_default(self) -> bool {
+        self == Self::default()
+    }
 }
 
 impl RouteEdge {
@@ -147,6 +192,7 @@ impl RouteEdge {
             ordinal,
             interior: Vec::new(),
             attrs: EdgeAttrs::default(),
+            flags: EdgeFlags::default(),
         }
     }
 }
@@ -220,6 +266,7 @@ mod tests {
                 ordinal: 0.0,
                 interior: Vec::new(),
                 attrs: EdgeAttrs::default(),
+                flags: Default::default(),
             }],
             ..nodes_only.clone()
         };

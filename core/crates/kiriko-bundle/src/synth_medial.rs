@@ -1132,6 +1132,7 @@ fn materialize_doorway_side(
             kind: EdgeKind::Stub,
             ..EdgeAttrs::default()
         },
+        flags: Default::default(),
     });
     side.node = Some(index);
     index
@@ -1785,6 +1786,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     clearance_m: clearance,
                     ..EdgeAttrs::default()
                 },
+                flags: Default::default(),
             });
         }
         let skeleton_range = base..nodes.len();
@@ -1889,6 +1891,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         kind: EdgeKind::Doorway,
                         ..EdgeAttrs::default()
                     },
+                    flags: Default::default(),
                 });
             }
             doorway_nodes.push(doorway);
@@ -1978,6 +1981,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     clearance_m: clearance,
                     ..EdgeAttrs::default()
                 },
+                flags: Default::default(),
             });
         }
 
@@ -1997,6 +2001,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     kind: EdgeKind::Chord,
                     ..EdgeAttrs::default()
                 },
+                flags: Default::default(),
             });
         }
 
@@ -2069,6 +2074,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         kind: EdgeKind::TransitAttach,
                         ..EdgeAttrs::default()
                     },
+                    flags: Default::default(),
                 });
                 attached = true;
             }
@@ -2098,6 +2104,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                             kind: EdgeKind::TransitAttach,
                             ..EdgeAttrs::default()
                         },
+                        flags: Default::default(),
                     });
                     break;
                 }
@@ -2168,6 +2175,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         vertical: Some(kind),
                         ..EdgeAttrs::default()
                     },
+                    flags: Default::default(),
                 });
             }
             for (lower_id, _, _, _, _) in &lower {
@@ -2555,6 +2563,7 @@ mod tests {
                     kind: EdgeKind::Skeleton,
                     ..EdgeAttrs::default()
                 },
+                flags: Default::default(),
             },
             RouteEdge {
                 from: 0,
@@ -2566,6 +2575,7 @@ mod tests {
                     kind: EdgeKind::Doorway,
                     ..EdgeAttrs::default()
                 },
+                flags: Default::default(),
             },
         ];
         rank_room_crossing_edges(&mut edges, &nodes, &room_polys);
