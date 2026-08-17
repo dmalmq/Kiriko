@@ -5,8 +5,8 @@ use geojson::{FeatureCollection, GeoJson, Value};
 
 use crate::floor::floor_to_ordinal;
 use crate::graph::{
-    EdgeAttrs, EdgeKind, PathwayRank, RouteEdge, RouteGraph, RouteNode, kind_from_key,
-    vertical_from_key,
+    EdgeAttrs, EdgeFlags, EdgeKind, PathwayRank, RouteEdge, RouteGraph, RouteNode,
+    TravelDirection, kind_from_key, vertical_from_key,
 };
 
 /// Non-fatal problem encountered while building a route graph.
@@ -153,7 +153,7 @@ pub fn build_route_graph(
             ordinal,
             interior,
             attrs: attrs_from_properties(&feature.properties),
-            flags: Default::default(),
+            flags: flags_from_properties(&feature.properties),
         };
 
         // Reciprocal handling requires both PATHID and RPATHID; id-less paths
@@ -270,6 +270,44 @@ fn prop<'a>(
     properties.as_ref()?.get(key)
 }
 
+
+/// Read GDB traversal properties from a path feature: `direction`, `BARRIER`,
+/// `GATE`, `STARTTIME`, `ENDTIME`. Missing or unrecognized values fall back
+/// to [`EdgeFlags::default()`] (bidirectional, open). GATE is stored, not a
+/// restriction. `passage_type` is not read into flags.
+fn flags_from_properties(
+    properties: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> EdgeFlags {
+    let direction = match prop(properties, "direction").and_then(|v| {
+        v.as_i64().or_else(|| v.as_u64().map(|n| n as i64))
+    }) {
+        Some(1) => TravelDirection::Forward,
+        Some(2) => TravelDirection::Reverse,
+        _ => TravelDirection::Both,
+    };
+    let int_prop = |key: &str| {
+        prop(properties, key).and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
+    };
+    let barrier = match int_prop("BARRIER").unwrap_or(0) {
+        0 => false,
+        _ => true,
+    };
+    let gate = match int_prop("GATE").unwrap_or(0) {
+        0 => false,
+        _ => true,
+    };
+    let start_minute = int_prop("STARTTIME").unwrap_or(-1) as i32;
+    let end_minute = int_prop("ENDTIME").unwrap_or(-1) as i32;
+    EdgeFlags {
+        direction,
+        barrier,
+        gate,
+        start_minute,
+        end_minute,
+        ..EdgeFlags::default()
+    }
+}
+
 /// Read the four generation-quality keys from a path feature's properties:
 /// `EDGE_KIND`, `PATHWAY_RANK`, `CLEARANCE_M`, `TRANSITION_CATEGORY`.
 /// Missing or unrecognized values fall back to `EdgeAttrs::default()`, so
@@ -320,7 +358,7 @@ fn attrs_from_properties(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::VerticalKind;
+    use crate::graph::{TravelDirection, VerticalKind};
 
     const JUNCTIONS: &str = r#"{"type":"FeatureCollection","features":[
       {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
@@ -447,6 +485,10 @@ mod tests {
         assert_eq!(costs, vec![100.0, 200.0]);
         // Every kept edge is the canonical forward (0->1, smaller PATHID) direction.
         assert!(b.graph.edges.iter().all(|e| (e.from, e.to) == (0, 1)));
+        assert!(
+            b.graph.edges.iter().all(|e| e.flags.is_default()),
+            "absent GDB traversal properties import as default flags"
+        );
     }
 
     #[test]
@@ -589,5 +631,66 @@ mod tests {
             b.graph.edges[0].attrs.is_default(),
             "unrecognized wire values must import as the imported-graph default"
         );
+    }
+
+    #[test]
+    fn one_way_direction_1_imports_as_forward() {
+        const J: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+          {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}}]}"#;
+        const P: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100,"direction":1},
+           "geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}}]}"#;
+        let b = build_route_graph(J, P, &[0.0]).unwrap();
+        assert_eq!(b.graph.edges.len(), 1);
+        assert_eq!(b.graph.edges[0].flags.direction, TravelDirection::Forward);
+    }
+
+    #[test]
+    fn reciprocal_pair_keeps_the_forward_feature_direction() {
+        const J: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+          {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}}]}"#;
+        const P: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100,"PATHID":1,"RPATHID":2,"direction":1},
+           "geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}},
+          {"type":"Feature","properties":{"FNODEID":2,"TNODEID":1,"cost":100,"PATHID":2,"RPATHID":1,"direction":1},
+           "geometry":{"type":"MultiLineString","coordinates":[[[139.001,35.0],[139.0,35.0]]]}}]}"#;
+        let b = build_route_graph(J, P, &[0.0]).unwrap();
+        assert_eq!(b.graph.edges.len(), 1);
+        assert_eq!((b.graph.edges[0].from, b.graph.edges[0].to), (0, 1));
+        assert_eq!(b.graph.edges[0].flags.direction, TravelDirection::Forward);
+    }
+
+    #[test]
+    fn barrier_1_imports_as_barrier() {
+        const J: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+          {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}}]}"#;
+        const P: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100,"BARRIER":1},
+           "geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}}]}"#;
+        let b = build_route_graph(J, P, &[0.0]).unwrap();
+        assert_eq!(b.graph.edges[0].flags.barrier, true);
+        assert_eq!(b.graph.edges[0].flags.gate, false);
+    }
+
+    #[test]
+    fn hours_minus_one_is_open() {
+        const J: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"NODEID":1,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.0,35.0]}},
+          {"type":"Feature","properties":{"NODEID":2,"FLOOR":"F1"},"geometry":{"type":"Point","coordinates":[139.001,35.0]}}]}"#;
+        const P: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100,"STARTTIME":-1,"ENDTIME":-1},
+           "geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}}]}"#;
+        let b = build_route_graph(J, P, &[0.0]).unwrap();
+        assert_eq!(b.graph.edges[0].flags.start_minute, -1);
+        assert_eq!(b.graph.edges[0].flags.end_minute, -1);
+        const P2: &str = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100},
+           "geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}}]}"#;
+        let b2 = build_route_graph(J, P2, &[0.0]).unwrap();
+        assert_eq!(b2.graph.edges[0].flags.start_minute, -1);
+        assert_eq!(b2.graph.edges[0].flags.end_minute, -1);
     }
 }
