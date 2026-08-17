@@ -1143,6 +1143,9 @@ fn materialize_doorway_side(
 struct DoorwayPlan {
     mid: [f64; 2],
     axis: [f64; 2],
+    /// Opening LineString length (IMDF physical width). Stamped onto
+    /// `EdgeKind::Doorway` edges as `clearance_m`.
+    arc_length_m: f64,
     /// `(blob_root, skeleton_local_target)` sorted by root for determinism.
     attaches: Vec<(usize, usize)>,
 }
@@ -1749,6 +1752,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             doorway_plans.push(DoorwayPlan {
                 mid,
                 axis,
+                arc_length_m: opening.arc_length_m,
                 attaches,
             });
         }
@@ -1889,6 +1893,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     interior: Vec::new(),
                     attrs: EdgeAttrs {
                         kind: EdgeKind::Doorway,
+                        clearance_m: clearance_attr(plan.arc_length_m),
                         ..EdgeAttrs::default()
                     },
                     flags: Default::default(),
@@ -3631,6 +3636,84 @@ mod tests {
             same_floor_degree(g, onode),
             2,
             "midpoint bridges both spines directly"
+        );
+    }
+
+    #[test]
+    fn doorway_clearance_matches_opening_width() {
+        // A 1.2 m straight opening between two thin walkways: the Doorway
+        // edge must carry that width as clearance. A wheelchair asking for
+        // 1.5 m cannot use it; walking still can.
+        let mid_lat = 35.600007;
+        let half_deg = 0.6 / 111_320.0;
+        let door = line(139.70000, mid_lat - half_deg, 139.70000, mid_lat + half_deg);
+        let measured = haversine_m(
+            [139.70000, mid_lat - half_deg],
+            [139.70000, mid_lat + half_deg],
+        );
+        assert!(
+            (measured - 1.2).abs() < 0.05,
+            "fixture opening is 1.2 m, got {measured}"
+        );
+        let doc = document(
+            &[("l0", 0.0)],
+            vec![
+                feature(
+                    "wa",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600000, 0.00040, 0.00001),
+                ),
+                feature(
+                    "wb",
+                    FeatureType::Unit,
+                    "l0",
+                    Some("walkway"),
+                    rect(139.70000, 35.600014, 0.00040, 0.00001),
+                ),
+                feature("door", FeatureType::Opening, "l0", None, door.clone()),
+            ],
+        );
+        let build = synthesize_network_medial(&doc);
+        let g = &build.graph;
+        let doorways: Vec<&RouteEdge> = g
+            .edges
+            .iter()
+            .filter(|e| e.attrs.kind == EdgeKind::Doorway)
+            .collect();
+        assert!(
+            doorways.is_empty() == false,
+            "expected at least one Doorway edge"
+        );
+        for e in &doorways {
+            let c = e.attrs.clearance_m.expect("doorway clearance is known");
+            assert!(
+                (c as f64 - measured).abs() < 0.05,
+                "doorway clearance {c} must match opening width {measured}"
+            );
+        }
+
+        let origin = kiriko_route::Point3 {
+            lon: 139.70000,
+            lat: 35.600000,
+            ordinal: 0.0,
+        };
+        let dest = kiriko_route::Point3 {
+            lon: 139.70000,
+            lat: 35.600014,
+            ordinal: 0.0,
+        };
+        assert!(
+            kiriko_route::route_with(g, origin, dest, &kiriko_route::RouteProfile::walking())
+                .is_some(),
+            "walking still uses the 1.2 m doorway"
+        );
+        let mut tight = kiriko_route::RouteProfile::wheelchair();
+        tight.min_clearance_m = Some(1.5);
+        assert!(
+            kiriko_route::route_with(g, origin, dest, &tight).is_none(),
+            "wheelchair min_clearance 1.5 m cannot use a 1.2 m doorway"
         );
     }
 
