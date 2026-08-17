@@ -350,6 +350,7 @@ mod tests {
             facilities: None,
             spatial_context: None,
             scene: None,
+            network_qa: None,
             capabilities: crate::codec::CapabilityReport::default(),
         }
     }

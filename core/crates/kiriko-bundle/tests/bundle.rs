@@ -1198,6 +1198,7 @@ fn minimal_document(features: Vec<kiriko_model::model::VenueFeature>) -> BundleD
         facilities: None,
         spatial_context: None,
         scene: None,
+        network_qa: None,
         capabilities: CapabilityReport::default(),
     }
 }
@@ -1550,6 +1551,7 @@ fn bundle_with_graph(graph: kiriko_route::RouteGraph) -> Vec<u8> {
         facilities: None,
         spatial_context: None,
         scene: None,
+        network_qa: None,
         capabilities: CapabilityReport::default(),
     };
     encode_bundle(&doc).expect("bundle with graph encodes")
@@ -1815,30 +1817,44 @@ fn a_section_whose_required_section_is_unavailable_is_disabled_end_to_end() {
 
 #[test]
 fn a_declared_section_without_a_decoder_still_reports_no_decoder() {
-    // §9 gained a real decoder; §10 (canonical graph) and §11 (network QA)
-    // are still declared-without-a-decoder and must not interpret their bytes.
-    for id in [10u16, 11u16] {
-        let payload = decompress_payload(&compile_minimal());
-        let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
-            sections.push((id, 1, vec![0xDE, 0xAD]));
-        }));
+    // §9 and §11 have real decoders; §10 (canonical graph) is still
+    // declared-without-a-decoder and must not interpret its bytes.
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        sections.push((10, 1, vec![0xDE, 0xAD]));
+    }));
 
-        let document = decode_bundle(&crafted).expect("the venue still opens");
-        let capability = if id == 10 {
-            document.capabilities.canonical_graph()
-        } else {
-            document.capabilities.network_qa()
-        };
-        match capability {
-            SectionCapability::Invalid { reason } => {
-                assert!(
-                    reason.contains("no decoder"),
-                    "section {id} has no decoder and must say so: {reason}"
-                );
-            }
-            other => panic!("expected no-decoder invalid for section {id}, got {other:?}"),
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    match document.capabilities.canonical_graph() {
+        SectionCapability::Invalid { reason } => {
+            assert!(
+                reason.contains("no decoder"),
+                "section 10 has no decoder and must say so: {reason}"
+            );
         }
+        other => panic!("expected no-decoder invalid for section 10, got {other:?}"),
     }
+}
+
+#[test]
+fn garbage_network_qa_bytes_report_invalid_and_the_venue_opens() {
+    // compile_minimal carries §8 and no graph. Garbage §11 fails the
+    // postcard decoder, reports invalid, and leaves the venue open.
+    let payload = decompress_payload(&compile_minimal());
+    let crafted = wrap_payload_for_test(&rebuild_payload(&payload, |sections| {
+        sections.push((11, 1, vec![0xDE, 0xAD]));
+    }));
+
+    let document = decode_bundle(&crafted).expect("the venue still opens");
+    assert!(
+        matches!(
+            document.capabilities.network_qa(),
+            SectionCapability::Invalid { .. }
+        ),
+        "garbage §11 reports invalid, not no-decoder"
+    );
+    assert_eq!(document.network_qa, None);
+    assert_eq!(document.capabilities.graph(), SectionCapability::Absent);
 }
 
 #[test]
@@ -2048,6 +2064,11 @@ fn stage0_fixture_is_frozen_and_reproducible() {
         document.capabilities.facilities(),
         SectionCapability::Available
     );
+    assert_eq!(
+        document.capabilities.network_qa(),
+        SectionCapability::Available
+    );
+    assert!(document.network_qa.is_some(), "stage0 emits §11");
     assert_eq!(document.levels.len(), 3);
     assert_eq!(document.features.len(), 27);
     let graph = document

@@ -18,12 +18,13 @@
 //! packed back-to-back in directory order. Section IDs are `1 manifest`,
 //! `2 geometry`, `3 stores`, `4 style`, `5 graph`, `6 beacons`,
 //! `7 facilities`, `8 spatial context`, `9 scene sources`,
-//! `10 canonical graph` (declared), `11 network QA` (declared),
+//! `10 canonical graph` (declared), `11 network QA`,
 //! `12 graph attrs`, `13 graph traversal`; sections 1-3 are required, section
 //! 5 is emitted when the document carries a non-empty graph, section 7 when
-//! it carries non-empty facilities, section 12 only when the graph carries
+//! it carries non-empty facilities, section 11 when a non-empty graph and
+//! §8 are both present, section 12 only when the graph carries
 //! non-default attrs, section 13 only when the graph carries non-default
-//! traversal flags, and 4, 6, 10, and 11 are never emitted.
+//! traversal flags, and 4, 6, and 10 are never emitted.
 //!
 //! This module is an internal implementation detail of [`crate::codec`]; the
 //! public codec surface is `compile_imdf`, `encode_bundle`, and
@@ -62,12 +63,17 @@ pub(crate) const SECTION_FACILITIES: u16 = 7;
 /// compiled venue has a computable anchor.
 pub(crate) const SECTION_SPATIAL_CONTEXT: u16 = 8;
 /// Declared future sections (3D Stage 0 ticket #38). Their ids, versions,
-/// and dependency edges are format facts from now; their decoders arrive in
-/// later stages (scene sources: Stage 1, canonical graph: Stage 4, network
-/// QA: Stage 6). A present row for one of these is never interpreted by a
-/// decoder that predates the section.
+/// and dependency edges are format facts from now. Scene sources (Stage 1)
+/// and network QA (Stage 6) have decoders in this build; canonical graph
+/// (Stage 4) does not. A present row for an undecoded section is never
+/// interpreted by a decoder that predates it.
 pub(crate) const SECTION_SCENE_SOURCES: u16 = 9;
 pub(crate) const SECTION_CANONICAL_GRAPH: u16 = 10;
+/// Section 11 (network QA): findings plus an optional stretch summary.
+/// Optional; emitted when a non-empty graph and §8 are both present.
+/// Requires §8: without an available spatial context its bytes are never
+/// interpreted. Invalid bytes report the capability invalid and leave the
+/// graph untouched.
 pub(crate) const SECTION_NETWORK_QA: u16 = 11;
 /// Section 12 (graph attrs): one generation-quality row per §5 edge, in §5
 /// edge order. Optional; emitted only when at least one edge's attrs differ

@@ -38,6 +38,7 @@ use kiriko_model::model::{
 
 use crate::codec::{BundleDocument, BundleMetadata, BundleStats, CapabilityReport};
 use crate::error::{BundleError, BundleErrorCode};
+use crate::network_qa::{NetworkFinding, NetworkQa, StretchSummary};
 
 /// Reject a non-finite (NaN or +/-Infinity) number, and normalize `-0.0` to
 /// `0.0`. Applied to every `f64` at the codec boundary (see module docs).
@@ -563,6 +564,7 @@ pub(crate) fn manifest_into_document(
         facilities: None,
         spatial_context: None,
         scene: None,
+        network_qa: None,
         capabilities: CapabilityReport::default(),
     })
 }
@@ -886,6 +888,98 @@ fn flags_from_dto(dto: &GraphTraversalRowDto) -> Result<kiriko_route::EdgeFlags,
         accessible_only: dto.accessible_only,
     })
 }
+
+/// Postcard mirror of [`NetworkQa`] (KVB §11).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct NetworkFindingDto {
+    code: String,
+    severity: u8,
+    detail: String,
+    feature_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct StretchSummaryDto {
+    sample_count: u32,
+    rho_max: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct NetworkQaSectionDto {
+    findings: Vec<NetworkFindingDto>,
+    stretch: Option<StretchSummaryDto>,
+}
+
+pub(crate) fn encode_network_qa(qa: &NetworkQa) -> Result<Vec<u8>, BundleError> {
+    let stretch = match &qa.stretch {
+        None => None,
+        Some(s) => {
+            if s.rho_max.is_finite() == false {
+                return Err(BundleError::new(
+                    BundleErrorCode::InvalidBundle,
+                    "network QA stretch rho_max must be finite",
+                ));
+            }
+            Some(StretchSummaryDto {
+                sample_count: s.sample_count,
+                rho_max: s.rho_max + 0.0,
+            })
+        }
+    };
+    let dto = NetworkQaSectionDto {
+        findings: qa
+            .findings
+            .iter()
+            .map(|f| NetworkFindingDto {
+                code: f.code.clone(),
+                severity: f.severity,
+                detail: f.detail.clone(),
+                feature_id: f.feature_id.clone(),
+            })
+            .collect(),
+        stretch,
+    };
+    postcard::to_allocvec(&dto).map_err(|e| {
+        BundleError::new(
+            BundleErrorCode::InvalidBundle,
+            format!("encode network QA section: {e}"),
+        )
+    })
+}
+
+pub(crate) fn decode_network_qa(bytes: &[u8]) -> Result<NetworkQa, BundleError> {
+    let dto: NetworkQaSectionDto =
+        crate::codec::postcard_take_exact(bytes, "decode network QA section")?;
+    let stretch = match dto.stretch {
+        None => None,
+        Some(s) => {
+            if s.rho_max.is_finite() == false {
+                return Err(BundleError::new(
+                    BundleErrorCode::InvalidBundle,
+                    "network QA stretch rho_max must be finite",
+                ));
+            }
+            Some(StretchSummary {
+                sample_count: s.sample_count,
+                rho_max: s.rho_max + 0.0,
+            })
+        }
+    };
+    Ok(NetworkQa {
+        findings: dto
+            .findings
+            .into_iter()
+            .map(|f| NetworkFinding {
+                code: f.code,
+                severity: f.severity,
+                detail: f.detail,
+                feature_id: f.feature_id,
+            })
+            .collect(),
+        stretch,
+    })
+}
+
 
 fn attrs_from_dto(dto: &GraphEdgeAttrDto) -> Result<kiriko_route::EdgeAttrs, BundleError> {
     use kiriko_route::{EdgeKind, PathwayRank, VerticalKind};
@@ -1226,6 +1320,7 @@ mod tests {
             facilities: None,
             spatial_context: None,
             scene: None,
+            network_qa: None,
             capabilities: CapabilityReport::default(),
         }
     }
@@ -2159,6 +2254,156 @@ mod tests {
                 crate::SectionCapability::Invalid { .. }
             ),
             "an unknown discriminant reports §13 invalid"
+        );
+    }
+
+    fn with_spatial(mut doc: BundleDocument) -> BundleDocument {
+        use kiriko_model::spatial::{
+            Axes, Datum, Ellipsoid, EvidenceMethod, Frame, LengthUnit, LocatorKind,
+            RegistrationEvidence, Registries, SourceLocator, SpatialContext, enu_basis_ecef,
+            wgs84_ecef,
+        };
+        let anchor = [139.767, 35.681];
+        let ecef_origin = wgs84_ecef(anchor[0], anchor[1], 0.0);
+        doc.spatial_context = Some(SpatialContext {
+            frame: Frame {
+                anchor,
+                ecef_origin,
+                enu_basis_ecef: enu_basis_ecef(anchor[0], anchor[1]),
+                world_translation: ecef_origin,
+                axes: Axes::EastNorthUp,
+                unit: LengthUnit::Millimetre,
+                vertical_normalisation_offset_mm: 0,
+                datum_ref: 0,
+                anchor_evidence_ref: 0,
+            },
+            registries: Registries {
+                locators: vec![SourceLocator {
+                    kind: LocatorKind::FeatureId,
+                    value: "venue-1".into(),
+                    artifact_ref: None,
+                }],
+                datums: vec![Datum {
+                    name: "WGS84".into(),
+                    ellipsoid: Ellipsoid {
+                        semi_major_metres: 6_378_137.0,
+                        inverse_flattening: 298.257_223_563,
+                    },
+                }],
+                registration_evidence: vec![RegistrationEvidence {
+                    method: EvidenceMethod::DerivedFromVenueGeometry,
+                    source_locator_ref: 0,
+                    transform_ref: None,
+                    confidence_ref: None,
+                    assumption_ref: None,
+                    detail: "anchor at venue bounds centre".into(),
+                }],
+                ..Registries::default()
+            },
+            levels: Vec::new(),
+            source_properties: BTreeMap::new(),
+        });
+        doc
+    }
+
+    #[test]
+    fn network_qa_section_round_trips() {
+        use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+        let mut doc = with_spatial(minimal_document());
+        doc.graph = Some(RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.003, lat: 35.0, ordinal: 0.0 },
+            ],
+            edges: vec![RouteEdge::new(0, 1, 100.0, 0.0), RouteEdge::new(2, 3, 100.0, 0.0)],
+        });
+        let bytes = crate::encode_bundle(&doc).expect("graph + spatial encodes");
+        let decoded = crate::decode_bundle(&bytes).expect("a QA bundle decodes");
+        assert!(
+            matches!(
+                decoded.capabilities.network_qa(),
+                crate::SectionCapability::Available
+            ),
+            "graph + §8 must emit §11"
+        );
+        let qa = decoded.network_qa.expect("decoded §11");
+        assert!(
+            qa.findings.iter().any(|f| f.code == "disconnected_component"),
+            "findings = {:?}",
+            qa.findings
+        );
+        assert_eq!(decoded.graph.as_ref().map(|g| g.edges.len()), Some(2));
+    }
+
+    #[test]
+    fn network_qa_without_spatial_is_absent() {
+        use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+        let mut doc = minimal_document();
+        doc.graph = Some(RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+            ],
+            edges: vec![RouteEdge::new(0, 1, 100.0, 0.0)],
+        });
+        let bytes = crate::encode_bundle(&doc).expect("graph-only encodes");
+        let decoded = crate::decode_bundle(&bytes).expect("decodes");
+        assert!(
+            matches!(
+                decoded.capabilities.network_qa(),
+                crate::SectionCapability::Absent
+            ),
+            "§11 requires §8"
+        );
+        assert_eq!(decoded.network_qa, None);
+    }
+
+    #[test]
+    fn invalid_network_qa_does_not_fail_the_graph() {
+        let mut doc = with_spatial(minimal_document());
+        use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
+        doc.graph = Some(RouteGraph {
+            nodes: vec![
+                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
+                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+            ],
+            edges: vec![RouteEdge::new(0, 1, 100.0, 0.0)],
+        });
+        let bytes = crate::encode_bundle(&doc).expect("encodes");
+        let payload = crate::format::decode_payload(&bytes).expect("payload");
+        let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+        let mut sections: Vec<(u16, u16, Vec<u8>)> = Vec::with_capacity(count);
+        for i in 0..count {
+            let base = 2 + i * 20;
+            let id = u16::from_le_bytes([payload[base], payload[base + 1]]);
+            let version = u16::from_le_bytes([payload[base + 2], payload[base + 3]]);
+            let offset =
+                u64::from_le_bytes(payload[base + 4..base + 12].try_into().unwrap()) as usize;
+            let length =
+                u64::from_le_bytes(payload[base + 12..base + 20].try_into().unwrap()) as usize;
+            sections.push((id, version, payload[offset..offset + length].to_vec()));
+        }
+        let mut found = false;
+        for (id, _, b) in sections.iter_mut() {
+            if *id == crate::format::SECTION_NETWORK_QA {
+                *b = vec![0xDE, 0xAD];
+                found = true;
+            }
+        }
+        assert!(found, "graph + §8 must emit §11");
+        let rebuilt = crate::format::build_payload(&sections);
+        let crafted = crate::format::encode_payload(&rebuilt).expect("wraps");
+        let decoded = crate::decode_bundle(&crafted).expect("invalid §11 must not fail the bundle");
+        assert!(decoded.graph.is_some(), "graph still loads");
+        assert_eq!(decoded.network_qa, None);
+        assert!(
+            matches!(
+                decoded.capabilities.network_qa(),
+                crate::SectionCapability::Invalid { .. }
+            ),
+            "garbage §11 reports invalid"
         );
     }
 }

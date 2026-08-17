@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{BundleError, BundleErrorCode, CompileError};
 use crate::format;
+use crate::network_qa::{NetworkQa, analyze_network};
 use crate::resolve::{FloorOverride, ResolutionProfile};
 use crate::sections;
 
@@ -78,8 +79,7 @@ pub struct CapabilityReport {
     /// Availability of the declared canonical-graph section (§10). No
     /// decoder exists until Stage 4.
     canonical_graph: SectionCapability,
-    /// Availability of the declared network-QA section (§11). No decoder
-    /// exists until Stage 6.
+    /// Availability of the network-QA section (§11).
     network_qa: SectionCapability,
 }
 
@@ -172,6 +172,9 @@ pub struct BundleDocument {
     /// carries no scene. Requires `spatial_context` — its references resolve
     /// into §8's registries.
     pub scene: Option<kiriko_model::scene::SceneSection>,
+    /// Optional network QA findings (section 11). `None` when the bundle
+    /// carries no §11, or when §11 was present but invalid / withheld.
+    pub network_qa: Option<NetworkQa>,
     /// Which optional-section capabilities this bundle offers, and why any
     /// unavailable one is unavailable. `graph`/`facilities`/`spatial_context`/
     /// `scene` above say *whether* content is present; this says *why* when
@@ -298,6 +301,7 @@ pub fn compile_imdf_with_network(
         facilities: None,
         spatial_context: None,
         scene: None,
+        network_qa: None,
         capabilities: CapabilityReport::default(),
     };
 
@@ -655,7 +659,23 @@ pub fn encode_bundle(document: &BundleDocument) -> Result<Vec<u8>, BundleError> 
             crate::scene_section::encode_scene_section(scene, spatial_context)?,
         ));
     }
-    // Section id 12 sorts after 9, so appending keeps the directory
+    // Section id 11 sorts after 9 and before 12. Emitted when a graph and
+    // §8 are both present (QA requires spatial context). Computed at encode
+    // time from the graph; the document's `network_qa` field is decode-only.
+    if document
+        .graph
+        .as_ref()
+        .is_some_and(|g| g.is_empty() == false)
+        && document.spatial_context.is_some()
+    {
+        let qa = analyze_network(document);
+        section_list.push((
+            format::SECTION_NETWORK_QA,
+            format::SECTION_VERSION,
+            sections::encode_network_qa(&qa)?,
+        ));
+    }
+    // Section id 12 sorts after 11, so appending keeps the directory
     // id-ascending. Emitted only when at least one edge carries non-default
     // attrs: graphs imported before attrs existed encode byte-identically
     // (no §12 row) and their edges decode back to `EdgeAttrs::default()`.
@@ -770,6 +790,30 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<BundleDocument, BundleError> {
     };
     document.scene = scene;
 
+    // §11 (network QA) requires §8: a present row whose spatial context is
+    // unavailable is withheld. Invalid bytes report the capability invalid
+    // and leave `document.network_qa` as None; the graph is never failed.
+    let (network_qa, network_qa_capability) = match (
+        &document.spatial_context,
+        directory.declared_version(format::SECTION_NETWORK_QA),
+    ) {
+        (Some(_), Some(_)) => classify_section(
+            &directory,
+            &payload,
+            format::SECTION_NETWORK_QA,
+            sections::decode_network_qa,
+        ),
+        (Some(_), None) => (None, SectionCapability::Absent),
+        (None, Some(_)) => (
+            None,
+            SectionCapability::DisabledByDependency {
+                requires: format::SECTION_SPATIAL_CONTEXT,
+            },
+        ),
+        (None, None) => (None, SectionCapability::Absent),
+    };
+    document.network_qa = network_qa;
+
     // §12 (graph attrs) decorates the already-decoded §5 graph. It requires
     // §5: rows present without an available graph are withheld. A mismatched
     // row count or an unknown discriminant reports §12 invalid and leaves
@@ -807,8 +851,8 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<BundleDocument, BundleError> {
         },
     };
 
-    // §10 and §11 are still declared-without-a-decoder; their outcomes come
-    // from the directory row and their declared §8 dependency edge.
+    // §10 is still declared-without-a-decoder; its outcome comes from the
+    // directory row and the declared §8 dependency edge.
     let outcomes = BTreeMap::from([(
         format::SECTION_SPATIAL_CONTEXT,
         spatial_context_capability.clone(),
@@ -825,18 +869,18 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<BundleDocument, BundleError> {
             format::SECTION_CANONICAL_GRAPH,
             &outcomes,
         ),
-        network_qa: classify_declared_section(&directory, format::SECTION_NETWORK_QA, &outcomes),
+        network_qa: network_qa_capability,
     };
     Ok(document)
 }
 
-/// Capability of a declared-but-not-yet-decodable section (10/11; §9 gained
-/// a real decoder). Its bytes are never interpreted. `Absent` without a
+/// Capability of a declared-but-not-yet-decodable section (§10). §9 and §11
+/// have real decoders. Its bytes are never interpreted. `Absent` without a
 /// directory row; withheld with `disabledByDependency` when a section it
 /// requires is unavailable; otherwise unavailable with a diagnostic — this
 /// build has no decoder for the section. The last outcome is unreachable by
-/// any real bundle (no producer emits these ids yet); the arriving decoder
-/// (Stage 4/6) replaces it with real classification.
+/// any real bundle (no producer emits §10 yet); the arriving decoder
+/// (Stage 4) replaces it with real classification.
 fn classify_declared_section(
     directory: &format::Directory,
     id: u16,
@@ -1084,6 +1128,7 @@ mod tests {
                 facilities: None,
                 spatial_context: None,
                 scene: None,
+                network_qa: None,
                 capabilities: CapabilityReport::default(),
             };
 
@@ -1188,6 +1233,7 @@ mod tests {
             facilities: None,
             spatial_context: None,
             scene: None,
+            network_qa: None,
             capabilities: CapabilityReport::default(),
         }
     }

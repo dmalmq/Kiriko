@@ -324,6 +324,7 @@ mod tests {
             facilities: None,
             spatial_context: None,
             scene: None,
+            network_qa: None,
             capabilities: crate::codec::CapabilityReport::default(),
         };
         encode_bundle(&doc).expect("encode")
@@ -447,6 +448,7 @@ mod tests {
             facilities: None,
             spatial_context: None,
             scene: None,
+            network_qa: None,
             capabilities: crate::codec::CapabilityReport::default(),
         };
         let bundle = encode_bundle(&doc).unwrap();
