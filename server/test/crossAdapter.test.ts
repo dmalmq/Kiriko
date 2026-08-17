@@ -26,6 +26,8 @@ interface LevelElevationDto {
 /** Capability report shape both adapters serialize (from #37/#38). */
 interface CapabilityReport {
   graph: unknown;
+  graphAttrs: unknown;
+  graphTraversal: unknown;
   facilities: unknown;
   spatialContext: unknown;
   sceneSources: unknown;

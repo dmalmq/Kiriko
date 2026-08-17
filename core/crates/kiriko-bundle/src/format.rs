@@ -19,10 +19,11 @@
 //! `2 geometry`, `3 stores`, `4 style`, `5 graph`, `6 beacons`,
 //! `7 facilities`, `8 spatial context`, `9 scene sources`,
 //! `10 canonical graph` (declared), `11 network QA` (declared),
-//! `12 graph attrs`; sections 1-3 are required, section 5 is emitted when the
-//! document carries a non-empty graph, section 7 when it carries non-empty
-//! facilities, section 12 only when the graph carries non-default attrs, and
-//! 4, 6, 10, and 11 are never emitted.
+//! `12 graph attrs`, `13 graph traversal`; sections 1-3 are required, section
+//! 5 is emitted when the document carries a non-empty graph, section 7 when
+//! it carries non-empty facilities, section 12 only when the graph carries
+//! non-default attrs, section 13 only when the graph carries non-default
+//! traversal flags, and 4, 6, 10, and 11 are never emitted.
 //!
 //! This module is an internal implementation detail of [`crate::codec`]; the
 //! public codec surface is `compile_imdf`, `encode_bundle`, and
@@ -74,6 +75,10 @@ pub(crate) const SECTION_NETWORK_QA: u16 = 11;
 /// encode byte-identically. Requires §5: without an available graph its rows
 /// are never interpreted.
 pub(crate) const SECTION_GRAPH_ATTRS: u16 = 12;
+/// Section 13 (graph traversal): one direction/barrier/hours/accessibility
+/// row per §5 edge, in §5 edge order. Optional; emitted only when at least
+/// one edge's flags differ from `EdgeFlags::default()`. Requires §5.
+pub(crate) const SECTION_GRAPH_TRAVERSAL: u16 = 13;
 
 /// Declared availability edges, as `(requires, references)`.
 ///
@@ -89,7 +94,7 @@ pub(crate) fn declared_dependencies(id: u16) -> (&'static [u16], &'static [u16])
             &[SECTION_SPATIAL_CONTEXT],
             &[SECTION_SCENE_SOURCES, SECTION_CANONICAL_GRAPH],
         ),
-        SECTION_GRAPH_ATTRS => (&[SECTION_GRAPH], &[]),
+        SECTION_GRAPH_ATTRS | SECTION_GRAPH_TRAVERSAL => (&[SECTION_GRAPH], &[]),
         _ => (&[], &[]),
     }
 }

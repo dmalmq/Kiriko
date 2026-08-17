@@ -66,6 +66,8 @@ pub struct CapabilityReport {
     /// Availability of the graph-attrs section (§12), which decorates the
     /// §5 graph's edges with generation-quality attributes.
     graph_attrs: SectionCapability,
+    /// Availability of the graph-traversal section (§13).
+    graph_traversal: SectionCapability,
     facilities: SectionCapability,
     /// Availability of the spatial context section (§8).
     spatial_context: SectionCapability,
@@ -90,6 +92,11 @@ impl CapabilityReport {
     /// Availability of the graph-attrs section.
     pub fn graph_attrs(&self) -> SectionCapability {
         self.graph_attrs.clone()
+    }
+
+    /// Availability of the graph-traversal section.
+    pub fn graph_traversal(&self) -> SectionCapability {
+        self.graph_traversal.clone()
     }
 
     /// Availability of the point facilities section.
@@ -125,6 +132,7 @@ impl Default for CapabilityReport {
         Self {
             graph: SectionCapability::Absent,
             graph_attrs: SectionCapability::Absent,
+            graph_traversal: SectionCapability::Absent,
             facilities: SectionCapability::Absent,
             spatial_context: SectionCapability::Absent,
             scene_sources: SectionCapability::Absent,
@@ -661,6 +669,16 @@ pub fn encode_bundle(document: &BundleDocument) -> Result<Vec<u8>, BundleError> 
             sections::encode_graph_attrs(graph)?,
         ));
     }
+    if let Some(graph) = &document.graph
+        && graph.is_empty() == false
+        && graph.edges.iter().any(|e| e.flags.is_default() == false)
+    {
+        section_list.push((
+            format::SECTION_GRAPH_TRAVERSAL,
+            format::SECTION_VERSION,
+            sections::encode_graph_traversal(graph)?,
+        ));
+    }
 
     let payload = format::build_payload(&section_list);
 
@@ -773,6 +791,22 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<BundleDocument, BundleError> {
         },
     };
 
+    let graph_traversal_capability = match (
+        &mut document.graph,
+        directory.declared_version(format::SECTION_GRAPH_TRAVERSAL),
+    ) {
+        (Some(graph), Some(_)) => {
+            classify_section(&directory, &payload, format::SECTION_GRAPH_TRAVERSAL, |bytes| {
+                sections::apply_graph_traversal(graph, bytes)
+            })
+            .1
+        }
+        (_, None) => SectionCapability::Absent,
+        (None, Some(_)) => SectionCapability::DisabledByDependency {
+            requires: format::SECTION_GRAPH,
+        },
+    };
+
     // §10 and §11 are still declared-without-a-decoder; their outcomes come
     // from the directory row and their declared §8 dependency edge.
     let outcomes = BTreeMap::from([(
@@ -782,6 +816,7 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<BundleDocument, BundleError> {
     document.capabilities = CapabilityReport {
         graph: graph_capability,
         graph_attrs: graph_attrs_capability,
+        graph_traversal: graph_traversal_capability,
         facilities: facilities_capability,
         spatial_context: spatial_context_capability,
         scene_sources: scene_sources_capability,
@@ -1253,6 +1288,7 @@ mod tests {
         let report = CapabilityReport {
             graph: SectionCapability::Available,
             graph_attrs: SectionCapability::Available,
+            graph_traversal: SectionCapability::Absent,
             facilities: SectionCapability::UnsupportedVersion {
                 declared: 2,
                 supported: 1,
@@ -1264,7 +1300,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&report).expect("report serializes"),
-            r#"{"graph":{"state":"available"},"graphAttrs":{"state":"available"},"facilities":{"state":"unsupportedVersion","declared":2,"supported":1},"spatialContext":{"state":"absent"},"sceneSources":{"state":"absent"},"canonicalGraph":{"state":"absent"},"networkQa":{"state":"absent"}}"#
+            r#"{"graph":{"state":"available"},"graphAttrs":{"state":"available"},"graphTraversal":{"state":"absent"},"facilities":{"state":"unsupportedVersion","declared":2,"supported":1},"spatialContext":{"state":"absent"},"sceneSources":{"state":"absent"},"canonicalGraph":{"state":"absent"},"networkQa":{"state":"absent"}}"#
         );
 
         let invalid = CapabilityReport {
@@ -1272,6 +1308,7 @@ mod tests {
                 reason: "bad bytes".to_string(),
             },
             graph_attrs: SectionCapability::DisabledByDependency { requires: 5 },
+            graph_traversal: SectionCapability::Absent,
             facilities: SectionCapability::DisabledByDependency { requires: 8 },
             spatial_context: SectionCapability::Available,
             scene_sources: SectionCapability::DisabledByDependency { requires: 8 },
@@ -1280,7 +1317,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&invalid).expect("report serializes"),
-            r#"{"graph":{"state":"invalid","reason":"bad bytes"},"graphAttrs":{"state":"disabledByDependency","requires":5},"facilities":{"state":"disabledByDependency","requires":8},"spatialContext":{"state":"available"},"sceneSources":{"state":"disabledByDependency","requires":8},"canonicalGraph":{"state":"absent"},"networkQa":{"state":"absent"}}"#
+            r#"{"graph":{"state":"invalid","reason":"bad bytes"},"graphAttrs":{"state":"disabledByDependency","requires":5},"graphTraversal":{"state":"absent"},"facilities":{"state":"disabledByDependency","requires":8},"spatialContext":{"state":"available"},"sceneSources":{"state":"disabledByDependency","requires":8},"canonicalGraph":{"state":"absent"},"networkQa":{"state":"absent"}}"#
         );
     }
 
@@ -1289,6 +1326,7 @@ mod tests {
         let report = CapabilityReport::default();
         assert_eq!(report.graph(), SectionCapability::Absent);
         assert_eq!(report.graph_attrs(), SectionCapability::Absent);
+        assert_eq!(report.graph_traversal(), SectionCapability::Absent);
         assert_eq!(report.facilities(), SectionCapability::Absent);
         assert_eq!(report.spatial_context(), SectionCapability::Absent);
         assert_eq!(report.scene_sources(), SectionCapability::Absent);

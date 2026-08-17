@@ -411,6 +411,7 @@ describe("@kiriko/node inspectBundle (raw native contract)", () => {
       capabilities: {
         graph: unknown;
         graphAttrs: unknown;
+        graphTraversal: unknown;
         facilities: unknown;
         spatialContext: unknown;
         sceneSources: unknown;
@@ -438,6 +439,7 @@ describe("@kiriko/node inspectBundle (raw native contract)", () => {
     expect(inspection.capabilities).toEqual({
       graph: { state: "absent" },
       graphAttrs: { state: "absent" },
+      graphTraversal: { state: "absent" },
       facilities: { state: "absent" },
       spatialContext: { state: "available" },
       sceneSources: { state: "available" },

@@ -795,6 +795,98 @@ pub(crate) fn apply_graph_attrs(
     Ok(())
 }
 
+
+/// Serializable mirror of one `kiriko_route::EdgeFlags` row (§13).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) struct GraphTraversalRowDto {
+    direction: u8,
+    barrier: bool,
+    gate: bool,
+    start_minute: i32,
+    end_minute: i32,
+    wheelchair: bool,
+    accessible_only: bool,
+}
+
+/// Section 13 (graph traversal): one row per §5 edge, in the same order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct GraphTraversalSectionDto {
+    edges: Vec<GraphTraversalRowDto>,
+}
+
+pub(crate) fn encode_graph_traversal(graph: &kiriko_route::RouteGraph) -> Result<Vec<u8>, BundleError> {
+    let mut edges = Vec::with_capacity(graph.edges.len());
+    for edge in &graph.edges {
+        edges.push(GraphTraversalRowDto {
+            direction: edge.flags.direction as u8,
+            barrier: edge.flags.barrier,
+            gate: edge.flags.gate,
+            start_minute: edge.flags.start_minute,
+            end_minute: edge.flags.end_minute,
+            wheelchair: edge.flags.wheelchair,
+            accessible_only: edge.flags.accessible_only,
+        });
+    }
+    postcard::to_allocvec(&GraphTraversalSectionDto { edges }).map_err(|e| {
+        BundleError::new(
+            BundleErrorCode::InvalidBundle,
+            format!("encode graph traversal section: {e}"),
+        )
+    })
+}
+
+/// Decode §13 rows onto the already-decoded §5 graph. A length mismatch or
+/// unknown `direction` discriminant leaves flags at their defaults and
+/// reports the section invalid; the graph itself is never failed here.
+pub(crate) fn apply_graph_traversal(
+    graph: &mut kiriko_route::RouteGraph,
+    bytes: &[u8],
+) -> Result<(), BundleError> {
+    let dto: GraphTraversalSectionDto =
+        crate::codec::postcard_take_exact(bytes, "decode graph traversal section")?;
+    if dto.edges.len() != graph.edges.len() {
+        return Err(BundleError::new(
+            BundleErrorCode::InvalidBundle,
+            format!(
+                "graph traversal section carries {} row(s) for {} edge(s)",
+                dto.edges.len(),
+                graph.edges.len()
+            ),
+        ));
+    }
+    let flags: Result<Vec<kiriko_route::EdgeFlags>, BundleError> =
+        dto.edges.iter().map(flags_from_dto).collect();
+    let flags = flags?;
+    for (edge, flags) in graph.edges.iter_mut().zip(flags) {
+        edge.flags = flags;
+    }
+    Ok(())
+}
+
+fn flags_from_dto(dto: &GraphTraversalRowDto) -> Result<kiriko_route::EdgeFlags, BundleError> {
+    use kiriko_route::TravelDirection;
+    let direction = match dto.direction {
+        0 => TravelDirection::Both,
+        1 => TravelDirection::Forward,
+        2 => TravelDirection::Reverse,
+        other => {
+            return Err(BundleError::new(
+                BundleErrorCode::InvalidBundle,
+                format!("graph traversal direction discriminant {other} is unknown"),
+            ));
+        }
+    };
+    Ok(kiriko_route::EdgeFlags {
+        direction,
+        barrier: dto.barrier,
+        gate: dto.gate,
+        start_minute: dto.start_minute,
+        end_minute: dto.end_minute,
+        wheelchair: dto.wheelchair,
+        accessible_only: dto.accessible_only,
+    })
+}
+
 fn attrs_from_dto(dto: &GraphEdgeAttrDto) -> Result<kiriko_route::EdgeAttrs, BundleError> {
     use kiriko_route::{EdgeKind, PathwayRank, VerticalKind};
     let kind = match dto.kind {
@@ -1897,6 +1989,176 @@ mod tests {
         assert!(
             encode_graph(&graph).is_err(),
             "encoding a negative-weight edge must fail"
+        );
+    }
+
+    fn wrap_bundle_with_graph_and_traversal(
+        manifest_bytes: Vec<u8>,
+        graph_bytes: Vec<u8>,
+        traversal_bytes: Vec<u8>,
+    ) -> Vec<u8> {
+        let empty_features: Vec<u8> =
+            postcard::to_allocvec(&Vec::<FeatureDto>::new()).expect("empty vec encodes");
+        let payload = crate::format::build_payload(&[
+            (
+                crate::format::SECTION_MANIFEST,
+                crate::format::SECTION_VERSION,
+                manifest_bytes,
+            ),
+            (
+                crate::format::SECTION_GEOMETRY,
+                crate::format::SECTION_VERSION,
+                empty_features.clone(),
+            ),
+            (
+                crate::format::SECTION_STORES,
+                crate::format::SECTION_VERSION,
+                empty_features,
+            ),
+            (
+                crate::format::SECTION_GRAPH,
+                crate::format::SECTION_VERSION,
+                graph_bytes,
+            ),
+            (
+                crate::format::SECTION_GRAPH_TRAVERSAL,
+                crate::format::SECTION_VERSION,
+                traversal_bytes,
+            ),
+        ]);
+        crate::format::encode_payload(&payload).expect("hand-built payload encodes")
+    }
+
+    #[test]
+    fn graph_traversal_section_round_trips_on_a_one_way_edge() {
+        use kiriko_route::{EdgeFlags, RouteEdge, RouteGraph, RouteNode, TravelDirection};
+        let mut doc = minimal_document();
+        let mut edge = RouteEdge::new(0, 1, 100.0, 0.0);
+        edge.flags = EdgeFlags {
+            direction: TravelDirection::Forward,
+            ..EdgeFlags::default()
+        };
+        doc.graph = Some(RouteGraph {
+            nodes: vec![
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![edge],
+        });
+        let bytes = crate::encode_bundle(&doc).expect("a document with flags encodes");
+        let decoded = crate::decode_bundle(&bytes).expect("a traversal bundle decodes");
+        assert!(
+            matches!(
+                decoded.capabilities.graph_traversal(),
+                crate::SectionCapability::Available
+            ),
+            "a bundle carrying flags must report §13 available"
+        );
+        assert_eq!(
+            decoded.graph.unwrap().edges[0].flags.direction,
+            TravelDirection::Forward
+        );
+    }
+
+    #[test]
+    fn default_flags_do_not_emit_section_13() {
+        use kiriko_route::{EdgeAttrs, RouteEdge, RouteGraph, RouteNode};
+        let mut doc = minimal_document();
+        doc.graph = Some(RouteGraph {
+            nodes: vec![
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 100.0,
+                ordinal: 0.0,
+                interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
+                flags: Default::default(),
+            }],
+        });
+        let bytes = crate::encode_bundle(&doc).expect("a default-flags document encodes");
+        let decoded = crate::decode_bundle(&bytes).expect("the bundle decodes");
+        assert!(
+            matches!(
+                decoded.capabilities.graph_traversal(),
+                crate::SectionCapability::Absent
+            ),
+            "default flags must not emit a §13 row"
+        );
+        assert_eq!(decoded.graph, doc.graph, "graph content is unchanged");
+    }
+
+    #[test]
+    fn invalid_direction_discriminant_leaves_flags_default_and_marks_section_invalid() {
+        let manifest_bytes =
+            postcard::to_allocvec(&manifest_section_with_ordinal(1.0)).expect("dto encodes");
+        let graph_bytes = postcard::to_allocvec(&GraphSectionDto {
+            nodes: vec![
+                GraphNodeDto {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                GraphNodeDto {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![GraphEdgeDto {
+                from: 0,
+                to: 1,
+                weight: 100.0,
+                ordinal: 0.0,
+                interior: vec![],
+            }],
+        })
+        .expect("graph dto encodes");
+        let traversal_bytes = postcard::to_allocvec(&GraphTraversalSectionDto {
+            edges: vec![GraphTraversalRowDto {
+                direction: 99,
+                barrier: false,
+                gate: false,
+                start_minute: -1,
+                end_minute: -1,
+                wheelchair: true,
+                accessible_only: false,
+            }],
+        })
+        .expect("traversal dto encodes");
+        let bytes = wrap_bundle_with_graph_and_traversal(manifest_bytes, graph_bytes, traversal_bytes);
+        let decoded =
+            crate::decode_bundle(&bytes).expect("an invalid §13 must not fail the bundle");
+        let graph = decoded.graph.expect("the §5 graph still loads");
+        assert!(
+            graph.edges[0].flags.is_default(),
+            "flags stay default on an unknown direction discriminant"
+        );
+        assert!(
+            matches!(
+                decoded.capabilities.graph_traversal(),
+                crate::SectionCapability::Invalid { .. }
+            ),
+            "an unknown discriminant reports §13 invalid"
         );
     }
 }

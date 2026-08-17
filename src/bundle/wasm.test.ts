@@ -64,6 +64,7 @@ describe("decodeBundle", () => {
     expect(response.capabilities).toEqual({
       graph: { state: "absent" },
       graphAttrs: { state: "absent" },
+      graphTraversal: { state: "absent" },
       facilities: { state: "absent" },
       spatialContext: { state: "available" },
       sceneSources: { state: "available" },

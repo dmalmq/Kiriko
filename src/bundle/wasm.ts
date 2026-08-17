@@ -111,6 +111,8 @@ export interface CapabilityReportDto {
   graph: SectionCapability;
   /** Availability of §12, the graph's per-edge generation-quality attrs. */
   graphAttrs: SectionCapability;
+  /** Availability of §13, the graph's per-edge traversal flags. */
+  graphTraversal: SectionCapability;
   facilities: SectionCapability;
   spatialContext: SectionCapability;
   sceneSources: SectionCapability;
