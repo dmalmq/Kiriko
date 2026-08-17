@@ -169,6 +169,7 @@ function bundleLoadResult(
     hasGraph,
     hasFacilities,
     facilities,
+    networkQa: null,
   };
 }
 
@@ -1886,6 +1887,31 @@ describe("App directions mode", () => {
       expect(loadNetworkOverlayMock).toHaveBeenCalledWith(`/v/default/tokyo-station/bundle@${PUBLIC_VERSION_ID}`);
       expect(mapStub().getAttribute("data-network-present")).toBe("true");
     });
+  });
+
+  it("shows network QA findings when Review network is on", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue({
+      junctions: [
+        { ordinal: 0, geometry: { type: "Point", coordinates: [139.7, 35.68] }, properties: { NODEID: 0, FLOOR: "F1" } },
+      ],
+      paths: [],
+    });
+    loadKirikoBundleMock.mockResolvedValue({
+      ...bundleLoadResult(buildMinimalVenue(), PUBLIC_VERSION_ID, true),
+      networkQa: {
+        findings: [{ code: "disconnected_component", severity: 1, featureId: null }],
+        stretch: { sampleCount: 4, rhoMax: 1.8 },
+      },
+    });
+    window.history.replaceState(null, "", "/?dataset=tokyo-station&lang=en");
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByTestId("indoor-map-stub")).toBeTruthy();
+    });
+    await user.click(screen.getByRole("button", { name: "Review network" }));
+    expect(await screen.findByText("Network has disconnected parts")).toBeTruthy();
+    expect(screen.getByText("detour 1.8")).toBeTruthy();
   });
 
   it("waits for edited-network publication before navigating to the returned public version", async () => {

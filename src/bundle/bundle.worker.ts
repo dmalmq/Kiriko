@@ -43,6 +43,7 @@ export async function decodeBundleMessage(
         hasGraph: response.hasGraph === true,
         hasFacilities: response.hasFacilities === true,
         facilities: response.hasFacilities === true ? facilities(bytes) : [],
+        networkQa: response.networkQa ?? null,
       };
     }
     const code = response.error?.code ?? "invalid_bundle";

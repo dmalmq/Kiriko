@@ -48,7 +48,9 @@ describe("decodeBundle", () => {
   it("reports §5 graph presence on the decode result", async () => {
     const bytes = await readGoldenBundle();
     // The golden fixture is compiled without a network: no graph section.
-    expect(decodeBundle(bytes).hasGraph).toBe(false);
+    const decoded = decodeBundle(bytes);
+    expect(decoded.hasGraph).toBe(false);
+    expect(decoded.networkQa).toBeNull();
   });
 
   it("reports why each optional section is unavailable, not just that it is", async () => {

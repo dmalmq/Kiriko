@@ -16,7 +16,8 @@
 use std::collections::BTreeMap;
 
 use kiriko_bundle::{
-    BundleDocument, BundleError, CapabilityReport, LevelElevation, decode_bundle, level_elevations,
+    BundleDocument, BundleError, CapabilityReport, LevelElevation, SectionCapability, decode_bundle,
+    level_elevations,
 };
 use kiriko_model::canonical::{Object as CanonicalObject, Value as CanonicalValue};
 use kiriko_model::model::{Bounds, ImdfManifest, VenueFeature, ViewerLevel, ViewerWarning};
@@ -111,6 +112,28 @@ struct DecodeErrorDto {
 /// the same division as `ViewerWarning` codes.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct NetworkQaFindingJsDto {
+    code: String,
+    severity: u8,
+    feature_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkQaStretchJsDto {
+    sample_count: u32,
+    rho_max: f32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkQaJsDto {
+    findings: Vec<NetworkQaFindingJsDto>,
+    stretch: Option<NetworkQaStretchJsDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DecodeResponseDto {
     ok: bool,
     venue: Option<DecodedVenueDto>,
@@ -118,6 +141,7 @@ struct DecodeResponseDto {
     has_graph: bool,
     has_facilities: bool,
     capabilities: Option<CapabilityReport>,
+    network_qa: Option<NetworkQaJsDto>,
 }
 
 fn canonical_to_json(value: &CanonicalValue) -> JsonValue {
@@ -238,6 +262,7 @@ fn to_js(response: &DecodeResponseDto) -> JsValue {
             has_graph: false,
             has_facilities: false,
             capabilities: None,
+            network_qa: None,
         };
         fallback
             .serialize(&serializer)
@@ -247,6 +272,37 @@ fn to_js(response: &DecodeResponseDto) -> JsValue {
 
 /// A decoded bundle advertises a routable graph only when it carries at least
 /// one edge; a nodes-only graph never enables Directions or Network Review.
+fn network_qa_dto(document: &BundleDocument) -> Option<NetworkQaJsDto> {
+    if document.capabilities.network_qa() == SectionCapability::Available {
+        match document.network_qa.as_ref() {
+            Some(qa) => Some(NetworkQaJsDto {
+                findings: qa
+                    .findings
+                    .iter()
+                    .map(|f| NetworkQaFindingJsDto {
+                        code: f.code.clone(),
+                        severity: f.severity,
+                        feature_id: f.feature_id.clone(),
+                    })
+                    .collect(),
+                stretch: match qa.stretch.as_ref() {
+                    Some(s) => Some(NetworkQaStretchJsDto {
+                        sample_count: s.sample_count,
+                        rho_max: s.rho_max,
+                    }),
+                    None => None,
+                },
+            }),
+            None => Some(NetworkQaJsDto {
+                findings: Vec::new(),
+                stretch: None,
+            }),
+        }
+    } else {
+        None
+    }
+}
+
 fn has_routable_graph(document: &BundleDocument) -> bool {
     document
         .graph
@@ -267,6 +323,7 @@ pub fn decode_bundle_js(bytes: &[u8]) -> JsValue {
             let has_facilities = document.facilities.is_some();
             // Taken before `document_dto` consumes the document.
             let capabilities = document.capabilities.clone();
+            let network_qa = network_qa_dto(&document);
             DecodeResponseDto {
                 ok: true,
                 venue: Some(document_dto(document)),
@@ -274,6 +331,7 @@ pub fn decode_bundle_js(bytes: &[u8]) -> JsValue {
                 has_graph,
                 has_facilities,
                 capabilities: Some(capabilities),
+                network_qa,
             }
         }
         Err(err) => DecodeResponseDto {
@@ -283,6 +341,7 @@ pub fn decode_bundle_js(bytes: &[u8]) -> JsValue {
             has_graph: false,
             has_facilities: false,
             capabilities: None,
+            network_qa: None,
         },
     };
     to_js(&response)

@@ -120,6 +120,23 @@ export interface CapabilityReportDto {
   networkQa: SectionCapability;
 }
 
+export interface NetworkQaFindingDto {
+  code: string;
+  severity: number;
+  featureId: string | null;
+}
+
+export interface NetworkQaStretchDto {
+  sampleCount: number;
+  rhoMax: number;
+}
+
+/** §11 network QA payload. Codes are mapped to ja/en in the viewer; `detail` is omitted. */
+export interface NetworkQaDto {
+  findings: NetworkQaFindingDto[];
+  stretch: NetworkQaStretchDto | null;
+}
+
 export interface DecodeResponseDto {
   ok: boolean;
   venue: DecodedVenueDto | null;
@@ -133,6 +150,8 @@ export interface DecodeResponseDto {
    * cannot express. `null` when the bundle failed to decode at all.
    */
   capabilities: CapabilityReportDto | null;
+  /** §11 findings when that capability is `available`; otherwise `null`. */
+  networkQa: NetworkQaDto | null;
 }
 
 /** A facility's routing anchor: the network node it snaps to, when linked. */
@@ -260,7 +279,8 @@ export async function initKirikoWasm(): Promise<void> {
  * `response.ok`/`response.error` instead.
  */
 export function decodeBundle(bytes: Uint8Array): DecodeResponseDto {
-  return decodeBundleWasm(bytes) as DecodeResponseDto;
+  const decoded = decodeBundleWasm(bytes) as DecodeResponseDto;
+  return { ...decoded, networkQa: decoded.networkQa ?? null };
 }
 
 /**

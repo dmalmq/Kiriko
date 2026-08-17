@@ -56,7 +56,7 @@ describe("decodeBundleMessage", () => {
     resolveInit();
     const response = await promise;
     expect(decodeBundleMock).toHaveBeenCalledTimes(1);
-    expect(response).toEqual({ type: "loaded", venue: { id: "v" }, hasGraph: false, hasFacilities: false, facilities: [] });
+    expect(response).toEqual({ type: "loaded", venue: { id: "v" }, hasGraph: false, hasFacilities: false, facilities: [], networkQa: null });
   });
 
   it("maps a successful decode to a loaded response carrying the decoded venue", async () => {
@@ -65,7 +65,7 @@ describe("decodeBundleMessage", () => {
     decodeBundleMock.mockReturnValue({ ok: true, venue, error: null, hasGraph: false });
 
     const response = await decodeBundleMessage(request());
-    expect(response).toEqual({ type: "loaded", venue, hasGraph: false, hasFacilities: false, facilities: [] });
+    expect(response).toEqual({ type: "loaded", venue, hasGraph: false, hasFacilities: false, facilities: [], networkQa: null });
   });
 
   it("carries the bundle's §5 graph presence flag on the loaded response", async () => {
@@ -73,7 +73,32 @@ describe("decodeBundleMessage", () => {
     decodeBundleMock.mockReturnValue({ ok: true, venue: { id: "v" }, error: null, hasGraph: true });
 
     const response = await decodeBundleMessage(request());
-    expect(response).toEqual({ type: "loaded", venue: { id: "v" }, hasGraph: true, hasFacilities: false, facilities: [] });
+    expect(response).toEqual({ type: "loaded", venue: { id: "v" }, hasGraph: true, hasFacilities: false, facilities: [], networkQa: null });
+  });
+
+  it("carries §11 network QA on the loaded response when decode provides it", async () => {
+    initKirikoWasmMock.mockResolvedValue(undefined);
+    const networkQa = {
+      findings: [{ code: "disconnected_component", severity: 1, featureId: null }],
+      stretch: { sampleCount: 4, rhoMax: 1.8 },
+    };
+    decodeBundleMock.mockReturnValue({
+      ok: true,
+      venue: { id: "v" },
+      error: null,
+      hasGraph: true,
+      networkQa,
+    });
+
+    const response = await decodeBundleMessage(request());
+    expect(response).toEqual({
+      type: "loaded",
+      venue: { id: "v" },
+      hasGraph: true,
+      hasFacilities: false,
+      facilities: [],
+      networkQa,
+    });
   });
 
   it.each([

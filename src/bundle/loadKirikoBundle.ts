@@ -3,7 +3,7 @@ import type { LoadedVenue } from "../imdf/types";
 import { hydrateVenue } from "./hydrateVenue";
 import { BUNDLE_WORKER_FAILED_MESSAGE } from "./types";
 import type { BundleDecodeRequest, BundleWorkerFailureCode, BundleWorkerResponse } from "./types";
-import type { FacilityDto } from "./wasm";
+import type { FacilityDto, NetworkQaDto } from "./wasm";
 import BundleWorker from "./bundle.worker?worker&inline";
 
 const PUBLIC_VERSION_ID = /^[0-9a-f]{64}$/;
@@ -27,6 +27,8 @@ export interface KirikoBundleLoadResult {
   hasFacilities: boolean;
   /** Point facilities from §7; empty when absent. */
   facilities: FacilityDto[];
+  /** §11 network QA from decode; `null` when the section is absent or unreadable. */
+  networkQa: NetworkQaDto | null;
 }
 
 /**
@@ -42,6 +44,29 @@ const BUNDLE_WORKER_FAILURE_CODES: Record<string, true> = {
   bundle_too_large: true,
   worker_failed: true,
 };
+
+function parseNetworkQa(value: unknown): NetworkQaDto | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  if (("findings" in value) === false || Array.isArray(value.findings) === false) {
+    return null;
+  }
+  let stretch: NetworkQaDto["stretch"] = null;
+  if (
+    "stretch" in value &&
+    value.stretch !== null &&
+    value.stretch !== undefined &&
+    typeof value.stretch === "object" &&
+    Array.isArray(value.stretch) === false
+  ) {
+    stretch = value.stretch as NetworkQaDto["stretch"];
+  }
+  return {
+    findings: value.findings as NetworkQaDto["findings"],
+    stretch,
+  };
+}
 
 function isBundleWorkerFailureCode(value: unknown): value is BundleWorkerFailureCode {
   return typeof value === "string" && BUNDLE_WORKER_FAILURE_CODES[value] === true;
@@ -250,6 +275,7 @@ export async function loadKirikoBundle(
           hasGraph: data.hasGraph === true,
           hasFacilities: data.hasFacilities === true,
           facilities: Array.isArray(data.facilities) ? data.facilities : [],
+          networkQa: parseNetworkQa("networkQa" in data ? data.networkQa : null),
         });
       });
     };

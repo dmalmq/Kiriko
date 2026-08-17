@@ -127,10 +127,41 @@ describe("loadKirikoBundle", () => {
       hasGraph: true,
       hasFacilities: false,
       facilities: [],
+      networkQa: null,
       seq: null,
     });
     expect(hydrateVenueMock).toHaveBeenCalledWith(dto);
     expect(worker.terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps §11 network QA from the worker loaded event", async () => {
+    const publicVersionId = "a".repeat(64);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(okResponse(new ArrayBuffer(4), publicVersionId)));
+    const hydrated = { venue: { id: "v1" } };
+    hydrateVenueMock.mockReturnValueOnce(hydrated);
+    const networkQa = {
+      findings: [{ code: "disconnected_component", severity: 1, featureId: null }],
+      stretch: { sampleCount: 4, rhoMax: 1.8 },
+    };
+
+    const promise = loadKirikoBundle(SRC);
+    await vi.waitFor(() => expect(createdWorkers).toHaveLength(1));
+    createdWorkers[0]!.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "loaded", venue: { venueId: "v1", datasetId: "default/minimal", version: 1 }, hasGraph: true, networkQa },
+      }),
+    );
+
+    await expect(promise).resolves.toEqual({
+      venue: hydrated,
+      metadata: { datasetId: "default/minimal", version: 1 },
+      publicVersionId,
+      hasGraph: true,
+      hasFacilities: false,
+      facilities: [],
+      networkQa,
+      seq: null,
+    });
   });
 
   it.each([
@@ -161,6 +192,7 @@ describe("loadKirikoBundle", () => {
       hasGraph: false,
       hasFacilities: false,
       facilities: [],
+      networkQa: null,
       seq: null,
     });
     expect(createdWorkers[0]!.terminate).toHaveBeenCalledTimes(1);
@@ -597,6 +629,7 @@ describe("loadKirikoBundle", () => {
       hasGraph: false,
       hasFacilities: false,
       facilities: [],
+      networkQa: null,
       seq: null,
     });
     expect(worker.terminate).toHaveBeenCalledTimes(1);
@@ -703,6 +736,7 @@ describe("loadKirikoBundle", () => {
       hasGraph: false,
       hasFacilities: false,
       facilities: [],
+      networkQa: null,
       seq: null,
     });
     expect(r2).toEqual({
@@ -712,6 +746,7 @@ describe("loadKirikoBundle", () => {
       hasGraph: false,
       hasFacilities: false,
       facilities: [],
+      networkQa: null,
       seq: null,
     });
     expect(createdWorkers[0]).not.toBe(createdWorkers[1]);

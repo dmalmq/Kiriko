@@ -33,7 +33,7 @@ import {
   sourceProvenance,
   type SceneSourceEvent,
 } from "../map/scene/sceneSource";
-import type { FacilityDto, RouteEndpoint, RouteResultDto } from "../bundle/wasm";
+import type { FacilityDto, NetworkQaDto, RouteEndpoint, RouteResultDto } from "../bundle/wasm";
 import { loadNetworkOverlay } from "../bundle/loadNetworkOverlay";
 import {
   networkConnectivity,
@@ -118,6 +118,9 @@ const ui = {
   reviewConnected: { ja: "接続率", en: "connected" },
   reviewIslands: { ja: "分割数", en: "islands" },
   reviewFloors: { ja: "接続フロア", en: "floors linked" },
+  reviewFindingDisconnected: { ja: "グラフが分割されています", en: "Network has disconnected parts" },
+  reviewFindingIsolated: { ja: "孤立したノードがあります", en: "Isolated nodes present" },
+  reviewStretch: { ja: "迂回率", en: "detour" },
   editNetwork: { ja: "ネットワークを編集", en: "Edit network" },
   saveNetwork: { ja: "ネットワークを保存", en: "Save network" },
   checkNetworkSave: { ja: "状況を確認", en: "Check status" },
@@ -198,6 +201,16 @@ function isAbortError(error: unknown): boolean {
   return false;
 }
 
+function networkQaFindingCopy(code: string, locale: "ja" | "en"): string | null {
+  if (code === "disconnected_component") {
+    return ui.reviewFindingDisconnected[locale];
+  }
+  if (code === "isolated_node") {
+    return ui.reviewFindingIsolated[locale];
+  }
+  return null;
+}
+
 function toVenueLoadError(error: unknown): VenueLoadError {
   if (error instanceof VenueLoadError) {
     return error;
@@ -251,6 +264,8 @@ type BundleProvenance = {
   hasGraph: boolean;
   /** Point facilities from §7; empty when absent. */
   facilities: FacilityDto[];
+  /** §11 network QA from decode; `null` when absent or unreadable. */
+  networkQa: NetworkQaDto | null;
 };
 
 interface AcceptedNetworkSave {
@@ -1481,6 +1496,7 @@ export function App() {
               seq: result.seq,
               hasGraph: result.hasGraph,
               facilities: result.facilities,
+              networkQa: result.networkQa ?? null,
             },
           };
         },
@@ -2085,6 +2101,24 @@ export function App() {
                       {reviewReport.floorsInLargest} {ui.reviewFloors[locale]}
                     </button>
                   </>
+                ) : null}
+                {reviewActive && bundleProvenance && bundleProvenance.networkQa
+                  ? bundleProvenance.networkQa.findings.map((finding, index) => {
+                      const label = networkQaFindingCopy(finding.code, locale);
+                      if (label === null) {
+                        return null;
+                      }
+                      return (
+                        <span key={`qa-${index}`} className="review-report" role="status">
+                          {label}
+                        </span>
+                      );
+                    })
+                  : null}
+                {reviewActive && bundleProvenance && bundleProvenance.networkQa && bundleProvenance.networkQa.stretch ? (
+                  <span className="review-report" role="status">
+                    {ui.reviewStretch[locale]} {bundleProvenance.networkQa.stretch.rhoMax.toFixed(1)}
+                  </span>
                 ) : null}
                 {reviewActive && editor === null ? (
                   compact ? (

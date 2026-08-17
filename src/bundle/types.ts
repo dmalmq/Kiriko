@@ -5,7 +5,7 @@
  * by the worker and its caller, `loadKirikoBundle.ts`.
  */
 import type { VenueLoadErrorCode } from "../errors/VenueLoadError";
-import type { DecodedVenueDto, FacilityDto, RouteEndpoint, RouteProfileDto, RouteResultDto } from "./wasm";
+import type { DecodedVenueDto, FacilityDto, NetworkQaDto, RouteEndpoint, RouteProfileDto, RouteResultDto } from "./wasm";
 
 /** `buffer` is always transferred (not cloned) to the worker. */
 export interface BundleDecodeRequest {
@@ -59,6 +59,8 @@ export interface BundleDecodeSuccess {
   hasFacilities: boolean;
   /** Point facilities from §7; empty when the section is absent. */
   facilities: FacilityDto[];
+  /** §11 network QA when decode advertised it; `null` when absent or unreadable. */
+  networkQa: NetworkQaDto | null;
 }
 
 /** `route` is `null` when the bundle has no graph or no path connects the endpoints. */
