@@ -27,6 +27,7 @@ use kiriko_route::{
 };
 
 use crate::codec::BundleDocument;
+use crate::relationship::{bind_doorway_directions, directed_by_opening, parse_relationships};
 use crate::transit_match::{TransitPair, minimum_cost_maximum_matching};
 
 /// IMDF `accessibility[]` → traversal flags. An empty list is the public
@@ -374,6 +375,7 @@ pub(crate) fn linestring_midpoint(geom: &Value) -> Option<[f64; 2]> {
 /// A node-bearing unit on one floor: a walkway or a transit unit. `transit`
 /// carries the transit category (`None` for a walkway).
 struct Hub<'a> {
+    id: &'a str,
     pt: [f64; 2],
     geom: &'a Value,
     transit: Option<&'a str>,
@@ -410,12 +412,13 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
     let mut warnings: Vec<RouteBuildWarning> = Vec::new();
     // Transit nodes across every floor: (node index, centroid, category, ordinal).
     let mut transit_all: Vec<(u32, [f64; 2], String, f64, Vec<String>)> = Vec::new();
+    let directed = directed_by_opening(&parse_relationships(&document.features));
 
     for &ord in &ordinals {
         // Node-bearing units on this floor: walkways and transit units. Each
         // gets a hub node at its centroid; `transit` tags the transit kind.
         let mut hubs: Vec<Hub<'_>> = Vec::new();
-        let mut openings: Vec<([f64; 2], Vec<String>)> = Vec::new();
+        let mut openings: Vec<([f64; 2], Vec<String>, String)> = Vec::new();
 
         for f in &document.features {
             let Some(level_id) = f.level_id.as_deref() else {
@@ -437,6 +440,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                         && let Some(pt) = polygon_centroid(geom)
                     {
                         hubs.push(Hub {
+                            id: f.id.as_str(),
                             pt,
                             geom,
                             transit: transit.then_some(category),
@@ -446,7 +450,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                 }
                 FeatureType::Opening => {
                     if let Some(m) = linestring_midpoint(geom) {
-                        openings.push((m, f.accessibility.clone()));
+                        openings.push((m, f.accessibility.clone(), f.id.clone()));
                     }
                 }
                 _ => {}
@@ -456,8 +460,8 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         // Keep only openings adjacent to at least one hub; record adjacencies
         // (indices into `hubs`). Openings are the standard IMDF connectivity
         // signal, joining walkways and transit units through their doorways.
-        let mut kept_openings: Vec<([f64; 2], Vec<usize>, Vec<String>)> = Vec::new();
-        for (op, access) in &openings {
+        let mut kept_openings: Vec<([f64; 2], Vec<usize>, Vec<String>, String)> = Vec::new();
+        for (op, access, opening_id) in &openings {
             let op = *op;
             let adj: Vec<usize> = hubs
                 .iter()
@@ -476,7 +480,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                     ),
                 });
             } else {
-                kept_openings.push((op, adj, access.clone()));
+                kept_openings.push((op, adj, access.clone(), opening_id.clone()));
             }
         }
 
@@ -485,7 +489,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         for (i, h) in hubs.iter().enumerate() {
             combined.push((h.pt, 0, Tag::Hub(i)));
         }
-        for (i, (pt, _, _)) in kept_openings.iter().enumerate() {
+        for (i, (pt, _, _, _)) in kept_openings.iter().enumerate() {
             combined.push((*pt, 1, Tag::Opening(i)));
         }
         combined.sort_by(|a, b| {
@@ -512,8 +516,20 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         }
 
         // Horizontal: each opening links to every adjacent hub.
-        for (k, (op, adj, access)) in kept_openings.iter().enumerate() {
-            for &h in adj {
+        for (k, (op, adj, access, opening_id)) in kept_openings.iter().enumerate() {
+            let dirs = match directed.get(opening_id) {
+                Some((origin, dest)) => {
+                    let sides: Vec<(bool, bool)> = adj
+                        .iter()
+                        .map(|&h| (hubs[h].id == origin, hubs[h].id == dest))
+                        .collect();
+                    bind_doorway_directions(&sides)
+                }
+                None => vec![kiriko_route::TravelDirection::Both; adj.len()],
+            };
+            for (i, &h) in adj.iter().enumerate() {
+                let mut flags = flags_from_accessibility(access);
+                flags.direction = dirs[i];
                 edges.push(RouteEdge {
                     from: opening_idx[k],
                     to: hub_idx[h],
@@ -524,7 +540,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                         kind: EdgeKind::Doorway,
                         ..EdgeAttrs::default()
                     },
-                    flags: flags_from_accessibility(access),
+                    flags,
                 });
             }
         }
@@ -1212,5 +1228,85 @@ mod tests {
             "cost units must be millimetre-scale, got {}",
             e.weight
         );
+    }
+
+
+    fn relationship_feature(
+        origin: &str,
+        dest: &str,
+        opening: &str,
+        direction: Option<&str>,
+    ) -> VenueFeature {
+        let mut f = feature(
+            "rel",
+            FeatureType::Relationship,
+            "L0",
+            None,
+            linestring(&[[0.0, 0.0004], [0.0, 0.0006]]),
+        );
+        f.level_id = None;
+        f.geometry = None;
+        let mut props = BTreeMap::new();
+        props.insert("origin".into(), Value::String(origin.into()));
+        props.insert("destination".into(), Value::String(dest.into()));
+        let mut inter = BTreeMap::new();
+        inter.insert("id".into(), Value::String(opening.into()));
+        inter.insert("feature_type".into(), Value::String("opening".into()));
+        props.insert("intermediary".into(), Value::Object(inter));
+        if let Some(d) = direction {
+            props.insert("direction".into(), Value::String(d.into()));
+        }
+        f.source_properties = props;
+        f
+    }
+
+    #[test]
+    fn relationship_centroid_directed_stamps_hub_travel() {
+        let features = vec![
+            feature(
+                "walk-a",
+                FeatureType::Unit,
+                "L0",
+                Some("walkway"),
+                polygon(&square(-0.0005, 0.0005, 0.001)),
+            ),
+            feature(
+                "walk-b",
+                FeatureType::Unit,
+                "L0",
+                Some("walkway"),
+                polygon(&square(0.0005, 0.0005, 0.001)),
+            ),
+            feature(
+                "op",
+                FeatureType::Opening,
+                "L0",
+                None,
+                linestring(&[[0.0, 0.0003], [0.0, 0.0007]]),
+            ),
+            relationship_feature("walk-a", "walk-b", "op", Some("directed")),
+        ];
+        let build = synthesize_network(&document(&[("L0", 0.0)], features));
+        let doorways: Vec<_> = build
+            .graph
+            .edges
+            .iter()
+            .filter(|e| e.attrs.kind == EdgeKind::Doorway)
+            .collect();
+        assert_eq!(doorways.len(), 2);
+        let mut saw_rev = false;
+        let mut saw_fwd = false;
+        for e in doorways {
+            let lon = build.graph.nodes[e.to as usize].lon;
+            if lon < 0.0 {
+                assert_eq!(e.flags.direction, kiriko_route::TravelDirection::Reverse);
+                saw_rev = true;
+            } else {
+                assert_eq!(e.flags.direction, kiriko_route::TravelDirection::Forward);
+                saw_fwd = true;
+            }
+        }
+        assert_eq!(saw_rev, true);
+        assert_eq!(saw_fwd, true);
     }
 }

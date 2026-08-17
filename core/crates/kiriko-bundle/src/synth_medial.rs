@@ -25,6 +25,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::codec::BundleDocument;
+use crate::relationship::{bind_doorway_directions, directed_by_opening, parse_relationships};
 use crate::synth::{
     flags_from_accessibility, haversine_m, linestring_midpoint, point_boundary_dist_m,
     polygon_centroid, vertical_cost_m, vertical_kind,
@@ -1143,6 +1144,7 @@ fn materialize_doorway_side(
 /// Per-opening plan produced before skeleton emit: passage axis and the
 /// skeleton-local attach target chosen for each attaching blob root.
 struct DoorwayPlan {
+    opening_id: String,
     mid: [f64; 2],
     axis: [f64; 2],
     /// Opening LineString length (IMDF physical width). Stamped onto
@@ -1152,6 +1154,56 @@ struct DoorwayPlan {
     /// `(blob_root, skeleton_local_target)` sorted by root for determinism.
     attaches: Vec<(usize, usize)>,
 }
+
+fn point_in_unit(
+    p: [f64; 2],
+    unit_id: &str,
+    unit_polys: &HashMap<String, Vec<Polygon<f64>>>,
+) -> bool {
+    let Some(polys) = unit_polys.get(unit_id) else {
+        return false;
+    };
+    let pt = Point::new(p[0], p[1]);
+    polys.iter().any(|poly| poly.contains(&pt))
+}
+
+/// Stamp IMDF Relationship direction onto doorway edges. Leaves Both when
+/// origin/dest cannot be uniquely bound to this opening's attach points.
+fn apply_relationship_directions(
+    edges: &mut [RouteEdge],
+    emits: &[(String, usize, usize)],
+    directed: &HashMap<String, (String, String)>,
+    nodes: &[RouteNode],
+    unit_polys: &HashMap<String, Vec<Polygon<f64>>>,
+) {
+    if directed.is_empty() || emits.is_empty() {
+        return;
+    }
+    let mut groups: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
+    for (oid, to, ei) in emits {
+        groups.entry(oid.as_str()).or_default().push((*to, *ei));
+    }
+    for (oid, items) in groups {
+        let Some((origin, dest)) = directed.get(oid) else {
+            continue;
+        };
+        let sides: Vec<(bool, bool)> = items
+            .iter()
+            .map(|(to, _)| {
+                let p = [nodes[*to].lon, nodes[*to].lat];
+                (
+                    point_in_unit(p, origin, unit_polys),
+                    point_in_unit(p, dest, unit_polys),
+                )
+            })
+            .collect();
+        let dirs = bind_doorway_directions(&sides);
+        for (dir, &(_, ei)) in dirs.into_iter().zip(items.iter()) {
+            edges[ei].flags.direction = dir;
+        }
+    }
+}
+
 
 /// Min-heap entry for the bounded Dijkstra inside [`shortcut_chords`].
 #[derive(Clone, Copy, PartialEq)]
@@ -1368,12 +1420,14 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
     let mut edges: Vec<RouteEdge> = Vec::new();
     let mut warnings: Vec<RouteBuildWarning> = Vec::new();
     let mut transit_all: Vec<TransitAllEntry> = Vec::new();
+    let directed = directed_by_opening(&parse_relationships(&document.features));
 
     for &ord in &ordinals {
         let mut walk: Vec<&Value> = Vec::new();
         let mut obstacles: Vec<&Value> = Vec::new();
         let mut buffered: Vec<Value> = Vec::new();
         let mut room_polys: Vec<Polygon<f64>> = Vec::new();
+        let mut unit_polys: HashMap<String, Vec<Polygon<f64>>> = HashMap::new();
         let mut openings: Vec<OpeningAxis> = Vec::new();
         let mut transit: Vec<TransitUnit<'_>> = Vec::new();
         for f in &document.features {
@@ -1388,6 +1442,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             };
             match f.feature_type {
                 FeatureType::Unit => {
+                    unit_polys.insert(f.id.clone(), geo_polygons(geom));
                     match f.category.as_deref() {
                         Some(category) if is_walkway(category) => {
                             walk.push(geom);
@@ -1753,6 +1808,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             }
 
             doorway_plans.push(DoorwayPlan {
+                opening_id: opening.feature_id.clone(),
                 mid,
                 axis,
                 arc_length_m: opening.arc_length_m,
@@ -1812,6 +1868,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
 
         // Doorway EMIT: midpoint, candidate axis sides, planned attaches.
         let mut doorway_nodes: Vec<DoorwayNodes> = Vec::new();
+        let mut doorway_emits: Vec<(String, usize, usize)> = Vec::new();
         for plan in &doorway_plans {
             let mid = plan.mid;
             let axis = plan.axis;
@@ -1889,9 +1946,11 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 } else {
                     (mid_idx, mid)
                 };
+                let to = (base + local) as usize;
+                let ei = edges.len();
                 edges.push(RouteEdge {
                     from: t_idx as u32,
-                    to: (base + local) as u32,
+                    to: to as u32,
                     weight: haversine_m(t_pt, c) as f32,
                     ordinal: ord,
                     interior: Vec::new(),
@@ -1902,9 +1961,17 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     },
                     flags: flags_from_accessibility(&plan.accessibility),
                 });
+                doorway_emits.push((plan.opening_id.clone(), to, ei));
             }
             doorway_nodes.push(doorway);
         }
+        apply_relationship_directions(
+            &mut edges,
+            &doorway_emits,
+            &directed,
+            &nodes,
+            &unit_polys,
+        );
 
         // Near-blob bridging: fuse distinct blobs that abut without a doorway.
         // Bucket skeleton nodes on an ~ADJACENCY_BRIDGE_M grid, then keep the
@@ -3747,6 +3814,44 @@ mod tests {
     }
 
     /// Two thin walkways joined by one north–south opening at lon 139.7.
+
+    fn relationship_feature(
+        id: &str,
+        origin: &str,
+        dest: &str,
+        opening: &str,
+        direction: Option<&str>,
+        hours: Option<&str>,
+        geometry: Option<Value>,
+    ) -> kiriko_model::model::VenueFeature {
+        let mut props = BTreeMap::new();
+        props.insert("origin".into(), Value::String(origin.into()));
+        props.insert("destination".into(), Value::String(dest.into()));
+        let mut inter = BTreeMap::new();
+        inter.insert("id".into(), Value::String(opening.into()));
+        inter.insert("feature_type".into(), Value::String("opening".into()));
+        props.insert("intermediary".into(), Value::Object(inter));
+        if let Some(d) = direction {
+            props.insert("direction".into(), Value::String(d.into()));
+        }
+        if let Some(h) = hours {
+            props.insert("hours".into(), Value::String(h.into()));
+        }
+        kiriko_model::model::VenueFeature {
+            id: id.to_string(),
+            feature_type: FeatureType::Relationship,
+            level_id: None,
+            geometry,
+            center: None,
+            labels: BTreeMap::new(),
+            alt_labels: BTreeMap::new(),
+            category: None,
+            accessibility: Vec::new(),
+            restriction: None,
+            source_properties: props,
+        }
+    }
+
     fn two_walkway_door_doc(door_access: &[&str]) -> BundleDocument {
         let door = line(139.70000, 35.600004, 139.70000, 35.600010);
         document(
@@ -3844,6 +3949,116 @@ mod tests {
             assert_eq!(f.accessible_only, false);
         }
     }
+
+    #[test]
+    fn relationship_without_direction_leaves_doorway_both() {
+        let mut doc = two_walkway_door_doc(&[]);
+        doc.features.push(relationship_feature(
+            "rel",
+            "wa",
+            "wb",
+            "door",
+            None,
+            None,
+            None,
+        ));
+        let flags = doorway_flags(&synthesize_network_medial(&doc).graph);
+        assert!(flags.is_empty() == false, "expected doorway edges");
+        for f in flags {
+            assert_eq!(f.direction, kiriko_route::TravelDirection::Both);
+        }
+    }
+
+    #[test]
+    fn relationship_directed_stamps_doorway_travel() {
+        let mut doc = two_walkway_door_doc(&[]);
+        doc.features.push(relationship_feature(
+            "rel",
+            "wa",
+            "wb",
+            "door",
+            Some("directed"),
+            None,
+            None,
+        ));
+        let build = synthesize_network_medial(&doc);
+        let mut saw_rev = false;
+        let mut saw_fwd = false;
+        for e in &build.graph.edges {
+            if e.attrs.kind != EdgeKind::Doorway {
+                continue;
+            }
+            let lat = build.graph.nodes[e.to as usize].lat;
+            let closer_to_a = (lat - 35.600000).abs() < (lat - 35.600014).abs();
+            if closer_to_a {
+                assert_eq!(e.flags.direction, kiriko_route::TravelDirection::Reverse);
+                saw_rev = true;
+            } else {
+                assert_eq!(e.flags.direction, kiriko_route::TravelDirection::Forward);
+                saw_fwd = true;
+            }
+        }
+        assert_eq!(saw_rev, true, "origin-side doorway should be Reverse");
+        assert_eq!(saw_fwd, true, "dest-side doorway should be Forward");
+    }
+
+    #[test]
+    fn relationship_directed_unmappable_leaves_both() {
+        let mut doc = two_walkway_door_doc(&[]);
+        doc.features.push(relationship_feature(
+            "rel",
+            "missing-a",
+            "missing-b",
+            "door",
+            Some("directed"),
+            None,
+            None,
+        ));
+        let flags = doorway_flags(&synthesize_network_medial(&doc).graph);
+        assert!(flags.is_empty() == false, "expected doorway edges");
+        for f in flags {
+            assert_eq!(f.direction, kiriko_route::TravelDirection::Both);
+        }
+    }
+
+    #[test]
+    fn relationship_lineal_geometry_does_not_add_edges() {
+        let baseline = synthesize_network_medial(&two_walkway_door_doc(&[]));
+        let mut doc = two_walkway_door_doc(&[]);
+        doc.features.push(relationship_feature(
+            "rel",
+            "wa",
+            "wb",
+            "door",
+            Some("directed"),
+            None,
+            Some(line(139.70000, 35.600000, 139.70000, 35.600014)),
+        ));
+        let with_rel = synthesize_network_medial(&doc);
+        assert_eq!(baseline.graph.edges.len(), with_rel.graph.edges.len());
+        assert_eq!(baseline.graph.nodes.len(), with_rel.graph.nodes.len());
+    }
+
+    #[test]
+    fn relationship_hours_stay_unset() {
+        let mut doc = two_walkway_door_doc(&[]);
+        doc.features.push(relationship_feature(
+            "rel",
+            "wa",
+            "wb",
+            "door",
+            Some("directed"),
+            Some("Mo-Fr 09:00-17:00"),
+            None,
+        ));
+        let flags = doorway_flags(&synthesize_network_medial(&doc).graph);
+        assert!(flags.is_empty() == false, "expected doorway edges");
+        for f in flags {
+            assert_eq!(f.start_minute, -1);
+            assert_eq!(f.end_minute, -1);
+        }
+    }
+
 
     #[test]
     fn nearby_openings_share_one_doorway_bridge() {

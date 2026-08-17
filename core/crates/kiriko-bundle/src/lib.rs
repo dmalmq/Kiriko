@@ -21,6 +21,7 @@ mod error;
 mod export;
 mod format;
 mod resolve;
+mod relationship;
 mod scene_adapter;
 mod scene_compile;
 mod scene_section;
