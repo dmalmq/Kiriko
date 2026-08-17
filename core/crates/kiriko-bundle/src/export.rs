@@ -185,6 +185,7 @@ pub fn export_network(bundle: &[u8]) -> Result<NetworkGeoJson, ExportError> {
             fwd,
             rev,
             e.attrs,
+            e.flags,
             &poly,
         ));
         path_features.push(path_feature(
@@ -199,6 +200,7 @@ pub fn export_network(bundle: &[u8]) -> Result<NetworkGeoJson, ExportError> {
             rev,
             fwd,
             e.attrs,
+            e.flags,
             &reversed,
         ));
     }
@@ -225,6 +227,7 @@ fn path_feature(
     path_id: i64,
     reverse_path_id: i64,
     attrs: kiriko_route::EdgeAttrs,
+    flags: kiriko_route::EdgeFlags,
     poly: &[[f64; 2]],
 ) -> Json {
     let coordinates: Vec<Json> = poly.iter().map(|p| json!([p[0], p[1]])).collect();
@@ -245,14 +248,19 @@ fn path_feature(
             "cost": cost,
             "TRAVELTIME": travel_time,
             "RFLAG": 0,
-            "BARRIER": 0,
+            "BARRIER": i64::from(flags.barrier),
+            "GATE": i64::from(flags.gate),
             "FLOOR": ordinal_to_floor_label(edge_ord),
             "PATHID": path_id,
             "RPATHID": reverse_path_id,
             "HFLAG": i64::from(vertical),
-            "STARTTIME": -1,
-            "ENDTIME": -1,
-            "direction": Json::Null,
+            "STARTTIME": flags.start_minute,
+            "ENDTIME": flags.end_minute,
+            "direction": match flags.direction {
+                kiriko_route::TravelDirection::Both => Json::Null,
+                kiriko_route::TravelDirection::Forward => Json::from(1),
+                kiriko_route::TravelDirection::Reverse => Json::from(2),
+            },
             "FFLOOR": ffloor,
             "TFOOLR": tfloor,
             "indoor": 1,
@@ -276,7 +284,7 @@ mod tests {
     use super::*;
     use crate::codec::{BundleDocument, BundleMetadata, BundleStats, encode_bundle};
     use kiriko_model::model::{ImdfManifest, ViewerLevel};
-    use kiriko_route::{EdgeAttrs, RouteEdge, RouteGraph, RouteNode};
+    use kiriko_route::{EdgeAttrs, EdgeFlags, RouteEdge, RouteGraph, RouteNode, TravelDirection};
     use std::collections::BTreeMap;
 
     fn bundle_with_graph(graph: RouteGraph) -> Vec<u8> {
@@ -612,5 +620,62 @@ mod tests {
             .expect("re-import")
             .graph;
         assert_eq!(g1, graph, "attrs round-trip through the GeoJSON wire");
+    }
+
+    #[test]
+    fn export_round_trips_one_way_barrier_and_hours() {
+        // A kept (smaller PATHID) path must carry the stored flags, and
+        // `build_route_graph` must recover Forward + barrier + hours.
+        let flags = EdgeFlags {
+            direction: TravelDirection::Forward,
+            barrier: true,
+            gate: true,
+            start_minute: 600,
+            end_minute: 720,
+            wheelchair: true,
+            accessible_only: false,
+        };
+        let graph = RouteGraph {
+            nodes: vec![
+                RouteNode {
+                    lon: 139.70,
+                    lat: 35.69,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.701,
+                    lat: 35.69,
+                    ordinal: 0.0,
+                },
+            ],
+            edges: vec![RouteEdge {
+                from: 0,
+                to: 1,
+                weight: 1_000.0,
+                ordinal: 0.0,
+                interior: Vec::new(),
+                attrs: EdgeAttrs::default(),
+                flags,
+            }],
+        };
+        let net = export_network(&bundle_with_graph(graph.clone())).expect("export");
+        let p: Json = serde_json::from_str(&net.paths).unwrap();
+        let pf = p["features"].as_array().unwrap();
+        assert_eq!(pf[0]["properties"]["PATHID"], 1, "kept feature is smaller PATHID");
+        assert_eq!(pf[0]["properties"]["direction"], 1);
+        assert_eq!(pf[0]["properties"]["BARRIER"], 1);
+        assert_eq!(pf[0]["properties"]["GATE"], 1);
+        assert_eq!(pf[0]["properties"]["STARTTIME"], 600);
+        assert_eq!(pf[0]["properties"]["ENDTIME"], 720);
+
+        let g1 = kiriko_route::build_route_graph(&net.junctions, &net.paths, &[0.0])
+            .expect("re-import")
+            .graph;
+        assert_eq!(g1.edges[0].flags.direction, TravelDirection::Forward);
+        assert_eq!(g1.edges[0].flags.barrier, true);
+        assert_eq!(g1.edges[0].flags.gate, true);
+        assert_eq!(g1.edges[0].flags.start_minute, 600);
+        assert_eq!(g1.edges[0].flags.end_minute, 720);
+        assert_eq!(g1, graph, "flags round-trip through the GeoJSON wire");
     }
 }
