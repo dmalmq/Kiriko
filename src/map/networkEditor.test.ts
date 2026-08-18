@@ -149,6 +149,17 @@ describe("networkEditorReducer tools", () => {
     expect(s.selection).toBeNull();
     expect(s.present).toBe(before);
   });
+
+  it("select-tool map pick clears the selection without committing", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    expect(s.selection).toEqual(singleJunction(0));
+    const before = s.present;
+    s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.71, latitude: 35.61 }, activeOrdinal: 0 });
+    expect(s.selection).toBeNull();
+    expect(s.present).toBe(before);
+    expect(s.past).toHaveLength(0);
+  });
 });
 
 describe("networkEditorReducer history", () => {
@@ -366,6 +377,23 @@ describe("networkEditorReducer preview", () => {
     s = reduce(s, { type: "set_preview", preview: previewOf("shorter", [[139.7, 35.6], [139.7005, 35.6]]) });
     s = reduce(s, { type: "set_tool", tool: "select" });
     expect(s.preview).toBeNull();
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("connect pick during preview does not hop or replace the preview", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, { type: "set_tool", tool: "connect" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    const preview = previewOf("shorter", [
+      [139.7, 35.6],
+      [139.7005, 35.6],
+    ]);
+    s = reduce(s, { type: "set_preview", preview });
+    expect(s.pendingNodeId).toBe(0);
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 1 }, activeOrdinal: 0 });
+    expect(s.present.paths).toHaveLength(0);
+    expect(s.preview).toBe(preview);
+    expect(s.pendingNodeId).toBe(0);
     expect(s.past).toHaveLength(0);
   });
 

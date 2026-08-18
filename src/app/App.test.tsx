@@ -2639,6 +2639,42 @@ describe("App directions mode", () => {
     expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
   });
 
+  it("ignores a third connect click while preview is open", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    proposeNetworkPathsMock.mockReturnValue({
+      fromId: 0,
+      toId: 2,
+      candidates: [
+        {
+          kind: "shorter",
+          coordinates: [
+            [139.7, 35.68],
+            [139.7005, 35.68],
+            [139.701, 35.68],
+          ],
+          nodeIds: null,
+        },
+      ],
+    });
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await startNetworkEdit(user);
+    await user.click(await screen.findByTestId("net-pick-0"));
+    await user.click(await screen.findByTestId("net-pick-2"));
+
+    expect(await screen.findByText("Choose a route, or press Escape to cancel.")).toBeTruthy();
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
+    const proposeCalls = proposeNetworkPathsMock.mock.calls.length;
+
+    // Node 1 is a short walkable chord from the still-pending origin — a hop
+    // would add paths and drop the preview if the session were not closed.
+    await user.click(await screen.findByTestId("net-pick-1"));
+    expect(screen.getByText("Choose a route, or press Escape to cancel.")).toBeTruthy();
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
+    expect(proposeNetworkPathsMock).toHaveBeenCalledTimes(proposeCalls);
+  });
+
   it("does not hop a short chord that is not walkable", async () => {
     const user = userEvent.setup();
     loadNetworkOverlayMock.mockResolvedValue(editableNetwork());

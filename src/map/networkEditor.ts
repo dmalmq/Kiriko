@@ -245,7 +245,7 @@ function applyPick(state: NetworkEditorState, pick: NetworkMapPick, activeOrdina
       if (pick.kind === "connection") {
         return { ...state, selection: singleConnection(pick.connectionId) };
       }
-      return state;
+      return state.selection === null ? state : { ...state, selection: null };
 
     case "add-junction": {
       if (pick.kind === "junction") {
@@ -265,6 +265,7 @@ function applyPick(state: NetworkEditorState, pick: NetworkMapPick, activeOrdina
 
     case "connect": {
       if (pick.kind !== "junction") return state;
+      if (state.preview !== null) return state;
       if (state.pendingNodeId === null) {
         return {
           ...state,

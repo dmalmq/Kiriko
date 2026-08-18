@@ -546,6 +546,11 @@ export function App() {
   editorRef.current = editor;
   const bundleBytesRef = useRef<Uint8Array | null>(null);
   const connectProposeTokenRef = useRef(0);
+  const connectProposeInFlightRef = useRef(false);
+  const invalidateConnectPropose = useCallback(() => {
+    connectProposeTokenRef.current += 1;
+    connectProposeInFlightRef.current = false;
+  }, []);
   // The published overlay is the immutable baseline; the editor's working copy
   // (when editing) is what renders, reports connectivity, and serializes.
   const editedNetwork = editor?.present ?? reviewNetwork;
@@ -740,9 +745,9 @@ export function App() {
     setEditor(null);
     setDiscardArmed(false);
     bundleBytesRef.current = null;
-    connectProposeTokenRef.current += 1;
+    invalidateConnectPropose();
     resetNetworkSave();
-  }, [bundleProvenance, resetNetworkSave]);
+  }, [bundleProvenance, resetNetworkSave, invalidateConnectPropose]);
 
   // Network-review overlay: load the generated network on demand the first
   // time review is switched on for this dataset (main-thread wasm export).
@@ -890,6 +895,9 @@ export function App() {
         dispatchEditor({ type: "pick", pick, activeOrdinal });
         return;
       }
+      if (current.preview !== null || connectProposeInFlightRef.current) {
+        return;
+      }
       const fromId = current.pendingNodeId;
       const toId = pick.nodeId;
       const from = junctionByNodeId(current.present, fromId);
@@ -924,11 +932,13 @@ export function App() {
       }
       const dist = haversineM(a[0], a[1], b[0], b[1]);
       if (dist < INSTANT_HOP_M && chord) {
+        invalidateConnectPropose();
         dispatchEditor({ type: "pick", pick, activeOrdinal });
         return;
       }
       const token = connectProposeTokenRef.current + 1;
       connectProposeTokenRef.current = token;
+      connectProposeInFlightRef.current = true;
       void (async () => {
         try {
           await initKirikoWasm();
@@ -941,6 +951,7 @@ export function App() {
             toId,
           );
           if (token !== connectProposeTokenRef.current) return;
+          connectProposeInFlightRef.current = false;
           const candidates = previewCandidatesFromProposal(proposal);
           const hasCurrent = candidates.some((candidate) => candidate.kind === "current");
           const hasNew = candidates.some((candidate) => candidate.kind !== "current");
@@ -963,11 +974,12 @@ export function App() {
           }
         } catch {
           if (token !== connectProposeTokenRef.current) return;
+          connectProposeInFlightRef.current = false;
           dispatchEditor({ type: "set_preview_status", status: "propose_failed" });
         }
       })();
     },
-    [dispatchEditor],
+    [dispatchEditor, invalidateConnectPropose],
   );
 
   const onNetworkBoxSelect = useCallback(
@@ -1441,7 +1453,7 @@ export function App() {
       const mod = event.ctrlKey || event.metaKey;
       if (mod && (event.key === "z" || event.key === "Z")) {
         event.preventDefault();
-        connectProposeTokenRef.current += 1;
+        invalidateConnectPropose();
         dispatchEditor({ type: event.shiftKey ? "redo" : "undo" });
         return;
       }
@@ -1452,26 +1464,26 @@ export function App() {
         if (discardArmed) {
           setDiscardArmed(false);
         } else {
-          connectProposeTokenRef.current += 1;
+          invalidateConnectPropose();
           dispatchEditor({ type: "cancel_pending" });
         }
         return;
       }
       switch (event.key.toLowerCase()) {
         case "s":
-          connectProposeTokenRef.current += 1;
+          invalidateConnectPropose();
           dispatchEditor({ type: "set_tool", tool: "select" });
           break;
         case "p":
-          connectProposeTokenRef.current += 1;
+          invalidateConnectPropose();
           dispatchEditor({ type: "set_tool", tool: "add-junction" });
           break;
         case "c":
-          connectProposeTokenRef.current += 1;
+          invalidateConnectPropose();
           dispatchEditor({ type: "set_tool", tool: "connect" });
           break;
         case "d":
-          connectProposeTokenRef.current += 1;
+          invalidateConnectPropose();
           dispatchEditor({ type: "set_tool", tool: "delete" });
           break;
         case "delete":
@@ -1484,7 +1496,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [editor, discardArmed, dispatchEditor]);
+  }, [editor, discardArmed, dispatchEditor, invalidateConnectPropose]);
 
   // Warn before unloading the tab with unsaved network edits.
   useEffect(() => {
@@ -2409,21 +2421,24 @@ export function App() {
                 saveError={networkSave.error}
                 discardArmed={discardArmed}
                 onSetTool={(tool) => {
-                  connectProposeTokenRef.current += 1;
+                  invalidateConnectPropose();
                   dispatchEditor({ type: "set_tool", tool });
                 }}
                 onUndo={() => {
-                  connectProposeTokenRef.current += 1;
+                  invalidateConnectPropose();
                   dispatchEditor({ type: "undo" });
                 }}
                 onRedo={() => {
-                  connectProposeTokenRef.current += 1;
+                  invalidateConnectPropose();
                   dispatchEditor({ type: "redo" });
                 }}
                 onRequestDiscard={requestDiscard}
                 onCancelDiscard={cancelDiscard}
                 onConfirmDiscard={confirmDiscard}
-                onConfirmPreview={() => dispatchEditor({ type: "confirm_preview" })}
+                onConfirmPreview={() => {
+                  invalidateConnectPropose();
+                  dispatchEditor({ type: "confirm_preview" });
+                }}
                 onSelectCandidate={(index) =>
                   dispatchEditor({ type: "select_candidate", index })
                 }
