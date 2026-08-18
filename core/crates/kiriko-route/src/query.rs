@@ -252,6 +252,127 @@ fn connector_cost(p: &Point3, s: &EdgeSnap) -> f64 {
     )))
 }
 
+/// Directed adjacency used by [`route_with`] and [`route_node_path`]:
+/// `(next_node, edge_index, weight)` per node, plus the heuristic scale `k`.
+fn profile_adjacency(
+    graph: &RouteGraph,
+    profile: &RouteProfile,
+) -> (Vec<Vec<(usize, usize, f32)>>, f64) {
+    let n = graph.nodes.len();
+    let mut adj: Vec<Vec<(usize, usize, f32)>> = vec![Vec::new(); n];
+    let mut k = f64::INFINITY;
+    for (ei, e) in graph.edges.iter().enumerate() {
+        if !edge_allowed(e, profile) {
+            continue;
+        }
+        let (from, to) = (e.from as usize, e.to as usize);
+        if from >= n || to >= n {
+            continue;
+        }
+        match e.flags.direction {
+            TravelDirection::Both => {
+                adj[from].push((to, ei, e.weight));
+                adj[to].push((from, ei, e.weight));
+            }
+            TravelDirection::Forward => adj[from].push((to, ei, e.weight)),
+            TravelDirection::Reverse => adj[to].push((from, ei, e.weight)),
+        }
+        let m = haversine_m(
+            graph.nodes[from].lon,
+            graph.nodes[from].lat,
+            graph.nodes[to].lon,
+            graph.nodes[to].lat,
+        );
+        if m > 0.0 {
+            k = k.min(f64::from(e.weight) / m);
+        }
+    }
+    if !k.is_finite() {
+        k = 0.0;
+    }
+    (adj, k)
+}
+
+/// Same-floor graph node nearest to `p` (ties by lower index).
+fn nearest_same_floor_node(graph: &RouteGraph, p: &Point3) -> Option<usize> {
+    graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.ordinal == p.ordinal)
+        .min_by(|(i, a), (j, b)| {
+            haversine_m(p.lon, p.lat, a.lon, a.lat)
+                .total_cmp(&haversine_m(p.lon, p.lat, b.lon, b.lat))
+                .then(i.cmp(j))
+        })
+        .map(|(i, _)| i)
+}
+
+/// Visit-order node indices of the walking A* path between the graph nodes
+/// nearest `origin` and `dest`. Same adjacency and edge filter as
+/// [`route_with`]. `None` when the endpoints do not share a connected
+/// component (or no same-floor node exists).
+pub(crate) fn route_node_path(
+    graph: &RouteGraph,
+    origin: Point3,
+    dest: Point3,
+    profile: &RouteProfile,
+) -> Option<Vec<usize>> {
+    if !endpoint_is_finite(&origin) || !endpoint_is_finite(&dest) {
+        return None;
+    }
+    let start = nearest_same_floor_node(graph, &origin)?;
+    let goal = nearest_same_floor_node(graph, &dest)?;
+    if start == goal {
+        return Some(vec![start]);
+    }
+    let (adj, k) = profile_adjacency(graph, profile);
+    let h = |i: usize| {
+        let node = &graph.nodes[i];
+        k * haversine_m(node.lon, node.lat, dest.lon, dest.lat)
+    };
+    let n = graph.nodes.len();
+    let mut dist = vec![f64::INFINITY; n];
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+    let mut heap = BinaryHeap::new();
+    dist[start] = 0.0;
+    heap.push(Open {
+        f: h(start),
+        g: 0.0,
+        node: start,
+        origin_edge: 0,
+    });
+    while let Some(Open { g, node, .. }) = heap.pop() {
+        if g > dist[node] {
+            continue;
+        }
+        if node == goal {
+            let mut path = vec![goal];
+            let mut cur = goal;
+            while let Some(prev) = parent[cur] {
+                path.push(prev);
+                cur = prev;
+            }
+            path.reverse();
+            return Some(path);
+        }
+        for &(next, _, w) in &adj[node] {
+            let ng = g + f64::from(w);
+            if ng < dist[next] {
+                dist[next] = ng;
+                parent[next] = Some(node);
+                heap.push(Open {
+                    f: ng + h(next),
+                    g: ng,
+                    node: next,
+                    origin_edge: 0,
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Route from `origin` to `dest` over the graph: project both endpoints onto
 /// their best same-floor edge candidates, then A* between the virtual
 /// endpoints of every candidate pair (edges traversed in both directions),
@@ -318,37 +439,7 @@ pub fn route_with(
     }
 
     let n = graph.nodes.len();
-    let mut adj: Vec<Vec<(usize, usize, f32)>> = vec![Vec::new(); n]; // (next, edge_index, weight)
-    let mut k = f64::INFINITY;
-    for (ei, e) in graph.edges.iter().enumerate() {
-        if !edge_allowed(e, profile) {
-            continue;
-        }
-        let (from, to) = (e.from as usize, e.to as usize);
-        if from >= n || to >= n {
-            continue;
-        }
-        match e.flags.direction {
-            TravelDirection::Both => {
-                adj[from].push((to, ei, e.weight));
-                adj[to].push((from, ei, e.weight));
-            }
-            TravelDirection::Forward => adj[from].push((to, ei, e.weight)),
-            TravelDirection::Reverse => adj[to].push((from, ei, e.weight)),
-        }
-        let m = haversine_m(
-            graph.nodes[from].lon,
-            graph.nodes[from].lat,
-            graph.nodes[to].lon,
-            graph.nodes[to].lat,
-        );
-        if m > 0.0 {
-            k = k.min(f64::from(e.weight) / m);
-        }
-    }
-    if !k.is_finite() {
-        k = 0.0;
-    }
+    let (adj, k) = profile_adjacency(graph, profile);
 
     // Heuristic: lower bound toward the nearest destination projection.
     let h = |i: usize| {
@@ -1529,7 +1620,10 @@ mod tests {
     }
 
     fn route_coords(r: &Route) -> Vec<[f64; 2]> {
-        r.segments.iter().flat_map(|s| s.coordinates.clone()).collect()
+        r.segments
+            .iter()
+            .flat_map(|s| s.coordinates.clone())
+            .collect()
     }
 
     #[test]
@@ -1545,10 +1639,13 @@ mod tests {
             lat: 35.001,
             ordinal: 1.0,
         };
-        let walking = route_with(&g, origin, dest, &RouteProfile::walking()).expect("walking routes");
+        let walking =
+            route_with(&g, origin, dest, &RouteProfile::walking()).expect("walking routes");
         let coords = route_coords(&walking);
         assert!(
-            coords.iter().any(|c| (c[0] - 139.001).abs() < 1e-9 && (c[1] - 35.0).abs() < 1e-9),
+            coords
+                .iter()
+                .any(|c| (c[0] - 139.001).abs() < 1e-9 && (c[1] - 35.0).abs() < 1e-9),
             "walking path visits the stair landing, got {coords:?}"
         );
         let wheelchair =
@@ -1574,7 +1671,8 @@ mod tests {
             lat: 35.001,
             ordinal: 1.0,
         };
-        let walking = route_with(&g, origin, dest, &RouteProfile::walking()).expect("walking routes");
+        let walking =
+            route_with(&g, origin, dest, &RouteProfile::walking()).expect("walking routes");
         let wheelchair =
             route_with(&g, origin, dest, &RouteProfile::wheelchair()).expect("wheelchair routes");
         let w_coords = route_coords(&wheelchair);
@@ -1588,8 +1686,7 @@ mod tests {
             .iter()
             .any(|c| (c[0] - 139.001).abs() < 1e-9 && (c[1] - 35.0).abs() < 1e-9);
         assert_eq!(
-            visits_stairs,
-            false,
+            visits_stairs, false,
             "wheelchair must not visit the stair landing, got {w_coords:?}"
         );
         let walk_coords = route_coords(&walking);
@@ -1653,7 +1750,8 @@ mod tests {
             lat: 35.0,
             ordinal: 0.0,
         };
-        let walking = route_with(&g, origin, dest, &RouteProfile::walking()).expect("walking routes");
+        let walking =
+            route_with(&g, origin, dest, &RouteProfile::walking()).expect("walking routes");
         assert!(
             (walking.total_weight - 1000.0).abs() < 1.0,
             "walking takes the cheap narrow edge, got {}",

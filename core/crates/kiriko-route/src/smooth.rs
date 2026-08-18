@@ -89,7 +89,7 @@ fn smooth_segment(seg: RouteSegment, floors: &[WalkableFloor]) -> RouteSegment {
 /// between them: every sample (≤ [`CHORD_SAMPLE_M`], endpoints included) lies
 /// in the floor's walkable union, and no lock sits within [`DOOR_LOCK_M`] of
 /// an intermediate vertex that the chord would skip.
-fn chord_ok(coords: &[[f64; 2]], i: usize, j: usize, floor: &WalkableFloor) -> bool {
+pub(crate) fn chord_ok(coords: &[[f64; 2]], i: usize, j: usize, floor: &WalkableFloor) -> bool {
     for k in (i + 1)..j {
         if floor
             .locks
@@ -115,7 +115,7 @@ fn chord_ok(coords: &[[f64; 2]], i: usize, j: usize, floor: &WalkableFloor) -> b
 /// `true` when `p` is walkable: inside (or within [`SEGMENT_OUTSIDE_TOL_M`] of)
 /// some polygon's exterior ring, and strictly outside every hole of that
 /// polygon. Holes never shrink — the tolerance is exterior-only.
-fn walkable(p: [f64; 2], floor: &WalkableFloor) -> bool {
+pub(crate) fn walkable(p: [f64; 2], floor: &WalkableFloor) -> bool {
     floor.polygons.iter().any(|poly| {
         if !point_in_ring(&poly.exterior, p)
             && dist_to_ring_m(p, &poly.exterior) > SEGMENT_OUTSIDE_TOL_M

@@ -16,12 +16,12 @@
 use std::collections::BTreeMap;
 
 use kiriko_bundle::{
-    BundleDocument, BundleError, CapabilityReport, LevelElevation, SectionCapability, decode_bundle,
-    level_elevations,
+    BundleDocument, BundleError, CapabilityReport, LevelElevation, SectionCapability,
+    decode_bundle, level_elevations,
 };
 use kiriko_model::canonical::{Object as CanonicalObject, Value as CanonicalValue};
 use kiriko_model::model::{Bounds, ImdfManifest, VenueFeature, ViewerLevel, ViewerWarning};
-use kiriko_route::{Point3, Route, RouteProfile};
+use kiriko_route::{PathCandidateKind, PathProposal, Point3, Route, RouteProfile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
@@ -626,6 +626,120 @@ pub fn export_network_js(bundle: &[u8]) -> Result<JsValue, JsError> {
     .map_err(|e| JsError::new(&e.to_string()))
 }
 
+// -- Smart Connect path proposal -------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PathCandidateDto {
+    kind: &'static str,
+    coordinates: Vec<[f64; 2]>,
+    node_ids: Option<Vec<u64>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PathProposalDto {
+    from_id: u64,
+    to_id: u64,
+    candidates: Vec<PathCandidateDto>,
+}
+
+fn candidate_kind_js(kind: PathCandidateKind) -> &'static str {
+    match kind {
+        PathCandidateKind::Current => "current",
+        PathCandidateKind::AlongNetwork => "along_network",
+        PathCandidateKind::Shorter => "shorter",
+    }
+}
+
+fn proposal_dto(proposal: PathProposal) -> PathProposalDto {
+    PathProposalDto {
+        from_id: proposal.from_id,
+        to_id: proposal.to_id,
+        candidates: proposal
+            .candidates
+            .into_iter()
+            .map(|c| PathCandidateDto {
+                kind: candidate_kind_js(c.kind),
+                coordinates: c.coordinates,
+                node_ids: c.node_ids,
+            })
+            .collect(),
+    }
+}
+
+/// Walkable floors from `document` plus a route graph built from the
+/// editor's present junctions/paths GeoJSON.
+fn propose_in_document(
+    document: &BundleDocument,
+    junctions_geojson: &str,
+    paths_geojson: &str,
+    from_id: u64,
+    to_id: u64,
+) -> Result<PathProposal, String> {
+    let floors = kiriko_bundle::walkable_floors(document);
+    let ordinals: Vec<f64> = document.levels.iter().map(|l| l.ordinal).collect();
+    let built = kiriko_route::build_route_graph(junctions_geojson, paths_geojson, &ordinals)
+        .map_err(|e| e.message)?;
+    Ok(kiriko_route::propose_paths(
+        &built.graph,
+        &built.node_ids,
+        &floors,
+        from_id,
+        to_id,
+        &RouteProfile::walking(),
+    ))
+}
+
+/// Straight-chord walkability on a decoded bundle floor. No matching
+/// ordinal → `false` (not an error). Bundle-format failures throw.
+#[wasm_bindgen(js_name = "walkableChord")]
+pub fn walkable_chord_js(
+    bundle: &[u8],
+    a_lon: f64,
+    a_lat: f64,
+    b_lon: f64,
+    b_lat: f64,
+    ordinal: f64,
+) -> Result<bool, JsError> {
+    let document = decode_bundle(bundle).map_err(|e| JsError::new(&e.message))?;
+    let floors = kiriko_bundle::walkable_floors(&document);
+    let Some(floor) = floors.iter().find(|f| f.ordinal == ordinal) else {
+        return Ok(false);
+    };
+    Ok(kiriko_route::walkable_chord(
+        floor,
+        [a_lon, a_lat],
+        [b_lon, b_lat],
+    ))
+}
+
+/// Propose current / along-network / shorter paths between two junction
+/// NODEIDs on the editor's present graph. Walkable floors come from the
+/// bundle; the graph is rebuilt from `junctions_geojson` / `paths_geojson`.
+/// Serialized `{ fromId, toId, candidates: [{ kind, coordinates, nodeIds }] }`.
+#[wasm_bindgen(js_name = "proposeNetworkPaths")]
+pub fn propose_network_paths_js(
+    bundle: &[u8],
+    junctions_geojson: &str,
+    paths_geojson: &str,
+    from_id: f64,
+    to_id: f64,
+) -> Result<JsValue, JsError> {
+    let document = decode_bundle(bundle).map_err(|e| JsError::new(&e.message))?;
+    let proposal = propose_in_document(
+        &document,
+        junctions_geojson,
+        paths_geojson,
+        from_id as u64,
+        to_id as u64,
+    )
+    .map_err(|e| JsError::new(&e))?;
+    proposal_dto(proposal)
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -728,6 +842,25 @@ mod tests {
         )
         .expect("fixture + network + facilities compiles")
         .bytes
+    }
+
+    #[test]
+    fn propose_network_paths_returns_candidates_array() {
+        let bundle = compile_with_graph();
+        let document = decode_bundle(&bundle).expect("bundle decodes");
+        let out = propose_in_document(&document, NETWORK_JUNCTIONS, NETWORK_PATHS, 1, 2)
+            .expect("proposes");
+        assert_eq!(out.from_id, 1);
+        assert_eq!(out.to_id, 2);
+        // `candidates` is always an array, even when empty (no walkable
+        // joiner / no current). The fixture graph connects 1→2 so Current
+        // is present.
+        let _ = out.candidates.as_slice();
+        assert!(
+            out.candidates
+                .iter()
+                .any(|c| c.kind == PathCandidateKind::Current)
+        );
     }
 
     #[test]
@@ -853,15 +986,40 @@ mod tests {
             ordinal: 0.0,
         };
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(route_in_document(&document, Point3 { lon: bad, ..ok }, ok, &RouteProfile::walking()).is_none());
-            assert!(route_in_document(&document, ok, Point3 { lat: bad, ..ok }, &RouteProfile::walking()).is_none());
-            assert!(route_in_document(&document, ok, Point3 { ordinal: bad, ..ok }, &RouteProfile::walking()).is_none());
+            assert!(
+                route_in_document(
+                    &document,
+                    Point3 { lon: bad, ..ok },
+                    ok,
+                    &RouteProfile::walking()
+                )
+                .is_none()
+            );
+            assert!(
+                route_in_document(
+                    &document,
+                    ok,
+                    Point3 { lat: bad, ..ok },
+                    &RouteProfile::walking()
+                )
+                .is_none()
+            );
+            assert!(
+                route_in_document(
+                    &document,
+                    ok,
+                    Point3 { ordinal: bad, ..ok },
+                    &RouteProfile::walking()
+                )
+                .is_none()
+            );
         }
     }
 
-
     fn diamond_vertical_graph() -> kiriko_route::RouteGraph {
-        use kiriko_route::{EdgeAttrs, EdgeKind, PathwayRank, RouteEdge, RouteGraph, RouteNode, VerticalKind};
+        use kiriko_route::{
+            EdgeAttrs, EdgeKind, PathwayRank, RouteEdge, RouteGraph, RouteNode, VerticalKind,
+        };
         RouteGraph {
             nodes: vec![
                 RouteNode {

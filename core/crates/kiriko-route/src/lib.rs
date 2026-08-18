@@ -4,6 +4,7 @@ mod build;
 mod floor;
 mod geo_math;
 mod graph;
+mod propose;
 mod query;
 mod smooth;
 
@@ -14,5 +15,6 @@ pub use graph::{
     RouteNode, TravelDirection, VerticalKind, kind_from_key, kind_key, meters_to_cost,
     vertical_from_key, vertical_key,
 };
+pub use propose::{PathCandidate, PathCandidateKind, PathProposal, propose_paths, walkable_chord};
 pub use query::{Point3, Route, RouteProfile, RouteSegment, edge_allowed, route, route_with};
 pub use smooth::{WalkableFloor, WalkablePolygon, smooth_route};

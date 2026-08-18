@@ -7,6 +7,26 @@
  *
  * Phase Two Task 4: WASM decode adapter (browser side).
  */
+
+/** Planned wasm exports; present after `pnpm core:build:wasm`. */
+declare module "@kiriko/wasm" {
+  export function walkableChord(
+    bundle: Uint8Array,
+    a_lon: number,
+    a_lat: number,
+    b_lon: number,
+    b_lat: number,
+    ordinal: number,
+  ): boolean;
+  export function proposeNetworkPaths(
+    bundle: Uint8Array,
+    junctions_geojson: string,
+    paths_geojson: string,
+    from_id: number,
+    to_id: number,
+  ): unknown;
+}
+
 import init, {
   decodeBundle as decodeBundleWasm,
   routeBundle as routeBundleWasm,
@@ -16,6 +36,8 @@ import init, {
   sceneProjection as sceneProjectionWasm,
   generatedScene as generatedSceneWasm,
   decodeScene as decodeSceneWasm,
+  walkableChord as walkableChordWasm,
+  proposeNetworkPaths as proposeNetworkPathsWasm,
 } from "@kiriko/wasm";
 // Vite emits a hashed, origin-relative asset path (e.g.
 // `/assets/kiriko_wasm_bg-[hash].wasm`) for this `?url` import. Resolving
@@ -459,4 +481,59 @@ export interface NetworkGeoJsonDto {
  */
 export function exportNetwork(bytes: Uint8Array): NetworkGeoJsonDto {
   return exportNetworkWasm(bytes) as NetworkGeoJsonDto;
+}
+
+/** Kinds returned by `proposeNetworkPaths`. */
+export type PathCandidateKind = "current" | "along_network" | "shorter";
+
+/** One proposed path: display polyline plus graph node ids for Current. */
+export interface PathCandidate {
+  kind: PathCandidateKind;
+  coordinates: [number, number][];
+  nodeIds: number[] | null;
+}
+
+/** Result of `proposeNetworkPaths`. */
+export interface PathProposal {
+  fromId: number;
+  toId: number;
+  candidates: PathCandidate[];
+}
+
+/**
+ * Whether the straight chord between two lon/lat points stays inside the
+ * walkable union of `ordinal`. Must only be called after `initKirikoWasm`
+ * has resolved. Returns `false` when the bundle has no matching floor.
+ * Throws when the bundle fails to decode.
+ */
+export function walkableChord(
+  bytes: Uint8Array,
+  a: [number, number],
+  b: [number, number],
+  ordinal: number,
+): boolean {
+  return walkableChordWasm(bytes, a[0], a[1], b[0], b[1], ordinal);
+}
+
+/**
+ * Propose current / along-network / shorter paths between two junction
+ * NODEIDs on the editor's present graph. Walkable floors come from the
+ * bundle; the graph is rebuilt from the junctions/paths GeoJSON. Must only
+ * be called after `initKirikoWasm` has resolved. Throws when the bundle
+ * fails to decode or the GeoJSON cannot be built.
+ */
+export function proposeNetworkPaths(
+  bytes: Uint8Array,
+  junctionsGeojson: string,
+  pathsGeojson: string,
+  fromId: number,
+  toId: number,
+): PathProposal {
+  return proposeNetworkPathsWasm(
+    bytes,
+    junctionsGeojson,
+    pathsGeojson,
+    fromId,
+    toId,
+  ) as PathProposal;
 }
