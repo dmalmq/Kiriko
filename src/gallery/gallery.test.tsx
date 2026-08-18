@@ -1115,6 +1115,41 @@ describe("GalleryPage generate routing", () => {
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
   });
 
+  it("watches generate-network longer than 60s when the server estimate is several minutes", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 42,
+        slug: "venue-only",
+        name: "Venue Only",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: false,
+      },
+    ]);
+    generateNetwork.mockResolvedValue({
+      jobId: "j-long",
+      versionId: 2,
+      seq: 2,
+      estimatedDurationSeconds: 180,
+    });
+    waitForJob.mockResolvedValue({ status: "done" });
+
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("Venue Only")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Generate routing" }));
+
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledTimes(1));
+    expect(waitForJob).toHaveBeenCalledWith("j-long", { timeoutMs: 300_000 });
+  });
 
   it("checks the same accepted generate-routing job after timeout without regenerating", async () => {
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
@@ -1148,13 +1183,21 @@ describe("GalleryPage generate routing", () => {
     await user.click(screen.getByRole("button", { name: "EN" }));
     await user.click(screen.getByRole("button", { name: "Generate routing" }));
 
-    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("generate-timeout"));
+    await waitFor(() =>
+      expect(waitForJob).toHaveBeenCalledWith(
+        "generate-timeout",
+        expect.objectContaining({ timeoutMs: expect.any(Number) }),
+      ),
+    );
     expect(screen.getByRole("progressbar").getAttribute("aria-valuetext")).toContain("still running");
     await user.click(screen.getByRole("button", { name: "Import Geodatabase" }));
     expect(screen.queryByRole("dialog", { name: "Review GDB layer mappings" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Check status" }));
     await waitFor(() => expect(waitForJob).toHaveBeenCalledTimes(2));
-    expect(waitForJob).toHaveBeenLastCalledWith("generate-timeout");
+    expect(waitForJob).toHaveBeenLastCalledWith(
+      "generate-timeout",
+      expect.objectContaining({ timeoutMs: expect.any(Number) }),
+    );
     expect(generateNetwork).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
   });
@@ -1227,7 +1270,12 @@ describe("GalleryPage generate routing", () => {
       await accepted.promise;
     });
 
-    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("slow-route"));
+    await waitFor(() =>
+      expect(waitForJob).toHaveBeenCalledWith(
+        "slow-route",
+        expect.objectContaining({ timeoutMs: expect.any(Number) }),
+      ),
+    );
     expect(screen.getByRole("progressbar").getAttribute("aria-valuetext")).toContain("still running");
     expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
     expect(generateNetwork).toHaveBeenCalledTimes(1);
@@ -1264,7 +1312,12 @@ describe("GalleryPage generate routing", () => {
     await waitFor(() => expect(screen.getByText("Venue Only")).toBeTruthy());
     await user.click(screen.getByRole("button", { name: "EN" }));
     await user.click(screen.getByRole("button", { name: "Generate routing" }));
-    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("generate-timeout"));
+    await waitFor(() =>
+      expect(waitForJob).toHaveBeenCalledWith(
+        "generate-timeout",
+        expect.objectContaining({ timeoutMs: expect.any(Number) }),
+      ),
+    );
 
     const lockedDelete = screen.getByRole("button", { name: "Delete: Venue Only" }) as HTMLButtonElement;
     expect(lockedDelete.disabled).toBe(true);
@@ -2283,7 +2336,12 @@ describe("GalleryPage async lifecycle blockers", () => {
     await waitFor(() => expect(screen.getByText("Venue")).toBeTruthy());
     await user.click(screen.getByRole("button", { name: "EN" }));
     await user.click(screen.getByRole("button", { name: "Generate routing" }));
-    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("old-generate"));
+    await waitFor(() =>
+      expect(waitForJob).toHaveBeenCalledWith(
+        "old-generate",
+        expect.objectContaining({ timeoutMs: expect.any(Number) }),
+      ),
+    );
     await user.click(screen.getByRole("button", { name: "Import Geodatabase" }));
     expect(inspectGdb).not.toHaveBeenCalled();
 

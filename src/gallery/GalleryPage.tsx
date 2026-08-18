@@ -64,6 +64,15 @@ const ui = {
   },
 } as const;
 
+/** Watch a generate-network job at least 5 minutes, or the server estimate plus 60s. */
+export function generateWaitTimeoutMs(estimatedDurationSeconds: number | null | undefined): number {
+  const estimateMs =
+    typeof estimatedDurationSeconds === "number" && estimatedDurationSeconds > 0
+      ? estimatedDurationSeconds * 1000
+      : 0;
+  return Math.max(300_000, estimateMs + 60_000);
+}
+
 function navigateTo(href: string): void {
   const event = new CustomEvent("kiriko:navigate", { cancelable: true, detail: { href } });
   if (window.dispatchEvent(event)) {
@@ -703,6 +712,8 @@ export function GalleryPage() {
     if (routingJob !== null && routingJob.venueId !== venue.id) return;
     if (acceptedOwner !== null && acceptedOwner !== "routing") return;
     let accepted = routingJob?.venueId === venue.id ? routingJob : null;
+    let estimate =
+      routingProgress?.venueId === venue.id ? routingProgress.estimatedDurationSeconds : null;
     if (!beginTopLevelActivity("routing")) return;
     const generation = routingGenerationRef.current;
     const noticeGeneration = noticeGenerationRef.current;
@@ -726,6 +737,7 @@ export function GalleryPage() {
         if (accepted === null) {
           const res = await api.generateNetwork(venue.id);
           accepted = { venueId: venue.id, jobId: res.jobId };
+          estimate = res.estimatedDurationSeconds;
           if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
           if (generation === routingGenerationRef.current) {
             setRoutingJob(accepted);
@@ -737,7 +749,9 @@ export function GalleryPage() {
           }
         }
         if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
-        const job = await api.waitForJob(accepted.jobId);
+        const job = await api.waitForJob(accepted.jobId, {
+          timeoutMs: generateWaitTimeoutMs(estimate),
+        });
         if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
         const canTouchNotice = noticeGeneration === noticeGenerationRef.current && generation === routingGenerationRef.current;
         if (job.status === "done") {
