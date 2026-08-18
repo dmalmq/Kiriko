@@ -2034,6 +2034,7 @@ export function App() {
                     tool: editor.tool,
                     selection: editor.selection,
                     pendingNodeId: editor.pendingNodeId,
+                    preview: editor.preview,
                     onPick: onNetworkPick,
                     onBoxSelect: onNetworkBoxSelect,
                     centerActionLabel: ui.networkCenterPick[locale],
@@ -2423,6 +2424,10 @@ export function App() {
                 onCancelDiscard={cancelDiscard}
                 onConfirmDiscard={confirmDiscard}
                 onConfirmPreview={() => dispatchEditor({ type: "confirm_preview" })}
+                onSelectCandidate={(index) =>
+                  dispatchEditor({ type: "select_candidate", index })
+                }
+                onSelectCurrentRoute={() => dispatchEditor({ type: "select_current_route" })}
                 onSave={() => {
                   void saveNetwork();
                 }}

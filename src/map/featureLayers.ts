@@ -67,6 +67,10 @@ export const LAYER_FACILITY_SYMBOL = "indoor-facility-symbol";
 export const NETWORK_SOURCE_ID = "indoor-network";
 export const LAYER_NETWORK_PATH = "indoor-network-path";
 export const LAYER_NETWORK_JUNCTION = "indoor-network-junction";
+/** Connect-preview strokes on the network source (`kind: "preview"`). */
+export const LAYER_NETWORK_PREVIEW_CURRENT = "indoor-network-preview-current";
+export const LAYER_NETWORK_PREVIEW_NEW = "indoor-network-preview-new";
+export const LAYER_NETWORK_PREVIEW_HIGHLIGHT = "indoor-network-preview-highlight";
 /** Wide, near-invisible hit targets for precise network editing clicks. */
 export const LAYER_NETWORK_PATH_HIT = "indoor-network-path-hit";
 export const LAYER_NETWORK_JUNCTION_HIT = "indoor-network-junction-hit";
@@ -771,6 +775,46 @@ export function buildNetworkLayers(): AnyLayer[] {
         "line-color": "#4F46E5",
         "line-width": 3,
         "line-opacity": 0.9,
+      },
+    },
+    {
+      // Current-route preview: same paint as the directions line.
+      id: LAYER_NETWORK_PREVIEW_CURRENT,
+      type: "line",
+      source: NETWORK_SOURCE_ID,
+      filter: ["all", ["==", ["get", "kind"], "preview"], ["==", ["get", "previewRole"], "current"]],
+      paint: {
+        "line-color": "#4f46e5",
+        "line-width": 4,
+        "line-opacity": 0.9,
+      },
+    },
+    {
+      // New candidates are quieter than current / highlight.
+      id: LAYER_NETWORK_PREVIEW_NEW,
+      type: "line",
+      source: NETWORK_SOURCE_ID,
+      filter: [
+        "all",
+        ["==", ["get", "kind"], "preview"],
+        ["in", ["get", "previewRole"], ["literal", ["along_network", "shorter"]]],
+      ],
+      paint: {
+        "line-color": "#4f46e5",
+        "line-width": 3,
+        "line-opacity": 0.35,
+      },
+    },
+    {
+      // Highlighted candidate: selected-path width, on top.
+      id: LAYER_NETWORK_PREVIEW_HIGHLIGHT,
+      type: "line",
+      source: NETWORK_SOURCE_ID,
+      filter: ["all", ["==", ["get", "kind"], "preview"], ["==", ["get", "previewRole"], "highlight"]],
+      paint: {
+        "line-color": "#4F46E5",
+        "line-width": 3,
+        "line-opacity": 1,
       },
     },
     {

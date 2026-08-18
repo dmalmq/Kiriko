@@ -57,7 +57,7 @@ import {
   type NetworkRenderState,
   type ParsedNetwork,
 } from "./networkFeatures";
-import type { NetworkEditTool, NetworkMapPick, NetworkSelection } from "./networkEditor";
+import type { NetworkEditTool, NetworkMapPick, NetworkSelection, PathPreview } from "./networkEditor";
 import { buildFacilityFeatures } from "./facilityFeatures";
 import { FACILITY_PIN_IMAGE, MARKER_ICON_URLS } from "./facilityIcons";
 import { useFeatureMarkers } from "./useFeatureMarkers";
@@ -241,6 +241,7 @@ export interface NetworkEditingMapProps {
   tool: NetworkEditTool;
   selection: NetworkSelection;
   pendingNodeId: number | null;
+  preview: PathPreview | null;
   onPick: (pick: NetworkMapPick) => void;
   onBoxSelect: (bounds: { west: number; south: number; east: number; north: number }) => void;
   /** Localized label for the keyboard-operable map-center pick action. */
@@ -481,13 +482,21 @@ function setNetworkSourceData(
 
 /** Per-floor highlight state from the App-owned editing projection. */
 function networkRenderState(editing: NetworkEditingMapProps): NetworkRenderState {
-  const { selection, tool, pendingNodeId } = editing;
-  return {
+  const { selection, tool, pendingNodeId, preview } = editing;
+  const state: NetworkRenderState = {
     selectedJunctionIds: selection?.junctionIds ?? [],
     selectedConnections: selection?.connectionIds ?? [],
     // Amber pending marker is a connect-origin affordance only.
     pendingJunctionId: tool === "connect" ? pendingNodeId : null,
   };
+  if (preview !== null) {
+    state.previewPaths = preview.candidates.map((candidate, index) => ({
+      role: candidate.kind,
+      coordinates: candidate.coordinates,
+      highlighted: index === preview.selectedIndex,
+    }));
+  }
+  return state;
 }
 /**
  * Resolve a click/center point to a semantic network pick. Move (and, for a

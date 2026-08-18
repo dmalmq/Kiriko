@@ -445,4 +445,79 @@ describe("networkEditorReducer preview", () => {
     s = reduce(s, { type: "redo" });
     expect(s.preview).toBeNull();
   });
+
+  it("select_current_route loads graph nodes and edges then closes preview", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, {
+      type: "set_preview",
+      preview: {
+        fromId: 0,
+        toId: 1,
+        candidates: [{ kind: "current", coordinates: [[139.7, 35.6], [139.7005, 35.6]], nodeIds: [0, 1] }],
+        selectedIndex: 0,
+      },
+    });
+    s = reduce(s, { type: "select_current_route" });
+    expect(s.preview).toBeNull();
+    expect(s.tool).toBe("select");
+    expect(s.selection).toEqual({
+      kind: "set",
+      junctionIds: [0, 1],
+      connectionIds: [expect.objectContaining({})],
+    });
+  });
+
+  it("select_current_route uses graph nodeIds not smoothed extra vertices and does not commit", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, { type: "set_tool", tool: "connect" });
+    const before = s.present;
+    s = reduce(s, {
+      type: "set_preview",
+      preview: {
+        fromId: 0,
+        toId: 1,
+        candidates: [
+          {
+            kind: "current",
+            coordinates: [
+              [139.7, 35.6],
+              [139.70025, 35.6001],
+              [139.7005, 35.6],
+            ],
+            nodeIds: [0, 1],
+          },
+        ],
+        selectedIndex: 0,
+      },
+    });
+    s = reduce(s, { type: "select_current_route" });
+    expect(s.present).toBe(before);
+    expect(s.past).toHaveLength(0);
+    expect(s.selection).toEqual({
+      kind: "set",
+      junctionIds: [0, 1],
+      connectionIds: [expect.objectContaining({})],
+    });
+    expect(s.pendingNodeId).toBeNull();
+  });
+
+  it("select_current_route is a no-op without a current candidate", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    const before = s;
+    s = reduce(s, { type: "select_current_route" });
+    expect(s).toBe(before);
+    s = reduce(s, {
+      type: "set_preview",
+      preview: {
+        fromId: 0,
+        toId: 1,
+        candidates: [{ kind: "shorter", coordinates: [[139.7, 35.6], [139.7005, 35.6]], nodeIds: null }],
+        selectedIndex: 0,
+      },
+    });
+    const withPreview = s;
+    s = reduce(s, { type: "select_current_route" });
+    expect(s).toBe(withPreview);
+  });
 });

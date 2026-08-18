@@ -556,4 +556,38 @@ describe("buildNetworkFeatures render state", () => {
     expect(fc.features[0]?.properties?.selected).toBe(false);
     expect(fc.features[0]?.properties?.pending).toBe(false);
   });
+
+  it("emits preview LineStrings with role and highlight for the selected candidate", () => {
+    const net: ParsedNetwork = { junctions: [jn(0, 139.7, 35.6, 0), jn(1, 139.7005, 35.6, 0)], paths: [] };
+    const fc = buildNetworkFeatures(net, 0, {
+      selectedJunctionIds: [],
+      selectedConnections: [],
+      pendingJunctionId: null,
+      previewPaths: [
+        {
+          role: "current",
+          coordinates: [
+            [139.7, 35.6],
+            [139.7005, 35.6],
+          ],
+          highlighted: false,
+        },
+        {
+          role: "shorter",
+          coordinates: [
+            [139.7, 35.6],
+            [139.7005, 35.601],
+          ],
+          highlighted: true,
+        },
+      ],
+    });
+    const previews = fc.features.filter((f) => f.properties?.kind === "preview");
+    expect(previews.map((f) => f.properties?.previewRole)).toEqual([
+      "current",
+      "shorter",
+      "highlight",
+    ]);
+    expect(previews.every((f) => f.geometry?.type === "LineString")).toBe(true);
+  });
 });

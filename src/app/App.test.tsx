@@ -2701,6 +2701,52 @@ describe("App directions mode", () => {
     expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
   });
 
+  it("selects the current route without committing a path", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    walkableChordMock.mockReturnValue(false);
+    proposeNetworkPathsMock.mockReturnValue({
+      fromId: 0,
+      toId: 2,
+      candidates: [
+        {
+          kind: "current",
+          coordinates: [
+            [139.7, 35.68],
+            [139.701, 35.68],
+          ],
+          nodeIds: [0, 2],
+        },
+        {
+          kind: "shorter",
+          coordinates: [
+            [139.7, 35.68],
+            [139.7005, 35.68],
+            [139.701, 35.68],
+          ],
+          nodeIds: null,
+        },
+      ],
+    });
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await startNetworkEdit(user);
+    await user.click(await screen.findByTestId("net-pick-0"));
+    await user.click(await screen.findByTestId("net-pick-2"));
+
+    expect(await screen.findByRole("button", { name: "Current route" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Shorter path" })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Add this path" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+    await user.click(screen.getByRole("button", { name: "Select this route" }));
+    expect(screen.queryByRole("button", { name: "Add this path" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Select this route" })).toBeNull();
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
+    expect(mapStub().getAttribute("data-network-selection")).toBe("set");
+    expect(mapStub().getAttribute("data-network-tool")).toBe("select");
+  });
+
   it("rejects an existing direct edge without opening preview", async () => {
     const user = userEvent.setup();
     loadNetworkOverlayMock.mockResolvedValue(editableNetwork());

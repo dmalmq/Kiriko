@@ -4,6 +4,7 @@ import type {
   NetworkChangeSummary,
   NetworkEditTool,
   NetworkPreviewStatus,
+  PathCandidateKind,
   PathPreview,
 } from "../map/networkEditor";
 import type { NetworkMutationError } from "../map/networkFeatures";
@@ -39,6 +40,8 @@ export interface NetworkEditorToolbarProps {
   onCancelDiscard: () => void;
   onConfirmDiscard: () => void;
   onConfirmPreview: () => void;
+  onSelectCandidate: (index: number) => void;
+  onSelectCurrentRoute: () => void;
   onSave: () => void;
 }
 
@@ -77,6 +80,10 @@ const ui = {
   instructDelete: { ja: "削除する点または接続を選択してください。", en: "Select a point or connection to remove it." },
   instructMove: { ja: "点の新しい位置をクリックしてください。", en: "Click the point’s new position." },
   addPath: { ja: "この経路を追加", en: "Add this path" },
+  currentRoute: { ja: "現在の経路", en: "Current route" },
+  alongNetwork: { ja: "ネットワークに沿う", en: "Along the network" },
+  shorterPath: { ja: "より短い経路", en: "Shorter path" },
+  selectRoute: { ja: "この経路を選択", en: "Select this route" },
   disconnected: {
     ja: "これらの点はつながっていません。",
     en: "These points are not connected.",
@@ -127,6 +134,12 @@ function instructionText(
     case "select":
       return ui.instructSelect[locale];
   }
+}
+
+function candidateLabel(kind: PathCandidateKind, locale: LocaleCode): string {
+  if (kind === "current") return ui.currentRoute[locale];
+  if (kind === "along_network") return ui.alongNetwork[locale];
+  return ui.shorterPath[locale];
 }
 
 function previewStatusText(status: NetworkPreviewStatus, locale: LocaleCode): string | null {
@@ -191,6 +204,8 @@ export function NetworkEditorToolbar({
   onCancelDiscard,
   onConfirmDiscard,
   onConfirmPreview,
+  onSelectCandidate,
+  onSelectCurrentRoute,
   onSave,
 }: NetworkEditorToolbarProps): ReactElement {
   const tools: { id: ToolId; label: string; icon: ReactNode }[] = [
@@ -267,18 +282,49 @@ export function NetworkEditorToolbar({
           </p>
         ) : null}
         {preview !== null ? (
-          <button
-            type="button"
-            className="btn-ghost"
-            disabled={
-              locked ||
-              preview.candidates[preview.selectedIndex] === undefined ||
-              preview.candidates[preview.selectedIndex]?.kind === "current"
-            }
-            onClick={onConfirmPreview}
-          >
-            {ui.addPath[locale]}
-          </button>
+          <div className="network-editor-toolbar__preview">
+            <div className="network-editor-toolbar__candidates" role="group">
+              {preview.candidates.map((candidate, index) => {
+                const active = index === preview.selectedIndex;
+                return (
+                  <button
+                    key={`${candidate.kind}-${index}`}
+                    type="button"
+                    className={
+                      active
+                        ? "network-editor-toolbar__tool network-editor-toolbar__tool--active"
+                        : "network-editor-toolbar__tool"
+                    }
+                    aria-pressed={active}
+                    disabled={locked}
+                    onClick={() => onSelectCandidate(index)}
+                  >
+                    {candidateLabel(candidate.kind, locale)}
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              className="btn-ghost"
+              disabled={
+                locked ||
+                preview.candidates[preview.selectedIndex] === undefined ||
+                preview.candidates[preview.selectedIndex]?.kind === "current"
+              }
+              onClick={onConfirmPreview}
+            >
+              {ui.addPath[locale]}
+            </button>
+            <button
+              type="button"
+              className="btn-ghost"
+              disabled={locked || !preview.candidates.some((candidate) => candidate.kind === "current")}
+              onClick={onSelectCurrentRoute}
+            >
+              {ui.selectRoute[locale]}
+            </button>
+          </div>
         ) : null}
         {notice !== null ? (
           <p className="network-editor-toolbar__alert" role="alert">

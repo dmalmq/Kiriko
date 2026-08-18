@@ -120,6 +120,7 @@ export type NetworkEditorAction =
   | { type: "set_preview"; preview: PathPreview }
   | { type: "select_candidate"; index: number }
   | { type: "confirm_preview" }
+  | { type: "select_current_route" }
   | { type: "set_preview_status"; status: NetworkPreviewStatus };
 
 const HISTORY_LIMIT = 50;
@@ -161,6 +162,35 @@ function selectionPresent(network: ParsedNetwork, selection: NetworkSelection): 
     if (!keys.has(connectionKey(id))) return false;
   }
   return true;
+}
+
+/** Logical connections between consecutive `nodeIds` that already exist. */
+function connectionsAlongNodeIds(
+  network: ParsedNetwork,
+  nodeIds: number[],
+): NetworkConnectionId[] {
+  const seen = new Set<string>();
+  const out: NetworkConnectionId[] = [];
+  for (let i = 0; i < nodeIds.length - 1; i += 1) {
+    const a = nodeIds[i]!;
+    const b = nodeIds[i + 1]!;
+    if (a === b) continue;
+    for (const path of network.paths) {
+      const from = path.properties.FNODEID;
+      const to = path.properties.TNODEID;
+      if (typeof from !== "number" || typeof to !== "number") continue;
+      if (!((from === a && to === b) || (from === b && to === a))) continue;
+      const pathId = path.properties.PATHID;
+      const reversePathId = path.properties.RPATHID;
+      if (typeof pathId !== "number" || typeof reversePathId !== "number") continue;
+      const id = normalizeConnectionId({ pathId, reversePathId });
+      const key = connectionKey(id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(id);
+    }
+  }
+  return out;
 }
 
 /** Logical connections whose both endpoints are in `junctionIds`. */
@@ -307,6 +337,26 @@ function restore(
   };
 }
 
+function selectCurrentRoute(state: NetworkEditorState): NetworkEditorState {
+  const candidate = state.preview?.candidates.find((item) => item.kind === "current");
+  if (candidate === undefined || candidate.nodeIds === null || candidate.nodeIds.length === 0) {
+    return state;
+  }
+  return {
+    ...state,
+    tool: "select",
+    pendingNodeId: null,
+    notice: null,
+    preview: null,
+    previewStatus: null,
+    selection: {
+      kind: "set",
+      junctionIds: candidate.nodeIds,
+      connectionIds: connectionsAlongNodeIds(state.present, candidate.nodeIds),
+    },
+  };
+}
+
 function confirmPreview(state: NetworkEditorState): NetworkEditorState {
   const preview = state.preview;
   if (preview === null) return state;
@@ -421,6 +471,9 @@ export function networkEditorReducer(
 
     case "confirm_preview":
       return confirmPreview(state);
+
+    case "select_current_route":
+      return selectCurrentRoute(state);
 
     case "set_preview_status":
       return {

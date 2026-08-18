@@ -435,6 +435,20 @@ button {
   max-width: 320px;
 }
 
+.network-editor-toolbar__preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.network-editor-toolbar__candidates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
 .network-editor-toolbar__instruction {
   margin: 0;
   font-size: 13px;

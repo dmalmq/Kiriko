@@ -1673,6 +1673,7 @@ function editing(
     tool: "select",
     selection: null,
     pendingNodeId: null,
+    preview: null,
     onPick: vi.fn(),
     onBoxSelect: vi.fn(),
     centerActionLabel: "Pick at map center",
@@ -1874,6 +1875,67 @@ describe("IndoorMap network editing", () => {
     });
     expect(net.onBoxSelect).toHaveBeenCalledWith({ west: 0, south: 0, east: 10, north: 8 });
     expect(net.onPick).not.toHaveBeenCalled();
+  });
+
+  it("writes preview LineStrings into the network source when preview is set", () => {
+    const network: NonNullable<IndoorMapProps["network"]> = {
+      junctions: [
+        {
+          ordinal: 0,
+          geometry: { type: "Point", coordinates: [139.0, 35.0] },
+          properties: { NODEID: 1, FLOOR: "F1" },
+        },
+        {
+          ordinal: 0,
+          geometry: { type: "Point", coordinates: [139.01, 35.0] },
+          properties: { NODEID: 2, FLOOR: "F1" },
+        },
+      ],
+      paths: [
+        {
+          ordinal: 0,
+          geometry: { type: "LineString", coordinates: [[139.0, 35.0], [139.01, 35.0]] },
+          properties: { FNODEID: 1, TNODEID: 2, PATHID: 1, RPATHID: 2, FLOOR: "F1" },
+        },
+      ],
+    };
+    const preview = {
+      fromId: 1,
+      toId: 2,
+      candidates: [
+        {
+          kind: "current" as const,
+          coordinates: [
+            [139.0, 35.0],
+            [139.01, 35.0],
+          ] as [number, number][],
+          nodeIds: [1, 2],
+        },
+        {
+          kind: "shorter" as const,
+          coordinates: [
+            [139.0, 35.0],
+            [139.01, 35.01],
+          ] as [number, number][],
+          nodeIds: null,
+        },
+      ],
+      selectedIndex: 1,
+    };
+    const { map } = renderMap(
+      baseProps({
+        network,
+        networkEditing: editing({ preview }),
+        levelId: "level-1",
+      }),
+    );
+    expect(map.networkSourceData.length).toBeGreaterThan(0);
+    const collection = map.networkSourceData.at(-1) as GeoJSON.FeatureCollection;
+    const previews = collection.features.filter((f) => f.properties?.["kind"] === "preview");
+    expect(previews.map((f) => f.properties?.["previewRole"])).toEqual(
+      expect.arrayContaining(["current", "shorter", "highlight"]),
+    );
+    expect(previews.every((f) => f.geometry?.type === "LineString")).toBe(true);
   });
 });
 

@@ -527,6 +527,8 @@ function toolbarProps(
     onCancelDiscard: vi.fn(),
     onConfirmDiscard: vi.fn(),
     onConfirmPreview: vi.fn(),
+    onSelectCandidate: vi.fn(),
+    onSelectCurrentRoute: vi.fn(),
     onSave: vi.fn(),
     ...overrides,
   };
@@ -715,13 +717,142 @@ describe("NetworkEditorToolbar", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "この経路を追加" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "この経路を選択" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "より短い経路" })).toBeTruthy();
     expect(screen.getByText("経路を選ぶか、Escapeで取り消します。")).toBeTruthy();
     rerender(<NetworkEditorToolbar {...toolbarProps({ previewStatus: "no_walkable" })} />);
-    expect(screen.getByText("No walkable path between these points.")).toBeTruthy();
+    expect(screen.getByText("No walkable path between these points.").getAttribute("role")).toBe(
+      "status",
+    );
     rerender(<NetworkEditorToolbar {...toolbarProps({ previewStatus: "propose_failed" })} />);
-    expect(screen.getByText("Could not calculate a path.")).toBeTruthy();
+    expect(screen.getByText("Could not calculate a path.").getAttribute("role")).toBe("status");
     rerender(<NetworkEditorToolbar {...toolbarProps({ previewStatus: "disconnected" })} />);
-    expect(screen.getByText("These points are not connected.")).toBeTruthy();
+    expect(screen.getByText("These points are not connected.").getAttribute("role")).toBe("status");
+  });
+
+  it("disables Add this path on current and shows Select this route", () => {
+    const onSelectCurrentRoute = vi.fn();
+    const onSelectCandidate = vi.fn();
+    render(
+      <NetworkEditorToolbar
+        {...toolbarProps({
+          preview: {
+            fromId: 0,
+            toId: 1,
+            candidates: [
+              {
+                kind: "current",
+                coordinates: [
+                  [139.7, 35.6],
+                  [139.7005, 35.6],
+                ],
+                nodeIds: [0, 1],
+              },
+              {
+                kind: "along_network",
+                coordinates: [
+                  [139.7, 35.6],
+                  [139.7005, 35.6],
+                ],
+                nodeIds: null,
+              },
+              {
+                kind: "shorter",
+                coordinates: [
+                  [139.7, 35.6],
+                  [139.7005, 35.6],
+                ],
+                nodeIds: null,
+              },
+            ],
+            selectedIndex: 0,
+          },
+          onSelectCurrentRoute,
+          onSelectCandidate,
+        })}
+      />,
+    );
+    expect((screen.getByRole("button", { name: "Add this path" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    const selectRoute = screen.getByRole("button", { name: "Select this route" }) as HTMLButtonElement;
+    expect(selectRoute.disabled).toBe(false);
+    expect(screen.getByRole("button", { name: "Current route" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Along the network" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Shorter path" })).toBeTruthy();
+  });
+
+  it("disables Select this route when no current candidate and never renders an empty path", () => {
+    render(
+      <NetworkEditorToolbar
+        {...toolbarProps({
+          preview: {
+            fromId: 0,
+            toId: 1,
+            candidates: [
+              {
+                kind: "shorter",
+                coordinates: [
+                  [139.7, 35.6],
+                  [139.7005, 35.6],
+                ],
+                nodeIds: null,
+              },
+            ],
+            selectedIndex: 0,
+          },
+          previewStatus: "disconnected",
+        })}
+      />,
+    );
+    expect((screen.getByRole("button", { name: "Select this route" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(screen.getByText("These points are not connected.").getAttribute("role")).toBe("status");
+    expect(screen.queryByText("[]")).toBeNull();
+  });
+
+  it("selects a candidate and Select this route from the switcher", async () => {
+    const onSelectCandidate = vi.fn();
+    const onSelectCurrentRoute = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <NetworkEditorToolbar
+        {...toolbarProps({
+          preview: {
+            fromId: 0,
+            toId: 1,
+            candidates: [
+              {
+                kind: "current",
+                coordinates: [
+                  [139.7, 35.6],
+                  [139.7005, 35.6],
+                ],
+                nodeIds: [0, 1],
+              },
+              {
+                kind: "shorter",
+                coordinates: [
+                  [139.7, 35.6],
+                  [139.7005, 35.6],
+                ],
+                nodeIds: null,
+              },
+            ],
+            selectedIndex: 1,
+          },
+          onSelectCandidate,
+          onSelectCurrentRoute,
+        })}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Current route" }));
+    expect(onSelectCandidate).toHaveBeenCalledWith(0);
+    await user.click(screen.getByRole("button", { name: "Select this route" }));
+    expect(onSelectCurrentRoute).toHaveBeenCalled();
   });
 });
 

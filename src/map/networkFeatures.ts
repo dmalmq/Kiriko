@@ -93,11 +93,22 @@ export type NetworkMutationResult =
     }
   | { ok: false; network: ParsedNetwork; error: NetworkMutationError };
 
+/** Connect-preview stroke role; `highlight` is the selected candidate overlay. */
+export type NetworkPreviewRole = "current" | "along_network" | "shorter" | "highlight";
+
+/** One candidate polyline to draw on the network overlay. */
+export interface NetworkPreviewPath {
+  role: Exclude<NetworkPreviewRole, "highlight">;
+  coordinates: GeoJSON.Position[];
+  highlighted: boolean;
+}
+
 /** Per-floor render highlights for the network overlay (selection + pending). */
 export interface NetworkRenderState {
   selectedJunctionIds: number[];
   selectedConnections: NetworkConnectionId[];
   pendingJunctionId: number | null;
+  previewPaths?: NetworkPreviewPath[];
 }
 
 function connectionIsSelected(
@@ -237,6 +248,21 @@ export function buildNetworkFeatures(
           pending: numericId !== null && render?.pendingJunctionId === numericId,
         },
         geometry: junction.geometry,
+      });
+    }
+  }
+  for (const path of render?.previewPaths ?? []) {
+    if (path.coordinates.length < 2) continue;
+    features.push({
+      type: "Feature",
+      properties: { kind: "preview", previewRole: path.role },
+      geometry: { type: "LineString", coordinates: path.coordinates },
+    });
+    if (path.highlighted) {
+      features.push({
+        type: "Feature",
+        properties: { kind: "preview", previewRole: "highlight" },
+        geometry: { type: "LineString", coordinates: path.coordinates },
       });
     }
   }
