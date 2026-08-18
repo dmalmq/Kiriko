@@ -147,6 +147,21 @@ describe("DatasetCard", () => {
     expect(onGenerateRouting).toHaveBeenCalledTimes(1);
   });
 
+  it("uses the regenerate label when generateRoutingLabel is provided", () => {
+    render(
+      <DatasetCard
+        venue={venue}
+        locale="en"
+        onOpen={() => {}}
+        onDelete={() => {}}
+        onGenerateRouting={() => {}}
+        generateRoutingLabel="Regenerate routing"
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Regenerate routing" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Generate routing" })).toBeNull();
+  });
+
   it("hides Generate routing when onGenerateRouting is omitted", () => {
     render(<DatasetCard venue={venue} locale="en" onOpen={() => {}} onDelete={() => {}} />);
     expect(screen.queryByRole("button", { name: "Generate routing" })).toBeNull();

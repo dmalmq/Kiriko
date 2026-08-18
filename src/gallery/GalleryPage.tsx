@@ -6,6 +6,7 @@ import { probeSceneCapability } from "../map/scene/sceneCapability";
 import { api, gdbErrorMessage, viewerHref, type ApiUser, type GdbError, type VenueSummary } from "./api";
 import { AddDataDialog } from "./AddDataDialog";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
+import { ConfirmRegenerateModal } from "./ConfirmRegenerateModal";
 import { DatasetCard } from "./DatasetCard";
 import { GdbImportDialog } from "./GdbImportDialog";
 import { SignInModal } from "./SignInModal";
@@ -50,6 +51,7 @@ const ui = {
     en: "Processing is still running on the server. Refresh the list again shortly.",
   },
   checkStatus: { ja: "状況を確認", en: "Check status" },
+  regenerateRouting: { ja: "経路を再生成", en: "Regenerate routing" },
   noGraphToExport: {
     ja: "書き出せる経路ネットワークがありません。先に生成してください。",
     en: "No routing network to export — generate one first.",
@@ -138,6 +140,7 @@ export function GalleryPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadTarget, setUploadTarget] = useState<UploadModalTarget | null>(null);
   const [deleting, setDeleting] = useState<VenueSummary | null>(null);
+  const [regenerating, setRegenerating] = useState<VenueSummary | null>(null);
   const [tilesVenue, setTilesVenue] = useState<VenueSummary | null>(null);
   const [gdbFlow, setGdbFlow] = useState<GdbFlow>({ phase: "idle" });
   const [gdbNotice, setGdbNotice] = useState<string | null>(null);
@@ -1030,14 +1033,22 @@ export function GalleryPage() {
                       },
                     }
                   : {})}
-                {...(venue.hasNetwork === false || routingJob?.venueId === venue.id
-                  ? {
-                      onGenerateRouting: () => {
-                        generateRouting(venue);
-                      },
-                      ...(routingJob?.venueId === venue.id ? { generateRoutingLabel: ui.checkStatus[locale] } : {}),
-                    }
-                  : {})}
+                onGenerateRouting={() => {
+                  if (routingJob?.venueId === venue.id) {
+                    generateRouting(venue);
+                    return;
+                  }
+                  if (venue.hasNetwork) {
+                    setRegenerating(venue);
+                    return;
+                  }
+                  generateRouting(venue);
+                }}
+                {...(routingJob?.venueId === venue.id
+                  ? { generateRoutingLabel: ui.checkStatus[locale] }
+                  : venue.hasNetwork
+                    ? { generateRoutingLabel: ui.regenerateRouting[locale] }
+                    : {})}
                 {...(venue.hasGraph === true
                   ? {
                       onExportNetwork: () => {
@@ -1075,6 +1086,20 @@ export function GalleryPage() {
             // Activation published a version, so the card's chip, its latest
             // version, and its stats are all stale.
             void reload();
+          }}
+        />
+      ) : null}
+      {regenerating !== null ? (
+        <ConfirmRegenerateModal
+          locale={locale}
+          venueName={regenerating.name}
+          onCancel={() => {
+            setRegenerating(null);
+          }}
+          onConfirm={() => {
+            const venue = regenerating;
+            setRegenerating(null);
+            generateRouting(venue);
           }}
         />
       ) : null}
