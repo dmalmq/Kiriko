@@ -200,8 +200,8 @@ describe("vertical network link projection", () => {
 
   it("selects a vertical marker by canonical reciprocal identity", () => {
     const links = buildNetworkFeatures(verticalNetwork(), 0, {
-      selectedJunctionId: null,
-      selectedConnection: { pathId: 7, reversePathId: 8 },
+      selectedJunctionIds: [],
+      selectedConnections: [{ pathId: 7, reversePathId: 8 }],
       pendingJunctionId: null,
     }).features.filter((feature) => feature.properties?.kind === "vertical-link");
     expect(links[0]?.properties?.selected).toBe(true);
@@ -494,8 +494,8 @@ describe("buildNetworkFeatures render state", () => {
       paths: [pathFeature(0, 1, 1, 2), pathFeature(1, 0, 2, 1)],
     };
     const fc = buildNetworkFeatures(net, 0, {
-      selectedJunctionId: 0,
-      selectedConnection: { pathId: 1, reversePathId: 2 },
+      selectedJunctionIds: [0],
+      selectedConnections: [{ pathId: 1, reversePathId: 2 }],
       pendingJunctionId: 1,
     });
     const junctions = fc.features.filter((f) => f.properties?.kind === "junction");

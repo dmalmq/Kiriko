@@ -13,6 +13,7 @@ import { WarningsPanel } from "./WarningsPanel";
 import { ViewerErrorNotice } from "./ViewerNotice";
 import { NetworkEditorToolbar, type NetworkEditorToolbarProps } from "./NetworkEditorToolbar";
 import { NetworkInspectorPanel } from "./NetworkInspectorPanel";
+import { singleConnection, singleJunction } from "../map/networkEditor";
 import type { ParsedNetwork } from "../map/networkFeatures";
 import { VenueLoadError, venueLoadErrorCopy } from "../errors/VenueLoadError";
 
@@ -670,7 +671,7 @@ describe("NetworkInspectorPanel", () => {
     render(
       <NetworkInspectorPanel
         network={inspectorNet}
-        selection={{ kind: "junction", nodeId: 0 }}
+        selection={singleJunction(0)}
         locale="en"
         locked={false}
         onClose={() => {}}
@@ -693,7 +694,7 @@ describe("NetworkInspectorPanel", () => {
     render(
       <NetworkInspectorPanel
         network={inspectorNet}
-        selection={{ kind: "connection", connectionId: { pathId: 1, reversePathId: 2 } }}
+        selection={singleConnection({ pathId: 1, reversePathId: 2 })}
         locale="en"
         locked={false}
         onClose={() => {}}
@@ -712,7 +713,7 @@ describe("NetworkInspectorPanel", () => {
     render(
       <NetworkInspectorPanel
         network={inspectorNet}
-        selection={{ kind: "junction", nodeId: 0 }}
+        selection={singleJunction(0)}
         locale="en"
         locked
         onClose={() => {}}
@@ -722,5 +723,22 @@ describe("NetworkInspectorPanel", () => {
     );
     expect((screen.getByRole("button", { name: "Move point" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Delete" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows a bilingual count and one Delete for a multi-set", () => {
+    render(
+      <NetworkInspectorPanel
+        network={inspectorNet}
+        selection={{ kind: "set", junctionIds: [0, 1], connectionIds: [] }}
+        locale="en"
+        locked={false}
+        onClose={() => {}}
+        onMove={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    expect(screen.getByText("2 selected")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Move point" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
   });
 });

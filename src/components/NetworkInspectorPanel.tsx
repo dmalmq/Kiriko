@@ -1,7 +1,11 @@
 import type { ReactElement } from "react";
 import type { LocaleCode } from "../imdf/types";
 import type { NetworkConnectionId, NetworkFeature, ParsedNetwork } from "../map/networkFeatures";
-import type { NetworkSelection } from "../map/networkEditor";
+import {
+  selectedConnectionId,
+  selectedJunctionId,
+  type NetworkSelection,
+} from "../map/networkEditor";
 import { FloatingPanel } from "./FloatingPanel";
 
 export interface NetworkInspectorPanelProps {
@@ -27,6 +31,7 @@ const ui = {
   move: { ja: "点を移動", en: "Move point" },
   delete: { ja: "削除", en: "Delete" },
   unknown: { ja: "不明", en: "Unknown" },
+  selectedCount: { ja: "{n}件選択", en: "{n} selected" },
 } as const;
 
 const EARTH_RADIUS_M = 6_371_000;
@@ -136,6 +141,26 @@ function JunctionBody({
   );
 }
 
+function MultiSelectBody({
+  locale,
+  locked,
+  onDelete,
+}: {
+  locale: LocaleCode;
+  locked: boolean;
+  onDelete: () => void;
+}): ReactElement {
+  return (
+    <div className="inspector">
+      <div className="inspector__footer">
+        <button type="button" className="btn-destructive" disabled={locked} onClick={onDelete}>
+          {ui.delete[locale]}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ConnectionBody({
   network,
   connectionId,
@@ -204,12 +229,17 @@ export function NetworkInspectorPanel({
   onMove,
   onDelete,
 }: NetworkInspectorPanelProps): ReactElement {
+  const junctionId = selectedJunctionId(selection);
+  const connectionId = selectedConnectionId(selection);
+  const count = selection.junctionIds.length + selection.connectionIds.length;
   const title =
-    selection.kind === "junction"
+    junctionId !== null
       ? locale === "ja"
-        ? `点 ${selection.nodeId}`
-        : `Point ${selection.nodeId}`
-      : ui.connectionTitle[locale];
+        ? `点 ${junctionId}`
+        : `Point ${junctionId}`
+      : connectionId !== null
+        ? ui.connectionTitle[locale]
+        : ui.selectedCount[locale].replace("{n}", String(count));
   return (
     <FloatingPanel
       title={title}
@@ -217,23 +247,25 @@ export function NetworkInspectorPanel({
       onClose={onClose}
       className="floating-panel--inspector"
     >
-      {selection.kind === "junction" ? (
+      {junctionId !== null ? (
         <JunctionBody
           network={network}
-          nodeId={selection.nodeId}
+          nodeId={junctionId}
           locale={locale}
           locked={locked}
           onMove={onMove}
           onDelete={onDelete}
         />
-      ) : (
+      ) : connectionId !== null ? (
         <ConnectionBody
           network={network}
-          connectionId={selection.connectionId}
+          connectionId={connectionId}
           locale={locale}
           locked={locked}
           onDelete={onDelete}
         />
+      ) : (
+        <MultiSelectBody locale={locale} locked={locked} onDelete={onDelete} />
       )}
     </FloatingPanel>
   );

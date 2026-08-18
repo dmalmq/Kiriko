@@ -78,6 +78,15 @@ const mapState = vi.hoisted(() => {
       disable(): void {},
       enable(): void {},
     };
+    readonly dragPan = {
+      enabled: true,
+      disable(): void {
+        this.enabled = false;
+      },
+      enable(): void {
+        this.enabled = true;
+      },
+    };
     readonly featureStates: Array<{ id: string; state: Record<string, unknown> }> = [];
     readonly removedStates: Array<{ id: string; key: string }> = [];
     readonly easeToCalls: Array<{ center: [number, number]; duration?: number }> = [];
@@ -374,6 +383,9 @@ const mapState = vi.hoisted(() => {
     }
     zoomIn(): void {}
     zoomOut(): void {}
+    unproject(point: { x: number; y: number }): { lng: number; lat: number } {
+      return { lng: point.x, lat: point.y };
+    }
     getCenter(): { lng: number; lat: number } {
       return this.center;
     }
@@ -1662,6 +1674,7 @@ function editing(
     selection: null,
     pendingNodeId: null,
     onPick: vi.fn(),
+    onBoxSelect: vi.fn(),
     centerActionLabel: "Pick at map center",
     ...overrides,
   };
@@ -1842,6 +1855,25 @@ describe("IndoorMap network editing", () => {
       map.emit("click", { point: { x: 1, y: 1 }, lngLat: { lng: 1, lat: 1 } });
     });
     expect(onSelectFeature).toHaveBeenCalledWith("unit-3");
+  });
+
+  it("disables dragPan in select and re-enables it for connect", () => {
+    const { map, rerender } = renderMap(baseProps({ networkEditing: editing({ tool: "select" }) }));
+    expect(map.dragPan.enabled).toBe(false);
+    rerender(baseProps({ networkEditing: editing({ tool: "connect" }) }));
+    expect(map.dragPan.enabled).toBe(true);
+  });
+
+  it("reports onBoxSelect for a select-tool drag of at least 4 px and does not onPick", () => {
+    const net = editing({ tool: "select" });
+    const { map } = renderMap(baseProps({ networkEditing: net }));
+    map.unproject = (p: { x: number; y: number }) => ({ lng: p.x, lat: p.y });
+    act(() => {
+      map.emit("mousedown", { point: { x: 0, y: 0 }, lngLat: { lng: 0, lat: 0 } });
+      map.emit("mouseup", { point: { x: 10, y: 8 }, lngLat: { lng: 10, lat: 8 } });
+    });
+    expect(net.onBoxSelect).toHaveBeenCalledWith({ west: 0, south: 0, east: 10, north: 8 });
+    expect(net.onPick).not.toHaveBeenCalled();
   });
 });
 

@@ -26,6 +26,7 @@ import maplibregl, {
   type GeoJSONSourceDiff,
   type Map as MapLibreMap,
   type MapMouseEvent,
+  type Point,
   type PointLike,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -241,6 +242,7 @@ export interface NetworkEditingMapProps {
   selection: NetworkSelection;
   pendingNodeId: number | null;
   onPick: (pick: NetworkMapPick) => void;
+  onBoxSelect: (bounds: { west: number; south: number; east: number; north: number }) => void;
   /** Localized label for the keyboard-operable map-center pick action. */
   centerActionLabel: string;
 }
@@ -481,8 +483,8 @@ function setNetworkSourceData(
 function networkRenderState(editing: NetworkEditingMapProps): NetworkRenderState {
   const { selection, tool, pendingNodeId } = editing;
   return {
-    selectedJunctionId: selection?.kind === "junction" ? selection.nodeId : null,
-    selectedConnection: selection?.kind === "connection" ? selection.connectionId : null,
+    selectedJunctionIds: selection?.junctionIds ?? [],
+    selectedConnections: selection?.connectionIds ?? [],
     // Amber pending marker is a connect-origin affordance only.
     pendingJunctionId: tool === "connect" ? pendingNodeId : null,
   };
@@ -972,6 +974,8 @@ export function IndoorMap({
   const directionsRef = useRef(directions);
   const networkRef = useRef(network);
   const networkEditingRef = useRef(networkEditing);
+  const boxDragStartRef = useRef<Point | null>(null);
+  const boxSelectConsumedClickRef = useRef(false);
   const routeSourceActiveRef = useRef(directions?.active === true);
   const networkSourceActiveRef = useRef(network != null || networkEditing != null);
   const facilitySourceActiveRef = useRef(facilities.length > 0);
@@ -1443,6 +1447,12 @@ export function IndoorMap({
 
       const editing = networkEditingRef.current;
       if (editing != null) {
+        // A box drag already reported bounds; the click that follows must not
+        // also replace the set with a single pick.
+        if (boxSelectConsumedClickRef.current) {
+          boxSelectConsumedClickRef.current = false;
+          return;
+        }
         // Editing suppresses ordinary feature/facility selection and reports a
         // semantic pick (junction/connection/coordinate) to the App reducer.
         // The graph's own wide hit targets keep their tolerances and their
@@ -1664,8 +1674,44 @@ export function IndoorMap({
       }
     };
 
+    const onMouseDown = (event: MapMouseEvent): void => {
+      // A new gesture owns the pointer; do not let a prior box swallow its click.
+      boxSelectConsumedClickRef.current = false;
+      const editing = networkEditingRef.current;
+      if (editing == null || editing.tool !== "select") {
+        boxDragStartRef.current = null;
+        return;
+      }
+      boxDragStartRef.current = event.point;
+    };
+
+    const onMouseUp = (event: MapMouseEvent): void => {
+      const start = boxDragStartRef.current;
+      boxDragStartRef.current = null;
+      const editing = networkEditingRef.current;
+      if (start == null || editing == null || editing.tool !== "select") {
+        return;
+      }
+      const dx = event.point.x - start.x;
+      const dy = event.point.y - start.y;
+      if (Math.hypot(dx, dy) < 4) {
+        return;
+      }
+      const a = map.unproject(start);
+      const b = map.unproject(event.point);
+      editing.onBoxSelect({
+        west: Math.min(a.lng, b.lng),
+        south: Math.min(a.lat, b.lat),
+        east: Math.max(a.lng, b.lng),
+        north: Math.max(a.lat, b.lat),
+      });
+      boxSelectConsumedClickRef.current = true;
+    };
+
     map.on("load", onLoad);
     map.on("click", onClick);
+    map.on("mousedown", onMouseDown);
+    map.on("mouseup", onMouseUp);
     map.on("mousemove", onMouseMove);
     map.on("moveend", onMoveEnd);
     map.on("mouseout", onMouseLeave);
@@ -1711,6 +1757,8 @@ export function IndoorMap({
       initialMapLoadCompleteRef.current = false;
       map.off("load", onLoad);
       map.off("click", onClick);
+      map.off("mousedown", onMouseDown);
+      map.off("mouseup", onMouseUp);
       map.off("mousemove", onMouseMove);
       map.off("moveend", onMoveEnd);
       map.off("mouseout", onMouseLeave);
@@ -1936,6 +1984,22 @@ export function IndoorMap({
   useEffect(() => {
     syncOverlays();
   }, [directions, network, networkEditing, facilities, layerVisibility, venue, levelId, syncOverlays]);
+
+  // Select-tool box drag owns the pointer; other tools (and unmount) keep pan.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (map == null) {
+      return;
+    }
+    if (networkEditing?.tool === "select") {
+      map.dragPan.disable();
+    } else {
+      map.dragPan.enable();
+    }
+    return () => {
+      map.dragPan.enable();
+    };
+  }, [networkEditing?.tool, mapInstance]);
 
   // The graph or the selected connection changed without the floor changing.
   // Both decide which edges are drawn and which one is emphasised, and the

@@ -21,11 +21,38 @@ import {
 /** Active editing tool. `move-junction` is transient and entered from the inspector. */
 export type NetworkEditTool = "select" | "add-junction" | "connect" | "delete" | "move-junction";
 
-/** The currently highlighted junction or logical connection, or nothing. */
+/** The currently highlighted junctions and logical connections, or nothing. */
 export type NetworkSelection =
-  | { kind: "junction"; nodeId: number }
-  | { kind: "connection"; connectionId: NetworkConnectionId }
+  | { kind: "set"; junctionIds: number[]; connectionIds: NetworkConnectionId[] }
   | null;
+
+/** A one-object set containing only `nodeId`. */
+export function singleJunction(nodeId: number): Exclude<NetworkSelection, null> {
+  return { kind: "set", junctionIds: [nodeId], connectionIds: [] };
+}
+
+/** A one-object set containing only the normalized `id`. */
+export function singleConnection(id: NetworkConnectionId): Exclude<NetworkSelection, null> {
+  return { kind: "set", junctionIds: [], connectionIds: [normalizeConnectionId(id)] };
+}
+
+/** The lone junction id when the set is exactly one junction and no connections. */
+export function selectedJunctionId(selection: NetworkSelection): number | null {
+  if (selection === null) return null;
+  if (selection.junctionIds.length === 1 && selection.connectionIds.length === 0) {
+    return selection.junctionIds[0]!;
+  }
+  return null;
+}
+
+/** The lone connection id when the set is exactly one connection and no junctions. */
+export function selectedConnectionId(selection: NetworkSelection): NetworkConnectionId | null {
+  if (selection === null) return null;
+  if (selection.connectionIds.length === 1 && selection.junctionIds.length === 0) {
+    return selection.connectionIds[0]!;
+  }
+  return null;
+}
 
 /** A semantic pick reported by the map: an existing object or a bare coordinate. */
 export type NetworkMapPick =
@@ -57,6 +84,7 @@ export interface NetworkEditorState {
 export type NetworkEditorAction =
   | { type: "set_tool"; tool: Exclude<NetworkEditTool, "move-junction"> }
   | { type: "pick"; pick: NetworkMapPick; activeOrdinal: number }
+  | { type: "box_select"; nodeIds: number[] }
   | { type: "start_move"; nodeId: number }
   | { type: "delete_selection" }
   | { type: "cancel_pending" }
@@ -92,13 +120,41 @@ function connectionKey(id: NetworkConnectionId): string {
   return `pair:${n.pathId}:${n.reversePathId}`;
 }
 
-/** Whether the current selection still refers to something in `network`. */
+/** Whether every id in the current set still refers to something in `network`. */
 function selectionPresent(network: ParsedNetwork, selection: NetworkSelection): boolean {
   if (selection === null) return true;
-  if (selection.kind === "junction") {
-    return network.junctions.some((j) => j.properties.NODEID === selection.nodeId);
+  for (const nodeId of selection.junctionIds) {
+    if (!network.junctions.some((j) => j.properties.NODEID === nodeId)) return false;
   }
-  return connectionKeys(network).has(connectionKey(selection.connectionId));
+  const keys = connectionKeys(network);
+  for (const id of selection.connectionIds) {
+    if (!keys.has(connectionKey(id))) return false;
+  }
+  return true;
+}
+
+/** Logical connections whose both endpoints are in `junctionIds`. */
+function connectionsInsideJunctions(
+  network: ParsedNetwork,
+  junctionIds: Set<number>,
+): NetworkConnectionId[] {
+  const seen = new Set<string>();
+  const out: NetworkConnectionId[] = [];
+  for (const path of network.paths) {
+    const from = path.properties.FNODEID;
+    const to = path.properties.TNODEID;
+    if (typeof from !== "number" || typeof to !== "number") continue;
+    if (!junctionIds.has(from) || !junctionIds.has(to)) continue;
+    const pathId = path.properties.PATHID;
+    const reversePathId = path.properties.RPATHID;
+    if (typeof pathId !== "number" || typeof reversePathId !== "number") continue;
+    const id = normalizeConnectionId({ pathId, reversePathId });
+    const key = connectionKey(id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(id);
+  }
+  return out;
 }
 
 /** Push `next` onto history (capped) and clear the redo stack. */
@@ -115,25 +171,19 @@ function applyPick(state: NetworkEditorState, pick: NetworkMapPick, activeOrdina
   switch (state.tool) {
     case "select":
       if (pick.kind === "junction") {
-        return { ...state, selection: { kind: "junction", nodeId: pick.nodeId } };
+        return { ...state, selection: singleJunction(pick.nodeId) };
       }
       if (pick.kind === "connection") {
-        return {
-          ...state,
-          selection: { kind: "connection", connectionId: normalizeConnectionId(pick.connectionId) },
-        };
+        return { ...state, selection: singleConnection(pick.connectionId) };
       }
       return state;
 
     case "add-junction": {
       if (pick.kind === "junction") {
-        return { ...state, selection: { kind: "junction", nodeId: pick.nodeId } };
+        return { ...state, selection: singleJunction(pick.nodeId) };
       }
       if (pick.kind === "connection") {
-        return {
-          ...state,
-          selection: { kind: "connection", connectionId: normalizeConnectionId(pick.connectionId) },
-        };
+        return { ...state, selection: singleConnection(pick.connectionId) };
       }
       const result = addJunction(state.present, {
         longitude: pick.longitude,
@@ -155,9 +205,7 @@ function applyPick(state: NetworkEditorState, pick: NetworkMapPick, activeOrdina
       return commit(state, result.network, {
         pendingNodeId: null,
         selection:
-          result.connectionId !== undefined
-            ? { kind: "connection", connectionId: result.connectionId }
-            : null,
+          result.connectionId !== undefined ? singleConnection(result.connectionId) : null,
       });
     }
 
@@ -188,7 +236,7 @@ function applyPick(state: NetworkEditorState, pick: NetworkMapPick, activeOrdina
       return commit(state, result.network, {
         tool: "select",
         pendingNodeId: null,
-        selection: { kind: "junction", nodeId },
+        selection: singleJunction(nodeId),
       });
     }
   }
@@ -228,18 +276,44 @@ export function networkEditorReducer(
         ...state,
         tool: "move-junction",
         pendingNodeId: action.nodeId,
-        selection: { kind: "junction", nodeId: action.nodeId },
+        selection: singleJunction(action.nodeId),
         notice: null,
       };
 
+    case "box_select": {
+      if (action.nodeIds.length === 0) return state;
+      const junctionIds = [...new Set(action.nodeIds)].sort((a, b) => a - b);
+      const connectionIds = connectionsInsideJunctions(state.present, new Set(junctionIds));
+      return {
+        ...state,
+        selection: { kind: "set", junctionIds, connectionIds },
+      };
+    }
+
     case "delete_selection": {
       if (state.selection === null) return state;
-      const result =
-        state.selection.kind === "junction"
-          ? deleteJunction(state.present, state.selection.nodeId)
-          : deleteConnection(state.present, state.selection.connectionId);
-      if (!result.ok) return { ...state, notice: result.error };
-      return commit(state, result.network, { selection: null });
+      let working = state.present;
+      let notice: NetworkMutationError | null = null;
+      for (const nodeId of state.selection.junctionIds) {
+        const result = deleteJunction(working, nodeId);
+        if (result.ok) {
+          working = result.network;
+        } else {
+          notice = result.error;
+        }
+      }
+      for (const connectionId of state.selection.connectionIds) {
+        const result = deleteConnection(working, connectionId);
+        if (result.ok) {
+          working = result.network;
+        } else if (result.error !== "unknown_connection") {
+          notice = result.error;
+        }
+      }
+      if (working === state.present) {
+        return notice === null ? state : { ...state, notice };
+      }
+      return commit(state, working, { selection: null });
     }
 
     case "cancel_pending":

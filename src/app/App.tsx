@@ -470,6 +470,8 @@ export function App() {
   const dispatchEditor = useCallback((action: NetworkEditorAction) => {
     setEditor((current) => (current === null ? current : networkEditorReducer(current, action)));
   }, []);
+  const editorRef = useRef(editor);
+  editorRef.current = editor;
   // The published overlay is the immutable baseline; the editor's working copy
   // (when editing) is what renders, reports connectivity, and serializes.
   const editedNetwork = editor?.present ?? reviewNetwork;
@@ -800,6 +802,40 @@ export function App() {
   const onNetworkPick = useCallback(
     (pick: NetworkMapPick) => {
       dispatchEditor({ type: "pick", pick, activeOrdinal: activeOrdinalRef.current });
+    },
+    [dispatchEditor],
+  );
+
+  const onNetworkBoxSelect = useCallback(
+    (bounds: { west: number; south: number; east: number; north: number }) => {
+      const current = editorRef.current;
+      if (current === null) {
+        return;
+      }
+      const ordinal = activeOrdinalRef.current;
+      const nodeIds: number[] = [];
+      for (const junction of current.present.junctions) {
+        if (junction.ordinal !== ordinal || junction.geometry.type !== "Point") {
+          continue;
+        }
+        const lon = junction.geometry.coordinates[0];
+        const lat = junction.geometry.coordinates[1];
+        if (typeof lon !== "number" || typeof lat !== "number") {
+          continue;
+        }
+        if (
+          lon >= bounds.west &&
+          lon <= bounds.east &&
+          lat >= bounds.south &&
+          lat <= bounds.north
+        ) {
+          const id = junction.properties.NODEID;
+          if (typeof id === "number") {
+            nodeIds.push(id);
+          }
+        }
+      }
+      dispatchEditor({ type: "box_select", nodeIds });
     },
     [dispatchEditor],
   );
@@ -1829,6 +1865,7 @@ export function App() {
                     selection: editor.selection,
                     pendingNodeId: editor.pendingNodeId,
                     onPick: onNetworkPick,
+                    onBoxSelect: onNetworkBoxSelect,
                     centerActionLabel: ui.networkCenterPick[locale],
                   }
                 : null

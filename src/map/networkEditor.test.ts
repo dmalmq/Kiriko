@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { addConnection, type ParsedNetwork } from "./networkFeatures";
+import { addConnection, addJunction, type ParsedNetwork } from "./networkFeatures";
 import {
   createNetworkEditorState,
   hasNetworkChanges,
   networkEditorReducer as reduce,
   networkSaveProblem,
+  selectedConnectionId,
+  singleJunction,
   summarizeNetworkChanges,
 } from "./networkEditor";
 
@@ -64,7 +66,7 @@ describe("networkEditorReducer tools", () => {
     s = reduce(s, { type: "set_tool", tool: "add-junction" });
     s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 1 }, activeOrdinal: 0 });
     expect(s.present.junctions).toHaveLength(2);
-    expect(s.selection).toEqual({ kind: "junction", nodeId: 1 });
+    expect(s.selection).toEqual(singleJunction(1));
     expect(s.tool).toBe("add-junction");
   });
 
@@ -76,7 +78,7 @@ describe("networkEditorReducer tools", () => {
     s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 1 }, activeOrdinal: 0 });
     expect(s.pendingNodeId).toBeNull();
     expect(s.present.paths).toHaveLength(2);
-    expect(s.selection?.kind).toBe("connection");
+    expect(selectedConnectionId(s.selection)).not.toBeNull();
     expect(s.tool).toBe("connect");
   });
 
@@ -111,7 +113,7 @@ describe("networkEditorReducer tools", () => {
     s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.72, latitude: 35.61 }, activeOrdinal: 0 });
     expect(s.tool).toBe("select");
     expect(s.pendingNodeId).toBeNull();
-    expect(s.selection).toEqual({ kind: "junction", nodeId: 0 });
+    expect(s.selection).toEqual(singleJunction(0));
     const moved = s.present.junctions.find((j) => j.properties.NODEID === 0)!;
     expect(moved.geometry).toEqual({ type: "Point", coordinates: [139.72, 35.61] });
   });
@@ -169,7 +171,7 @@ describe("networkEditorReducer history", () => {
     s = reduce(s, { type: "pick", pick: { kind: "map", longitude: 139.7, latitude: 35.6 }, activeOrdinal: 0 });
     s = reduce(s, { type: "set_tool", tool: "select" });
     s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
-    expect(s.selection).toEqual({ kind: "junction", nodeId: 0 });
+    expect(s.selection).toEqual(singleJunction(0));
     s = reduce(s, { type: "undo" });
     expect(s.selection).toBeNull();
   });
@@ -257,5 +259,53 @@ describe("network change summary and save validation", () => {
     expect(networkSaveProblem(empty())).toBe("missing_junction");
     expect(networkSaveProblem(twoPoints())).toBe("missing_connection");
     expect(networkSaveProblem(connected())).toBeNull();
+  });
+});
+
+describe("networkEditorReducer multi-select", () => {
+  it("box_select selects junctions and only connections with both ends in the box", () => {
+    const net = connected(); // nodes 0-1 plus their pair
+    const extra = addJunction(net, { longitude: 139.702, latitude: 35.6, ordinal: 0 });
+    if (!extra.ok) throw new Error("fixture");
+    let s = createNetworkEditorState(extra.network);
+    s = reduce(s, { type: "box_select", nodeIds: [0, 1] });
+    expect(s.selection).toEqual({
+      kind: "set",
+      junctionIds: [0, 1],
+      connectionIds: [expect.objectContaining({ pathId: expect.any(Number) })],
+    });
+    expect(s.selection?.kind).toBe("set");
+    if (s.selection?.kind === "set") {
+      expect(s.selection.connectionIds).toHaveLength(1);
+    }
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("box_select of no nodes leaves the selection unchanged", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    const before = s.selection;
+    s = reduce(s, { type: "box_select", nodeIds: [] });
+    expect(s.selection).toBe(before);
+  });
+
+  it("delete_selection removes a multi-set as one undo step", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, { type: "box_select", nodeIds: [0, 1] });
+    s = reduce(s, { type: "delete_selection" });
+    expect(s.present.junctions).toHaveLength(0);
+    expect(s.present.paths).toHaveLength(0);
+    expect(s.selection).toBeNull();
+    expect(s.past).toHaveLength(1);
+    s = reduce(s, { type: "undo" });
+    expect(s.present.junctions).toHaveLength(2);
+    expect(s.present.paths).toHaveLength(2);
+  });
+
+  it("click pick replaces a multi-set with a single object", () => {
+    let s = createNetworkEditorState(connected());
+    s = reduce(s, { type: "box_select", nodeIds: [0, 1] });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    expect(s.selection).toEqual(singleJunction(0));
   });
 });

@@ -95,9 +95,17 @@ export type NetworkMutationResult =
 
 /** Per-floor render highlights for the network overlay (selection + pending). */
 export interface NetworkRenderState {
-  selectedJunctionId: number | null;
-  selectedConnection: NetworkConnectionId | null;
+  selectedJunctionIds: number[];
+  selectedConnections: NetworkConnectionId[];
   pendingJunctionId: number | null;
+}
+
+function connectionIsSelected(
+  id: NetworkConnectionId | null,
+  selected: NetworkConnectionId[] | undefined,
+): boolean {
+  if (id === null || selected === undefined) return false;
+  return selected.some((c) => c.pathId === id.pathId && c.reversePathId === id.reversePathId);
 }
 
 function parseCollection(text: string): NetworkFeature[] {
@@ -158,7 +166,7 @@ export function buildNetworkFeatures(
   if (network === null) {
     return { type: "FeatureCollection", features };
   }
-  const selectedConnection = render?.selectedConnection ?? null;
+  const selectedConnections = render?.selectedConnections ?? [];
   const junctionById = new Map<number, NetworkFeature>();
   for (const junction of network.junctions) {
     const nodeId = asFiniteNumber(junction.properties.NODEID);
@@ -169,7 +177,7 @@ export function buildNetworkFeatures(
   const emittedVertical = new Set<string>();
   for (const path of network.paths) {
     if (isVerticalPath(path)) {
-      const link = verticalLinkOf(path, junctionById, activeOrdinal, selectedConnection);
+      const link = verticalLinkOf(path, junctionById, activeOrdinal, selectedConnections);
       if (link === null) {
         continue;
       }
@@ -201,11 +209,7 @@ export function buildNetworkFeatures(
     }
     if (path.ordinal === activeOrdinal) {
       const id = connectionIdOf(path);
-      const selected =
-        selectedConnection !== null &&
-        id !== null &&
-        id.pathId === selectedConnection.pathId &&
-        id.reversePathId === selectedConnection.reversePathId;
+      const selected = connectionIsSelected(id, selectedConnections);
       features.push({
         type: "Feature",
         properties: {
@@ -229,7 +233,7 @@ export function buildNetworkFeatures(
         properties: {
           kind: "junction",
           NODEID: id,
-          selected: numericId !== null && render?.selectedJunctionId === numericId,
+          selected: numericId !== null && (render?.selectedJunctionIds.includes(numericId) ?? false),
           pending: numericId !== null && render?.pendingJunctionId === numericId,
         },
         geometry: junction.geometry,
@@ -409,7 +413,7 @@ function verticalLinkOf(
   path: NetworkFeature,
   junctionById: Map<number, NetworkFeature>,
   activeOrdinal: number,
-  selectedConnection: NetworkConnectionId | null,
+  selectedConnections: NetworkConnectionId[],
 ): VerticalNetworkLink | null {
   const id = connectionIdOf(path);
   const fromId = asFiniteNumber(path.properties.FNODEID);
@@ -425,10 +429,7 @@ function verticalLinkOf(
     return null;
   }
   const passageType = asFiniteNumber(path.properties.passage_type) ?? 1;
-  const selected =
-    selectedConnection !== null &&
-    id.pathId === selectedConnection.pathId &&
-    id.reversePathId === selectedConnection.reversePathId;
+  const selected = connectionIsSelected(id, selectedConnections);
   let endpointNodeId: number;
   let targetNodeId: number;
   let activeFloor: string;
