@@ -1,6 +1,11 @@
 import type { ReactElement, ReactNode } from "react";
 import type { LocaleCode } from "../imdf/types";
-import type { NetworkChangeSummary, NetworkEditTool } from "../map/networkEditor";
+import type {
+  NetworkChangeSummary,
+  NetworkEditTool,
+  NetworkPreviewStatus,
+  PathPreview,
+} from "../map/networkEditor";
 import type { NetworkMutationError } from "../map/networkFeatures";
 import { IconConnect, IconCursor, IconPointPlus, IconRedo, IconTrash, IconUndo } from "./icons";
 
@@ -13,6 +18,8 @@ export interface NetworkEditorToolbarProps {
   /** Localized label of the floor new points land on. */
   activeFloorLabel: string;
   notice: NetworkMutationError | null;
+  preview: PathPreview | null;
+  previewStatus: NetworkPreviewStatus;
   saveProblem: "missing_junction" | "missing_connection" | null;
   canUndo: boolean;
   canRedo: boolean;
@@ -31,6 +38,7 @@ export interface NetworkEditorToolbarProps {
   onRequestDiscard: () => void;
   onCancelDiscard: () => void;
   onConfirmDiscard: () => void;
+  onConfirmPreview: () => void;
   onSave: () => void;
 }
 
@@ -62,8 +70,25 @@ const ui = {
   },
   instructSelect: { ja: "点または接続を選択してください。", en: "Select a point or connection." },
   instructConnect: { ja: "同じフロアの点を2つ選択してください。", en: "Select two points on the same floor." },
+  instructPreview: {
+    ja: "経路を選ぶか、Escapeで取り消します。",
+    en: "Choose a route, or press Escape to cancel.",
+  },
   instructDelete: { ja: "削除する点または接続を選択してください。", en: "Select a point or connection to remove it." },
   instructMove: { ja: "点の新しい位置をクリックしてください。", en: "Click the point’s new position." },
+  addPath: { ja: "この経路を追加", en: "Add this path" },
+  disconnected: {
+    ja: "これらの点はつながっていません。",
+    en: "These points are not connected.",
+  },
+  noWalkable: {
+    ja: "これらの点の間に歩ける経路がありません。",
+    en: "No walkable path between these points.",
+  },
+  proposeFailed: {
+    ja: "経路を計算できませんでした。",
+    en: "Could not calculate a path.",
+  },
 } as const;
 
 const TOOL_SHORTCUT: Record<ToolId, string> = {
@@ -83,7 +108,11 @@ function instructionText(
   tool: NetworkEditTool,
   activeFloorLabel: string,
   locale: LocaleCode,
+  preview: PathPreview | null,
 ): string {
+  if (preview !== null) {
+    return ui.instructPreview[locale];
+  }
   switch (tool) {
     case "add-junction":
       return locale === "ja"
@@ -98,6 +127,13 @@ function instructionText(
     case "select":
       return ui.instructSelect[locale];
   }
+}
+
+function previewStatusText(status: NetworkPreviewStatus, locale: LocaleCode): string | null {
+  if (status === "disconnected") return ui.disconnected[locale];
+  if (status === "no_walkable") return ui.noWalkable[locale];
+  if (status === "propose_failed") return ui.proposeFailed[locale];
+  return null;
 }
 
 function changeSummaryText(summary: NetworkChangeSummary, locale: LocaleCode): string {
@@ -137,6 +173,8 @@ export function NetworkEditorToolbar({
   summary,
   activeFloorLabel,
   notice,
+  preview,
+  previewStatus,
   saveProblem,
   canUndo,
   canRedo,
@@ -152,6 +190,7 @@ export function NetworkEditorToolbar({
   onRequestDiscard,
   onCancelDiscard,
   onConfirmDiscard,
+  onConfirmPreview,
   onSave,
 }: NetworkEditorToolbarProps): ReactElement {
   const tools: { id: ToolId; label: string; icon: ReactNode }[] = [
@@ -168,6 +207,7 @@ export function NetworkEditorToolbar({
     summary.deletedConnections;
   const discardPrompt =
     locale === "ja" ? `${totalChanges}件の変更を破棄しますか？` : `Discard ${totalChanges} changes?`;
+  const previewStatusCopy = previewStatusText(previewStatus, locale);
 
   return (
     <section className="network-editor-toolbar" aria-label={ui.toolbarLabel[locale]}>
@@ -218,9 +258,28 @@ export function NetworkEditorToolbar({
 
       <div className="network-editor-toolbar__status">
         <p className="network-editor-toolbar__instruction" role="status">
-          {instructionText(tool, activeFloorLabel, locale)}
+          {instructionText(tool, activeFloorLabel, locale, preview)}
         </p>
         <p className="network-editor-toolbar__summary">{changeSummaryText(summary, locale)}</p>
+        {previewStatusCopy !== null ? (
+          <p className="network-editor-toolbar__note" role="status">
+            {previewStatusCopy}
+          </p>
+        ) : null}
+        {preview !== null ? (
+          <button
+            type="button"
+            className="btn-ghost"
+            disabled={
+              locked ||
+              preview.candidates[preview.selectedIndex] === undefined ||
+              preview.candidates[preview.selectedIndex]?.kind === "current"
+            }
+            onClick={onConfirmPreview}
+          >
+            {ui.addPath[locale]}
+          </button>
+        ) : null}
         {notice !== null ? (
           <p className="network-editor-toolbar__alert" role="alert">
             {noticeText(notice, locale)}

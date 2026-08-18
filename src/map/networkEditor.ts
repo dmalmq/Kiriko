@@ -1,6 +1,7 @@
 import {
   addConnection,
   addJunction,
+  addPath,
   connectionKeys,
   deleteConnection,
   deleteJunction,
@@ -54,6 +55,27 @@ export function selectedConnectionId(selection: NetworkSelection): NetworkConnec
   return null;
 }
 
+/** Kinds of a Connect preview candidate. Matches the wasm propose DTO. */
+export type PathCandidateKind = "current" | "along_network" | "shorter";
+
+/** One proposed path: display polyline plus graph node ids for Current. */
+export interface PathCandidate {
+  kind: PathCandidateKind;
+  coordinates: [number, number][];
+  nodeIds: number[] | null;
+}
+
+/** Session state for a Connect preview between two junctions. */
+export interface PathPreview {
+  fromId: number;
+  toId: number;
+  candidates: PathCandidate[];
+  selectedIndex: number;
+}
+
+/** Why a Connect preview is inspect-only, empty, or failed. */
+export type NetworkPreviewStatus = "disconnected" | "no_walkable" | "propose_failed" | null;
+
 /** A semantic pick reported by the map: an existing object or a bare coordinate. */
 export type NetworkMapPick =
   | { kind: "junction"; nodeId: number }
@@ -79,6 +101,8 @@ export interface NetworkEditorState {
   /** Connect origin (tool `connect`) or the node being repositioned (tool `move-junction`). */
   pendingNodeId: number | null;
   notice: NetworkMutationError | null;
+  preview: PathPreview | null;
+  previewStatus: NetworkPreviewStatus;
 }
 
 export type NetworkEditorAction =
@@ -92,7 +116,11 @@ export type NetworkEditorAction =
   | { type: "redo" }
   | { type: "reset" }
   | { type: "clear_selection" }
-  | { type: "clear_notice" };
+  | { type: "clear_notice" }
+  | { type: "set_preview"; preview: PathPreview }
+  | { type: "select_candidate"; index: number }
+  | { type: "confirm_preview" }
+  | { type: "set_preview_status"; status: NetworkPreviewStatus };
 
 const HISTORY_LIMIT = 50;
 
@@ -106,6 +134,8 @@ export function createNetworkEditorState(network: ParsedNetwork): NetworkEditorS
     selection: null,
     pendingNodeId: null,
     notice: null,
+    preview: null,
+    previewStatus: null,
   };
 }
 
@@ -164,7 +194,16 @@ function commit(
   patch: Partial<NetworkEditorState>,
 ): NetworkEditorState {
   const past = [...state.past, state.present].slice(-HISTORY_LIMIT);
-  return { ...state, past, present: next, future: [], notice: null, ...patch };
+  return {
+    ...state,
+    past,
+    present: next,
+    future: [],
+    notice: null,
+    preview: null,
+    previewStatus: null,
+    ...patch,
+  };
 }
 
 function applyPick(state: NetworkEditorState, pick: NetworkMapPick, activeOrdinal: number): NetworkEditorState {
@@ -197,7 +236,13 @@ function applyPick(state: NetworkEditorState, pick: NetworkMapPick, activeOrdina
     case "connect": {
       if (pick.kind !== "junction") return state;
       if (state.pendingNodeId === null) {
-        return { ...state, pendingNodeId: pick.nodeId, notice: null };
+        return {
+          ...state,
+          pendingNodeId: pick.nodeId,
+          notice: null,
+          preview: null,
+          previewStatus: null,
+        };
       }
       if (state.pendingNodeId === pick.nodeId) return state;
       const result = addConnection(state.present, state.pendingNodeId, pick.nodeId);
@@ -255,9 +300,31 @@ function restore(
     future,
     pendingNodeId: null,
     notice: null,
+    preview: null,
+    previewStatus: null,
     selection: selectionPresent(present, state.selection) ? state.selection : null,
     tool: state.tool === "move-junction" ? "select" : state.tool,
   };
+}
+
+function confirmPreview(state: NetworkEditorState): NetworkEditorState {
+  const preview = state.preview;
+  if (preview === null) return state;
+  const selected = preview.candidates[preview.selectedIndex];
+  if (selected === undefined || selected.kind === "current") return state;
+  const from = state.present.junctions.find((j) => j.properties.NODEID === preview.fromId);
+  const ordinal = from?.ordinal;
+  if (ordinal === undefined || ordinal === null) {
+    return { ...state, notice: "unknown_junction" };
+  }
+  const result = addPath(state.present, selected.coordinates, ordinal);
+  if (!result.ok) {
+    return { ...state, notice: result.error };
+  }
+  if (result.network === state.present) {
+    return { ...state, preview: null, previewStatus: null, pendingNodeId: null };
+  }
+  return commit(state, result.network, { pendingNodeId: null, selection: null });
 }
 
 export function networkEditorReducer(
@@ -266,7 +333,14 @@ export function networkEditorReducer(
 ): NetworkEditorState {
   switch (action.type) {
     case "set_tool":
-      return { ...state, tool: action.tool, pendingNodeId: null, notice: null };
+      return {
+        ...state,
+        tool: action.tool,
+        pendingNodeId: null,
+        notice: null,
+        preview: null,
+        previewStatus: null,
+      };
 
     case "pick":
       return applyPick(state, action.pick, action.activeOrdinal);
@@ -278,6 +352,8 @@ export function networkEditorReducer(
         pendingNodeId: action.nodeId,
         selection: singleJunction(action.nodeId),
         notice: null,
+        preview: null,
+        previewStatus: null,
       };
 
     case "box_select": {
@@ -321,7 +397,41 @@ export function networkEditorReducer(
         ...state,
         pendingNodeId: null,
         notice: null,
+        preview: null,
+        previewStatus: null,
         tool: state.tool === "move-junction" ? "select" : state.tool,
+      };
+
+    case "set_preview":
+      return {
+        ...state,
+        preview: action.preview,
+        previewStatus: null,
+        notice: null,
+      };
+
+    case "select_candidate": {
+      if (state.preview === null) return state;
+      if (action.index < 0 || action.index >= state.preview.candidates.length) return state;
+      return {
+        ...state,
+        preview: { ...state.preview, selectedIndex: action.index },
+      };
+    }
+
+    case "confirm_preview":
+      return confirmPreview(state);
+
+    case "set_preview_status":
+      return {
+        ...state,
+        previewStatus: action.status,
+        preview:
+          action.status === "no_walkable" || action.status === "propose_failed"
+            ? null
+            : state.preview,
+        pendingNodeId: action.status === "propose_failed" ? null : state.pendingNodeId,
+        notice: null,
       };
 
     case "undo": {

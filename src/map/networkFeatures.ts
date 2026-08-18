@@ -336,8 +336,11 @@ export function ordinalToFloorLabel(ordinal: number): string {
 }
 
 const EARTH_RADIUS_M = 6_371_000;
+/** Snap a new path vertex onto an existing same-floor junction (spec §5.5). */
+const PATH_SNAP_RADIUS_M = 0.8;
+
 /** Great-circle distance in metres between two lon/lat points. */
-function haversineM(lon1: number, lat1: number, lon2: number, lat2: number): number {
+export function haversineM(lon1: number, lat1: number, lon2: number, lat2: number): number {
   const toRad = Math.PI / 180;
   const dLat = (lat2 - lat1) * toRad;
   const dLon = (lon2 - lon1) * toRad;
@@ -703,6 +706,87 @@ export function addConnection(net: ParsedNetwork, fromId: number, toId: number):
     network: { junctions: withPathCounts(net.junctions, paths), paths },
     connectionId: { pathId: fwdPathId, reversePathId: revPathId },
   };
+}
+
+/** Same-floor NODEID within `PATH_SNAP_RADIUS_M`, or null. Closest wins; ties take the smaller id. */
+function snapJunctionId(
+  net: ParsedNetwork,
+  lon: number,
+  lat: number,
+  ordinal: number,
+): number | null {
+  let bestId: number | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const junction of net.junctions) {
+    if (junction.ordinal !== ordinal) continue;
+    const id = asFiniteNumber(junction.properties.NODEID);
+    const coord = pointCoordinates(junction);
+    if (id === null || coord === null) continue;
+    const dist = haversineM(lon, lat, coord[0], coord[1]);
+    if (dist > PATH_SNAP_RADIUS_M) continue;
+    if (dist < bestDist || (dist === bestDist && (bestId === null || id < bestId))) {
+      bestDist = dist;
+      bestId = id;
+    }
+  }
+  return bestId;
+}
+
+/**
+ * Insert a same-floor polyline as junctions + connections on a working copy.
+ * Vertices snap to existing same-floor nodes within 0.8 m; consecutive
+ * identical ids collapse; an already-present pair is skipped rather than
+ * failing the whole path. Fatal `node_id_exhausted` / `invalid_coordinate`
+ * discard the copy and return the original network.
+ */
+export function addPath(
+  net: ParsedNetwork,
+  coordinates: [number, number][],
+  ordinal: number,
+): NetworkMutationResult {
+  if (coordinates.length < 2) {
+    return { ok: true, network: net };
+  }
+  let working = net;
+  const resolved: number[] = [];
+  for (const coord of coordinates) {
+    const lon = coord[0];
+    const lat = coord[1];
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+      return { ok: false, network: net, error: "invalid_coordinate" };
+    }
+    const snapped = snapJunctionId(working, lon, lat, ordinal);
+    if (snapped !== null) {
+      if (resolved[resolved.length - 1] !== snapped) resolved.push(snapped);
+      continue;
+    }
+    const added = addJunction(working, { longitude: lon, latitude: lat, ordinal });
+    if (!added.ok) {
+      return { ok: false, network: net, error: added.error };
+    }
+    working = added.network;
+    if (added.nodeId !== undefined && resolved[resolved.length - 1] !== added.nodeId) {
+      resolved.push(added.nodeId);
+    }
+  }
+  if (resolved.length < 2) {
+    return { ok: true, network: net };
+  }
+  for (let i = 0; i < resolved.length - 1; i += 1) {
+    const fromId = resolved[i]!;
+    const toId = resolved[i + 1]!;
+    const linked = addConnection(working, fromId, toId);
+    if (linked.ok) {
+      working = linked.network;
+      continue;
+    }
+    if (linked.error === "existing_connection") continue;
+    if (linked.error === "node_id_exhausted" || linked.error === "invalid_coordinate") {
+      return { ok: false, network: net, error: linked.error };
+    }
+    return { ok: false, network: net, error: linked.error };
+  }
+  return { ok: true, network: working };
 }
 
 /** Remove exactly the reciprocal pair identified by `connectionId`. */

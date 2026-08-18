@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   addConnection,
   addJunction,
+  addPath,
   buildNetworkFeatures,
   deleteConnection,
   deleteJunction,
   floorLabelToOrdinal,
+  haversineM,
   moveJunction,
   ordinalToFloorLabel,
   parseNetworkOverlay,
@@ -484,6 +486,41 @@ describe("network mutations", () => {
     expect(addConnection(net, 0, 0).network).toBe(net);
     expect(moveJunction(net, 9, { longitude: 1, latitude: 1 }).network).toBe(net);
     expect(deleteJunction(net, 9).network).toBe(net);
+  });
+
+  it("addPath on existing endpoints adds only the missing connection", () => {
+    const r = addPath(base(), [[139.7, 35.6], [139.7005, 35.6]], 0);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.network.junctions).toHaveLength(2);
+    expect(r.network.paths).toHaveLength(2);
+  });
+
+  it("addPath reuses a NODEID within 0.8 m", () => {
+    const net = base();
+    // ~0.45 m east of node 0 at this latitude — inside the 0.8 m snap.
+    const nearZero: [number, number] = [139.700005, 35.6];
+    expect(haversineM(139.7, 35.6, nearZero[0], nearZero[1])).toBeLessThan(0.8);
+    const mid: [number, number] = [139.70025, 35.6];
+    const r = addPath(net, [nearZero, mid, [139.7005, 35.6]], 0);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.network.junctions.map((j) => j.properties.NODEID)).toEqual([0, 1, 2]);
+    const added = r.network.junctions.find((j) => j.properties.NODEID === 2)!;
+    expect(added.geometry).toEqual({ type: "Point", coordinates: mid });
+  });
+
+  it("addPath skips an existing_connection pair and still adds the rest", () => {
+    const once = addConnection(base(), 0, 1);
+    expect(once.ok).toBe(true);
+    if (!once.ok) return;
+    const mid: [number, number] = [139.70025, 35.6];
+    const r = addPath(once.network, [[139.7, 35.6], [139.7005, 35.6], mid], 0);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.network.junctions).toHaveLength(3);
+    // Original 0–1 pair plus the new 1–mid pair.
+    expect(r.network.paths).toHaveLength(4);
   });
 });
 

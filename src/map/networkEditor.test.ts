@@ -8,6 +8,8 @@ import {
   selectedConnectionId,
   singleJunction,
   summarizeNetworkChanges,
+  type PathCandidateKind,
+  type PathPreview,
 } from "./networkEditor";
 
 function junction(id: number, lon: number, lat: number, ordinal = 0): ParsedNetwork["junctions"][number] {
@@ -307,5 +309,140 @@ describe("networkEditorReducer multi-select", () => {
     s = reduce(s, { type: "box_select", nodeIds: [0, 1] });
     s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
     expect(s.selection).toEqual(singleJunction(0));
+  });
+});
+
+const previewOf = (kind: PathCandidateKind, coords: [number, number][]): PathPreview => ({
+  fromId: 0,
+  toId: 1,
+  candidates: [{ kind, coordinates: coords, nodeIds: kind === "current" ? [0, 1] : null }],
+  selectedIndex: 0,
+});
+
+describe("networkEditorReducer preview", () => {
+  it("starts with no preview", () => {
+    const s = createNetworkEditorState(twoPoints());
+    expect(s.preview).toBeNull();
+    expect(s.previewStatus).toBeNull();
+  });
+
+  it("confirm_preview of current does not commit", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = { ...s, preview: previewOf("current", [[139.7, 35.6], [139.7005, 35.6]]) };
+    s = reduce(s, { type: "confirm_preview" });
+    expect(s.present.paths).toHaveLength(0);
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("confirm_preview of a new path is one undo that removes every added junction and connection", () => {
+    let s = createNetworkEditorState(twoPoints());
+    const mid: [number, number] = [139.70025, 35.6];
+    s = reduce(s, {
+      type: "set_preview",
+      preview: {
+        fromId: 0,
+        toId: 1,
+        candidates: [{ kind: "shorter", coordinates: [[139.7, 35.6], mid, [139.7005, 35.6]], nodeIds: null }],
+        selectedIndex: 0,
+      },
+    });
+    s = reduce(s, { type: "confirm_preview" });
+    expect(s.present.junctions.length).toBeGreaterThanOrEqual(3);
+    expect(s.present.paths.length).toBeGreaterThanOrEqual(4); // two new undirected pairs
+    expect(s.past).toHaveLength(1);
+    expect(s.preview).toBeNull();
+    s = reduce(s, { type: "undo" });
+    expect(s.present.junctions).toHaveLength(2);
+    expect(s.present.paths).toHaveLength(0);
+    expect(s.preview).toBeNull();
+  });
+
+  it("cancel_pending and set_tool drop preview without history", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, { type: "set_preview", preview: previewOf("shorter", [[139.7, 35.6], [139.7005, 35.6]]) });
+    s = reduce(s, { type: "cancel_pending" });
+    expect(s.preview).toBeNull();
+    expect(s.past).toHaveLength(0);
+    s = reduce(s, { type: "set_preview", preview: previewOf("shorter", [[139.7, 35.6], [139.7005, 35.6]]) });
+    s = reduce(s, { type: "set_tool", tool: "select" });
+    expect(s.preview).toBeNull();
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("set_preview does not push history", () => {
+    let s = createNetworkEditorState(twoPoints());
+    const before = s.present;
+    s = reduce(s, { type: "set_preview", preview: previewOf("along_network", [[139.7, 35.6], [139.7005, 35.6]]) });
+    expect(s.preview?.candidates[0]?.kind).toBe("along_network");
+    expect(s.present).toBe(before);
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("select_candidate updates the highlighted index", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, {
+      type: "set_preview",
+      preview: {
+        fromId: 0,
+        toId: 1,
+        candidates: [
+          { kind: "current", coordinates: [[139.7, 35.6], [139.7005, 35.6]], nodeIds: [0, 1] },
+          { kind: "shorter", coordinates: [[139.7, 35.6], [139.7005, 35.6]], nodeIds: null },
+        ],
+        selectedIndex: 0,
+      },
+    });
+    s = reduce(s, { type: "select_candidate", index: 1 });
+    expect(s.preview?.selectedIndex).toBe(1);
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("set_preview_status records absence without writing the graph", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, { type: "set_preview_status", status: "no_walkable" });
+    expect(s.previewStatus).toBe("no_walkable");
+    expect(s.preview).toBeNull();
+    expect(s.present.paths).toHaveLength(0);
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("propose_failed clears pending without history", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, { type: "set_tool", tool: "connect" });
+    s = reduce(s, { type: "pick", pick: { kind: "junction", nodeId: 0 }, activeOrdinal: 0 });
+    expect(s.pendingNodeId).toBe(0);
+    s = reduce(s, { type: "set_preview_status", status: "propose_failed" });
+    expect(s.previewStatus).toBe("propose_failed");
+    expect(s.pendingNodeId).toBeNull();
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("undo and redo after a confirmed path leave preview cleared", () => {
+    let s = createNetworkEditorState(twoPoints());
+    s = reduce(s, {
+      type: "set_preview",
+      preview: {
+        fromId: 0,
+        toId: 1,
+        candidates: [
+          {
+            kind: "shorter",
+            coordinates: [
+              [139.7, 35.6],
+              [139.70025, 35.6],
+              [139.7005, 35.6],
+            ],
+            nodeIds: null,
+          },
+        ],
+        selectedIndex: 0,
+      },
+    });
+    s = reduce(s, { type: "confirm_preview" });
+    s = reduce(s, { type: "set_preview", preview: previewOf("current", [[139.7, 35.6], [139.7005, 35.6]]) });
+    s = reduce(s, { type: "undo" });
+    expect(s.preview).toBeNull();
+    s = reduce(s, { type: "redo" });
+    expect(s.preview).toBeNull();
   });
 });

@@ -518,12 +518,15 @@ function toolbarProps(
     saveMessage: null,
     saveError: null,
     discardArmed: false,
+    preview: null,
+    previewStatus: null,
     onSetTool: vi.fn(),
     onUndo: vi.fn(),
     onRedo: vi.fn(),
     onRequestDiscard: vi.fn(),
     onCancelDiscard: vi.fn(),
     onConfirmDiscard: vi.fn(),
+    onConfirmPreview: vi.fn(),
     onSave: vi.fn(),
     ...overrides,
   };
@@ -633,6 +636,92 @@ describe("NetworkEditorToolbar", () => {
       />,
     );
     expect(screen.getByText("1 point added · 2 connections added")).toBeTruthy();
+  });
+
+  it("shows the preview instruction and Add this path while a candidate is open", async () => {
+    const onConfirmPreview = vi.fn();
+    const user = userEvent.setup();
+    const preview = {
+      fromId: 0,
+      toId: 1,
+      candidates: [
+        {
+          kind: "shorter" as const,
+          coordinates: [
+            [139.7, 35.6],
+            [139.7005, 35.6],
+          ] as [number, number][],
+          nodeIds: null,
+        },
+      ],
+      selectedIndex: 0,
+    };
+    render(<NetworkEditorToolbar {...toolbarProps({ preview, onConfirmPreview })} />);
+    expect(screen.getByText("Choose a route, or press Escape to cancel.")).toBeTruthy();
+    const add = screen.getByRole("button", { name: "Add this path" }) as HTMLButtonElement;
+    expect(add.disabled).toBe(false);
+    await user.click(add);
+    expect(onConfirmPreview).toHaveBeenCalled();
+  });
+
+  it("disables Add this path when the selected candidate is current", () => {
+    render(
+      <NetworkEditorToolbar
+        {...toolbarProps({
+          preview: {
+            fromId: 0,
+            toId: 1,
+            candidates: [
+              {
+                kind: "current",
+                coordinates: [
+                  [139.7, 35.6],
+                  [139.7005, 35.6],
+                ],
+                nodeIds: [0, 1],
+              },
+            ],
+            selectedIndex: 0,
+          },
+        })}
+      />,
+    );
+    expect((screen.getByRole("button", { name: "Add this path" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
+
+  it("localizes Add this path and preview absence copy", () => {
+    const { rerender } = render(
+      <NetworkEditorToolbar
+        {...toolbarProps({
+          locale: "ja",
+          preview: {
+            fromId: 0,
+            toId: 1,
+            candidates: [
+              {
+                kind: "shorter",
+                coordinates: [
+                  [139.7, 35.6],
+                  [139.7005, 35.6],
+                ],
+                nodeIds: null,
+              },
+            ],
+            selectedIndex: 0,
+          },
+        })}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "この経路を追加" })).toBeTruthy();
+    expect(screen.getByText("経路を選ぶか、Escapeで取り消します。")).toBeTruthy();
+    rerender(<NetworkEditorToolbar {...toolbarProps({ previewStatus: "no_walkable" })} />);
+    expect(screen.getByText("No walkable path between these points.")).toBeTruthy();
+    rerender(<NetworkEditorToolbar {...toolbarProps({ previewStatus: "propose_failed" })} />);
+    expect(screen.getByText("Could not calculate a path.")).toBeTruthy();
+    rerender(<NetworkEditorToolbar {...toolbarProps({ previewStatus: "disconnected" })} />);
+    expect(screen.getByText("These points are not connected.")).toBeTruthy();
   });
 });
 

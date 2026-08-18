@@ -34,11 +34,14 @@ import {
   type SceneSourceEvent,
 } from "../map/scene/sceneSource";
 import type { FacilityDto, NetworkQaDto, RouteEndpoint, RouteResultDto } from "../bundle/wasm";
-import { loadNetworkOverlay } from "../bundle/loadNetworkOverlay";
+import { initKirikoWasm, proposeNetworkPaths, walkableChord } from "../bundle/wasm";
+import { loadNetworkOverlay, type LoadedNetworkOverlay } from "../bundle/loadNetworkOverlay";
 import {
+  haversineM,
   networkConnectivity,
   serializeNetwork,
   type NetworkConnectionId,
+  type NetworkFeature,
   type ParsedNetwork,
 } from "../map/networkFeatures";
 import {
@@ -50,6 +53,8 @@ import {
   type NetworkEditorAction,
   type NetworkMapPick,
   type NetworkEditorState,
+  type PathCandidate,
+  type PathCandidateKind,
 } from "../map/networkEditor";
 import { NetworkEditorToolbar } from "../components/NetworkEditorToolbar";
 import { NetworkInspectorPanel } from "../components/NetworkInspectorPanel";
@@ -370,6 +375,73 @@ const INITIAL_DIRECTIONS: DirectionsState = {
   accessible: false,
 };
 
+/** Instant hop when the straight chord is shorter than this and walkable. */
+const INSTANT_HOP_M = 15;
+
+function readOverlayLoad(result: LoadedNetworkOverlay | ParsedNetwork): {
+  network: ParsedNetwork;
+  bytes: Uint8Array | null;
+} {
+  if ("junctions" in result && "paths" in result) {
+    return { network: result, bytes: null };
+  }
+  return { network: result.network, bytes: result.bytes };
+}
+
+function junctionByNodeId(net: ParsedNetwork, nodeId: number): NetworkFeature | undefined {
+  return net.junctions.find((junction) => junction.properties.NODEID === nodeId);
+}
+
+function junctionLonLat(junction: NetworkFeature): [number, number] | null {
+  if (junction.geometry.type !== "Point") return null;
+  const lon = junction.geometry.coordinates[0];
+  const lat = junction.geometry.coordinates[1];
+  return typeof lon === "number" && Number.isFinite(lon) && typeof lat === "number" && Number.isFinite(lat)
+    ? [lon, lat]
+    : null;
+}
+
+function hasDirectConnection(net: ParsedNetwork, fromId: number, toId: number): boolean {
+  return net.paths.some((path) => {
+    const from = path.properties.FNODEID;
+    const to = path.properties.TNODEID;
+    return (from === fromId && to === toId) || (from === toId && to === fromId);
+  });
+}
+
+function isPathCandidateKind(value: unknown): value is PathCandidateKind {
+  return value === "current" || value === "along_network" || value === "shorter";
+}
+
+function previewCandidatesFromProposal(value: unknown): PathCandidate[] {
+  if (value === null || typeof value !== "object" || !("candidates" in value)) return [];
+  const raw = value.candidates;
+  if (!Array.isArray(raw)) return [];
+  const out: PathCandidate[] = [];
+  for (const item of raw) {
+    if (item === null || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    if (!isPathCandidateKind(record.kind) || !Array.isArray(record.coordinates)) continue;
+    const coordinates: [number, number][] = [];
+    for (const pair of record.coordinates) {
+      if (
+        !Array.isArray(pair) ||
+        pair.length < 2 ||
+        typeof pair[0] !== "number" ||
+        typeof pair[1] !== "number"
+      ) {
+        continue;
+      }
+      coordinates.push([pair[0], pair[1]]);
+    }
+    const nodeIds = Array.isArray(record.nodeIds)
+      ? record.nodeIds.filter((id): id is number => typeof id === "number")
+      : null;
+    out.push({ kind: record.kind, coordinates, nodeIds });
+  }
+  return out;
+}
+
 export function App() {
   const params = useMemo(() => parseViewerParams(window.location.search), []);
   const embed = params.embed;
@@ -472,6 +544,8 @@ export function App() {
   }, []);
   const editorRef = useRef(editor);
   editorRef.current = editor;
+  const bundleBytesRef = useRef<Uint8Array | null>(null);
+  const connectProposeTokenRef = useRef(0);
   // The published overlay is the immutable baseline; the editor's working copy
   // (when editing) is what renders, reports connectivity, and serializes.
   const editedNetwork = editor?.present ?? reviewNetwork;
@@ -665,6 +739,8 @@ export function App() {
     setConnectionsPanelOpen(false);
     setEditor(null);
     setDiscardArmed(false);
+    bundleBytesRef.current = null;
+    connectProposeTokenRef.current += 1;
     resetNetworkSave();
   }, [bundleProvenance, resetNetworkSave]);
 
@@ -682,9 +758,13 @@ export function App() {
     let cancelled = false;
     setNetworkLoadState("loading");
     void loadNetworkOverlay(pinnedBundleUrl).then(
-      (parsed) => {
+      (loaded) => {
         if (cancelled) return;
-        setReviewNetwork(parsed);
+        const { network, bytes } = readOverlayLoad(loaded);
+        setReviewNetwork(network);
+        if (bytes !== null) {
+          bundleBytesRef.current = bytes;
+        }
         setNetworkLoadState("ready");
       },
       () => {
@@ -801,7 +881,91 @@ export function App() {
 
   const onNetworkPick = useCallback(
     (pick: NetworkMapPick) => {
-      dispatchEditor({ type: "pick", pick, activeOrdinal: activeOrdinalRef.current });
+      const current = editorRef.current;
+      const activeOrdinal = activeOrdinalRef.current;
+      if (current === null) {
+        return;
+      }
+      if (current.tool !== "connect" || current.pendingNodeId === null || pick.kind !== "junction") {
+        dispatchEditor({ type: "pick", pick, activeOrdinal });
+        return;
+      }
+      const fromId = current.pendingNodeId;
+      const toId = pick.nodeId;
+      const from = junctionByNodeId(current.present, fromId);
+      const to = junctionByNodeId(current.present, toId);
+      if (
+        fromId === toId ||
+        from === undefined ||
+        to === undefined ||
+        from.ordinal !== to.ordinal ||
+        hasDirectConnection(current.present, fromId, toId)
+      ) {
+        dispatchEditor({ type: "pick", pick, activeOrdinal });
+        return;
+      }
+      const a = junctionLonLat(from);
+      const b = junctionLonLat(to);
+      if (a === null || b === null) {
+        dispatchEditor({ type: "pick", pick, activeOrdinal });
+        return;
+      }
+      let chord = false;
+      try {
+        chord = walkableChord(
+          bundleBytesRef.current ?? new Uint8Array(),
+          a,
+          b,
+          from.ordinal ?? activeOrdinal,
+        );
+      } catch {
+        // Wasm missing or not ready: do not punch a wall; fall through to preview.
+        chord = false;
+      }
+      const dist = haversineM(a[0], a[1], b[0], b[1]);
+      if (dist < INSTANT_HOP_M && chord) {
+        dispatchEditor({ type: "pick", pick, activeOrdinal });
+        return;
+      }
+      const token = connectProposeTokenRef.current + 1;
+      connectProposeTokenRef.current = token;
+      void (async () => {
+        try {
+          await initKirikoWasm();
+          const serialized = serializeNetwork(current.present);
+          const proposal = proposeNetworkPaths(
+            bundleBytesRef.current ?? new Uint8Array(),
+            serialized.junctions,
+            serialized.paths,
+            fromId,
+            toId,
+          );
+          if (token !== connectProposeTokenRef.current) return;
+          const candidates = previewCandidatesFromProposal(proposal);
+          const hasCurrent = candidates.some((candidate) => candidate.kind === "current");
+          const hasNew = candidates.some((candidate) => candidate.kind !== "current");
+          if (!hasCurrent && !hasNew) {
+            dispatchEditor({ type: "set_preview_status", status: "no_walkable" });
+            return;
+          }
+          const firstNew = candidates.findIndex((candidate) => candidate.kind !== "current");
+          dispatchEditor({
+            type: "set_preview",
+            preview: {
+              fromId: typeof proposal.fromId === "number" ? proposal.fromId : fromId,
+              toId: typeof proposal.toId === "number" ? proposal.toId : toId,
+              candidates,
+              selectedIndex: firstNew >= 0 ? firstNew : 0,
+            },
+          });
+          if (!hasCurrent && hasNew) {
+            dispatchEditor({ type: "set_preview_status", status: "disconnected" });
+          }
+        } catch {
+          if (token !== connectProposeTokenRef.current) return;
+          dispatchEditor({ type: "set_preview_status", status: "propose_failed" });
+        }
+      })();
     },
     [dispatchEditor],
   );
@@ -1277,6 +1441,7 @@ export function App() {
       const mod = event.ctrlKey || event.metaKey;
       if (mod && (event.key === "z" || event.key === "Z")) {
         event.preventDefault();
+        connectProposeTokenRef.current += 1;
         dispatchEditor({ type: event.shiftKey ? "redo" : "undo" });
         return;
       }
@@ -1287,21 +1452,26 @@ export function App() {
         if (discardArmed) {
           setDiscardArmed(false);
         } else {
+          connectProposeTokenRef.current += 1;
           dispatchEditor({ type: "cancel_pending" });
         }
         return;
       }
       switch (event.key.toLowerCase()) {
         case "s":
+          connectProposeTokenRef.current += 1;
           dispatchEditor({ type: "set_tool", tool: "select" });
           break;
         case "p":
+          connectProposeTokenRef.current += 1;
           dispatchEditor({ type: "set_tool", tool: "add-junction" });
           break;
         case "c":
+          connectProposeTokenRef.current += 1;
           dispatchEditor({ type: "set_tool", tool: "connect" });
           break;
         case "d":
+          connectProposeTokenRef.current += 1;
           dispatchEditor({ type: "set_tool", tool: "delete" });
           break;
         case "delete":
@@ -2226,6 +2396,8 @@ export function App() {
                 summary={summarizeNetworkChanges(editor)}
                 activeFloorLabel={activeFloorLabel}
                 notice={editor.notice}
+                preview={editor.preview}
+                previewStatus={editor.previewStatus}
                 saveProblem={networkSaveProblem(editor.present)}
                 canUndo={editor.past.length > 0}
                 canRedo={editor.future.length > 0}
@@ -2235,12 +2407,22 @@ export function App() {
                 saveMessage={networkSave.message}
                 saveError={networkSave.error}
                 discardArmed={discardArmed}
-                onSetTool={(tool) => dispatchEditor({ type: "set_tool", tool })}
-                onUndo={() => dispatchEditor({ type: "undo" })}
-                onRedo={() => dispatchEditor({ type: "redo" })}
+                onSetTool={(tool) => {
+                  connectProposeTokenRef.current += 1;
+                  dispatchEditor({ type: "set_tool", tool });
+                }}
+                onUndo={() => {
+                  connectProposeTokenRef.current += 1;
+                  dispatchEditor({ type: "undo" });
+                }}
+                onRedo={() => {
+                  connectProposeTokenRef.current += 1;
+                  dispatchEditor({ type: "redo" });
+                }}
                 onRequestDiscard={requestDiscard}
                 onCancelDiscard={cancelDiscard}
                 onConfirmDiscard={confirmDiscard}
+                onConfirmPreview={() => dispatchEditor({ type: "confirm_preview" })}
                 onSave={() => {
                   void saveNetwork();
                 }}

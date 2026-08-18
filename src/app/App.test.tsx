@@ -216,6 +216,15 @@ vi.mock("../bundle/routeKirikoBundle", () => ({
   routeKirikoBundle: (...args: unknown[]) => routeKirikoBundleMock(...args),
 }));
 
+const walkableChordMock = vi.fn(() => true);
+const proposeNetworkPathsMock = vi.fn();
+
+vi.mock("../bundle/wasm", () => ({
+  initKirikoWasm: async () => undefined,
+  walkableChord: (...args: unknown[]) => walkableChordMock(...args),
+  proposeNetworkPaths: (...args: unknown[]) => proposeNetworkPathsMock(...args),
+}));
+
 const fetchImdfFileMock = vi.fn();
 
 vi.mock("../imdf/fetchImdfArchive", async (importOriginal) => {
@@ -1751,7 +1760,8 @@ describe("App directions mode", () => {
     return {
       junctions: [
         { ordinal: 0, geometry: { type: "Point", coordinates: [139.7, 35.68] }, properties: { NODEID: 0, FLOOR: "F1" } },
-        { ordinal: 0, geometry: { type: "Point", coordinates: [139.7005, 35.68] }, properties: { NODEID: 1, FLOOR: "F1" } },
+        // ~7 m from node 0 — inside the 15 m instant-hop gate when walkable.
+        { ordinal: 0, geometry: { type: "Point", coordinates: [139.70008, 35.68] }, properties: { NODEID: 1, FLOOR: "F1" } },
         { ordinal: 0, geometry: { type: "Point", coordinates: [139.701, 35.68] }, properties: { NODEID: 2, FLOOR: "F1" } },
       ],
       paths: [],
@@ -1764,6 +1774,8 @@ describe("App directions mode", () => {
     fetchImdfFileMock.mockReset();
     routeKirikoBundleMock.mockReset();
     loadNetworkOverlayMock.mockReset();
+    walkableChordMock.mockReset().mockReturnValue(true);
+    proposeNetworkPathsMock.mockReset();
     resetIssueMocks();
     // Network editing is a producer action; default these tests to a member so
     // the Edit control is enabled once the overlay loads.
@@ -2593,5 +2605,116 @@ describe("App directions mode", () => {
     await user.click(screen.getByRole("button", { name: "Discard changes" }));
     expect(screen.queryByRole("button", { name: "Connect" })).toBeNull();
     expect(screen.getByRole("button", { name: "Directions" })).toBeTruthy();
+  });
+
+  it("previews a long connect pair and confirms as one added path", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    proposeNetworkPathsMock.mockReturnValue({
+      fromId: 0,
+      toId: 2,
+      candidates: [
+        {
+          kind: "shorter",
+          coordinates: [
+            [139.7, 35.68],
+            [139.7005, 35.68],
+            [139.701, 35.68],
+          ],
+          nodeIds: null,
+        },
+      ],
+    });
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await startNetworkEdit(user);
+    await user.click(await screen.findByTestId("net-pick-0"));
+    await user.click(await screen.findByTestId("net-pick-2"));
+
+    expect(await screen.findByText("Choose a route, or press Escape to cancel.")).toBeTruthy();
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
+    await user.click(screen.getByRole("button", { name: "Add this path" }));
+    await waitFor(() => expect(Number(mapStub().getAttribute("data-network-path-count"))).toBeGreaterThanOrEqual(4));
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
+  });
+
+  it("does not hop a short chord that is not walkable", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    walkableChordMock.mockReturnValue(false);
+    proposeNetworkPathsMock.mockReturnValue({
+      fromId: 0,
+      toId: 1,
+      candidates: [
+        {
+          kind: "along_network",
+          coordinates: [
+            [139.7, 35.68],
+            [139.70008, 35.68],
+          ],
+          nodeIds: null,
+        },
+      ],
+    });
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await startNetworkEdit(user);
+    await user.click(await screen.findByTestId("net-pick-0"));
+    await user.click(await screen.findByTestId("net-pick-1"));
+
+    expect(await screen.findByText("Choose a route, or press Escape to cancel.")).toBeTruthy();
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
+    expect(proposeNetworkPathsMock).toHaveBeenCalled();
+  });
+
+  it("shows no walkable path when propose returns no candidates", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    walkableChordMock.mockReturnValue(false);
+    proposeNetworkPathsMock.mockReturnValue({ fromId: 0, toId: 1, candidates: [] });
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await startNetworkEdit(user);
+    await user.click(await screen.findByTestId("net-pick-0"));
+    await user.click(await screen.findByTestId("net-pick-1"));
+
+    expect(await screen.findByText("No walkable path between these points.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add this path" })).toBeNull();
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
+  });
+
+  it("shows propose failed when wasm throws", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+    walkableChordMock.mockReturnValue(false);
+    proposeNetworkPathsMock.mockImplementation(() => {
+      throw new Error("wasm down");
+    });
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await startNetworkEdit(user);
+    await user.click(await screen.findByTestId("net-pick-0"));
+    await user.click(await screen.findByTestId("net-pick-1"));
+
+    expect(await screen.findByText("Could not calculate a path.")).toBeTruthy();
+    expect(mapStub().getAttribute("data-network-path-count")).toBe("0");
+  });
+
+  it("rejects an existing direct edge without opening preview", async () => {
+    const user = userEvent.setup();
+    loadNetworkOverlayMock.mockResolvedValue(editableNetwork());
+
+    await renderDataset(PUBLIC_VERSION_ID, buildMinimalVenue(), true);
+    await startNetworkEdit(user);
+    await user.click(await screen.findByTestId("net-pick-0"));
+    await user.click(await screen.findByTestId("net-pick-1"));
+    await waitFor(() => expect(mapStub().getAttribute("data-network-path-count")).toBe("2"));
+
+    await user.click(await screen.findByTestId("net-pick-0"));
+    await user.click(await screen.findByTestId("net-pick-1"));
+    expect((await screen.findByRole("alert")).textContent).toContain("already connected");
+    expect(screen.queryByRole("button", { name: "Add this path" })).toBeNull();
+    expect(proposeNetworkPathsMock).not.toHaveBeenCalled();
   });
 });
