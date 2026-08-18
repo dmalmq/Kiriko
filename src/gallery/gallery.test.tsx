@@ -1295,7 +1295,7 @@ describe("GalleryPage generate routing", () => {
     await user.click(within(screen.getByRole("alertdialog", { name: "Delete dataset" })).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(deleteVenue).toHaveBeenCalledWith(42));
   });
-  it("hides Generate routing on a dataset that already has a real network", async () => {
+  it("offers Regenerate routing on a dataset that already has a network", async () => {
     me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
     listVenues.mockResolvedValue([
       {
@@ -1313,10 +1313,80 @@ describe("GalleryPage generate routing", () => {
         hasNetwork: true,
       },
     ]);
+    const user = userEvent.setup();
     render(<GalleryPage />);
     await waitFor(() => expect(screen.getByText("With Network")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    expect(screen.getByRole("button", { name: "Regenerate routing" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Generate routing" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "経路を生成" })).toBeNull();
+  });
+
+  it("does not start generation when regenerate confirm is cancelled", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 43,
+        slug: "with-network",
+        name: "With Network",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: true,
+      },
+    ]);
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("With Network")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Regenerate routing" }));
+    expect(screen.getByRole("alertdialog", { name: "Regenerate routing?" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog", { name: "Regenerate routing?" })).toBeNull();
+    expect(generateNetwork).not.toHaveBeenCalled();
+  });
+
+  it("creates a new generated version after regenerate is confirmed", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      {
+        id: 43,
+        slug: "with-network",
+        name: "With Network",
+        createdAt: "2026-07-20 00:00:00",
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "published",
+          stats: { levels: 2, features: 9 },
+          createdAt: "2026-07-20 00:00:00",
+        },
+        hasNetwork: true,
+      },
+    ]);
+    generateNetwork.mockResolvedValue({
+      jobId: "regen",
+      versionId: 8,
+      seq: 2,
+      estimatedDurationSeconds: null,
+    });
+    waitForJob.mockResolvedValue({ status: "done" });
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("With Network")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Regenerate routing" }));
+    expect(
+      screen.getByText(/creates a new version from the venue geometry/i),
+    ).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Regenerate" }));
+    await waitFor(() => expect(generateNetwork).toHaveBeenCalledTimes(1));
+    expect(generateNetwork).toHaveBeenCalledWith(43);
+    await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
   });
 });
 
