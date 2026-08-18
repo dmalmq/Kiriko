@@ -780,11 +780,62 @@ fn prune_spur_leaves(
     Skeleton { nodes, edges }
 }
 
+/// True when the sub-chain `chain[lo]..=chain[hi]` is at least
+/// `min_detour_ratio` longer than its chord and that chord stays passable.
+fn chain_window_straightenable(
+    skeleton: &Skeleton,
+    chain: &[usize],
+    steps: &[f64],
+    lo: usize,
+    hi: usize,
+    area: &MultiPolygon<f64>,
+    min_detour_ratio: f64,
+) -> bool {
+    if hi < lo + 2 {
+        return false;
+    }
+    let total: f64 = steps[lo..hi].iter().sum();
+    let from = skeleton.nodes[chain[lo]];
+    let to = skeleton.nodes[chain[hi]];
+    let chord = haversine_m(from, to);
+    chord > f64::EPSILON
+        && total / chord >= min_detour_ratio
+        && centerline_chord_passable(from, to, area)
+}
+
+/// Redistribute `chain[lo+1..hi]` along the `lo`→`hi` chord by cumulative
+/// path distance. Endpoints are not moved.
+fn redistribute_chain_window(
+    skeleton: &mut Skeleton,
+    chain: &[usize],
+    steps: &[f64],
+    lo: usize,
+    hi: usize,
+) {
+    let total: f64 = steps[lo..hi].iter().sum();
+    if total <= f64::EPSILON {
+        return;
+    }
+    let from = skeleton.nodes[chain[lo]];
+    let to = skeleton.nodes[chain[hi]];
+    let mut traversed = 0.0;
+    for i in lo + 1..hi {
+        traversed += steps[i - 1];
+        let t = traversed / total;
+        skeleton.nodes[chain[i]] = [
+            from[0] + (to[0] - from[0]) * t,
+            from[1] + (to[1] - from[1]) * t,
+        ];
+    }
+}
+
 /// Remove degree-2 sawtooth geometry without changing graph topology or node
-/// density. Interior nodes are redistributed along the endpoint chord by
-/// cumulative path distance, but only when the original chain is at least
-/// `min_detour_ratio` longer and the entire chord remains fully passable.
-/// `protected` semantic snap targets divide chains and never move.
+/// density. Interior nodes are redistributed along a passable chord by
+/// cumulative path distance. The whole chain is aligned first; if that
+/// end-to-end chord is blocked (narrow stairstep corridors), maximal
+/// passable windows are aligned instead so local 90° CDT stairs flatten
+/// without cutting a real corner. `protected` semantic snap targets divide
+/// chains and never move.
 fn straighten_degree_two_chains(
     mut skeleton: Skeleton,
     area: &MultiPolygon<f64>,
@@ -809,7 +860,6 @@ fn straighten_degree_two_chains(
             }
             let mut chain_nodes = vec![start];
             let mut step_lengths = Vec::new();
-            let mut total = 0.0;
             let mut cur = start;
             let mut edge = first_edge;
             let mut complete = false;
@@ -821,7 +871,6 @@ fn straighten_degree_two_chains(
                 let (a, b) = skeleton.edges[edge];
                 let next = if a == cur { b } else { a };
                 let step = haversine_m(skeleton.nodes[cur], skeleton.nodes[next]);
-                total += step;
                 step_lengths.push(step);
                 chain_nodes.push(next);
                 if adj[next].len() != 2 || protected[next] {
@@ -846,22 +895,56 @@ fn straighten_degree_two_chains(
             if end == start {
                 continue;
             }
-            let (from, to) = (skeleton.nodes[start], skeleton.nodes[end]);
-            let chord = haversine_m(from, to);
-            if chord <= f64::EPSILON
-                || total / chord < min_detour_ratio
-                || !centerline_chord_passable(from, to, area)
-            {
+            if chain_window_straightenable(
+                &skeleton,
+                &chain_nodes,
+                &step_lengths,
+                0,
+                chain_nodes.len() - 1,
+                area,
+                min_detour_ratio,
+            ) {
+                redistribute_chain_window(
+                    &mut skeleton,
+                    &chain_nodes,
+                    &step_lengths,
+                    0,
+                    chain_nodes.len() - 1,
+                );
                 continue;
             }
-            let mut traversed = 0.0;
-            for i in 1..chain_nodes.len() - 1 {
-                traversed += step_lengths[i - 1];
-                let t = traversed / total;
-                skeleton.nodes[chain_nodes[i]] = [
-                    from[0] + (to[0] - from[0]) * t,
-                    from[1] + (to[1] - from[1]) * t,
-                ];
+            // Long chord blocked: flatten the longest passable window at
+            // each index so 90° CDT stairs collapse without cutting a
+            // real corridor corner.
+            let last = chain_nodes.len() - 1;
+            let mut i = 0;
+            while i + 2 <= last {
+                let mut best = i;
+                for j in (i + 2)..=last {
+                    if chain_window_straightenable(
+                        &skeleton,
+                        &chain_nodes,
+                        &step_lengths,
+                        i,
+                        j,
+                        area,
+                        min_detour_ratio,
+                    ) {
+                        best = j;
+                    }
+                }
+                if best >= i + 2 {
+                    redistribute_chain_window(
+                        &mut skeleton,
+                        &chain_nodes,
+                        &step_lengths,
+                        i,
+                        best,
+                    );
+                    i = best;
+                } else {
+                    i += 1;
+                }
             }
         }
     }
@@ -3574,6 +3657,105 @@ mod tests {
         assert!(
             preserved.nodes[2][1] > cy + 1.5 / 111_320.0,
             "wall detour geometry is not flattened"
+        );
+    }
+
+    /// Shinagawa F1: CDT midpoints form 0.45×0.35 m 90° stairs in a ~1.4 m
+    /// corridor. The end-to-end chord of a chain that also turns a real L is
+    /// not passable, so the whole-chain weave pass leaves them. Local L chords
+    /// stay inside the hall and must flatten.
+    #[test]
+    fn straightens_narrow_stair_steps_when_long_chord_is_blocked() {
+        let (cx, cy): (f64, f64) = (139.70000, 35.60000);
+        let mx = 111_320.0 * cy.to_radians().cos();
+        let xy = |x_m: f64, y_m: f64| (cx + x_m / mx, cy + y_m / 111_320.0);
+        let node = |x_m: f64, y_m: f64| {
+            let (x, y) = xy(x_m, y_m);
+            [x, y]
+        };
+        let rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            Polygon::new(
+                LineString::from(vec![
+                    xy(x0, y0),
+                    xy(x1, y0),
+                    xy(x1, y1),
+                    xy(x0, y1),
+                    xy(x0, y0),
+                ]),
+                vec![],
+            )
+        };
+        // 2 m-wide L: 8 m hall east, then 8 m north. Half-width 1.0 m so a
+        // 0.45×0.35 m stair's local chord keeps MIN_PASSAGE clearance, while
+        // the chain's end-to-end diagonal still cuts the inside of the L.
+        let area = union_all(&[rect(-1.0, -1.0, 9.0, 1.0), rect(7.0, -1.0, 9.0, 9.0)]);
+
+        let sx = 0.45;
+        let sy = 0.35;
+        let mut nodes = vec![node(0.0, 0.0)];
+        let mut edges = Vec::new();
+        let mut x = 0.0;
+        let mut y = 0.0;
+        let stairs = 6usize;
+        for i in 0..stairs {
+            x += sx;
+            nodes.push(node(x, y));
+            edges.push((2 * i, 2 * i + 1));
+            y = if y == 0.0 { sy } else { 0.0 };
+            nodes.push(node(x, y));
+            edges.push((2 * i + 1, 2 * i + 2));
+        }
+        // Real corridor corner and northbound leg so the chain's end-to-end
+        // chord cuts the L and the old whole-chain pass cannot fire.
+        let corner = nodes.len();
+        nodes.push(node(8.0, 0.0));
+        edges.push((corner - 1, corner));
+        nodes.push(node(8.0, 8.0));
+        edges.push((corner, corner + 1));
+
+        assert!(
+            !centerline_chord_passable(nodes[0], nodes[nodes.len() - 1], &area),
+            "fixture must block the end-to-end chord so the old pass cannot fire"
+        );
+        assert!(
+            centerline_chord_passable(nodes[0], nodes[2], &area),
+            "one stair's local chord must stay passable"
+        );
+
+        let n = nodes.len();
+        let out = straighten_degree_two_chains(
+            Skeleton { nodes, edges },
+            &area,
+            &vec![false; n],
+            WEAVE_DETOUR_RATIO,
+        );
+        assert_eq!(out.nodes.len(), n, "node density is preserved");
+        assert_eq!(out.edges.len(), n - 1, "chain topology is preserved");
+
+        let turn_deg = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| -> f64 {
+            let m_lat = 6_371_000.0 * std::f64::consts::PI / 180.0;
+            let m_lon = m_lat * b[1].to_radians().cos();
+            let ax = (b[0] - a[0]) * m_lon;
+            let ay = (b[1] - a[1]) * m_lat;
+            let bx = (c[0] - b[0]) * m_lon;
+            let by = (c[1] - b[1]) * m_lat;
+            (ax * by - ay * bx).atan2(ax * bx + ay * by).to_degrees()
+        };
+        for i in 1..=stairs * 2 - 1 {
+            let deg = turn_deg(out.nodes[i - 1], out.nodes[i], out.nodes[i + 1]);
+            assert!(
+                deg.abs() < 35.0,
+                "stair turn at {i} should flatten, got {deg:.1}°"
+            );
+        }
+        let corner_turn = turn_deg(
+            out.nodes[corner - 1],
+            out.nodes[corner],
+            out.nodes[corner + 1],
+        );
+        assert!(
+            corner_turn.abs() > 55.0,
+            "real L corner must remain, got {corner_turn:.1}°"
         );
     }
 
