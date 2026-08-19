@@ -10,6 +10,9 @@ import {
   LAYER_NETWORK_JUNCTION_HIT,
   LAYER_NETWORK_PATH_HIT,
   LAYER_NETWORK_VERTICAL_LINK_HIT,
+  LAYER_ROOM_FILL,
+  LAYER_WALKWAY_FILL,
+  LAYER_WALKWAY_OUTLINE,
   NETWORK_SOURCE_ID,
   ROUTE_SOURCE_ID,
 } from "./featureLayers";
@@ -343,7 +346,13 @@ const mapState = vi.hoisted(() => {
       this.terrainCalls.push(value);
     }
 
-    setLayoutProperty(): void {}
+    readonly layoutProperties = new Map<string, Record<string, unknown>>();
+
+    setLayoutProperty(id: string, key: string, value: unknown): void {
+      const current = this.layoutProperties.get(id) ?? {};
+      current[key] = value;
+      this.layoutProperties.set(id, current);
+    }
     setPaintProperty(): void {}
     setPitch(): void {}
     setBearing(): void {}
@@ -2096,6 +2105,18 @@ describe("IndoorMap scene floor elevation", () => {
     });
   });
 
+  it("hides 2D unit fills while generated 3D is attached", () => {
+    const { map, rerender } = renderMap(baseProps({ scene: null }));
+    expect(map.layoutProperties.get(LAYER_WALKWAY_FILL)?.visibility).not.toBe("none");
+
+    rerender(baseProps({ scene, levelId: "level-1" }));
+    expect(map.layoutProperties.get(LAYER_WALKWAY_FILL)?.visibility).toBe("none");
+    expect(map.layoutProperties.get(LAYER_ROOM_FILL)?.visibility).toBe("none");
+    expect(map.layoutProperties.get(LAYER_WALKWAY_OUTLINE)?.visibility).not.toBe("none");
+
+    rerender(baseProps({ scene: null }));
+    expect(map.layoutProperties.get(LAYER_WALKWAY_FILL)?.visibility).toBe("visible");
+  });
 
   it("attaches terrain at the active scene plane and swaps floors in place", () => {
     const { map, rerender } = renderMap(baseProps({ scene, levelId: "level-1" }));

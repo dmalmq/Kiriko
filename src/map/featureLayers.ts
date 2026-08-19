@@ -53,6 +53,22 @@ export const LAYER_SELECTED_OUTLINE = "indoor-selected-outline";
 export const LAYER_ISSUE_HIGHLIGHT_OUTLINE = "indoor-issue-highlight-outline";
 export const LAYER_ISSUE_HIGHLIGHT_POINT = "indoor-issue-highlight-point";
 
+/** Unit/fixture fills that z-fight generated slabs when draped on the floor DEM. */
+export const INDOOR_FILL_LAYER_IDS = [
+  LAYER_CONTEXT_FILL,
+  LAYER_SELECTABLE_CONTEXT_FILL,
+  LAYER_WALKWAY_FILL,
+  LAYER_ROOM_FILL,
+  LAYER_UNENCLOSED_FILL,
+  LAYER_TRANSIT_FILL,
+  LAYER_RESTROOM_FILL,
+  LAYER_NONPUBLIC_FILL,
+  LAYER_STRUCTURE_FILL,
+  LAYER_RESTRICTED_FILL,
+  LAYER_FIXTURE_FILL,
+  LAYER_KIOSK_FILL,
+] as const;
+
 /** Separate GeoJSON source for the directions overlay (route + endpoints). */
 export const ROUTE_SOURCE_ID = "indoor-route";
 export const LAYER_ROUTE = "indoor-route-line";

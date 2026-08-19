@@ -39,6 +39,7 @@ import {
   applyThemePaintProperties,
   CLICKABLE_LAYER_IDS,
   FACILITY_SOURCE_ID,
+  INDOOR_FILL_LAYER_IDS,
   CONVEYANCE_CATEGORIES,
   LAYER_FACILITY_SYMBOL,
   LAYER_NETWORK_CONVEYANCE_HIT,
@@ -907,13 +908,31 @@ function whenSourceReady(map: MapLibreMap, fn: () => void): () => void {
   };
 }
 
-function applyLayerVisibility(map: MapLibreMap, visibility: LayerVisibility): void {
+function applyLayerVisibility(
+  map: MapLibreMap,
+  visibility: LayerVisibility,
+  hideFills: boolean,
+): void {
   for (const [group, layerIds] of Object.entries(LAYER_GROUP_IDS)) {
     const visible = visibility[group as keyof LayerVisibility];
     for (const layerId of layerIds) {
       if (map.getLayer(layerId) != null) {
         map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
       }
+    }
+  }
+  for (const layerId of INDOOR_FILL_LAYER_IDS) {
+    if (map.getLayer(layerId) == null) {
+      continue;
+    }
+    if (hideFills) {
+      map.setLayoutProperty(layerId, "visibility", "none");
+      continue;
+    }
+    // Walkway / context fills are not in a toggle group — they stay on in 2D.
+    const grouped = Object.values(LAYER_GROUP_IDS).some((ids) => ids.includes(layerId));
+    if (!grouped) {
+      map.setLayoutProperty(layerId, "visibility", "visible");
     }
   }
 }
@@ -1202,7 +1221,7 @@ export function IndoorMap({
       facilitySourceActiveRef.current = facilityActive;
     }
 
-    applyLayerVisibility(map, visibilityRef.current);
+    applyLayerVisibility(map, visibilityRef.current, sceneRef.current != null);
     syncSceneFloorState(
       map,
       sceneRef.current,
@@ -1658,7 +1677,7 @@ export function IndoorMap({
       registerFacilityImages(map);
       setFacilitySourceData(map, venueRef.current, levelIdRef.current, facilitiesRef.current);
       facilitySourceActiveRef.current = facilitiesRef.current.length > 0;
-      applyLayerVisibility(map, visibilityRef.current);
+      applyLayerVisibility(map, visibilityRef.current, sceneRef.current != null);
       syncSceneFloorState(
         map,
         sceneRef.current,
@@ -1992,7 +2011,7 @@ export function IndoorMap({
   // change). onLoad initializes every source, so a null map is a no-op.
   useEffect(() => {
     syncOverlays();
-  }, [directions, network, networkEditing, facilities, layerVisibility, venue, levelId, syncOverlays]);
+  }, [directions, network, networkEditing, facilities, layerVisibility, venue, levelId, scene, syncOverlays]);
 
   // Select-tool box drag owns the pointer; other tools (and unmount) keep pan.
   useEffect(() => {
