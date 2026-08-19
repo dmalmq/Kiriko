@@ -1900,6 +1900,52 @@ describe("IndoorMap network editing", () => {
     expect(net.onPick).not.toHaveBeenCalled();
   });
 
+  it("paints a box-select overlay once the drag is long enough and hides it under the threshold", () => {
+    const { map } = renderMap(baseProps({ networkEditing: editing({ tool: "select" }) }));
+    act(() => {
+      map.emit("mousedown", { point: { x: 10, y: 20 }, lngLat: { lng: 0, lat: 0 } });
+      map.emit("mousemove", { point: { x: 12, y: 20 }, lngLat: { lng: 0, lat: 0 } });
+    });
+    expect(document.querySelector(".network-box-select")).toBeNull();
+    act(() => {
+      map.emit("mousemove", { point: { x: 40, y: 8 }, lngLat: { lng: 0, lat: 0 } });
+    });
+    const overlay = document.querySelector(".network-box-select");
+    expect(overlay).toBeInstanceOf(HTMLElement);
+    expect((overlay as HTMLElement).style.left).toBe("10px");
+    expect((overlay as HTMLElement).style.top).toBe("8px");
+    expect((overlay as HTMLElement).style.width).toBe("30px");
+    expect((overlay as HTMLElement).style.height).toBe("12px");
+  });
+
+  it("clears the box-select overlay when the drag ends, the pointer leaves, or the tool changes", () => {
+    const net = editing({ tool: "select" });
+    const { map, rerender } = renderMap(baseProps({ networkEditing: net }));
+    map.unproject = (p: { x: number; y: number }) => ({ lng: p.x, lat: p.y });
+    const drag = (): void => {
+      map.emit("mousedown", { point: { x: 0, y: 0 }, lngLat: { lng: 0, lat: 0 } });
+      map.emit("mousemove", { point: { x: 20, y: 16 }, lngLat: { lng: 20, lat: 16 } });
+    };
+    act(drag);
+    expect(document.querySelector(".network-box-select")).not.toBeNull();
+    act(() => {
+      map.emit("mouseup", { point: { x: 20, y: 16 }, lngLat: { lng: 20, lat: 16 } });
+    });
+    expect(document.querySelector(".network-box-select")).toBeNull();
+
+    act(drag);
+    expect(document.querySelector(".network-box-select")).not.toBeNull();
+    act(() => {
+      map.emit("mouseout");
+    });
+    expect(document.querySelector(".network-box-select")).toBeNull();
+
+    act(drag);
+    expect(document.querySelector(".network-box-select")).not.toBeNull();
+    rerender(baseProps({ networkEditing: editing({ tool: "connect" }) }));
+    expect(document.querySelector(".network-box-select")).toBeNull();
+  });
+
   it("writes preview LineStrings into the network source when preview is set", () => {
     const network: NonNullable<IndoorMapProps["network"]> = {
       junctions: [

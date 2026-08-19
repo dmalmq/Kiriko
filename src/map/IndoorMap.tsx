@@ -34,6 +34,7 @@ import type { FacilityDto, RouteEndpoint, RouteResultDto } from "../bundle/wasm"
 import type { LocaleCode, LoadedVenue } from "../imdf/types";
 import type { ViewerTheme } from "../theme/types";
 import { buildIndoorStyle, INDOOR_SOURCE_ID } from "./buildIndoorStyle";
+import { boxSelectRect, type BoxSelectRect } from "./boxSelectRect";
 import { buildRenderFeatures } from "./buildRenderFeatures";
 import {
   applyThemePaintProperties,
@@ -1101,6 +1102,7 @@ export function IndoorMap({
   const networkEditingRef = useRef(networkEditing);
   const boxDragStartRef = useRef<Point | null>(null);
   const boxSelectConsumedClickRef = useRef(false);
+  const [boxSelectPreview, setBoxSelectPreview] = useState<BoxSelectRect | null>(null);
   const routeSourceActiveRef = useRef(directions?.active === true);
   const networkSourceActiveRef = useRef(network != null || networkEditing != null);
   const facilitySourceActiveRef = useRef(facilities.length > 0);
@@ -1679,6 +1681,9 @@ export function IndoorMap({
       const editing = networkEditingRef.current;
       if (editing != null) {
         updateNetworkCursor(map, event.point, editing.tool);
+        if (editing.tool === "select" && boxDragStartRef.current != null) {
+          setBoxSelectPreview(boxSelectRect(boxDragStartRef.current, event.point));
+        }
         return;
       }
       const sceneLayer = sceneLayerRef.current;
@@ -1778,6 +1783,8 @@ export function IndoorMap({
         hoverIdRef.current = null;
       }
       map.getCanvas().style.cursor = "";
+      boxDragStartRef.current = null;
+      setBoxSelectPreview(null);
     };
 
     const onLoad = (): void => {
@@ -1827,6 +1834,7 @@ export function IndoorMap({
     const onMouseDown = (event: MapMouseEvent): void => {
       // A new gesture owns the pointer; do not let a prior box swallow its click.
       boxSelectConsumedClickRef.current = false;
+      setBoxSelectPreview(null);
       const editing = networkEditingRef.current;
       if (editing == null || editing.tool !== "select") {
         boxDragStartRef.current = null;
@@ -1838,13 +1846,12 @@ export function IndoorMap({
     const onMouseUp = (event: MapMouseEvent): void => {
       const start = boxDragStartRef.current;
       boxDragStartRef.current = null;
+      setBoxSelectPreview(null);
       const editing = networkEditingRef.current;
       if (start == null || editing == null || editing.tool !== "select") {
         return;
       }
-      const dx = event.point.x - start.x;
-      const dy = event.point.y - start.y;
-      if (Math.hypot(dx, dy) < 4) {
+      if (boxSelectRect(start, event.point) == null) {
         return;
       }
       const a = map.unproject(start);
@@ -2145,6 +2152,8 @@ export function IndoorMap({
       map.dragPan.disable();
     } else {
       map.dragPan.enable();
+      boxDragStartRef.current = null;
+      setBoxSelectPreview(null);
     }
     return () => {
       map.dragPan.enable();
@@ -2415,6 +2424,18 @@ export function IndoorMap({
         aria-label="Indoor map"
         style={{ width: "100%", height: "100%" }}
       />
+      {boxSelectPreview != null ? (
+        <div
+          className="network-box-select"
+          aria-hidden="true"
+          style={{
+            left: boxSelectPreview.left,
+            top: boxSelectPreview.top,
+            width: boxSelectPreview.width,
+            height: boxSelectPreview.height,
+          }}
+        />
+      ) : null}
       {issueReview?.placementMode === true ? (
         <button type="button" className="issue-place-center" onClick={onPlaceAtCenter}>
           {PLACE_AT_CENTER_LABEL[locale]}
