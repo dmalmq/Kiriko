@@ -10,7 +10,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use kiriko_bundle::{BundleMetadata, compile_imdf_with_network, decode_bundle};
+use kiriko_bundle::{
+    BundleMetadata, compile_imdf_with_network, decode_bundle, evaluate_routes,
+};
 use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
 
@@ -516,4 +518,26 @@ fn main() {
     for (ord, (s, o, t)) in per_ord {
         println!("  ord {ord}: {s}/{o}/{t}");
     }
+
+    let r = evaluate_routes(&doc);
+    let fmt_opt_f32 = |v: Option<f32>| {
+        v.map(|x| x.to_string())
+            .unwrap_or_else(|| "absent".to_string())
+    };
+    let fmt_opt_u32 = |v: Option<u32>| {
+        v.map(|x| x.to_string())
+            .unwrap_or_else(|| "absent".to_string())
+    };
+    println!(
+        "route_eval pair_count={} routed_count={} vertex_retention={} length_ratio={} leftover_near_wall_max={} leftover_near_wall_mean={} stretch_rho_max={} stretch_sample_count={} chord_edges={}",
+        r.pair_count,
+        r.routed_count,
+        fmt_opt_f32(r.vertex_retention),
+        fmt_opt_f32(r.length_ratio),
+        fmt_opt_u32(r.leftover_near_wall_max),
+        fmt_opt_f32(r.leftover_near_wall_mean),
+        fmt_opt_f32(r.stretch_rho_max),
+        r.stretch_sample_count,
+        r.chord_edges,
+    );
 }
