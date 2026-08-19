@@ -438,6 +438,7 @@ pub(crate) fn compile_scene(
         z: i64,
         source_height_mm: Option<i64>,
         surface_index: Option<u32>,
+        category: Option<String>,
     }
 
     let mut levels_data: Vec<LevelGeom> = Vec::new();
@@ -487,6 +488,7 @@ pub(crate) fn compile_scene(
             z,
             source_height_mm: unit_height_mm(unit, profile),
             surface_index: None,
+            category: unit.category.clone(),
         });
     }
     if levels_data.is_empty() && units_data.is_empty() {
@@ -602,16 +604,21 @@ pub(crate) fn compile_scene(
     // corroborated ones mark an existing boundary, all others are detail
     // linework.
     let nominal_wall = profile.wall_height_mm;
-    let mut walls_by_level: Vec<(WallEdgeKey, Vec<u32>)> = Vec::new();
+    let mut walls_by_level: Vec<(WallEdgeKey, Vec<u32>, bool)> = Vec::new();
     for unit in &units_data {
+        let platform = unit
+            .category
+            .as_deref()
+            .is_some_and(|c| c.eq_ignore_ascii_case("platform"));
         for (a, b) in ring_edges(&unit.ring_xy) {
             let key = if a <= b { (a, b) } else { (b, a) };
-            match walls_by_level.iter_mut().find(|(k, _)| {
+            match walls_by_level.iter_mut().find(|(k, _, _)| {
                 k.0 == unit.level_id
                     && (k.1, k.2, k.3, k.4) == (key.0[0], key.0[1], key.1[0], key.1[1])
             }) {
-                Some((_, heights)) => {
-                    heights.push(unit.source_height_mm.unwrap_or(profile.wall_height_mm) as u32)
+                Some((_, heights, all_platform)) => {
+                    heights.push(unit.source_height_mm.unwrap_or(profile.wall_height_mm) as u32);
+                    *all_platform = *all_platform && platform;
                 }
                 None => walls_by_level.push((
                     (
@@ -622,12 +629,16 @@ pub(crate) fn compile_scene(
                         key.1[1],
                     ),
                     vec![unit.source_height_mm.unwrap_or(profile.wall_height_mm) as u32],
+                    platform,
                 )),
             }
         }
     }
     walls_by_level.sort_by(|a, b| a.0.cmp(&b.0));
-    for ((level_id, ax, ay, bx, by), heights) in walls_by_level {
+    for ((level_id, ax, ay, bx, by), heights, all_platform) in walls_by_level {
+        if all_platform {
+            continue;
+        }
         let z = plane_z(&level_id).expect("level has a plane");
         let height = *heights.iter().min().expect("at least one height") as i64;
         let assumed = height == nominal_wall;

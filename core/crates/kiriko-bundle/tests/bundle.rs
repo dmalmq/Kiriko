@@ -2616,6 +2616,67 @@ fn the_scene_compiles_byte_identically_with_the_network_pipeline() {
 }
 
 #[test]
+fn a_lone_platform_unit_emits_no_walls() {
+    use kiriko_model::scene::PrimitiveRole;
+
+    let compiled = compile_imdf_with_network(
+        &support::build_platform_wall_imdf_zip(),
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+        None,
+    )
+    .expect("compiles");
+    let document = decode_bundle(&compiled.bytes).expect("decodes");
+    let scene = document.scene.expect("scene present");
+    let f1 = "b1000001-0000-4000-8000-000000000011";
+    let walls = scene
+        .primitives
+        .iter()
+        .filter(|p| p.role == PrimitiveRole::Wall && p.level_id == f1)
+        .count();
+    assert_eq!(walls, 0, "a lone platform is not enclosed by walls");
+}
+
+#[test]
+fn a_platform_shop_shared_edge_is_the_only_wall() {
+    use kiriko_model::scene::PrimitiveRole;
+
+    let compiled = compile_imdf_with_network(
+        &support::build_platform_wall_imdf_zip(),
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+        None,
+    )
+    .expect("compiles");
+    let document = decode_bundle(&compiled.bytes).expect("decodes");
+    let scene = document.scene.expect("scene present");
+    let f2 = "b1000002-0000-4000-8000-000000000012";
+    let walls = scene
+        .primitives
+        .iter()
+        .filter(|p| p.role == PrimitiveRole::Wall && p.level_id == f2)
+        .count();
+    assert_eq!(
+        walls, 4,
+        "three shop-only edges plus the shared shop|platform edge; platform-only edges omitted"
+    );
+}
+
+#[test]
 fn the_scene_profile_drives_nominal_dimensions() {
     use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
 
