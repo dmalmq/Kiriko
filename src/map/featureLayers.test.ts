@@ -30,6 +30,9 @@ import {
   LAYER_ISSUE_HIGHLIGHT_OUTLINE,
   LAYER_ISSUE_HIGHLIGHT_POINT,
   LAYER_SELECTED_OUTLINE,
+  LAYER_HOVER_OUTLINE,
+  LAYER_AMENITY_CIRCLE,
+  LAYER_OCCUPANT_CIRCLE,
   LAYER_SELECTABLE_CONTEXT_FILL,
   LAYER_CONTEXT_FILL,
   LAYER_NONPUBLIC_FILL,
@@ -401,6 +404,26 @@ describe("lifted 3D unit fills", () => {
     const firstFill = ids.indexOf(LAYER_WALKWAY_FILL);
     const firstLifted = ids.indexOf(liftedFillLayerId(LAYER_WALKWAY_FILL));
     expect(firstLifted).toBeGreaterThan(firstFill);
+  });
+
+  it("keeps point markers and review overlays above every lifted extrusion", () => {
+    const ids = buildFeatureLayers(theme).map((layer) => layer.id);
+    const lastLifted = Math.max(
+      ...INDOOR_LIFTED_FILL_SOURCE_IDS.map((fillId) =>
+        ids.indexOf(liftedFillLayerId(fillId)),
+      ),
+    );
+    expect(lastLifted).toBeGreaterThan(-1);
+    for (const overlayId of [
+      LAYER_AMENITY_CIRCLE,
+      LAYER_OCCUPANT_CIRCLE,
+      LAYER_HOVER_OUTLINE,
+      LAYER_SELECTED_OUTLINE,
+      LAYER_ISSUE_HIGHLIGHT_OUTLINE,
+      LAYER_ISSUE_HIGHLIGHT_POINT,
+    ]) {
+      expect(ids.indexOf(overlayId), overlayId).toBeGreaterThan(lastLifted);
+    }
   });
 
   it("repaints lifted fill-extrusion colors on theme switch", () => {

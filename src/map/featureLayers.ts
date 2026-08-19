@@ -671,7 +671,20 @@ export function buildFeatureLayers(theme: ViewerTheme): AnyLayer[] {
     }
     return [asLiftedFillExtrusion(layer)];
   });
-  return [...layers, ...lifted];
+  // Lifted pancakes are opaque and sit above the floor: anything ordered after
+  // them here stays visible in 3D, anything before is depth-occluded. Insert
+  // them after the flat floor content they replace but before the point
+  // markers and interaction/review overlays (amenity/occupant circles,
+  // hover/selected outlines, issue highlights) so those are never hidden
+  // beneath an extrusion.
+  const overlayStart = layers.findIndex(
+    (layer) => layer.id === LAYER_AMENITY_CIRCLE,
+  );
+  return [
+    ...layers.slice(0, overlayStart),
+    ...lifted,
+    ...layers.slice(overlayStart),
+  ];
 }
 
 /**

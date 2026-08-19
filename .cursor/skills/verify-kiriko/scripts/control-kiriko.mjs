@@ -192,6 +192,9 @@ function spawnLogged(args, logPath, env) {
           cwd: REPO_ROOT,
           env: { ...process.env, ...env },
           stdio: ["ignore", fd, fd],
+          // Own process group so killTree's process.kill(-pid) works under
+          // non-job-control shells and CI supervisors.
+          detached: true,
         });
   child.on("exit", () => {
     try {
@@ -352,6 +355,9 @@ async function cmdLaunch() {
     console.log("Stopping a stale verify instance before relaunch.");
     stopRecorded(leftover);
     await sleep(500);
+    // Drop the stale run dir too: reusing its SQLite data would carry old
+    // datasets and credentials into the fresh instance, same as `stop` does.
+    rmSync(RUN_DIR, { recursive: true, force: true });
   }
 
   if (!(await portFree(BACKEND_PORT))) {
