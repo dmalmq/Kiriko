@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SemanticRoleName } from "./sceneFormat";
 import {
   CONNECTOR_COLOR,
+  CONNECTOR_HIT_WIDTH_PX,
   CONNECTOR_SELECTED_WIDTH_PX,
   CONNECTOR_WIDTH_PX,
   CONTEXT_HANDOFF_MS,
@@ -265,12 +266,13 @@ describe("conveyance shells", () => {
 });
 
 describe("inter-floor connectors", () => {
-  it("stays clickable at every zoom a reviewer uses", () => {
-    // The drawn ribbon is the pick target: GPU picking is exact per-pixel, so a
-    // hairline connector would be a line nobody can hit.
-    expect(CONNECTOR_WIDTH_PX).toBeGreaterThanOrEqual(6);
-    expect(CONNECTOR_WIDTH_PX).toBeLessThanOrEqual(8);
-    expect(CONNECTOR_SELECTED_WIDTH_PX).toBeGreaterThan(CONNECTOR_WIDTH_PX);
+  it("matches ordinary network edges visually and keeps a wide pick target", () => {
+    // Same paint as indoor-network-path / indoor-network-path-selected /
+    // indoor-network-path-hit: thin to look at, fat to click.
+    expect(CONNECTOR_WIDTH_PX).toBe(1.5);
+    expect(CONNECTOR_SELECTED_WIDTH_PX).toBe(3);
+    expect(CONNECTOR_HIT_WIDTH_PX).toBe(12);
+    expect(CONNECTOR_HIT_WIDTH_PX).toBeGreaterThan(CONNECTOR_WIDTH_PX);
   });
 
   it("borrows the network's own hue rather than inventing a second one", () => {

@@ -167,14 +167,14 @@ export const OPENING_THRESHOLD_OPACITY = 0.2;
 export const CONNECTOR_COLOR: readonly [number, number, number] = [0.847, 0.106, 0.549];
 
 /**
- * Ribbon width in CSS pixels, and the wider width a selected connector gets.
- *
- * Screen width, not world width: GPU picking is exact per-pixel with no hit
- * tolerance, so the drawn ribbon *is* the target, and a hairline would be
- * unclickable at every zoom the reviewer actually uses.
+ * Ribbon widths in CSS pixels. Visual widths match the 2D network overlay
+ * (`indoor-network-path` 1.5 / selected 3). The pick pass uses a wider
+ * invisible hit, same idea as `indoor-network-path-hit` (12px), because GPU
+ * picking is exact per-pixel.
  */
-export const CONNECTOR_WIDTH_PX = 7;
-export const CONNECTOR_SELECTED_WIDTH_PX = 10;
+export const CONNECTOR_WIDTH_PX = 1.5;
+export const CONNECTOR_SELECTED_WIDTH_PX = 3;
+export const CONNECTOR_HIT_WIDTH_PX = 12;
 
 /**
  * How long adjacent floors stay visible as context when the floor changes —

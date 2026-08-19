@@ -46,6 +46,7 @@ import {
 } from "./scenePick";
 import {
   CONNECTOR_COLOR,
+  CONNECTOR_HIT_WIDTH_PX,
   CONNECTOR_SELECTED_WIDTH_PX,
   CONNECTOR_WIDTH_PX,
   CONTEXT_LEVEL_OPACITY,
@@ -1272,8 +1273,8 @@ export class SceneLayer implements CustomLayerInterface {
     gl.useProgram(program);
     gl.uniformMatrix4fv(uniforms.matrix, false, this._matrixF32);
     gl.uniform2f(uniforms.viewport, halfWidth, halfHeight);
-    gl.uniform1f(uniforms.halfWidth, (CONNECTOR_WIDTH_PX * ratio) / 2);
-    gl.uniform1f(uniforms.selectedHalfWidth, (CONNECTOR_SELECTED_WIDTH_PX * ratio) / 2);
+    gl.uniform1f(uniforms.halfWidth, (CONNECTOR_HIT_WIDTH_PX * ratio) / 2);
+    gl.uniform1f(uniforms.selectedHalfWidth, (CONNECTOR_HIT_WIDTH_PX * ratio) / 2);
     gl.uniform1ui(uniforms.selected, this._selectedConnector);
     gl.polygonOffset(0, 0);
     gl.bindVertexArray(buffers.vao);
