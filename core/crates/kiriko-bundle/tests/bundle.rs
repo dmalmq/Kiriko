@@ -2582,6 +2582,45 @@ fn the_scene_compiler_emits_neutral_conveyance_forms() {
 }
 
 #[test]
+fn a_multipolygon_unit_emits_one_surface_per_outer_ring() {
+    use kiriko_model::scene::PrimitiveRole;
+
+    let compiled = compile_imdf_with_network(
+        &support::build_multipolygon_unit_imdf_zip(),
+        metadata(),
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        &[],
+        None,
+        None,
+    )
+    .expect("compiles");
+    let document = decode_bundle(&compiled.bytes).expect("decodes");
+    let scene = document.scene.expect("scene present");
+    let unit_id = "c1000001-0000-4000-8000-000000000021";
+    let surfaces = scene
+        .primitives
+        .iter()
+        .filter(|p| {
+            p.role == PrimitiveRole::Surface && p.canonical_feature_id.as_deref() == Some(unit_id)
+        })
+        .count();
+    let ceilings = scene
+        .primitives
+        .iter()
+        .filter(|p| {
+            p.role == PrimitiveRole::Ceiling && p.canonical_feature_id.as_deref() == Some(unit_id)
+        })
+        .count();
+    assert_eq!(surfaces, 2, "each MultiPolygon island becomes a surface");
+    assert_eq!(ceilings, 2, "each island gets a ceiling");
+}
+
+#[test]
 fn the_scene_compiles_byte_identically_with_the_network_pipeline() {
     let forward = support::build_multi_floor_imdf_zip();
     let reversed = support::build_multi_floor_imdf_zip_reversed();

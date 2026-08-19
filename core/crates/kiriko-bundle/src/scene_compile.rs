@@ -261,23 +261,9 @@ pub(crate) fn triangulate_simple(ring: &[[i64; 2]]) -> Vec<[u32; 3]> {
 
 // -- Geometry extraction ---------------------------------------------------
 
-/// The outer ring of the first `Polygon` in `geometry`, as `[lon, lat]`
-/// pairs. `None` for point/line/collection or missing geometry.
-fn polygon_ring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
-    let obj = geometry.as_object()?;
-    let kind = obj.get("type")?.as_str()?;
-    if kind == "GeometryCollection" {
-        for child in obj.get("geometries")?.as_array()? {
-            if let Some(ring) = polygon_ring(child) {
-                return Some(ring);
-            }
-        }
-        return None;
-    }
-    if kind != "Polygon" {
-        return None;
-    }
-    let rings = obj.get("coordinates")?.as_array()?;
+/// The outer ring of one GeoJSON polygon coordinate array (`[ring, hole…]`).
+fn polygon_outer_from_coords(poly: &Value) -> Option<Vec<[f64; 2]>> {
+    let rings = poly.as_array()?;
     let outer = rings.first()?.as_array()?;
     let mut ring = Vec::with_capacity(outer.len());
     for position in outer {
@@ -294,6 +280,42 @@ fn polygon_ring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
         ring.pop();
     }
     (ring.len() >= 3).then_some(ring)
+}
+
+/// Every outer ring of `Polygon` / `MultiPolygon` / nested collections.
+/// Point, line, and invalid rings are omitted rather than reported as empty
+/// success.
+fn polygon_outers(geometry: &Value) -> Vec<Vec<[f64; 2]>> {
+    let Some(obj) = geometry.as_object() else {
+        return Vec::new();
+    };
+    let Some(kind) = obj.get("type").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    match kind {
+        "Polygon" => obj
+            .get("coordinates")
+            .and_then(polygon_outer_from_coords)
+            .into_iter()
+            .collect(),
+        "MultiPolygon" => obj
+            .get("coordinates")
+            .and_then(Value::as_array)
+            .map(|polys| polys.iter().filter_map(polygon_outer_from_coords).collect())
+            .unwrap_or_default(),
+        "GeometryCollection" => obj
+            .get("geometries")
+            .and_then(Value::as_array)
+            .map(|children| children.iter().flat_map(polygon_outers).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// The outer ring of the first `Polygon` in `geometry`, as `[lon, lat]`
+/// pairs. `None` for point/line/collection or missing geometry.
+fn polygon_ring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
+    polygon_outers(geometry).into_iter().next()
 }
 
 /// The vertices of the first `LineString` in `geometry`, as `[lon, lat]`.
@@ -428,11 +450,13 @@ pub(crate) fn compile_scene(
     // -- Collect level and unit geometry in canonical order. ----------------
     struct LevelGeom {
         id: String,
+        ring_index: usize,
         ring_xy: Vec<[i64; 2]>,
         z: i64,
     }
     struct UnitGeom {
         id: String,
+        ring_index: usize,
         level_id: String,
         ring_xy: Vec<[i64; 2]>,
         z: i64,
@@ -450,20 +474,23 @@ pub(crate) fn compile_scene(
         else {
             continue;
         };
-        let Some(ring) = feature.geometry.as_ref().and_then(polygon_ring) else {
-            continue;
-        };
         let Some(z) = plane_z(&level.id) else {
             continue;
         };
-        levels_data.push(LevelGeom {
-            id: level.id.clone(),
-            ring_xy: ring
-                .iter()
-                .map(|[lon, lat]| project_local_mm(frame, *lon, *lat))
-                .collect(),
-            z,
-        });
+        let Some(geometry) = feature.geometry.as_ref() else {
+            continue;
+        };
+        for (ring_index, ring) in polygon_outers(geometry).into_iter().enumerate() {
+            levels_data.push(LevelGeom {
+                id: level.id.clone(),
+                ring_index,
+                ring_xy: ring
+                    .iter()
+                    .map(|[lon, lat]| project_local_mm(frame, *lon, *lat))
+                    .collect(),
+                z,
+            });
+        }
     }
     let mut units_data: Vec<UnitGeom> = Vec::new();
     for unit in document
@@ -475,21 +502,24 @@ pub(crate) fn compile_scene(
             continue;
         };
         let Some(z) = plane_z(level_id) else { continue };
-        let Some(ring) = unit.geometry.as_ref().and_then(polygon_ring) else {
+        let Some(geometry) = unit.geometry.as_ref() else {
             continue;
         };
-        units_data.push(UnitGeom {
-            id: unit.id.clone(),
-            level_id: level_id.to_string(),
-            ring_xy: ring
-                .iter()
-                .map(|[lon, lat]| project_local_mm(frame, *lon, *lat))
-                .collect(),
-            z,
-            source_height_mm: unit_height_mm(unit, profile),
-            surface_index: None,
-            category: unit.category.clone(),
-        });
+        for (ring_index, ring) in polygon_outers(geometry).into_iter().enumerate() {
+            units_data.push(UnitGeom {
+                id: unit.id.clone(),
+                ring_index,
+                level_id: level_id.to_string(),
+                ring_xy: ring
+                    .iter()
+                    .map(|[lon, lat]| project_local_mm(frame, *lon, *lat))
+                    .collect(),
+                z,
+                source_height_mm: unit_height_mm(unit, profile),
+                surface_index: None,
+                category: unit.category.clone(),
+            });
+        }
     }
     if levels_data.is_empty() && units_data.is_empty() {
         return None;
@@ -512,7 +542,11 @@ pub(crate) fn compile_scene(
             "floor slab from level polygon",
         );
         primitives.push(ScenePrimitive {
-            id: format!("slab-{}", level.id),
+            id: if level.ring_index == 0 {
+                format!("slab-{}", level.id)
+            } else {
+                format!("slab-{}-{}", level.id, level.ring_index)
+            },
             role: PrimitiveRole::Surface,
             level_id: level.id.clone(),
             occlusion: OcclusionClass::Opaque,
@@ -543,7 +577,11 @@ pub(crate) fn compile_scene(
         );
         let surface_index = primitives.len() as u32;
         primitives.push(ScenePrimitive {
-            id: format!("surface-{}", unit.id),
+            id: if unit.ring_index == 0 {
+                format!("surface-{}", unit.id)
+            } else {
+                format!("surface-{}-{}", unit.id, unit.ring_index)
+            },
             role: PrimitiveRole::Surface,
             level_id: unit.level_id.clone(),
             occlusion: OcclusionClass::Opaque,
@@ -587,7 +625,15 @@ pub(crate) fn compile_scene(
             },
         );
         primitives.push(ScenePrimitive {
-            id: format!("ceiling-{}", unit.id),
+            id: format!(
+                "ceiling-{}{}",
+                unit.id,
+                if unit.ring_index == 0 {
+                    String::new()
+                } else {
+                    format!("-{}", unit.ring_index)
+                }
+            ),
             role: PrimitiveRole::Ceiling,
             level_id: unit.level_id.clone(),
             occlusion: OcclusionClass::Opaque,

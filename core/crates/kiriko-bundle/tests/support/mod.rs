@@ -237,6 +237,50 @@ pub fn build_platform_wall_imdf_zip() -> Vec<u8> {
     ])
 }
 
+/// One F1 with a two-island MultiPolygon walkway (the shape 2D already draws).
+pub fn build_multipolygon_unit_imdf_zip() -> Vec<u8> {
+    let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;
+    let venue = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000001-0000-4000-8000-000000000021",
+            "venue",
+            r#"{"category":"transit","name":{"en":"MultiPolygon Venue"},"address_id":"a1000002-0000-4000-8000-000000000022"}"#,
+            Some(POLYGON),
+        )
+    );
+    let address = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000002-0000-4000-8000-000000000022",
+            "address",
+            r#"{"address":"1 Multi Way"}"#,
+            None,
+        )
+    );
+    let level_id = "b1000001-0000-4000-8000-000000000021";
+    let unit_id = "c1000001-0000-4000-8000-000000000021";
+    let levels = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            level_id,
+            "level",
+            r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
+            Some(POLYGON),
+        )
+    );
+    let units = format!(
+        r#"{{"type":"FeatureCollection","features":[{{"id":"{unit_id}","type":"Feature","feature_type":"unit","geometry":{{"type":"MultiPolygon","coordinates":[[[[139.7660,35.6800],[139.7668,35.6800],[139.7668,35.6808],[139.7660,35.6808],[139.7660,35.6800]]],[[[139.7672,35.6812],[139.7680,35.6812],[139.7680,35.6820],[139.7672,35.6820],[139.7672,35.6812]]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}]}}"#
+    );
+    write_zip_entries(&[
+        ("manifest.json", manifest.to_string()),
+        ("venue.geojson", venue),
+        ("address.geojson", address),
+        ("level.geojson", levels),
+        ("unit.geojson", units),
+    ])
+}
+
 /// Writes `(name, content)` entries into a zip in the given order.
 fn write_zip_entries(entries: &[(&str, String)]) -> Vec<u8> {
     let mut cursor = Cursor::new(Vec::new());
