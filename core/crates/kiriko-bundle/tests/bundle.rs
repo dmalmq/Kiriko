@@ -1326,7 +1326,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "b995c817f8817d2e5c4144536d208cb96011a2f556c0ac2ad62fff09114b8c6e";
+const GOLDEN_BUNDLE_HASH: &str = "b07ae7af10265563ff91745e71f1eb5e6d218a3e619852f031affec30c110f13";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -2583,7 +2583,7 @@ fn the_scene_compiler_emits_neutral_conveyance_forms() {
 
 #[test]
 fn a_multipolygon_unit_emits_one_surface_per_outer_ring() {
-    use kiriko_model::scene::PrimitiveRole;
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
 
     let compiled = compile_imdf_with_network(
         &support::build_multipolygon_unit_imdf_zip(),
@@ -2618,6 +2618,30 @@ fn a_multipolygon_unit_emits_one_surface_per_outer_ring() {
         .count();
     assert_eq!(surfaces, 2, "each MultiPolygon island becomes a surface");
     assert_eq!(ceilings, 2, "each island gets a ceiling");
+
+    let portal = scene
+        .primitives
+        .iter()
+        .find(|primitive| primitive.role == PrimitiveRole::Portal)
+        .expect("second-island exterior opening emits a portal");
+    let PrimitiveGeometry::Portal { connects, .. } = &portal.geometry else {
+        panic!("portal geometry expected");
+    };
+    let second_surface = scene
+        .primitives
+        .iter()
+        .position(|primitive| primitive.id == format!("surface-{unit_id}-1"))
+        .expect("second-island surface") as u32;
+    let second_slab = scene
+        .primitives
+        .iter()
+        .position(|primitive| primitive.id.ends_with("000000000021-1"))
+        .expect("second-island slab") as u32;
+    assert_eq!(
+        *connects,
+        (second_surface, second_slab),
+        "exterior topology uses the slab for the host edge's level island"
+    );
 }
 
 #[test]
@@ -2655,6 +2679,175 @@ fn the_scene_compiles_byte_identically_with_the_network_pipeline() {
 }
 
 #[test]
+fn openings_cut_their_host_walls() {
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    const LEVEL_ID: &str = "b1000003-0000-4000-8000-000000000003";
+    const OPENING_ID: &str = "d1000001-0000-4000-8000-000000000001";
+    const SECOND_OPENING_ID: &str = "d1000002-0000-4000-8000-000000000002";
+    const UNIT_A: &str = "c1000001-0000-4000-8000-000000000001";
+    const UNIT_B: &str = "c1000002-0000-4000-8000-000000000002";
+
+    let forward = support::build_multi_floor_imdf_zip();
+    let reversed = support::build_multi_floor_imdf_zip_reversed();
+    let compile = |source: &[u8]| {
+        compile_imdf(source, metadata())
+            .expect("multi-floor fixture compiles")
+            .bytes
+    };
+    let bytes = compile(&forward);
+    assert_eq!(bytes, compile(&forward), "repeated compilation is stable");
+    assert_eq!(
+        bytes,
+        compile(&reversed),
+        "ZIP entry order does not change hosted-opening output"
+    );
+
+    let document = decode_bundle(&bytes).expect("bundle decodes");
+    let spatial = document.spatial_context.expect("spatial context present");
+    let plane = spatial
+        .levels
+        .iter()
+        .find(|level| level.level_id == LEVEL_ID)
+        .expect("F1 level record")
+        .resolved_scene_z_mm;
+    let scene = document.scene.expect("generated scene present");
+    let portal = scene
+        .primitives
+        .iter()
+        .find(|primitive| primitive.canonical_feature_id.as_deref() == Some(OPENING_ID))
+        .expect("canonical opening emits a portal");
+    let PrimitiveGeometry::Portal { connects, opening } = &portal.geometry else {
+        panic!("opening must use portal geometry");
+    };
+    assert_eq!(
+        scene
+            .primitives
+            .iter()
+            .filter(|primitive| primitive.role == PrimitiveRole::Portal)
+            .count(),
+        2,
+        "both openings sharing the host wall remain portal primitives"
+    );
+    let portal_bottom = opening
+        .positions
+        .iter()
+        .map(|position| position[2])
+        .min()
+        .unwrap();
+    let portal_top = opening
+        .positions
+        .iter()
+        .map(|position| position[2])
+        .max()
+        .unwrap();
+    assert_eq!(
+        portal_bottom, plane,
+        "portal starts on the resolved F1 plane"
+    );
+    assert_eq!(
+        portal_top,
+        plane + 2_400,
+        "nominal opening height is 2,400 mm"
+    );
+
+    let mut expected_connects = [UNIT_A, UNIT_B].map(|unit_id| {
+        scene
+            .primitives
+            .iter()
+            .position(|primitive| {
+                primitive.role == PrimitiveRole::Surface
+                    && primitive.canonical_feature_id.as_deref() == Some(unit_id)
+            })
+            .expect("unit surface exists") as u32
+    });
+    expected_connects.sort_unstable();
+    assert_eq!(*connects, (expected_connects[0], expected_connects[1]));
+
+    let p0 = opening.positions[0];
+    let p1 = opening.positions[1];
+    let dx = i128::from(p1[0] - p0[0]);
+    let dy = i128::from(p1[1] - p0[1]);
+    let opening_len2 = dx * dx + dy * dy;
+    let along = |position: &[i64; 3]| {
+        i128::from(position[0] - p0[0]) * dx + i128::from(position[1] - p0[1]) * dy
+    };
+    let on_host_line = |position: &[i64; 3]| {
+        i128::from(position[0] - p0[0]) * dy - i128::from(position[1] - p0[1]) * dx == 0
+    };
+    let host_wall = scene
+        .primitives
+        .iter()
+        .find(|primitive| {
+            if primitive.role != PrimitiveRole::Wall || primitive.level_id != LEVEL_ID {
+                return false;
+            }
+            let PrimitiveGeometry::Mesh(mesh) = &primitive.geometry else {
+                return false;
+            };
+            mesh.positions.iter().all(on_host_line)
+                && mesh
+                    .positions
+                    .iter()
+                    .map(&along)
+                    .min()
+                    .is_some_and(|min| min <= 0)
+                && mesh
+                    .positions
+                    .iter()
+                    .map(&along)
+                    .max()
+                    .is_some_and(|max| max >= opening_len2)
+        })
+        .expect("the selected host wall remains one primitive");
+    let PrimitiveGeometry::Mesh(host_mesh) = &host_wall.geometry else {
+        unreachable!()
+    };
+
+    let mut left = false;
+    let mut right = false;
+    let mut header = false;
+    for face in &host_mesh.faces {
+        let points = face.map(|index| &host_mesh.positions[index as usize]);
+        let start = points.iter().map(|position| along(position)).min().unwrap();
+        let end = points.iter().map(|position| along(position)).max().unwrap();
+        let min_z = points.iter().map(|position| position[2]).min().unwrap();
+        let max_z = points.iter().map(|position| position[2]).max().unwrap();
+        if start < opening_len2 && end > 0 {
+            assert!(
+                min_z >= portal_top,
+                "no host-wall triangle may occupy the opening interval below its top"
+            );
+            header |= max_z > portal_top;
+        }
+        left |= end <= 0 && min_z == portal_bottom && max_z > portal_top;
+        right |= start >= opening_len2 && min_z == portal_bottom && max_z > portal_top;
+    }
+    assert!(
+        left && right,
+        "full-height wall geometry remains on both sides"
+    );
+    assert!(header, "wall geometry remains above the opening");
+
+    let opening_locators: Vec<u32> = [OPENING_ID, SECOND_OPENING_ID]
+        .iter()
+        .map(|opening_id| {
+            spatial
+                .registries
+                .locators
+                .iter()
+                .position(|locator| locator.value == *opening_id)
+                .expect("opening locator is registered") as u32
+        })
+        .collect();
+    assert_eq!(
+        host_wall.source_locator_refs[1..],
+        opening_locators,
+        "host-wall provenance appends canonical opening locators once, in order"
+    );
+}
+
+#[test]
 fn a_lone_platform_unit_emits_no_walls() {
     use kiriko_model::scene::PrimitiveRole;
 
@@ -2681,6 +2874,15 @@ fn a_lone_platform_unit_emits_no_walls() {
         .filter(|p| p.role == PrimitiveRole::Wall && p.level_id == f1)
         .count();
     assert_eq!(walls, 0, "a lone platform is not enclosed by walls");
+    assert_eq!(
+        scene
+            .primitives
+            .iter()
+            .filter(|primitive| primitive.role == PrimitiveRole::Portal && primitive.level_id == f1)
+            .count(),
+        1,
+        "an opening on a platform-only edge remains topology-only"
+    );
 }
 
 #[test]
@@ -2722,6 +2924,7 @@ fn the_scene_profile_drives_nominal_dimensions() {
     let source = support::build_multi_floor_imdf_zip();
     let profile = kiriko_bundle::SceneProfile {
         wall_height_mm: 4000,
+        door_height_mm: 1800,
         ..kiriko_bundle::SceneProfile::default()
     };
     let compiled = compile_imdf_with_network(
@@ -2762,6 +2965,84 @@ fn the_scene_profile_drives_nominal_dimensions() {
         mesh.positions.iter().map(|p| p[2]).max(),
         Some(4000 + 4000),
         "the nominal wall height comes from the versioned profile, not a constant"
+    );
+
+    let portal = scene
+        .primitives
+        .iter()
+        .find(|primitive| primitive.role == PrimitiveRole::Portal)
+        .expect("fixture opening emits a portal");
+    let PrimitiveGeometry::Portal { opening, .. } = &portal.geometry else {
+        panic!("portal geometry expected");
+    };
+    let portal_bottom = opening
+        .positions
+        .iter()
+        .map(|position| position[2])
+        .min()
+        .unwrap();
+    let portal_top = opening
+        .positions
+        .iter()
+        .map(|position| position[2])
+        .max()
+        .unwrap();
+    assert_eq!(
+        portal_top - portal_bottom,
+        1_800,
+        "the nominal opening height comes from the versioned profile"
+    );
+
+    let p0 = opening.positions[0];
+    let p1 = opening.positions[1];
+    let dx = i128::from(p1[0] - p0[0]);
+    let dy = i128::from(p1[1] - p0[1]);
+    let opening_len2 = dx * dx + dy * dy;
+    let along = |position: &[i64; 3]| {
+        i128::from(position[0] - p0[0]) * dx + i128::from(position[1] - p0[1]) * dy
+    };
+    let host_mesh = scene
+        .primitives
+        .iter()
+        .filter(|primitive| primitive.role == PrimitiveRole::Wall)
+        .filter_map(|primitive| match &primitive.geometry {
+            PrimitiveGeometry::Mesh(mesh) => Some(mesh),
+            _ => None,
+        })
+        .find(|mesh| {
+            mesh.positions.iter().all(|position| {
+                i128::from(position[0] - p0[0]) * dy - i128::from(position[1] - p0[1]) * dx == 0
+            }) && mesh
+                .positions
+                .iter()
+                .map(&along)
+                .min()
+                .is_some_and(|min| min <= 0)
+                && mesh
+                    .positions
+                    .iter()
+                    .map(&along)
+                    .max()
+                    .is_some_and(|max| max >= opening_len2)
+        })
+        .expect("portal host wall");
+    let mut header_minima = Vec::new();
+    for face in &host_mesh.faces {
+        let points = face.map(|index| &host_mesh.positions[index as usize]);
+        let start = points.iter().map(|position| along(position)).min().unwrap();
+        let end = points.iter().map(|position| along(position)).max().unwrap();
+        if start < opening_len2 && end > 0 {
+            let min_z = points.iter().map(|position| position[2]).min().unwrap();
+            assert!(
+                min_z >= portal_top,
+                "the wall cut uses the profile's nominal opening height"
+            );
+            header_minima.push(min_z);
+        }
+    }
+    assert!(
+        header_minima.first().is_some() && header_minima.iter().all(|min_z| *min_z == portal_top),
+        "the overlapping header starts exactly at the profile-driven portal top"
     );
 }
 

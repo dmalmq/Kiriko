@@ -26,7 +26,7 @@ use crate::quantize::{encode_normal_oct, quantize_positions};
 use crate::roles::occlusion_for_role;
 
 /// Bumped when this producer's output changes for unchanged input.
-const GENERATED_PRODUCER_VERSION: u16 = 1;
+const GENERATED_PRODUCER_VERSION: u16 = 2;
 
 /// The render format this producer writes.
 const SCENE_FORMAT_VERSION: u16 = 1;

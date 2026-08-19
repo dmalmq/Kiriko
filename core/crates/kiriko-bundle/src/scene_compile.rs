@@ -14,6 +14,8 @@
 //! canonical inputs in a fixed order, with `round` applied exactly once per
 //! value.
 
+use std::collections::BTreeMap;
+
 use kiriko_model::canonical::Value;
 use kiriko_model::model::{FeatureType, VenueFeature};
 use kiriko_model::scene::{
@@ -54,13 +56,13 @@ pub struct SceneProfile {
 }
 
 impl Default for SceneProfile {
-    /// The versioned default scene profile (v1).
+    /// The versioned default scene profile (v2).
     fn default() -> Self {
         Self {
-            profile_version: 1,
+            profile_version: 2,
             wall_height_mm: 3000,
             ceiling_height_mm: 3000,
-            door_height_mm: 2100,
+            door_height_mm: 2400,
             height_property_key: "height".to_string(),
             corroboration_tolerance_mm: 200,
             conveyance_height_mm: 3000,
@@ -397,6 +399,51 @@ fn push_assumption(registries: &mut Registries, detail: &str) -> u32 {
 /// A unique boundary edge keyed by (level id, ordered vertex pair).
 type WallEdgeKey = (String, i64, i64, i64, i64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SquaredDistance {
+    numerator: i128,
+    denominator: i128,
+}
+
+impl SquaredDistance {
+    fn plus(self, other: Self) -> Self {
+        Self {
+            numerator: self.numerator * other.denominator + other.numerator * self.denominator,
+            denominator: self.denominator * other.denominator,
+        }
+    }
+
+    fn cmp(self, other: Self) -> std::cmp::Ordering {
+        (self.numerator * other.denominator).cmp(&(other.numerator * self.denominator))
+    }
+}
+
+struct WallSpec {
+    heights: Vec<u32>,
+    all_platform: bool,
+    surface_indices: Vec<u32>,
+    hosted_openings: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpeningInterval {
+    start_numerator: i128,
+    end_numerator: i128,
+    height_mm: i64,
+}
+
+struct HostedOpening {
+    id: String,
+    level_id: String,
+    host_key: WallEdgeKey,
+    interval: OpeningInterval,
+    snapped_endpoints: ([i64; 2], [i64; 2]),
+    connects: (u32, u32),
+    locator_ref: u32,
+    evidence_ref: u32,
+    confidence_ref: u32,
+}
+
 /// The explicit height of a unit from its source properties (metres → mm),
 /// when present and finite.
 fn unit_height_mm(unit: &VenueFeature, profile: &SceneProfile) -> Option<i64> {
@@ -526,6 +573,7 @@ pub(crate) fn compile_scene(
     }
 
     // -- Slabs: one per level, on the resolved plane. -----------------------
+    let mut level_slab_edges: Vec<(WallEdgeKey, u32)> = Vec::new();
     for level in &levels_data {
         let locator = find_or_push_locator(&mut spatial.registries, &level.id);
         let confidence_ref = conf_ref(
@@ -541,6 +589,7 @@ pub(crate) fn compile_scene(
             None,
             "floor slab from level polygon",
         );
+        let slab_index = primitives.len() as u32;
         primitives.push(ScenePrimitive {
             id: if level.ring_index == 0 {
                 format!("slab-{}", level.id)
@@ -556,6 +605,10 @@ pub(crate) fn compile_scene(
             evidence_refs: vec![evidence_ref],
             geometry: PrimitiveGeometry::Mesh(ring_mesh_from_xy(&level.ring_xy, level.z)),
         });
+        for (a, b) in ring_edges(&level.ring_xy) {
+            let (a, b) = if a <= b { (a, b) } else { (b, a) };
+            level_slab_edges.push(((level.id.clone(), a[0], a[1], b[0], b[1]), slab_index));
+        }
     }
 
     // -- Ceilings and surfaces: one per unit. -------------------------------
@@ -644,49 +697,174 @@ pub(crate) fn compile_scene(
             geometry: PrimitiveGeometry::Mesh(ring_mesh_from_xy(&unit.ring_xy, unit.z + height)),
         });
     }
-    // -- Walls: one vertical quad per unique unit-boundary edge. -------------
-    // A shared edge between two units yields one wall at the minimum of the
+    // -- Host openings on deterministic unit-boundary walls. ----------------
+    // A shared edge between two units yields one host at the minimum of the
     // two heights (source or nominal). Drawing lines never add geometry:
     // corroborated ones mark an existing boundary, all others are detail
     // linework.
     let nominal_wall = profile.wall_height_mm;
-    let mut walls_by_level: Vec<(WallEdgeKey, Vec<u32>, bool)> = Vec::new();
+    let mut walls_by_level: BTreeMap<WallEdgeKey, WallSpec> = BTreeMap::new();
     for unit in &units_data {
         let platform = unit
             .category
             .as_deref()
-            .is_some_and(|c| c.eq_ignore_ascii_case("platform"));
+            .is_some_and(|category| category.eq_ignore_ascii_case("platform"));
         for (a, b) in ring_edges(&unit.ring_xy) {
-            let key = if a <= b { (a, b) } else { (b, a) };
-            match walls_by_level.iter_mut().find(|(k, _, _)| {
-                k.0 == unit.level_id
-                    && (k.1, k.2, k.3, k.4) == (key.0[0], key.0[1], key.1[0], key.1[1])
-            }) {
-                Some((_, heights, all_platform)) => {
-                    heights.push(unit.source_height_mm.unwrap_or(profile.wall_height_mm) as u32);
-                    *all_platform = *all_platform && platform;
-                }
-                None => walls_by_level.push((
-                    (
-                        unit.level_id.clone(),
-                        key.0[0],
-                        key.0[1],
-                        key.1[0],
-                        key.1[1],
-                    ),
-                    vec![unit.source_height_mm.unwrap_or(profile.wall_height_mm) as u32],
-                    platform,
-                )),
-            }
+            let (a, b) = if a <= b { (a, b) } else { (b, a) };
+            let key = (unit.level_id.clone(), a[0], a[1], b[0], b[1]);
+            let spec = walls_by_level.entry(key).or_insert_with(|| WallSpec {
+                heights: Vec::new(),
+                all_platform: true,
+                surface_indices: Vec::new(),
+                hosted_openings: Vec::new(),
+            });
+            spec.heights
+                .push(unit.source_height_mm.unwrap_or(profile.wall_height_mm) as u32);
+            spec.all_platform &= platform;
+            spec.surface_indices
+                .push(unit.surface_index.expect("unit surface exists"));
         }
     }
-    walls_by_level.sort_by(|a, b| a.0.cmp(&b.0));
-    for ((level_id, ax, ay, bx, by), heights, all_platform) in walls_by_level {
-        if all_platform {
+    for spec in walls_by_level.values_mut() {
+        spec.surface_indices.sort_unstable();
+        spec.surface_indices.dedup();
+    }
+
+    let tolerance = profile.corroboration_tolerance_mm;
+    let mut hosted_openings: Vec<HostedOpening> = Vec::new();
+    for opening in document
+        .features
+        .iter()
+        .filter(|feature| feature.feature_type == FeatureType::Opening)
+    {
+        let Some(level_id) = opening.level_id.as_deref() else {
+            continue;
+        };
+        let Some(line) = opening.geometry.as_ref().and_then(linestring) else {
+            continue;
+        };
+        let source_a = project_local_mm(frame, line[0][0], line[0][1]);
+        let source_b = project_local_mm(
+            frame,
+            line.last().expect("line has two endpoints")[0],
+            line.last().expect("line has two endpoints")[1],
+        );
+        let Some(host_key) = walls_by_level
+            .keys()
+            .filter(|key| key.0 == level_id)
+            .filter_map(|key| {
+                let a = [key.1, key.2];
+                let b = [key.3, key.4];
+                if a == b
+                    || !point_near_segment(source_a, a, b, tolerance)
+                    || !point_near_segment(source_b, a, b, tolerance)
+                {
+                    return None;
+                }
+                let score = point_segment_squared_distance(source_a, a, b)
+                    .plus(point_segment_squared_distance(source_b, a, b));
+                Some((score, key.clone()))
+            })
+            .min_by(|(score_a, key_a), (score_b, key_b)| {
+                score_a.cmp(*score_b).then_with(|| key_a.cmp(key_b))
+            })
+            .map(|(_, key)| key)
+        else {
+            continue;
+        };
+
+        let host_a = [host_key.1, host_key.2];
+        let host_b = [host_key.3, host_key.4];
+        let host_len2 = segment_len2(host_a, host_b);
+        let source_a_numerator = projection_numerator(source_a, host_a, host_b);
+        let source_b_numerator = projection_numerator(source_b, host_a, host_b);
+        let start_numerator = source_a_numerator.min(source_b_numerator);
+        let end_numerator = source_a_numerator.max(source_b_numerator);
+        if start_numerator == end_numerator {
             continue;
         }
-        let z = plane_z(&level_id).expect("level has a plane");
-        let height = *heights.iter().min().expect("at least one height") as i64;
+        let Some(snapped_endpoints) =
+            snapped_interval_endpoints(host_a, host_b, start_numerator, end_numerator, host_len2)
+        else {
+            continue;
+        };
+
+        let spec = walls_by_level.get(&host_key).expect("selected host exists");
+        let host_height = i64::from(*spec.heights.iter().min().expect("host has a height"));
+        let effective_height = profile.door_height_mm.clamp(0, host_height);
+        if effective_height == 0 {
+            continue;
+        }
+        let connects = match spec.surface_indices.as_slice() {
+            [first, second, ..] => (*first, *second),
+            [surface] => {
+                let slab = level_slab_edges.iter().find_map(|(level_edge, slab)| {
+                    let level_a = [level_edge.1, level_edge.2];
+                    let level_b = [level_edge.3, level_edge.4];
+                    (level_edge.0 == host_key.0
+                        && point_near_segment(host_a, level_a, level_b, 0)
+                        && point_near_segment(host_b, level_a, level_b, 0))
+                    .then_some(*slab)
+                });
+                let Some(slab) = slab else { continue };
+                (*surface, slab)
+            }
+            [] => continue,
+        };
+
+        let locator_ref = find_or_push_locator(&mut spatial.registries, &opening.id);
+        let confidence_ref = conf_ref(
+            &mut spatial.registries,
+            true,
+            &mut measured_confidence,
+            &mut assumed_confidence,
+        );
+        let opening_assumption = *nominal_door_assumption.get_or_insert_with(|| {
+            push_assumption(
+                &mut spatial.registries,
+                &format!("nominal opening height {} mm", profile.door_height_mm),
+            )
+        });
+        let evidence_ref = push_evidence(
+            &mut spatial.registries,
+            locator_ref,
+            Some(confidence_ref),
+            Some(opening_assumption),
+            "portal at nominal opening height",
+        );
+        let interval = OpeningInterval {
+            start_numerator,
+            end_numerator,
+            height_mm: effective_height,
+        };
+        let hosted_index = hosted_openings.len();
+        hosted_openings.push(HostedOpening {
+            id: opening.id.clone(),
+            level_id: level_id.to_string(),
+            host_key: host_key.clone(),
+            interval,
+            snapped_endpoints,
+            connects,
+            locator_ref,
+            evidence_ref,
+            confidence_ref,
+        });
+        walls_by_level
+            .get_mut(&host_key)
+            .expect("selected host exists")
+            .hosted_openings
+            .push(hosted_index);
+    }
+
+    // -- Walls: one partitioned mesh per non-platform host edge. ------------
+    for (wall_ordinal, (key, spec)) in walls_by_level
+        .iter()
+        .filter(|(_, spec)| !spec.all_platform)
+        .enumerate()
+    {
+        let (level_id, ax, ay, bx, by) = key;
+        let z = plane_z(level_id).expect("level has a plane");
+        let height = i64::from(*spec.heights.iter().min().expect("host has a height"));
         let assumed = height == nominal_wall;
         let wall_confidence = conf_ref(
             &mut spatial.registries,
@@ -704,7 +882,7 @@ pub(crate) fn compile_scene(
         } else {
             None
         };
-        let level_locator = find_or_push_locator(&mut spatial.registries, &level_id);
+        let level_locator = find_or_push_locator(&mut spatial.registries, level_id);
         let wall_evidence = push_evidence(
             &mut spatial.registries,
             level_locator,
@@ -716,116 +894,60 @@ pub(crate) fn compile_scene(
                 "wall at source height"
             },
         );
-        let n = primitives
-            .iter()
-            .filter(|p| p.role == PrimitiveRole::Wall && p.level_id == level_id)
-            .count();
+        let mut source_locator_refs = vec![level_locator];
+        let mut evidence_refs = vec![wall_evidence];
+        let mut intervals = Vec::with_capacity(spec.hosted_openings.len());
+        for hosted_index in &spec.hosted_openings {
+            let opening = &hosted_openings[*hosted_index];
+            debug_assert_eq!(&opening.host_key, key);
+            intervals.push(opening.interval);
+            if !source_locator_refs.contains(&opening.locator_ref) {
+                source_locator_refs.push(opening.locator_ref);
+            }
+            if !evidence_refs.contains(&opening.evidence_ref) {
+                evidence_refs.push(opening.evidence_ref);
+            }
+        }
         primitives.push(ScenePrimitive {
-            id: format!("wall-{level_id}-{n}"),
+            id: format!("wall-{level_id}-{wall_ordinal}"),
             role: PrimitiveRole::Wall,
-            level_id,
+            level_id: level_id.clone(),
             occlusion: OcclusionClass::Opaque,
             confidence_ref: wall_confidence,
             canonical_feature_id: None,
-            source_locator_refs: vec![level_locator],
-            evidence_refs: vec![wall_evidence],
-            geometry: PrimitiveGeometry::Mesh(wall_mesh([ax, ay], [bx, by], z, height)),
+            source_locator_refs,
+            evidence_refs,
+            geometry: PrimitiveGeometry::Mesh(wall_mesh_with_openings(
+                [*ax, *ay],
+                [*bx, *by],
+                z,
+                height,
+                &intervals,
+            )),
         });
     }
 
-    // -- Portals: openings on unit-boundary edges. ---------------------------
-    let tolerance = profile.corroboration_tolerance_mm;
-    let door_height = profile.door_height_mm;
-    let door_assumption = *nominal_door_assumption.get_or_insert_with(|| {
-        push_assumption(
-            &mut spatial.registries,
-            &format!("nominal door height {door_height} mm"),
-        )
-    });
-    for opening in document
-        .features
-        .iter()
-        .filter(|f| f.feature_type == FeatureType::Opening)
-    {
-        let Some(level_id) = opening.level_id.as_deref() else {
-            continue;
-        };
-        let Some(z) = plane_z(level_id) else { continue };
-        let Some(line) = opening.geometry.as_ref().and_then(linestring) else {
-            continue;
-        };
-        let line_xy: Vec<[i64; 2]> = line
-            .iter()
-            .map(|[lon, lat]| project_local_mm(frame, *lon, *lat))
-            .collect();
-        let (p0, p1) = (line_xy[0], *line_xy.last().expect("line has two endpoints"));
-
-        // The edge this opening sits on: the two units sharing it become the
-        // portal's connects; an edge on the venue boundary connects the unit
-        // to the level slab.
-        // Collect the surfaces whose boundary edges the opening lies on.
-        let mut matched_units: Vec<u32> = Vec::new();
-        let mut matched_edge = false;
-        for unit in &units_data {
-            if unit.level_id != level_id {
-                continue;
-            }
-            for (a, b) in ring_edges(&unit.ring_xy) {
-                if !point_near_segment(p0, a, b, tolerance)
-                    || !point_near_segment(p1, a, b, tolerance)
-                {
-                    continue;
-                }
-                // Both endpoints of the opening lie on this edge.
-                matched_units.push(unit.surface_index.expect("unit surface exists"));
-                matched_edge = true;
-                break;
-            }
-        }
-        if !matched_edge {
-            continue; // an opening on no boundary is not part of the topology
-        }
-        matched_units.sort_unstable();
-        matched_units.dedup();
-        let (a_idx, b_idx) = if matched_units.len() >= 2 {
-            (matched_units[0], matched_units[1])
-        } else if matched_units.len() == 1 {
-            // An opening on the venue boundary connects the unit to its slab.
-            let slab_index = primitives
-                .iter()
-                .position(|p| p.id == format!("slab-{level_id}"))
-                .expect("slab exists") as u32;
-            (matched_units[0], slab_index)
-        } else {
-            continue;
-        };
-
-        let locator = find_or_push_locator(&mut spatial.registries, &opening.id);
-        let confidence_ref = conf_ref(
-            &mut spatial.registries,
-            true,
-            &mut measured_confidence,
-            &mut assumed_confidence,
-        );
-        let evidence_ref = push_evidence(
-            &mut spatial.registries,
-            locator,
-            Some(confidence_ref),
-            Some(door_assumption),
-            "portal opening at nominal door height",
-        );
+    // -- Portals: snapped to their selected host after wall emission. -------
+    for opening in hosted_openings {
+        debug_assert!(walls_by_level.contains_key(&opening.host_key));
+        let z = plane_z(&opening.level_id).expect("hosted opening level has a plane");
         primitives.push(ScenePrimitive {
             id: format!("portal-{}", opening.id),
             role: PrimitiveRole::Portal,
-            level_id: level_id.to_string(),
+            level_id: opening.level_id,
             occlusion: OcclusionClass::Transparent,
-            confidence_ref,
-            canonical_feature_id: Some(opening.id.clone()),
-            source_locator_refs: vec![locator],
-            evidence_refs: vec![evidence_ref],
+            confidence_ref: opening.confidence_ref,
+            canonical_feature_id: Some(opening.id),
+            source_locator_refs: vec![opening.locator_ref],
+            evidence_refs: vec![opening.evidence_ref],
             geometry: PrimitiveGeometry::Portal {
-                connects: (a_idx, b_idx),
-                opening: wall_mesh(p0, p1, z, door_height),
+                connects: opening.connects,
+                opening: wall_mesh(
+                    opening.snapped_endpoints.0,
+                    opening.snapped_endpoints.1,
+                    z,
+                    opening.interval.height_mm,
+                ),
             },
         });
     }
@@ -1067,6 +1189,128 @@ fn wall_mesh(a: [i64; 2], b: [i64; 2], z: i64, height: i64) -> Mesh {
     }
 }
 
+fn segment_len2(a: [i64; 2], b: [i64; 2]) -> i128 {
+    let dx = i128::from(b[0] - a[0]);
+    let dy = i128::from(b[1] - a[1]);
+    dx * dx + dy * dy
+}
+
+fn projection_numerator(point: [i64; 2], a: [i64; 2], b: [i64; 2]) -> i128 {
+    let dx = i128::from(b[0] - a[0]);
+    let dy = i128::from(b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    (i128::from(point[0] - a[0]) * dx + i128::from(point[1] - a[1]) * dy).clamp(0, len2)
+}
+
+fn round_div_signed(numerator: i128, denominator: i128) -> i128 {
+    debug_assert!(denominator > 0);
+    if numerator >= 0 {
+        (numerator + denominator / 2) / denominator
+    } else {
+        -((-numerator + denominator / 2) / denominator)
+    }
+}
+
+fn point_at_numerator(a: [i64; 2], b: [i64; 2], numerator: i128, denominator: i128) -> [i64; 2] {
+    let coordinate = |start: i64, end: i64| {
+        let offset = round_div_signed(i128::from(end - start) * numerator, denominator);
+        i64::try_from(i128::from(start) + offset).expect("point on an i64 segment remains i64")
+    };
+    [coordinate(a[0], b[0]), coordinate(a[1], b[1])]
+}
+
+fn append_wall_panel(mesh: &mut Mesh, a: [i64; 2], b: [i64; 2], bottom_z: i64, top_z: i64) {
+    if a == b || bottom_z >= top_z {
+        return;
+    }
+    let base = mesh.positions.len() as u32;
+    mesh.positions.extend_from_slice(&[
+        [a[0], a[1], bottom_z],
+        [b[0], b[1], bottom_z],
+        [b[0], b[1], top_z],
+        [a[0], a[1], top_z],
+    ]);
+    mesh.faces
+        .extend_from_slice(&[[base, base + 1, base + 2], [base, base + 2, base + 3]]);
+}
+
+/// One host-wall mesh partitioned into full-height complement panels and
+/// headers above the exact union of its hosted opening intervals.
+fn wall_mesh_with_openings(
+    a: [i64; 2],
+    b: [i64; 2],
+    z: i64,
+    height: i64,
+    openings: &[OpeningInterval],
+) -> Mesh {
+    let len2 = segment_len2(a, b);
+    if len2 == 0 || height <= 0 {
+        return Mesh {
+            positions: Vec::new(),
+            faces: Vec::new(),
+        };
+    }
+
+    let mut intervals: Vec<OpeningInterval> = openings
+        .iter()
+        .filter_map(|opening| {
+            let start_numerator = opening.start_numerator.clamp(0, len2);
+            let end_numerator = opening.end_numerator.clamp(0, len2);
+            (start_numerator < end_numerator).then_some(OpeningInterval {
+                start_numerator,
+                end_numerator,
+                height_mm: opening.height_mm.clamp(0, height),
+            })
+        })
+        .collect();
+    intervals.sort_by_key(|opening| (opening.start_numerator, opening.end_numerator));
+
+    let mut breakpoints = Vec::with_capacity(intervals.len() * 2 + 2);
+    breakpoints.push(0);
+    breakpoints.push(len2);
+    for opening in &intervals {
+        breakpoints.push(opening.start_numerator);
+        breakpoints.push(opening.end_numerator);
+    }
+    breakpoints.sort_unstable();
+    breakpoints.dedup();
+
+    let mut spans: Vec<(i128, i128, i64)> = Vec::new();
+    for bounds in breakpoints.windows(2) {
+        let start = bounds[0];
+        let end = bounds[1];
+        let void_height = intervals
+            .iter()
+            .filter(|opening| opening.start_numerator < end && opening.end_numerator > start)
+            .map(|opening| opening.height_mm)
+            .max()
+            .unwrap_or(0);
+        if let Some(last) = spans.last_mut()
+            && last.1 == start
+            && last.2 == void_height
+        {
+            last.1 = end;
+        } else {
+            spans.push((start, end, void_height));
+        }
+    }
+
+    let mut mesh = Mesh {
+        positions: Vec::with_capacity(spans.len() * 4),
+        faces: Vec::with_capacity(spans.len() * 2),
+    };
+    for (start, end, void_height) in spans {
+        append_wall_panel(
+            &mut mesh,
+            point_at_numerator(a, b, start, len2),
+            point_at_numerator(a, b, end, len2),
+            z + void_height,
+            z + height,
+        );
+    }
+    mesh
+}
+
 /// A projected, triangulated mesh from an already-projected ring at `z`.
 fn ring_mesh_from_xy(xy: &[[i64; 2]], z: i64) -> Mesh {
     Mesh {
@@ -1075,39 +1319,70 @@ fn ring_mesh_from_xy(xy: &[[i64; 2]], z: i64) -> Mesh {
     }
 }
 
-/// Squared distance from `p` to the segment `a`–`b`.
-fn point_segment_dist2(p: [i64; 2], a: [i64; 2], b: [i64; 2]) -> i128 {
+/// Exact squared distance from `p` to the segment `a`–`b`.
+fn point_segment_squared_distance(p: [i64; 2], a: [i64; 2], b: [i64; 2]) -> SquaredDistance {
     let (ax, ay, bx, by, px, py) = (a[0], a[1], b[0], b[1], p[0], p[1]);
     let dx = i128::from(bx - ax);
     let dy = i128::from(by - ay);
     let len2 = dx * dx + dy * dy;
     if len2 == 0 {
         let (qx, qy) = (i128::from(px - ax), i128::from(py - ay));
-        return qx * qx + qy * qy;
+        return SquaredDistance {
+            numerator: qx * qx + qy * qy,
+            denominator: 1,
+        };
     }
-    let t = (i128::from(px - ax) * dx + i128::from(py - ay) * dy)
-        .max(0)
-        .min(len2);
-    let (cx, cy) = (
-        i128::from(ax) + dx * t / len2,
-        i128::from(ay) + dy * t / len2,
-    );
-    let (qx, qy) = (i128::from(px) - cx, i128::from(py) - cy);
-    qx * qx + qy * qy
+    let qx = i128::from(px - ax);
+    let qy = i128::from(py - ay);
+    let projection = qx * dx + qy * dy;
+    if projection <= 0 {
+        return SquaredDistance {
+            numerator: qx * qx + qy * qy,
+            denominator: 1,
+        };
+    }
+    if projection >= len2 {
+        let qx = i128::from(px - bx);
+        let qy = i128::from(py - by);
+        return SquaredDistance {
+            numerator: qx * qx + qy * qy,
+            denominator: 1,
+        };
+    }
+    let cross = qx * dy - qy * dx;
+    SquaredDistance {
+        numerator: cross * cross,
+        denominator: len2,
+    }
 }
 
 /// Whether `p` is within `tolerance` millimetres of the segment `a`–`b`.
 fn point_near_segment(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> bool {
-    let t = i128::from(tolerance);
-    point_segment_dist2(p, a, b) <= t * t
+    let distance = point_segment_squared_distance(p, a, b);
+    let tolerance = i128::from(tolerance).abs();
+    distance.numerator <= tolerance * tolerance * distance.denominator
 }
 
-#[cfg(test)]
+fn snapped_interval_endpoints(
+    a: [i64; 2],
+    b: [i64; 2],
+    start_numerator: i128,
+    end_numerator: i128,
+    denominator: i128,
+) -> Option<([i64; 2], [i64; 2])> {
+    let start = point_at_numerator(a, b, start_numerator, denominator);
+    let end = point_at_numerator(a, b, end_numerator, denominator);
+    (start != end).then_some((start, end))
+}
+
 #[cfg(test)]
 mod tests {
     use kiriko_model::spatial::{Axes, Frame, LengthUnit, enu_basis_ecef, wgs84_ecef};
 
-    use super::{SceneProfile, project_local_mm, triangulate_simple};
+    use super::{
+        OpeningInterval, SceneProfile, point_segment_squared_distance, project_local_mm,
+        snapped_interval_endpoints, triangulate_simple, wall_mesh_with_openings,
+    };
 
     fn test_frame() -> Frame {
         let anchor = [139.767, 35.681];
@@ -1126,16 +1401,223 @@ mod tests {
     }
 
     #[test]
-    fn the_default_scene_profile_is_version_one() {
+    fn the_default_scene_profile_is_version_two() {
         let profile = SceneProfile::default();
-        assert_eq!(profile.profile_version, 1);
+        assert_eq!(profile.profile_version, 2);
         assert_eq!(profile.wall_height_mm, 3000);
         assert_eq!(profile.ceiling_height_mm, 3000);
-        assert_eq!(profile.door_height_mm, 2100);
+        assert_eq!(profile.door_height_mm, 2400);
         assert_eq!(profile.height_property_key, "height");
         assert_eq!(profile.corroboration_tolerance_mm, 200);
         assert_eq!(profile.conveyance_height_mm, 3000);
         assert_eq!(profile.conveyance_half_width_mm, 600);
+    }
+
+    #[test]
+    fn host_scoring_compares_exact_squared_distances() {
+        let source = [[-1, 10], [0, 6]];
+        let diagonal = point_segment_squared_distance(source[0], [0, 0], [9, 6])
+            .plus(point_segment_squared_distance(source[1], [0, 0], [9, 6]));
+        let horizontal = point_segment_squared_distance(source[0], [0, 1], [10, 1])
+            .plus(point_segment_squared_distance(source[1], [0, 1], [10, 1]));
+
+        assert!(
+            diagonal.cmp(horizontal).is_lt(),
+            "exact rational scoring must not reverse the near-tie through integer truncation"
+        );
+    }
+
+    #[test]
+    fn distinct_rational_positions_that_snap_together_are_rejected() {
+        assert_eq!(
+            snapped_interval_endpoints([0, 0], [1_000_000, 1], 1, 2, 1_000_000_000_001),
+            None
+        );
+    }
+
+    fn triangle_horizontal_span(mesh: &kiriko_model::scene::Mesh, face: &[u32; 3]) -> (i64, i64) {
+        let xs = face.map(|index| mesh.positions[index as usize][0]);
+        (*xs.iter().min().unwrap(), *xs.iter().max().unwrap())
+    }
+
+    #[test]
+    fn a_wall_mesh_is_partitioned_around_an_opening() {
+        let mesh = wall_mesh_with_openings(
+            [0, 0],
+            [10_000, 0],
+            0,
+            3_000,
+            &[OpeningInterval {
+                start_numerator: 40_000_000,
+                end_numerator: 60_000_000,
+                height_mm: 2_400,
+            }],
+        );
+
+        assert_eq!(mesh.faces.len(), 6, "left, right, and header panels");
+        for face in &mesh.faces {
+            let (start, end) = triangle_horizontal_span(&mesh, face);
+            let min_z = face
+                .iter()
+                .map(|index| mesh.positions[*index as usize][2])
+                .min()
+                .unwrap();
+            if start < 6_000 && end > 4_000 {
+                assert!(
+                    min_z >= 2_400,
+                    "no triangle may occupy the opening below its top: {face:?}"
+                );
+            }
+        }
+        assert!(
+            mesh.positions
+                .iter()
+                .any(|position| position[0] == 0 && position[2] == 3_000)
+        );
+        assert!(
+            mesh.positions
+                .iter()
+                .any(|position| position[0] == 10_000 && position[2] == 3_000)
+        );
+        for x in [4_000, 6_000] {
+            assert!(
+                mesh.positions
+                    .iter()
+                    .any(|position| position[0] == x && position[2] == 3_000),
+                "the header retains its top corner at x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn touching_and_overlapping_openings_union_without_duplicate_panels() {
+        let mesh = wall_mesh_with_openings(
+            [0, 0],
+            [10_000, 0],
+            0,
+            3_000,
+            &[
+                OpeningInterval {
+                    start_numerator: 20_000_000,
+                    end_numerator: 50_000_000,
+                    height_mm: 2_400,
+                },
+                OpeningInterval {
+                    start_numerator: 40_000_000,
+                    end_numerator: 70_000_000,
+                    height_mm: 2_400,
+                },
+                OpeningInterval {
+                    start_numerator: 70_000_000,
+                    end_numerator: 80_000_000,
+                    height_mm: 2_400,
+                },
+            ],
+        );
+
+        assert_eq!(
+            mesh.faces.len(),
+            6,
+            "the union emits two side panels and exactly one header"
+        );
+        let header_faces = mesh
+            .faces
+            .iter()
+            .filter(|face| {
+                face.iter()
+                    .map(|index| mesh.positions[*index as usize][2])
+                    .min()
+                    == Some(2_400)
+            })
+            .count();
+        assert_eq!(
+            header_faces, 2,
+            "one header quad, not duplicate coplanar faces"
+        );
+    }
+
+    #[test]
+    fn overlapping_openings_use_the_tallest_void_for_each_span() {
+        let mesh = wall_mesh_with_openings(
+            [0, 0],
+            [10_000, 0],
+            0,
+            3_000,
+            &[
+                OpeningInterval {
+                    start_numerator: 20_000_000,
+                    end_numerator: 60_000_000,
+                    height_mm: 1_800,
+                },
+                OpeningInterval {
+                    start_numerator: 40_000_000,
+                    end_numerator: 80_000_000,
+                    height_mm: 2_400,
+                },
+            ],
+        );
+
+        assert_eq!(mesh.faces.len(), 8, "two side panels and two header steps");
+        let panels: Vec<_> = mesh
+            .faces
+            .iter()
+            .map(|face| {
+                (
+                    triangle_horizontal_span(&mesh, face),
+                    face.iter()
+                        .map(|index| mesh.positions[*index as usize][2])
+                        .min()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert!(panels.contains(&((2_000, 4_000), 1_800)));
+        assert!(panels.contains(&((4_000, 8_000), 2_400)));
+    }
+
+    #[test]
+    fn an_opening_clamped_to_a_short_host_emits_no_header() {
+        let mesh = wall_mesh_with_openings(
+            [0, 0],
+            [10_000, 0],
+            500,
+            2_000,
+            &[OpeningInterval {
+                start_numerator: 20_000_000,
+                end_numerator: 80_000_000,
+                height_mm: 2_000,
+            }],
+        );
+
+        assert_eq!(mesh.faces.len(), 4, "only the two side panels remain");
+        assert!(
+            mesh.positions
+                .iter()
+                .all(|position| (500..=2_500).contains(&position[2])),
+            "no inverted or above-host header vertices"
+        );
+    }
+
+    #[test]
+    fn a_zero_width_projected_opening_produces_no_degenerate_triangles() {
+        let mesh = wall_mesh_with_openings(
+            [0, 0],
+            [10_000, 0],
+            0,
+            3_000,
+            &[OpeningInterval {
+                start_numerator: 50_000_000,
+                end_numerator: 50_000_000,
+                height_mm: 2_400,
+            }],
+        );
+
+        assert_eq!(mesh.faces.len(), 2, "the rejected cut leaves the full wall");
+        for face in &mesh.faces {
+            let [a, b, c] = face.map(|index| mesh.positions[index as usize]);
+            let area2 = (b[0] - a[0]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[0] - a[0]);
+            assert_ne!(area2, 0, "no degenerate triangle");
+        }
     }
 
     #[test]

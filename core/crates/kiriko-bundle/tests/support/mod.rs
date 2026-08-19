@@ -165,6 +165,9 @@ fn multi_floor_entries() -> Vec<(&'static str, String)> {
     let openings = r#"{"type":"FeatureCollection","features":[
         {"id":"d1000001-0000-4000-8000-000000000001","type":"Feature","feature_type":"opening",
           "geometry":{"type":"LineString","coordinates":[[139.7670,35.6810],[139.7672,35.6810]]},
+          "properties":{"category":"pedestrian.transit","level_id":"b1000003-0000-4000-8000-000000000003"}},
+        {"id":"d1000002-0000-4000-8000-000000000002","type":"Feature","feature_type":"opening",
+          "geometry":{"type":"LineString","coordinates":[[139.7672,35.6810],[139.7673,35.6810]]},
           "properties":{"category":"pedestrian.transit","level_id":"b1000003-0000-4000-8000-000000000003"}}
     ]}"#;
     let drawings = r#"{"type":"FeatureCollection","features":[
@@ -228,12 +231,18 @@ pub fn build_platform_wall_imdf_zip() -> Vec<u8> {
             {{"id":"c1000003-0000-4000-8000-000000000013","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7660,35.6810],[139.7680,35.6810],[139.7680,35.6820],[139.7660,35.6820],[139.7660,35.6810]]]}},"properties":{{"category":"shop","level_id":"{f2}"}}}}
         ]}}"#
     );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000011","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.7668,35.6800],[139.7672,35.6800]]}},"properties":{{"category":"pedestrian.transit","level_id":"{f1}"}}}}
+        ]}}"#
+    );
     write_zip_entries(&[
         ("manifest.json", manifest.to_string()),
         ("venue.geojson", venue),
         ("address.geojson", address),
         ("level.geojson", levels),
         ("unit.geojson", units),
+        ("opening.geojson", openings),
     ])
 }
 
@@ -266,11 +275,18 @@ pub fn build_multipolygon_unit_imdf_zip() -> Vec<u8> {
             level_id,
             "level",
             r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
-            Some(POLYGON),
+            Some(
+                r#"{"type":"MultiPolygon","coordinates":[[[[139.7660,35.6800],[139.7668,35.6800],[139.7668,35.6808],[139.7660,35.6808],[139.7660,35.6800]]],[[[139.7672,35.6812],[139.7680,35.6812],[139.7680,35.6820],[139.7672,35.6820],[139.7672,35.6812]]]]}"#
+            ),
         )
     );
     let units = format!(
-        r#"{{"type":"FeatureCollection","features":[{{"id":"{unit_id}","type":"Feature","feature_type":"unit","geometry":{{"type":"MultiPolygon","coordinates":[[[[139.7660,35.6800],[139.7668,35.6800],[139.7668,35.6808],[139.7660,35.6808],[139.7660,35.6800]]],[[[139.7672,35.6812],[139.7680,35.6812],[139.7680,35.6820],[139.7672,35.6820],[139.7672,35.6812]]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}]}}"#
+        r#"{{"type":"FeatureCollection","features":[{{"id":"{unit_id}","type":"Feature","feature_type":"unit","geometry":{{"type":"MultiPolygon","coordinates":[[[[139.7660,35.6800],[139.7668,35.6800],[139.7668,35.6808],[139.7660,35.6808],[139.7660,35.6800]]],[[[139.7673,35.6812],[139.7679,35.6812],[139.7679,35.6819],[139.7673,35.6819],[139.7673,35.6812]]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}]}}"#
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000021","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.7674,35.6812],[139.7676,35.6812]]}},"properties":{{"category":"pedestrian.transit","level_id":"{level_id}"}}}}
+        ]}}"#
     );
     write_zip_entries(&[
         ("manifest.json", manifest.to_string()),
@@ -278,6 +294,7 @@ pub fn build_multipolygon_unit_imdf_zip() -> Vec<u8> {
         ("address.geojson", address),
         ("level.geojson", levels),
         ("unit.geojson", units),
+        ("opening.geojson", openings),
     ])
 }
 
