@@ -8,7 +8,7 @@ import {
 } from "react";
 import { SceneLayer, SCENE_DIAGNOSTICS_KEY } from "./scene/sceneLayer";
 import { useSceneLabels } from "./scene/useSceneLabels";
-import { CONTEXT_HANDOFF_MS } from "./scene/scenePolicy";
+import { CONTEXT_HANDOFF_MS, CONTEXT_LEVEL_OPACITY } from "./scene/scenePolicy";
 import type { SceneView } from "./scene/sceneFormat";
 import {
   FLOOR_ELEVATION_PROTOCOL,
@@ -71,6 +71,13 @@ import {
   type VerticalLink,
 } from "./scene/verticalLinks";
 import type { ConnectorInput } from "./scene/sceneConnectors";
+import {
+  INDOOR_CONTEXT_SOURCE_ID,
+  LAYER_INDOOR_CONTEXT_EXTRUSION,
+  contextGraphConnectors,
+  contextIndoorFeatures,
+} from "./scene/contextOverlay";
+
 import type { SurfacePickCandidate, PickCandidate } from "./scene/scenePick";
 
 
@@ -908,6 +915,70 @@ function whenSourceReady(map: MapLibreMap, fn: () => void): () => void {
   };
 }
 
+function syncContextIndoorOverlay(
+  map: MapLibreMap,
+  venue: LoadedVenue,
+  scene: SceneView | null,
+  floorState: SceneFloorState,
+  contextOrdinals: readonly number[],
+  walkwayColor: string,
+): void {
+  const empty: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
+  let data = empty;
+  if (scene !== null && contextOrdinals.length > 0 && floorState.activePlaneM !== null) {
+    const partnerPlanes = floorState.contextLevelIndices.map(
+      (index) => scene.levels[index]?.resolvedPlaneZ,
+    );
+    const partnerPlane = partnerPlanes[0];
+    const agreed =
+      partnerPlane !== undefined &&
+      Number.isFinite(partnerPlane) &&
+      partnerPlanes.every((plane) => plane === partnerPlane);
+    if (agreed) {
+      const delta = Math.max(0, partnerPlane - floorState.activePlaneM);
+      const collection = contextIndoorFeatures(venue, contextOrdinals);
+      data = {
+        type: "FeatureCollection",
+        features: collection.features.map((feature) => ({
+          ...feature,
+          properties: {
+            ...feature.properties,
+            __extrude_base: delta,
+            __extrude_height: delta + 0.05,
+          },
+        })),
+      };
+    }
+  }
+  const existing = map.getSource(INDOOR_CONTEXT_SOURCE_ID) as GeoJSONSource | undefined;
+  if (existing === undefined) {
+    if (data.features.length === 0) {
+      return;
+    }
+    map.addSource(INDOOR_CONTEXT_SOURCE_ID, { type: "geojson", data });
+    if (map.getLayer(LAYER_INDOOR_CONTEXT_EXTRUSION) == null) {
+      map.addLayer({
+        id: LAYER_INDOOR_CONTEXT_EXTRUSION,
+        type: "fill-extrusion",
+        source: INDOOR_CONTEXT_SOURCE_ID,
+        filter: [
+          "any",
+          ["==", ["geometry-type"], "Polygon"],
+          ["==", ["geometry-type"], "MultiPolygon"],
+        ],
+        paint: {
+          "fill-extrusion-color": ["coalesce", ["get", "__unit_color"], walkwayColor],
+          "fill-extrusion-opacity": CONTEXT_LEVEL_OPACITY,
+          "fill-extrusion-base": ["coalesce", ["get", "__extrude_base"], 0],
+          "fill-extrusion-height": ["coalesce", ["get", "__extrude_height"], 0.05],
+        },
+      });
+    }
+    return;
+  }
+  existing.setData(data);
+}
+
 function applyLayerVisibility(
   map: MapLibreMap,
   visibility: LayerVisibility,
@@ -1052,6 +1123,8 @@ export function IndoorMap({
   directionsRef.current = directions;
   networkRef.current = network;
   sceneRef.current = scene;
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
   const facilitiesRef = useRef(facilities);
   const onSelectFacilityRef = useRef(onSelectFacility);
   facilitiesRef.current = facilities;
@@ -1079,7 +1152,10 @@ export function IndoorMap({
               partnerOrdinalRef.current,
             );
       desiredSceneFloorStateRef.current = floorState;
-      if (currentScene !== null) {
+      if (currentScene === null) {
+        sceneLayerRef.current?.setContextGraph([]);
+        syncContextIndoorOverlay(map, currentVenue, null, floorState, [], themeRef.current.colors.walkway);
+      } else if (currentScene !== null) {
         // The edges on screen follow the floors on screen: same state, same
         // moment, so a connector can never outlive the floor it explains.
         sceneLayerRef.current?.setConnectors(
@@ -1089,6 +1165,26 @@ export function IndoorMap({
             linksRef.current,
             shownOrdinalsOf(currentScene, currentVenue, floorState),
           ),
+        );
+        const activeOrdinal = ordinalOfLevel(currentVenue.levels, currentLevelId);
+        const contextOrdinals = shownOrdinalsOf(currentScene, currentVenue, floorState).filter(
+          (ordinal) => ordinal !== activeOrdinal,
+        );
+        sceneLayerRef.current?.setContextGraph(
+          contextGraphConnectors(
+            networkRef.current ?? null,
+            currentScene,
+            currentVenue,
+            contextOrdinals,
+          ),
+        );
+        syncContextIndoorOverlay(
+          map,
+          currentVenue,
+          currentScene,
+          floorState,
+          contextOrdinals,
+          themeRef.current.colors.walkway,
         );
         sceneLayerRef.current?.setSelectedConnection(
           verticalConnectionsRef.current?.selected ?? null,

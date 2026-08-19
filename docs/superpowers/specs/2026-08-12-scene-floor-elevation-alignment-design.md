@@ -73,11 +73,13 @@ The second floor:
   progress, or map terrain;
 - is limited to the registered scene levels mapped to that one canonical floor.
 
-The MapLibre plan, facility, route, network, and edit-hit layers remain active-
-floor overlays on the active terrain plane. They are not duplicated onto the
-context floor. Generated scene conveyance geometry supplies the spatial bridge
-between the two visible floor plates; a future graph-repair cockpit can add its
-own 3D diagnostic overlay without changing this floor-visibility contract.
+The MapLibre plan, facility, route, and edit-hit layers remain active-floor
+overlays on the active terrain plane. The **context floor** additionally receives
+a translucent, non-pickable indoor fill-extrusion overlay and same-floor network
+ribbons in the scene layer, both at the partner `resolvedPlaneZ` (2026-08-19).
+They exist so a selected vertical connection can be checked against the partner
+plan and graph. Terrain stays on the active floor. Facilities and issue pins are
+not duplicated.
 
 A normal floor transition still uses the existing 160 ms all-floor handoff. When
 that handoff settles, route context returns to exactly the active/context pair.

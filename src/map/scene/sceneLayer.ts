@@ -48,6 +48,7 @@ import {
   CONNECTOR_COLOR,
   CONNECTOR_SELECTED_WIDTH_PX,
   CONNECTOR_WIDTH_PX,
+  CONTEXT_LEVEL_OPACITY,
   ROLE_COLORS,
   ROLE_DEPTH_BIAS,
   ROLE_PAINT_ORDER,
@@ -516,6 +517,8 @@ export class SceneLayer implements CustomLayerInterface {
     ids: WebGLBuffer;
   } | null = null;
   private _connectorInputs: readonly ConnectorInput[] = [];
+  private _contextGraphInputs: readonly ConnectorInput[] = [];
+  private _verticalConnectorCount = 0;
   private _connectorMesh: ConnectorMesh | null = null;
   /** Selected connector index shifted by one; `0` means none. */
   private _selectedConnector = 0;
@@ -773,13 +776,17 @@ export class SceneLayer implements CustomLayerInterface {
       if (idPixel[3] === PICK_ALPHA_CONNECTOR) {
         // A connector belongs to no single floor, so it answers with the
         // connection the editor selects by rather than a scene feature.
-        return this._connectorMesh?.connectionIds[featureIndex] === undefined
-          ? null
-          : {
-              kind: "connector",
-              connectorIndex: featureIndex,
-              localPoint: [localPixel[0] ?? 0, localPixel[1] ?? 0, localPixel[2] ?? 0],
-            };
+        if (
+          featureIndex >= this._verticalConnectorCount ||
+          this._connectorMesh?.connectionIds[featureIndex] === undefined
+        ) {
+          return null;
+        }
+        return {
+          kind: "connector",
+          connectorIndex: featureIndex,
+          localPoint: [localPixel[0] ?? 0, localPixel[1] ?? 0, localPixel[2] ?? 0],
+        };
       }
       const feature = this._scene.features[featureIndex];
       if (feature === undefined) {
@@ -1019,6 +1026,19 @@ export class SceneLayer implements CustomLayerInterface {
     this._map?.triggerRepaint();
   }
 
+  /**
+   * Same-floor network paths on the context floor. Drawn as translucent
+   * ribbons on that floor's plane; they are not pickable.
+   */
+  setContextGraph(connectors: readonly ConnectorInput[]): void {
+    this._contextGraphInputs = connectors;
+    const gl = this._gl;
+    if (gl !== null && !this._contextLost) {
+      this._uploadConnectors(gl);
+    }
+    this._map?.triggerRepaint();
+  }
+
   /** Emphasise one connection, or none. Unknown ids clear the emphasis. */
   setSelectedConnection(connectionId: NetworkConnectionId | null): void {
     const index =
@@ -1118,10 +1138,14 @@ export class SceneLayer implements CustomLayerInterface {
     }
     const localOf = (endpoint: ConnectorEndpoint): readonly [number, number, number] =>
       this.localFromLngLat(endpoint.lng, endpoint.lat, endpoint.levelIndex);
-    const mesh = buildConnectorMesh(this._connectorInputs, localOf);
-    if (mesh.connectionIds.length >= MAX_PICKABLE_FEATURES) {
+    const mesh = buildConnectorMesh(
+      [...this._connectorInputs, ...this._contextGraphInputs],
+      localOf,
+    );
+    if (this._connectorInputs.length >= MAX_PICKABLE_FEATURES) {
       throw new Error("scene: more cross-floor connectors than the pick codec can address");
     }
+    this._verticalConnectorCount = this._connectorInputs.length;
     this._connectorMesh = mesh;
     gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position);
     gl.bufferData(gl.ARRAY_BUFFER, mesh.position, gl.DYNAMIC_DRAW);
@@ -1208,10 +1232,19 @@ export class SceneLayer implements CustomLayerInterface {
       INTERACTION_COLOR[1],
       INTERACTION_COLOR[2],
     );
-    gl.uniform1f(uniforms.opacity, 1);
     gl.polygonOffset(0, 0);
     gl.bindVertexArray(buffers.vao);
-    gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
+    const verticesPerConnector = 6;
+    const verticalVertices = this._verticalConnectorCount * verticesPerConnector;
+    gl.uniform1f(uniforms.opacity, 1);
+    if (verticalVertices > 0) {
+      gl.drawArrays(gl.TRIANGLES, 0, verticalVertices);
+    }
+    const contextVertices = mesh.vertexCount - verticalVertices;
+    if (contextVertices > 0) {
+      gl.uniform1f(uniforms.opacity, CONTEXT_LEVEL_OPACITY);
+      gl.drawArrays(gl.TRIANGLES, verticalVertices, contextVertices);
+    }
     gl.bindVertexArray(null);
     return 1;
   }
@@ -1244,7 +1277,10 @@ export class SceneLayer implements CustomLayerInterface {
     gl.uniform1ui(uniforms.selected, this._selectedConnector);
     gl.polygonOffset(0, 0);
     gl.bindVertexArray(buffers.vao);
-    gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
+    const verticalVertices = this._verticalConnectorCount * 6;
+    if (verticalVertices > 0) {
+      gl.drawArrays(gl.TRIANGLES, 0, verticalVertices);
+    }
     gl.bindVertexArray(null);
   }
 

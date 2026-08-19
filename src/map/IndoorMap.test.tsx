@@ -16,6 +16,7 @@ import {
   NETWORK_SOURCE_ID,
   ROUTE_SOURCE_ID,
 } from "./featureLayers";
+import { INDOOR_CONTEXT_SOURCE_ID } from "./scene/contextOverlay";
 import { defaultLayerVisibility } from "./layerGroups";
 import { buildIndoorSourceDiff, IndoorMap, type IndoorMapProps } from "./IndoorMap";
 import type { MapIssuePin } from "./useIssuePins";
@@ -101,6 +102,7 @@ const mapState = vi.hoisted(() => {
     readonly routeSourceData: unknown[] = [];
     readonly facilitySourceData: unknown[] = [];
     readonly networkSourceData: unknown[] = [];
+    readonly contextIndoorSourceData: unknown[] = [];
     readonly floorTileUrls: string[][] = [];
     readonly initialFloorStyleTiles: string[];
     readonly floorSourceOperations: Array<
@@ -211,6 +213,10 @@ const mapState = vi.hoisted(() => {
       return {
         type: "geojson",
         setData: (data: unknown) => {
+          if (id === INDOOR_CONTEXT_SOURCE_ID) {
+            this.contextIndoorSourceData.push(data);
+            return;
+          }
           const bucket =
             id === ROUTE_SOURCE_ID
               ? this.routeSourceData
@@ -2103,6 +2109,48 @@ describe("IndoorMap scene floor elevation", () => {
       source: FLOOR_ELEVATION_SOURCE_ID,
       exaggeration: 1,
     });
+  });
+
+  it("writes partner-floor indoor features when a cross-floor route is retained", () => {
+    const venue = baseVenue();
+    venue.renderFeaturesByLevel = new Map([
+      [
+        "level-2",
+        {
+          type: "FeatureCollection",
+          features: [
+            {
+              type: "Feature",
+              id: "partner-unit",
+              properties: { __feature_id: "partner-unit" },
+              geometry: {
+                type: "Polygon",
+                coordinates: [
+                  [
+                    [139.7, 35.6],
+                    [139.71, 35.6],
+                    [139.71, 35.61],
+                    [139.7, 35.61],
+                    [139.7, 35.6],
+                  ],
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    ]);
+    const { map } = renderMap(
+      baseProps({
+        venue,
+        scene,
+        levelId: "level-1",
+        directions: crossFloorDirections(CROSS_FLOOR_ROUTE),
+      }),
+    );
+    const last = map.contextIndoorSourceData.at(-1) as GeoJSON.FeatureCollection | undefined;
+    expect(last?.type).toBe("FeatureCollection");
+    expect((last?.features.length ?? 0) > 0).toBe(true);
   });
 
   it("hides 2D unit fills while generated 3D is attached", () => {
