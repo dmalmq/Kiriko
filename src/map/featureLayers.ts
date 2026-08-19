@@ -1,6 +1,7 @@
 import type {
   CircleLayerSpecification,
   ExpressionSpecification,
+  FillExtrusionLayerSpecification,
   FillLayerSpecification,
   FilterSpecification,
   LineLayerSpecification,
@@ -53,7 +54,7 @@ export const LAYER_SELECTED_OUTLINE = "indoor-selected-outline";
 export const LAYER_ISSUE_HIGHLIGHT_OUTLINE = "indoor-issue-highlight-outline";
 export const LAYER_ISSUE_HIGHLIGHT_POINT = "indoor-issue-highlight-point";
 
-/** Unit/fixture fills that z-fight generated slabs when draped on the floor DEM. */
+/** Unit/fixture fills hidden in 3D; most reappear as lifted pancake extrusions. */
 export const INDOOR_FILL_LAYER_IDS = [
   LAYER_CONTEXT_FILL,
   LAYER_SELECTABLE_CONTEXT_FILL,
@@ -68,6 +69,21 @@ export const INDOOR_FILL_LAYER_IDS = [
   LAYER_FIXTURE_FILL,
   LAYER_KIOSK_FILL,
 ] as const;
+
+/** Centimetres above the DEM-draped slab — enough to stop z-fighting, not a step. */
+export const LIFTED_FILL_EXTRUDE_BASE_M = 0.04;
+export const LIFTED_FILL_EXTRUDE_HEIGHT_M = 0.09;
+
+export function liftedFillLayerId(fillLayerId: string): string {
+  return `${fillLayerId}-lifted`;
+}
+
+/** Draped fills that become pancake extrusions in 3D. Selectable context stays 2D-only. */
+export const INDOOR_LIFTED_FILL_SOURCE_IDS = INDOOR_FILL_LAYER_IDS.filter(
+  (id) => id !== LAYER_SELECTABLE_CONTEXT_FILL,
+);
+
+export const INDOOR_LIFTED_FILL_LAYER_IDS = INDOOR_LIFTED_FILL_SOURCE_IDS.map(liftedFillLayerId);
 
 /** Separate GeoJSON source for the directions overlay (route + endpoints). */
 export const ROUTE_SOURCE_ID = "indoor-route";
@@ -165,9 +181,36 @@ const restroomPrefix: ExpressionSpecification = [
 
 type AnyLayer =
   | FillLayerSpecification
+  | FillExtrusionLayerSpecification
   | LineLayerSpecification
   | CircleLayerSpecification
   | SymbolLayerSpecification;
+
+function asLiftedFillExtrusion(fill: FillLayerSpecification): FillExtrusionLayerSpecification {
+  const paint = fill.paint ?? {};
+  const color = paint["fill-color"];
+  const filter = fill.filter;
+  if (color === undefined) {
+    throw new Error(`missing fill-color on ${fill.id}`);
+  }
+  if (filter === undefined) {
+    throw new Error(`missing filter on ${fill.id}`);
+  }
+  const opacity = paint["fill-opacity"];
+  return {
+    id: liftedFillLayerId(fill.id),
+    type: "fill-extrusion",
+    source: INDOOR_SOURCE_ID,
+    filter,
+    layout: { visibility: "none" },
+    paint: {
+      "fill-extrusion-color": color,
+      "fill-extrusion-opacity": typeof opacity === "number" ? opacity : 1,
+      "fill-extrusion-base": LIFTED_FILL_EXTRUDE_BASE_M,
+      "fill-extrusion-height": LIFTED_FILL_EXTRUDE_HEIGHT_M,
+    },
+  };
+}
 
 /**
  * Fixed layer order (plan §3):
@@ -621,7 +664,14 @@ export function buildFeatureLayers(theme: ViewerTheme): AnyLayer[] {
     },
   ];
 
-  return layers;
+  const fillIds: readonly string[] = INDOOR_LIFTED_FILL_SOURCE_IDS;
+  const lifted = layers.flatMap((layer) => {
+    if (layer.type !== "fill" || !fillIds.includes(layer.id)) {
+      return [];
+    }
+    return [asLiftedFillExtrusion(layer)];
+  });
+  return [...layers, ...lifted];
 }
 
 /**
@@ -926,30 +976,36 @@ export function applyThemePaintProperties(
   theme: ViewerTheme,
 ): void {
   const c = theme.colors;
+  const paintFill = (layerId: string, color: unknown): void => {
+    setPaintProperty(layerId, "fill-color", color);
+    if ((INDOOR_LIFTED_FILL_SOURCE_IDS as readonly string[]).includes(layerId)) {
+      setPaintProperty(liftedFillLayerId(layerId), "fill-extrusion-color", color);
+    }
+  };
 
-  setPaintProperty(LAYER_CONTEXT_FILL, "fill-color", c.unit);
+  paintFill(LAYER_CONTEXT_FILL, c.unit);
   setPaintProperty(LAYER_CONTEXT_OUTLINE, "line-color", c.unitOutline);
 
-  setPaintProperty(LAYER_WALKWAY_FILL, "fill-color", unitFillColor(c.walkway));
+  paintFill(LAYER_WALKWAY_FILL, unitFillColor(c.walkway));
   setPaintProperty(LAYER_WALKWAY_OUTLINE, "line-color", c.unitOutline);
-  setPaintProperty(LAYER_ROOM_FILL, "fill-color", unitFillColor(c.unit));
+  paintFill(LAYER_ROOM_FILL, unitFillColor(c.unit));
   setPaintProperty(LAYER_ROOM_OUTLINE, "line-color", c.unitOutline);
-  setPaintProperty(LAYER_UNENCLOSED_FILL, "fill-color", unitFillColor(c.unitUnenclosed));
+  paintFill(LAYER_UNENCLOSED_FILL, unitFillColor(c.unitUnenclosed));
   setPaintProperty(LAYER_UNENCLOSED_OUTLINE, "line-color", c.unitOutline);
-  setPaintProperty(LAYER_TRANSIT_FILL, "fill-color", unitFillColor(c.unitTransit));
+  paintFill(LAYER_TRANSIT_FILL, unitFillColor(c.unitTransit));
   setPaintProperty(LAYER_TRANSIT_OUTLINE, "line-color", c.unitOutline);
-  setPaintProperty(LAYER_RESTROOM_FILL, "fill-color", unitFillColor(c.unitRestroom));
+  paintFill(LAYER_RESTROOM_FILL, unitFillColor(c.unitRestroom));
   setPaintProperty(LAYER_RESTROOM_OUTLINE, "line-color", c.unitOutline);
-  setPaintProperty(LAYER_NONPUBLIC_FILL, "fill-color", unitFillColor(c.unitNonPublic));
+  paintFill(LAYER_NONPUBLIC_FILL, unitFillColor(c.unitNonPublic));
   setPaintProperty(LAYER_NONPUBLIC_OUTLINE, "line-color", c.unitOutline);
 
-  setPaintProperty(LAYER_STRUCTURE_FILL, "fill-color", unitFillColor(c.unit));
+  paintFill(LAYER_STRUCTURE_FILL, unitFillColor(c.unit));
   setPaintProperty(LAYER_STRUCTURE_OUTLINE, "line-color", c.unitOutline);
-  setPaintProperty(LAYER_RESTRICTED_FILL, "fill-color", c.restricted);
+  paintFill(LAYER_RESTRICTED_FILL, c.restricted);
   setPaintProperty(LAYER_RESTRICTED_OUTLINE, "line-color", c.unitOutline);
-  setPaintProperty(LAYER_FIXTURE_FILL, "fill-color", c.unitOutline);
+  paintFill(LAYER_FIXTURE_FILL, c.unitOutline);
   setPaintProperty(LAYER_FIXTURE_OUTLINE, "line-color", c.muted);
-  setPaintProperty(LAYER_KIOSK_FILL, "fill-color", c.accentSoft);
+  paintFill(LAYER_KIOSK_FILL, c.accentSoft);
   setPaintProperty(LAYER_KIOSK_OUTLINE, "line-color", c.accent);
   setPaintProperty(LAYER_DETAIL_LINE, "line-color", c.muted);
 
@@ -962,7 +1018,7 @@ export function applyThemePaintProperties(
 
   setPaintProperty(LAYER_HOVER_OUTLINE, "line-color", c.accent);
   setPaintProperty(LAYER_SELECTED_OUTLINE, "line-color", c.selected);
-  setPaintProperty(LAYER_SELECTABLE_CONTEXT_FILL, "fill-color", c.selected);
+  paintFill(LAYER_SELECTABLE_CONTEXT_FILL, c.selected);
   setPaintProperty(LAYER_ISSUE_HIGHLIGHT_OUTLINE, "line-color", c.warning);
   setPaintProperty(LAYER_ISSUE_HIGHLIGHT_POINT, "circle-color", c.warning);
   setPaintProperty(LAYER_ISSUE_HIGHLIGHT_POINT, "circle-stroke-color", c.warning);

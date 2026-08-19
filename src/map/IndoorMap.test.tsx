@@ -13,6 +13,8 @@ import {
   LAYER_ROOM_FILL,
   LAYER_WALKWAY_FILL,
   LAYER_WALKWAY_OUTLINE,
+  INDOOR_FILL_LAYER_IDS,
+  liftedFillLayerId,
   NETWORK_SOURCE_ID,
   ROUTE_SOURCE_ID,
 } from "./featureLayers";
@@ -113,6 +115,7 @@ const mapState = vi.hoisted(() => {
       exaggeration: number;
     } | null> = [];
     readonly customLayers = new Map<string, { id: string }>();
+    readonly addLayerCalls: Array<{ id: string; beforeId?: string }> = [];
     queryResult: Array<{ properties: Record<string, unknown> }> = [];
     queryByLayer: Record<string, Array<{ properties: Record<string, unknown> }>> = {};
     styleLoaded = initialStyleLoaded;
@@ -337,8 +340,13 @@ const mapState = vi.hoisted(() => {
       return this.customLayers.get(id) ?? (id === "kiriko-scene" ? undefined : {});
     }
 
-    addLayer(layer: { id: string }): void {
+    addLayer(layer: { id: string }, beforeId?: string): void {
       this.customLayers.set(layer.id, layer);
+      if (beforeId === undefined) {
+        this.addLayerCalls.push({ id: layer.id });
+      } else {
+        this.addLayerCalls.push({ id: layer.id, beforeId });
+      }
     }
 
     removeLayer(id: string): void {
@@ -2153,17 +2161,49 @@ describe("IndoorMap scene floor elevation", () => {
     expect((last?.features.length ?? 0) > 0).toBe(true);
   });
 
-  it("hides 2D unit fills while generated 3D is attached", () => {
+  it("lifts 2D unit fills above the generated slab while 3D is attached", () => {
     const { map, rerender } = renderMap(baseProps({ scene: null }));
     expect(map.layoutProperties.get(LAYER_WALKWAY_FILL)?.visibility).not.toBe("none");
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_WALKWAY_FILL))?.visibility).not.toBe(
+      "visible",
+    );
 
     rerender(baseProps({ scene, levelId: "level-1" }));
     expect(map.layoutProperties.get(LAYER_WALKWAY_FILL)?.visibility).toBe("none");
     expect(map.layoutProperties.get(LAYER_ROOM_FILL)?.visibility).toBe("none");
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_WALKWAY_FILL))?.visibility).toBe(
+      "visible",
+    );
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_ROOM_FILL))?.visibility).toBe(
+      "visible",
+    );
     expect(map.layoutProperties.get(LAYER_WALKWAY_OUTLINE)?.visibility).not.toBe("none");
 
     rerender(baseProps({ scene: null }));
     expect(map.layoutProperties.get(LAYER_WALKWAY_FILL)?.visibility).toBe("visible");
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_WALKWAY_FILL))?.visibility).toBe(
+      "none",
+    );
+  });
+
+  it("inserts the scene under the lifted fills so the pancakes composite on top", () => {
+    const { map } = renderMap(baseProps({ scene, levelId: "level-1" }));
+    const sceneCall = map.addLayerCalls.find((call) => call.id === "kiriko-scene");
+    expect(sceneCall?.beforeId).toBe(liftedFillLayerId(INDOOR_FILL_LAYER_IDS[0]));
+  });
+
+  it("hides lifted unit fills when the units group is off in 3D", () => {
+    const { map } = renderMap(
+      baseProps({
+        scene,
+        levelId: "level-1",
+        layerVisibility: { ...defaultLayerVisibility, labels: false, units: false },
+      }),
+    );
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_WALKWAY_FILL))?.visibility).toBe(
+      "visible",
+    );
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_ROOM_FILL))?.visibility).toBe("none");
   });
 
   it("attaches terrain at the active scene plane and swaps floors in place", () => {

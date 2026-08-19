@@ -26,7 +26,7 @@ Isolated ports so this can sit next to `./dev.sh` (`:5173` + `:8790`) without sh
 node .cursor/skills/verify-kiriko/scripts/control-kiriko.mjs launch
 ```
 
-Leave this process running. It prints `Driveable at http://127.0.0.1:14173` when both ports answer, then holds the Vite **preview** + Fastify tree. Background it in the agent shell and wait for that line. First launch may run `pnpm core:build` and `vite build` (the preview server is the Playwright e2e shape: static `dist/`, no HMR). If you changed frontend files since `dist/` was built, stop the instance, set `KIRIKO_VERIFY_REBUILD=1`, and launch again — otherwise you will prove a stale bundle.
+Leave this process running. It prints `Driveable at http://127.0.0.1:14173` when both ports answer, then holds the Vite **preview** + Fastify tree. Background it in the agent shell and wait for that line. First launch may run `pnpm core:build` and `vite build` (the preview server is the Playwright e2e shape: static `dist/`, no HMR). Launch also rebuilds native/wasm when those artifacts are missing **or** older than `core/` sources. If you changed frontend or Rust since the last verify stack was built, stop the instance, set `KIRIKO_VERIFY_REBUILD=1`, and launch again — that flag rebuilds both `pnpm core:build` and the Vite bundle. Otherwise you will prove a stale stack.
 
 Override ports with `KIRIKO_VERIFY_FRONTEND_PORT` and `KIRIKO_VERIFY_BACKEND_PORT` only when 14173/18790 are taken by something that is **not** this instance. Vite's repo config hardcodes the 8790 proxy; the helper writes `.kiriko-verify/run/vite.config.mjs` so verify traffic never hits the developer backend, and so Vite does not watch `.kiriko-verify` (log writes would otherwise stall the dev server).
 

@@ -40,6 +40,9 @@ import {
   CLICKABLE_LAYER_IDS,
   FACILITY_SOURCE_ID,
   INDOOR_FILL_LAYER_IDS,
+  INDOOR_LIFTED_FILL_LAYER_IDS,
+  INDOOR_LIFTED_FILL_SOURCE_IDS,
+  liftedFillLayerId,
   CONVEYANCE_CATEGORIES,
   LAYER_FACILITY_SYMBOL,
   LAYER_NETWORK_CONVEYANCE_HIT,
@@ -979,10 +982,19 @@ function syncContextIndoorOverlay(
   existing.setData(data);
 }
 
+function fillGroupVisible(visibility: LayerVisibility, fillId: string): boolean {
+  for (const [group, layerIds] of Object.entries(LAYER_GROUP_IDS)) {
+    if (layerIds.includes(fillId)) {
+      return visibility[group as keyof LayerVisibility];
+    }
+  }
+  return true;
+}
+
 function applyLayerVisibility(
   map: MapLibreMap,
   visibility: LayerVisibility,
-  hideFills: boolean,
+  liftFills: boolean,
 ): void {
   for (const [group, layerIds] of Object.entries(LAYER_GROUP_IDS)) {
     const visible = visibility[group as keyof LayerVisibility];
@@ -992,19 +1004,33 @@ function applyLayerVisibility(
       }
     }
   }
-  for (const layerId of INDOOR_FILL_LAYER_IDS) {
-    if (map.getLayer(layerId) == null) {
+  for (const fillId of INDOOR_FILL_LAYER_IDS) {
+    if (map.getLayer(fillId) != null) {
+      if (liftFills) {
+        map.setLayoutProperty(fillId, "visibility", "none");
+      } else {
+        // Walkway / context fills are not in a toggle group — they stay on in 2D.
+        const grouped = Object.values(LAYER_GROUP_IDS).some((ids) => ids.includes(fillId));
+        if (!grouped) {
+          map.setLayoutProperty(fillId, "visibility", "visible");
+        }
+      }
+    }
+  }
+  for (const fillId of INDOOR_LIFTED_FILL_SOURCE_IDS) {
+    const liftedId = liftedFillLayerId(fillId);
+    if (map.getLayer(liftedId) == null) {
       continue;
     }
-    if (hideFills) {
-      map.setLayoutProperty(layerId, "visibility", "none");
+    if (!liftFills) {
+      map.setLayoutProperty(liftedId, "visibility", "none");
       continue;
     }
-    // Walkway / context fills are not in a toggle group — they stay on in 2D.
-    const grouped = Object.values(LAYER_GROUP_IDS).some((ids) => ids.includes(layerId));
-    if (!grouped) {
-      map.setLayoutProperty(layerId, "visibility", "visible");
-    }
+    map.setLayoutProperty(
+      liftedId,
+      "visibility",
+      fillGroupVisible(visibility, fillId) ? "visible" : "none",
+    );
   }
 }
 
@@ -2217,7 +2243,10 @@ export function IndoorMap({
         } else {
           layer.setActiveLevels([]);
         }
-        map.addLayer(layer);
+        map.addLayer(
+          layer,
+          INDOOR_LIFTED_FILL_LAYER_IDS.find((id) => map.getLayer(id) != null),
+        );
         // A 3D scene needs a camera that can look at it (#23 D7); MapLibre
         // keeps owning the camera, this only lifts the 2D constraints.
         map.setMaxPitch(SCENE_MAX_PITCH);

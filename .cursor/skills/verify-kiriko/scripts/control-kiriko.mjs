@@ -16,7 +16,6 @@ import {
   existsSync,
   mkdirSync,
   openSync,
-  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -24,6 +23,7 @@ import {
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { coreBuildReason } from "./coreBuildNeeded.mjs";
 
 const FRONTEND_PORT = Number(process.env.KIRIKO_VERIFY_FRONTEND_PORT ?? 14173);
 const BACKEND_PORT = Number(process.env.KIRIKO_VERIFY_BACKEND_PORT ?? 18790);
@@ -43,9 +43,6 @@ const INSTANCE_PATH = path.join(RUN_DIR, "instance.json");
 const VITE_CONFIG_PATH = path.join(RUN_DIR, "vite.config.mjs");
 const BACKEND_LOG = path.join(RUN_DIR, "backend.log");
 const FRONTEND_LOG = path.join(RUN_DIR, "frontend.log");
-
-const NODE_ADDON_DIR = path.join(REPO_ROOT, "core/crates/kiriko-node");
-const WASM_PKG = path.join(REPO_ROOT, "core/crates/kiriko-wasm/pkg/package.json");
 
 const command = process.argv[2] ?? "help";
 
@@ -119,15 +116,6 @@ async function fetchJson(url, init, ms = 8_000) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function listNodeAddons() {
-  if (!existsSync(NODE_ADDON_DIR)) return [];
-  return readdirSync(NODE_ADDON_DIR).filter((name) => name.endsWith(".node"));
-}
-
-function needsCoreBuild() {
-  return !existsSync(WASM_PKG) || listNodeAddons().length === 0;
 }
 
 function runPnpm(args, options = {}) {
@@ -384,14 +372,16 @@ async function cmdLaunch() {
   writeFileSync(BACKEND_LOG, "");
   writeFileSync(FRONTEND_LOG, "");
 
-  if (needsCoreBuild()) {
-    console.log("Native/wasm artifacts missing; running pnpm core:build (can take several minutes).");
+  const forceRebuild = process.env.KIRIKO_VERIFY_REBUILD === "1";
+  const coreReason = coreBuildReason(REPO_ROOT, { force: forceRebuild });
+  if (coreReason != null) {
+    console.log(`${coreReason}; running pnpm core:build (can take several minutes).`);
     runPnpm(["core:build"]);
   }
 
   const distHtml = path.join(REPO_ROOT, "dist/index.html");
-  const rebuild = process.env.KIRIKO_VERIFY_REBUILD === "1" || !existsSync(distHtml);
-  if (rebuild) {
+  const rebuildFrontend = forceRebuild || !existsSync(distHtml);
+  if (rebuildFrontend) {
     console.log(
       existsSync(distHtml)
         ? "KIRIKO_VERIFY_REBUILD=1; running vite build."
