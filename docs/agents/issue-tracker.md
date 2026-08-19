@@ -3,10 +3,10 @@
 Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
 **This repo has two git remotes.** `origin` is the tracker
-(`git@github.com:dmalmq/imdf-map-application.git`); `no-mistakes` points at a
+(`git@github.com:dmalmq/Kiriko.git`); `no-mistakes` points at a
 local bare repo and is a tooling artifact. `gh` resolves `origin` by default when
 run inside the clone, which is correct — but if you ever pass an explicit repo,
-use `dmalmq/imdf-map-application`, never the `no-mistakes` path.
+use `dmalmq/Kiriko`, never the `no-mistakes` path.
 
 ## Conventions
 
