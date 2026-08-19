@@ -2,7 +2,7 @@
 
 Date: 2026-08-03  
 Status: chosen, pending spike gates (section 12)  
-Issue: [#23 — Choose the 3D rendering architecture](https://github.com/dmalmq/imdf-map-application/issues/23)
+Issue: [#23 — Choose the 3D rendering architecture](https://github.com/dmalmq/Kiriko/issues/23)
 
 ## 1. Decision
 

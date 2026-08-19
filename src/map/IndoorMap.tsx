@@ -34,12 +34,16 @@ import type { FacilityDto, RouteEndpoint, RouteResultDto } from "../bundle/wasm"
 import type { LocaleCode, LoadedVenue } from "../imdf/types";
 import type { ViewerTheme } from "../theme/types";
 import { buildIndoorStyle, INDOOR_SOURCE_ID } from "./buildIndoorStyle";
+import { boxSelectRect, type BoxSelectRect } from "./boxSelectRect";
 import { buildRenderFeatures } from "./buildRenderFeatures";
 import {
   applyThemePaintProperties,
   CLICKABLE_LAYER_IDS,
   FACILITY_SOURCE_ID,
   INDOOR_FILL_LAYER_IDS,
+  INDOOR_LIFTED_FILL_LAYER_IDS,
+  INDOOR_LIFTED_FILL_SOURCE_IDS,
+  liftedFillLayerId,
   CONVEYANCE_CATEGORIES,
   LAYER_FACILITY_SYMBOL,
   LAYER_NETWORK_CONVEYANCE_HIT,
@@ -979,10 +983,19 @@ function syncContextIndoorOverlay(
   existing.setData(data);
 }
 
+function fillGroupVisible(visibility: LayerVisibility, fillId: string): boolean {
+  for (const [group, layerIds] of Object.entries(LAYER_GROUP_IDS)) {
+    if (layerIds.includes(fillId)) {
+      return visibility[group as keyof LayerVisibility];
+    }
+  }
+  return true;
+}
+
 function applyLayerVisibility(
   map: MapLibreMap,
   visibility: LayerVisibility,
-  hideFills: boolean,
+  liftFills: boolean,
 ): void {
   for (const [group, layerIds] of Object.entries(LAYER_GROUP_IDS)) {
     const visible = visibility[group as keyof LayerVisibility];
@@ -992,19 +1005,33 @@ function applyLayerVisibility(
       }
     }
   }
-  for (const layerId of INDOOR_FILL_LAYER_IDS) {
-    if (map.getLayer(layerId) == null) {
+  for (const fillId of INDOOR_FILL_LAYER_IDS) {
+    if (map.getLayer(fillId) != null) {
+      if (liftFills) {
+        map.setLayoutProperty(fillId, "visibility", "none");
+      } else {
+        // Walkway / context fills are not in a toggle group — they stay on in 2D.
+        const grouped = Object.values(LAYER_GROUP_IDS).some((ids) => ids.includes(fillId));
+        if (!grouped) {
+          map.setLayoutProperty(fillId, "visibility", "visible");
+        }
+      }
+    }
+  }
+  for (const fillId of INDOOR_LIFTED_FILL_SOURCE_IDS) {
+    const liftedId = liftedFillLayerId(fillId);
+    if (map.getLayer(liftedId) == null) {
       continue;
     }
-    if (hideFills) {
-      map.setLayoutProperty(layerId, "visibility", "none");
+    if (!liftFills) {
+      map.setLayoutProperty(liftedId, "visibility", "none");
       continue;
     }
-    // Walkway / context fills are not in a toggle group — they stay on in 2D.
-    const grouped = Object.values(LAYER_GROUP_IDS).some((ids) => ids.includes(layerId));
-    if (!grouped) {
-      map.setLayoutProperty(layerId, "visibility", "visible");
-    }
+    map.setLayoutProperty(
+      liftedId,
+      "visibility",
+      fillGroupVisible(visibility, fillId) ? "visible" : "none",
+    );
   }
 }
 
@@ -1075,6 +1102,7 @@ export function IndoorMap({
   const networkEditingRef = useRef(networkEditing);
   const boxDragStartRef = useRef<Point | null>(null);
   const boxSelectConsumedClickRef = useRef(false);
+  const [boxSelectPreview, setBoxSelectPreview] = useState<BoxSelectRect | null>(null);
   const routeSourceActiveRef = useRef(directions?.active === true);
   const networkSourceActiveRef = useRef(network != null || networkEditing != null);
   const facilitySourceActiveRef = useRef(facilities.length > 0);
@@ -1653,6 +1681,9 @@ export function IndoorMap({
       const editing = networkEditingRef.current;
       if (editing != null) {
         updateNetworkCursor(map, event.point, editing.tool);
+        if (editing.tool === "select" && boxDragStartRef.current != null) {
+          setBoxSelectPreview(boxSelectRect(boxDragStartRef.current, event.point));
+        }
         return;
       }
       const sceneLayer = sceneLayerRef.current;
@@ -1752,6 +1783,8 @@ export function IndoorMap({
         hoverIdRef.current = null;
       }
       map.getCanvas().style.cursor = "";
+      boxDragStartRef.current = null;
+      setBoxSelectPreview(null);
     };
 
     const onLoad = (): void => {
@@ -1801,6 +1834,7 @@ export function IndoorMap({
     const onMouseDown = (event: MapMouseEvent): void => {
       // A new gesture owns the pointer; do not let a prior box swallow its click.
       boxSelectConsumedClickRef.current = false;
+      setBoxSelectPreview(null);
       const editing = networkEditingRef.current;
       if (editing == null || editing.tool !== "select") {
         boxDragStartRef.current = null;
@@ -1812,13 +1846,12 @@ export function IndoorMap({
     const onMouseUp = (event: MapMouseEvent): void => {
       const start = boxDragStartRef.current;
       boxDragStartRef.current = null;
+      setBoxSelectPreview(null);
       const editing = networkEditingRef.current;
       if (start == null || editing == null || editing.tool !== "select") {
         return;
       }
-      const dx = event.point.x - start.x;
-      const dy = event.point.y - start.y;
-      if (Math.hypot(dx, dy) < 4) {
+      if (boxSelectRect(start, event.point) == null) {
         return;
       }
       const a = map.unproject(start);
@@ -2119,6 +2152,8 @@ export function IndoorMap({
       map.dragPan.disable();
     } else {
       map.dragPan.enable();
+      boxDragStartRef.current = null;
+      setBoxSelectPreview(null);
     }
     return () => {
       map.dragPan.enable();
@@ -2217,7 +2252,10 @@ export function IndoorMap({
         } else {
           layer.setActiveLevels([]);
         }
-        map.addLayer(layer);
+        map.addLayer(
+          layer,
+          INDOOR_LIFTED_FILL_LAYER_IDS.find((id) => map.getLayer(id) != null),
+        );
         // A 3D scene needs a camera that can look at it (#23 D7); MapLibre
         // keeps owning the camera, this only lifts the 2D constraints.
         map.setMaxPitch(SCENE_MAX_PITCH);
@@ -2386,6 +2424,18 @@ export function IndoorMap({
         aria-label="Indoor map"
         style={{ width: "100%", height: "100%" }}
       />
+      {boxSelectPreview != null ? (
+        <div
+          className="network-box-select"
+          aria-hidden="true"
+          style={{
+            left: boxSelectPreview.left,
+            top: boxSelectPreview.top,
+            width: boxSelectPreview.width,
+            height: boxSelectPreview.height,
+          }}
+        />
+      ) : null}
       {issueReview?.placementMode === true ? (
         <button type="button" className="issue-place-center" onClick={onPlaceAtCenter}>
           {PLACE_AT_CENTER_LABEL[locale]}

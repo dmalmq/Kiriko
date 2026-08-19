@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type {
   CircleLayerSpecification,
+  FillExtrusionLayerSpecification,
   FillLayerSpecification,
   LineLayerSpecification,
   SymbolLayerSpecification,
@@ -29,6 +30,9 @@ import {
   LAYER_ISSUE_HIGHLIGHT_OUTLINE,
   LAYER_ISSUE_HIGHLIGHT_POINT,
   LAYER_SELECTED_OUTLINE,
+  LAYER_HOVER_OUTLINE,
+  LAYER_AMENITY_CIRCLE,
+  LAYER_OCCUPANT_CIRCLE,
   LAYER_SELECTABLE_CONTEXT_FILL,
   LAYER_CONTEXT_FILL,
   LAYER_NONPUBLIC_FILL,
@@ -43,6 +47,11 @@ import {
   LAYER_UNENCLOSED_FILL,
   LAYER_UNENCLOSED_OUTLINE,
   LAYER_WALKWAY_FILL,
+  INDOOR_FILL_LAYER_IDS,
+  INDOOR_LIFTED_FILL_SOURCE_IDS,
+  LIFTED_FILL_EXTRUDE_BASE_M,
+  LIFTED_FILL_EXTRUDE_HEIGHT_M,
+  liftedFillLayerId,
   NONPUBLIC_CATEGORIES,
   TRANSIT_CATEGORIES,
   UNENCLOSED_CATEGORIES,
@@ -357,6 +366,81 @@ describe("issue highlight outline", () => {
       calls.push([layerId, name, value]);
     }, theme);
     expect(calls).toContainEqual([LAYER_ISSUE_HIGHLIGHT_OUTLINE, "line-color", theme.colors.warning]);
+  });
+});
+
+describe("lifted 3D unit fills", () => {
+  it("twins each draped fill as a hidden pancake extrusion", () => {
+    const layers = buildFeatureLayers(theme);
+    for (const fillId of INDOOR_LIFTED_FILL_SOURCE_IDS) {
+      const fill = findLayer(fillId) as FillLayerSpecification;
+      const lifted = layers.find((candidate) => candidate.id === liftedFillLayerId(fillId));
+      expect(lifted, `lifted twin of ${fillId}`).toBeDefined();
+      expect(lifted?.type).toBe("fill-extrusion");
+      const extrusion = lifted as FillExtrusionLayerSpecification;
+      expect(extrusion.source).toBe(fill.source);
+      expect(extrusion.filter).toEqual(fill.filter);
+      expect(extrusion.layout?.visibility).toBe("none");
+      expect(extrusion.paint?.["fill-extrusion-color"]).toEqual(fill.paint?.["fill-color"]);
+      expect(extrusion.paint?.["fill-extrusion-opacity"]).toBe(fill.paint?.["fill-opacity"]);
+      expect(extrusion.paint?.["fill-extrusion-base"]).toBe(LIFTED_FILL_EXTRUDE_BASE_M);
+      expect(extrusion.paint?.["fill-extrusion-height"]).toBe(LIFTED_FILL_EXTRUDE_HEIGHT_M);
+    }
+  });
+
+  it("does not lift selectable context fills that key opacity on feature-state", () => {
+    const ids = buildFeatureLayers(theme).map((layer) => layer.id);
+    expect(ids).not.toContain(liftedFillLayerId(LAYER_SELECTABLE_CONTEXT_FILL));
+  });
+
+  it("keeps lifted fills out of 2D hit-testing so 3D picking stays scene-first", () => {
+    for (const fillId of INDOOR_FILL_LAYER_IDS) {
+      expect(CLICKABLE_LAYER_IDS).not.toContain(liftedFillLayerId(fillId));
+    }
+  });
+
+  it("sits after the draped fills so the scene can insert underneath", () => {
+    const ids = buildFeatureLayers(theme).map((layer) => layer.id);
+    const firstFill = ids.indexOf(LAYER_WALKWAY_FILL);
+    const firstLifted = ids.indexOf(liftedFillLayerId(LAYER_WALKWAY_FILL));
+    expect(firstLifted).toBeGreaterThan(firstFill);
+  });
+
+  it("keeps point markers and review overlays above every lifted extrusion", () => {
+    const ids = buildFeatureLayers(theme).map((layer) => layer.id);
+    const lastLifted = Math.max(
+      ...INDOOR_LIFTED_FILL_SOURCE_IDS.map((fillId) =>
+        ids.indexOf(liftedFillLayerId(fillId)),
+      ),
+    );
+    expect(lastLifted).toBeGreaterThan(-1);
+    for (const overlayId of [
+      LAYER_AMENITY_CIRCLE,
+      LAYER_OCCUPANT_CIRCLE,
+      LAYER_HOVER_OUTLINE,
+      LAYER_SELECTED_OUTLINE,
+      LAYER_ISSUE_HIGHLIGHT_OUTLINE,
+      LAYER_ISSUE_HIGHLIGHT_POINT,
+    ]) {
+      expect(ids.indexOf(overlayId), overlayId).toBeGreaterThan(lastLifted);
+    }
+  });
+
+  it("repaints lifted fill-extrusion colors on theme switch", () => {
+    const calls: [string, string, unknown][] = [];
+    applyThemePaintProperties((layerId, name, value) => {
+      calls.push([layerId, name, value]);
+    }, theme);
+    expect(calls).toContainEqual([
+      liftedFillLayerId(LAYER_WALKWAY_FILL),
+      "fill-extrusion-color",
+      ["coalesce", ["get", "__unit_color"], theme.colors.walkway],
+    ]);
+    expect(calls).toContainEqual([
+      liftedFillLayerId(LAYER_ROOM_FILL),
+      "fill-extrusion-color",
+      ["coalesce", ["get", "__unit_color"], theme.colors.unit],
+    ]);
   });
 });
 

@@ -6,6 +6,7 @@ playwright-report
 .pnpm-store
 .superpowers/
 .e2e-data/
+.kiriko-verify/
 e2e/.platform-data/
 tmp-test-list.txt
 .worktrees/

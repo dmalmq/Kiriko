@@ -46,7 +46,7 @@ Key facts: GDAL stays in TypeScript (gdal3.js); all data interpretation is Rust.
 ## Agent skills
 
 ### Issue tracker
-GitHub issues in `dmalmq/imdf-map-application` via `gh`. `origin` is the tracker remote; `no-mistakes` is a local tooling artifact. See `docs/agents/issue-tracker.md`.
+GitHub issues in `dmalmq/Kiriko` via `gh`. `origin` is the tracker remote; `no-mistakes` is a local tooling artifact. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 The five canonical roles, each label string equal to its name. A separate axis from the existing `wayfinder:*` ticket-type labels. See `docs/agents/triage-labels.md`.

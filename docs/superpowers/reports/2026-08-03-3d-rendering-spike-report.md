@@ -4,7 +4,7 @@ Date: 2026-08-03
 Branch: `spike/3d-rendering-architecture`  
 Design: `docs/superpowers/specs/2026-08-03-3d-rendering-architecture-design.md`  
 Plan: `docs/superpowers/plans/2026-08-03-3d-rendering-spike.md`  
-Issue: [#23 — Choose the 3D rendering architecture](https://github.com/dmalmq/imdf-map-application/issues/23)
+Issue: [#23 — Choose the 3D rendering architecture](https://github.com/dmalmq/Kiriko/issues/23)
 
 ## Verdict
 

@@ -220,6 +220,16 @@ button {
   height: 100%;
 }
 
+/* Select-tool drag preview: screen-space, above the canvas, under chrome. */
+.network-box-select {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: 1px solid var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+}
+
 /* ── ContextBar (floating, top-left) ───────────────────── */
 
 .context-bar {

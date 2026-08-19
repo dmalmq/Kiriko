@@ -1,6 +1,6 @@
 # Renderer Core: the WebGL2 custom scene layer — implementation record
 
-Ticket: [#60](https://github.com/dmalmq/imdf-map-application/issues/60) — first slice of Stage 2 ([#59](https://github.com/dmalmq/imdf-map-application/issues/59)).
+Ticket: [#60](https://github.com/dmalmq/Kiriko/issues/60) — first slice of Stage 2 ([#59](https://github.com/dmalmq/Kiriko/issues/59)).
 
 ## What shipped
 
@@ -21,7 +21,7 @@ renderer-owned WebGL2 custom layer fed by one source-neutral render format.
 Stage 3's producer). The generated scene had no producer, so this slice added one: the same
 container, levels, features, and merged `(level, role)` batches, from §9 and §8 instead of a GLB.
 
-That is the point of the decision it implements ([#23](https://github.com/dmalmq/imdf-map-application/issues/23) D4):
+That is the point of the decision it implements ([#23](https://github.com/dmalmq/Kiriko/issues/23) D4):
 
 ```
 §9 + §8  ──compile_generated_scene──┐
@@ -31,7 +31,7 @@ GLB + tiles descriptor ──derive─────┘        (Stage 3)
 
 The renderer receives `SceneView` and cannot tell which producer filled it. Provenance,
 capability, and pick semantics stay in the semantic projection
-([#53](https://github.com/dmalmq/imdf-map-application/issues/53)) — the render document carries
+([#53](https://github.com/dmalmq/Kiriko/issues/53)) — the render document carries
 only what is drawn.
 
 ## Decisions worth keeping
@@ -53,7 +53,7 @@ navigable surfaces never do.
 geometry payload transfers back rather than being cloned.
 
 **3D is explicit until the preflight exists.** `?scene` opts in. The capability floor, the
-fallback state machine, and automatic selection are [#62](https://github.com/dmalmq/imdf-map-application/issues/62).
+fallback state machine, and automatic selection are [#62](https://github.com/dmalmq/Kiriko/issues/62).
 
 ## Three defects only a real frame could show
 
@@ -71,7 +71,7 @@ fallback state machine, and automatic selection are [#62](https://github.com/dma
    depth the plate won and every floor read as one flat colour. Contextual mass now paints first
    and is biased back, openings are biased forward of the walls they pierce, and contact darkness
    was corrected — a wall turned from the key rendered near-black instead of 12% below cool stone
-   ([#32](https://github.com/dmalmq/imdf-map-application/issues/32) section 5).
+   ([#32](https://github.com/dmalmq/Kiriko/issues/32) section 5).
 
 ## Follow-on: picking (#61)
 
@@ -140,5 +140,5 @@ two.
 
 The ≥ 15× primitive-collapse floor is a property of station-scale data, not of the three-floor
 fixture (which has too few objects to merge that far); it is asserted against the registered
-Tokyo dataset in [#64](https://github.com/dmalmq/imdf-map-application/issues/64), together with
+Tokyo dataset in [#64](https://github.com/dmalmq/Kiriko/issues/64), together with
 the decode and upload budgets.

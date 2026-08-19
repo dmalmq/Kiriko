@@ -13,6 +13,8 @@ import {
   LAYER_ROOM_FILL,
   LAYER_WALKWAY_FILL,
   LAYER_WALKWAY_OUTLINE,
+  INDOOR_FILL_LAYER_IDS,
+  liftedFillLayerId,
   NETWORK_SOURCE_ID,
   ROUTE_SOURCE_ID,
 } from "./featureLayers";
@@ -113,6 +115,7 @@ const mapState = vi.hoisted(() => {
       exaggeration: number;
     } | null> = [];
     readonly customLayers = new Map<string, { id: string }>();
+    readonly addLayerCalls: Array<{ id: string; beforeId?: string }> = [];
     queryResult: Array<{ properties: Record<string, unknown> }> = [];
     queryByLayer: Record<string, Array<{ properties: Record<string, unknown> }>> = {};
     styleLoaded = initialStyleLoaded;
@@ -337,8 +340,13 @@ const mapState = vi.hoisted(() => {
       return this.customLayers.get(id) ?? (id === "kiriko-scene" ? undefined : {});
     }
 
-    addLayer(layer: { id: string }): void {
+    addLayer(layer: { id: string }, beforeId?: string): void {
       this.customLayers.set(layer.id, layer);
+      if (beforeId === undefined) {
+        this.addLayerCalls.push({ id: layer.id });
+      } else {
+        this.addLayerCalls.push({ id: layer.id, beforeId });
+      }
     }
 
     removeLayer(id: string): void {
@@ -1892,6 +1900,52 @@ describe("IndoorMap network editing", () => {
     expect(net.onPick).not.toHaveBeenCalled();
   });
 
+  it("paints a box-select overlay once the drag is long enough and hides it under the threshold", () => {
+    const { map } = renderMap(baseProps({ networkEditing: editing({ tool: "select" }) }));
+    act(() => {
+      map.emit("mousedown", { point: { x: 10, y: 20 }, lngLat: { lng: 0, lat: 0 } });
+      map.emit("mousemove", { point: { x: 12, y: 20 }, lngLat: { lng: 0, lat: 0 } });
+    });
+    expect(document.querySelector(".network-box-select")).toBeNull();
+    act(() => {
+      map.emit("mousemove", { point: { x: 40, y: 8 }, lngLat: { lng: 0, lat: 0 } });
+    });
+    const overlay = document.querySelector(".network-box-select");
+    expect(overlay).toBeInstanceOf(HTMLElement);
+    expect((overlay as HTMLElement).style.left).toBe("10px");
+    expect((overlay as HTMLElement).style.top).toBe("8px");
+    expect((overlay as HTMLElement).style.width).toBe("30px");
+    expect((overlay as HTMLElement).style.height).toBe("12px");
+  });
+
+  it("clears the box-select overlay when the drag ends, the pointer leaves, or the tool changes", () => {
+    const net = editing({ tool: "select" });
+    const { map, rerender } = renderMap(baseProps({ networkEditing: net }));
+    map.unproject = (p: { x: number; y: number }) => ({ lng: p.x, lat: p.y });
+    const drag = (): void => {
+      map.emit("mousedown", { point: { x: 0, y: 0 }, lngLat: { lng: 0, lat: 0 } });
+      map.emit("mousemove", { point: { x: 20, y: 16 }, lngLat: { lng: 20, lat: 16 } });
+    };
+    act(drag);
+    expect(document.querySelector(".network-box-select")).not.toBeNull();
+    act(() => {
+      map.emit("mouseup", { point: { x: 20, y: 16 }, lngLat: { lng: 20, lat: 16 } });
+    });
+    expect(document.querySelector(".network-box-select")).toBeNull();
+
+    act(drag);
+    expect(document.querySelector(".network-box-select")).not.toBeNull();
+    act(() => {
+      map.emit("mouseout");
+    });
+    expect(document.querySelector(".network-box-select")).toBeNull();
+
+    act(drag);
+    expect(document.querySelector(".network-box-select")).not.toBeNull();
+    rerender(baseProps({ networkEditing: editing({ tool: "connect" }) }));
+    expect(document.querySelector(".network-box-select")).toBeNull();
+  });
+
   it("writes preview LineStrings into the network source when preview is set", () => {
     const network: NonNullable<IndoorMapProps["network"]> = {
       junctions: [
@@ -2153,17 +2207,49 @@ describe("IndoorMap scene floor elevation", () => {
     expect((last?.features.length ?? 0) > 0).toBe(true);
   });
 
-  it("hides 2D unit fills while generated 3D is attached", () => {
+  it("lifts 2D unit fills above the generated slab while 3D is attached", () => {
     const { map, rerender } = renderMap(baseProps({ scene: null }));
     expect(map.layoutProperties.get(LAYER_WALKWAY_FILL)?.visibility).not.toBe("none");
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_WALKWAY_FILL))?.visibility).not.toBe(
+      "visible",
+    );
 
     rerender(baseProps({ scene, levelId: "level-1" }));
     expect(map.layoutProperties.get(LAYER_WALKWAY_FILL)?.visibility).toBe("none");
     expect(map.layoutProperties.get(LAYER_ROOM_FILL)?.visibility).toBe("none");
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_WALKWAY_FILL))?.visibility).toBe(
+      "visible",
+    );
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_ROOM_FILL))?.visibility).toBe(
+      "visible",
+    );
     expect(map.layoutProperties.get(LAYER_WALKWAY_OUTLINE)?.visibility).not.toBe("none");
 
     rerender(baseProps({ scene: null }));
     expect(map.layoutProperties.get(LAYER_WALKWAY_FILL)?.visibility).toBe("visible");
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_WALKWAY_FILL))?.visibility).toBe(
+      "none",
+    );
+  });
+
+  it("inserts the scene under the lifted fills so the pancakes composite on top", () => {
+    const { map } = renderMap(baseProps({ scene, levelId: "level-1" }));
+    const sceneCall = map.addLayerCalls.find((call) => call.id === "kiriko-scene");
+    expect(sceneCall?.beforeId).toBe(liftedFillLayerId(INDOOR_FILL_LAYER_IDS[0]));
+  });
+
+  it("hides lifted unit fills when the units group is off in 3D", () => {
+    const { map } = renderMap(
+      baseProps({
+        scene,
+        levelId: "level-1",
+        layerVisibility: { ...defaultLayerVisibility, labels: false, units: false },
+      }),
+    );
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_WALKWAY_FILL))?.visibility).toBe(
+      "visible",
+    );
+    expect(map.layoutProperties.get(liftedFillLayerId(LAYER_ROOM_FILL))?.visibility).toBe("none");
   });
 
   it("attaches terrain at the active scene plane and swaps floors in place", () => {
