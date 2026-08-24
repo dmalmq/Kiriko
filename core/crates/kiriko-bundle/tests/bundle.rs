@@ -1326,7 +1326,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "b07ae7af10265563ff91745e71f1eb5e6d218a3e619852f031affec30c110f13";
+const GOLDEN_BUNDLE_HASH: &str = "0e6f4cd8038070170e5b14709e73eb694ef971d29242a65202ce8525dfd03562";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -2845,6 +2845,115 @@ fn openings_cut_their_host_walls() {
         opening_locators,
         "host-wall provenance appends canonical opening locators once, in order"
     );
+}
+
+#[test]
+fn an_opening_on_a_split_shared_edge_still_connects_both_units() {
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    const OPENING_ID: &str = "d1000001-0000-4000-8000-000000000031";
+    const UNIT_A: &str = "c1000001-0000-4000-8000-000000000031";
+    const UNIT_B: &str = "c1000002-0000-4000-8000-000000000032";
+
+    let compiled = compile_imdf(
+        &support::build_split_shared_edge_opening_imdf_zip(),
+        metadata(),
+    )
+    .expect("split-edge fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let scene = document.scene.expect("generated scene present");
+    let portal = scene
+        .primitives
+        .iter()
+        .find(|primitive| primitive.canonical_feature_id.as_deref() == Some(OPENING_ID))
+        .expect("opening on a split shared edge emits a portal");
+    let PrimitiveGeometry::Portal { connects, opening } = &portal.geometry else {
+        panic!("opening must use portal geometry");
+    };
+    let mut expected_connects = [UNIT_A, UNIT_B].map(|unit_id| {
+        scene
+            .primitives
+            .iter()
+            .position(|primitive| {
+                primitive.role == PrimitiveRole::Surface
+                    && primitive.canonical_feature_id.as_deref() == Some(unit_id)
+            })
+            .expect("unit surface exists") as u32
+    });
+    expected_connects.sort_unstable();
+    assert_eq!(
+        *connects,
+        (expected_connects[0], expected_connects[1]),
+        "collinear host segments must contribute both adjacent surfaces"
+    );
+
+    let p0 = opening.positions[0];
+    let p1 = opening.positions[1];
+    let dx = i128::from(p1[0] - p0[0]);
+    let dy = i128::from(p1[1] - p0[1]);
+    let opening_len2 = dx * dx + dy * dy;
+    let along = |position: &[i64; 3]| {
+        i128::from(position[0] - p0[0]) * dx + i128::from(position[1] - p0[1]) * dy
+    };
+    let on_host_line = |position: &[i64; 3]| {
+        i128::from(position[0] - p0[0]) * dy - i128::from(position[1] - p0[1]) * dx == 0
+    };
+    let portal_top = opening
+        .positions
+        .iter()
+        .map(|position| position[2])
+        .max()
+        .unwrap();
+    let cut_walls = scene
+        .primitives
+        .iter()
+        .filter(|primitive| {
+            primitive.role == PrimitiveRole::Wall
+                && matches!(&primitive.geometry, PrimitiveGeometry::Mesh(mesh) if mesh.positions.iter().all(on_host_line))
+        })
+        .count();
+    assert!(
+        cut_walls >= 2,
+        "both the unsplit edge and the overlapping split segment remain host walls, got {cut_walls}"
+    );
+    for primitive in &scene.primitives {
+        if primitive.role != PrimitiveRole::Wall {
+            continue;
+        }
+        let PrimitiveGeometry::Mesh(mesh) = &primitive.geometry else {
+            continue;
+        };
+        if !mesh.positions.iter().all(on_host_line) {
+            continue;
+        }
+        let spans_opening = mesh
+            .positions
+            .iter()
+            .map(&along)
+            .min()
+            .is_some_and(|min| min <= 0)
+            && mesh
+                .positions
+                .iter()
+                .map(&along)
+                .max()
+                .is_some_and(|max| max >= opening_len2);
+        if !spans_opening {
+            continue;
+        }
+        for face in &mesh.faces {
+            let points = face.map(|index| &mesh.positions[index as usize]);
+            let start = points.iter().map(|position| along(position)).min().unwrap();
+            let end = points.iter().map(|position| along(position)).max().unwrap();
+            if start < opening_len2 && end > 0 {
+                let min_z = points.iter().map(|position| position[2]).min().unwrap();
+                assert!(
+                    min_z >= portal_top,
+                    "every collinear host wall must open below the portal top"
+                );
+            }
+        }
+    }
 }
 
 #[test]

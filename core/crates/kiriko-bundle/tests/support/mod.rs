@@ -186,6 +186,60 @@ fn multi_floor_entries() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Two walkways sharing a 10 m-class boundary, but only one unit splits that
+/// edge with a mid-edge vertex. An opening that straddles the split must still
+/// connect both surfaces.
+pub fn build_split_shared_edge_opening_imdf_zip() -> Vec<u8> {
+    let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;
+    let venue = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000001-0000-4000-8000-000000000031",
+            "venue",
+            r#"{"category":"transit","name":{"en":"Split Edge Venue"},"address_id":"a1000002-0000-4000-8000-000000000032"}"#,
+            Some(POLYGON),
+        )
+    );
+    let address = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000002-0000-4000-8000-000000000032",
+            "address",
+            r#"{"address":"1 Split Way"}"#,
+            None,
+        )
+    );
+    let level_id = "b1000001-0000-4000-8000-000000000031";
+    let levels = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            level_id,
+            "level",
+            r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
+            Some(POLYGON),
+        )
+    );
+    let units = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"c1000001-0000-4000-8000-000000000031","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6806],[139.7678,35.6806],[139.7678,35.6810],[139.7662,35.6810],[139.7662,35.6806]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}},
+            {{"id":"c1000002-0000-4000-8000-000000000032","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6810],[139.7670,35.6810],[139.7678,35.6810],[139.7678,35.6814],[139.7662,35.6814],[139.7662,35.6810]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000031","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.7668,35.6810],[139.7672,35.6810]]}},"properties":{{"category":"pedestrian.transit","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    write_zip_entries(&[
+        ("manifest.json", manifest.to_string()),
+        ("venue.geojson", venue),
+        ("address.geojson", address),
+        ("level.geojson", levels),
+        ("unit.geojson", units),
+        ("opening.geojson", openings),
+    ])
+}
+
 /// One F1 with a lone platform, plus F2 with a platform sharing an edge with a shop.
 pub fn build_platform_wall_imdf_zip() -> Vec<u8> {
     let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;

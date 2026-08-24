@@ -406,23 +406,89 @@ struct SquaredDistance {
 }
 
 impl SquaredDistance {
-    fn plus(self, other: Self) -> Self {
+    fn new(numerator: i128, denominator: i128) -> Self {
+        debug_assert!(denominator > 0);
         Self {
-            numerator: self.numerator * other.denominator + other.numerator * self.denominator,
-            denominator: self.denominator * other.denominator,
+            numerator,
+            denominator,
+        }
+        .reduced()
+    }
+
+    fn reduced(self) -> Self {
+        let gcd = gcd_i128(self.numerator.abs(), self.denominator).max(1);
+        Self {
+            numerator: self.numerator / gcd,
+            denominator: self.denominator / gcd,
         }
     }
 
-    fn cmp(self, other: Self) -> std::cmp::Ordering {
-        (self.numerator * other.denominator).cmp(&(other.numerator * self.denominator))
+    fn plus(self, other: Self) -> Self {
+        let left = self.reduced();
+        let right = other.reduced();
+        Self::new(
+            left.numerator * right.denominator + right.numerator * left.denominator,
+            left.denominator * right.denominator,
+        )
     }
+
+    fn cmp(self, other: Self) -> std::cmp::Ordering {
+        let left = self.reduced();
+        let right = other.reduced();
+        cmp_nonneg_products(
+            left.numerator,
+            right.denominator,
+            right.numerator,
+            left.denominator,
+        )
+    }
+}
+
+fn gcd_i128(mut a: i128, mut b: i128) -> i128 {
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    a
+}
+
+/// Compare `a * b` against `c * d` for non-negative factors without wrapping.
+fn cmp_nonneg_products(a: i128, b: i128, c: i128, d: i128) -> std::cmp::Ordering {
+    match (a.checked_mul(b), c.checked_mul(d)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        _ => mul_u128_wide(
+            u128::try_from(a).expect("squared distance is non-negative"),
+            u128::try_from(b).expect("denominator is positive"),
+        )
+        .cmp(&mul_u128_wide(
+            u128::try_from(c).expect("squared distance is non-negative"),
+            u128::try_from(d).expect("denominator is positive"),
+        )),
+    }
+}
+
+fn mul_u128_wide(x: u128, y: u128) -> (u128, u128) {
+    const MASK: u128 = 0xffff_ffff_ffff_ffff;
+    let x0 = x & MASK;
+    let x1 = x >> 64;
+    let y0 = y & MASK;
+    let y1 = y >> 64;
+    let p00 = x0 * y0;
+    let p01 = x0 * y1;
+    let p10 = x1 * y0;
+    let p11 = x1 * y1;
+    let mid = (p00 >> 64) + (p01 & MASK) + (p10 & MASK);
+    let lo = (p00 & MASK) | (mid << 64);
+    let hi = p11 + (p01 >> 64) + (p10 >> 64) + (mid >> 64);
+    (hi, lo)
 }
 
 struct WallSpec {
     heights: Vec<u32>,
     all_platform: bool,
     surface_indices: Vec<u32>,
-    hosted_openings: Vec<usize>,
+    hosted_openings: Vec<(usize, OpeningInterval)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -749,7 +815,7 @@ pub(crate) fn compile_scene(
             line.last().expect("line has two endpoints")[0],
             line.last().expect("line has two endpoints")[1],
         );
-        let Some(host_key) = walls_by_level
+        let matching: Vec<(SquaredDistance, WallEdgeKey)> = walls_by_level
             .keys()
             .filter(|key| key.0 == level_id)
             .filter_map(|key| {
@@ -765,16 +831,30 @@ pub(crate) fn compile_scene(
                     .plus(point_segment_squared_distance(source_b, a, b));
                 Some((score, key.clone()))
             })
+            .collect();
+        let Some((_, host_key)) = matching
+            .iter()
             .min_by(|(score_a, key_a), (score_b, key_b)| {
                 score_a.cmp(*score_b).then_with(|| key_a.cmp(key_b))
             })
-            .map(|(_, key)| key)
+            .map(|(score, key)| (*score, key.clone()))
         else {
             continue;
         };
 
         let host_a = [host_key.1, host_key.2];
         let host_b = [host_key.3, host_key.4];
+        let collinear_hosts: Vec<WallEdgeKey> = walls_by_level
+            .keys()
+            .filter(|key| {
+                let a = [key.1, key.2];
+                let b = [key.3, key.4];
+                key.0 == level_id
+                    && segments_are_collinear(host_a, host_b, a, b)
+                    && opening_overlaps_host(source_a, source_b, a, b)
+            })
+            .cloned()
+            .collect();
         let host_len2 = segment_len2(host_a, host_b);
         let source_a_numerator = projection_numerator(source_a, host_a, host_b);
         let source_b_numerator = projection_numerator(source_b, host_a, host_b);
@@ -795,16 +875,33 @@ pub(crate) fn compile_scene(
         if effective_height == 0 {
             continue;
         }
-        let connects = match spec.surface_indices.as_slice() {
+        let mut surfaces: Vec<u32> = collinear_hosts
+            .iter()
+            .flat_map(|key| {
+                walls_by_level
+                    .get(key)
+                    .expect("collinear host exists")
+                    .surface_indices
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        surfaces.sort_unstable();
+        surfaces.dedup();
+        let connects = match surfaces.as_slice() {
             [first, second, ..] => (*first, *second),
             [surface] => {
-                let slab = level_slab_edges.iter().find_map(|(level_edge, slab)| {
-                    let level_a = [level_edge.1, level_edge.2];
-                    let level_b = [level_edge.3, level_edge.4];
-                    (level_edge.0 == host_key.0
-                        && point_near_segment(host_a, level_a, level_b, 0)
-                        && point_near_segment(host_b, level_a, level_b, 0))
-                    .then_some(*slab)
+                let slab = collinear_hosts.iter().find_map(|key| {
+                    let edge_a = [key.1, key.2];
+                    let edge_b = [key.3, key.4];
+                    level_slab_edges.iter().find_map(|(level_edge, slab)| {
+                        let level_a = [level_edge.1, level_edge.2];
+                        let level_b = [level_edge.3, level_edge.4];
+                        (level_edge.0 == key.0
+                            && point_near_segment(edge_a, level_a, level_b, 0)
+                            && point_near_segment(edge_b, level_a, level_b, 0))
+                        .then_some(*slab)
+                    })
                 });
                 let Some(slab) = slab else { continue };
                 (*surface, slab)
@@ -849,11 +946,31 @@ pub(crate) fn compile_scene(
             evidence_ref,
             confidence_ref,
         });
-        walls_by_level
-            .get_mut(&host_key)
-            .expect("selected host exists")
-            .hosted_openings
-            .push(hosted_index);
+        for key in &collinear_hosts {
+            let edge_a = [key.1, key.2];
+            let edge_b = [key.3, key.4];
+            let start = projection_numerator(source_a, edge_a, edge_b)
+                .min(projection_numerator(source_b, edge_a, edge_b));
+            let end = projection_numerator(source_a, edge_a, edge_b)
+                .max(projection_numerator(source_b, edge_a, edge_b));
+            if start == end {
+                continue;
+            }
+            let spec = walls_by_level.get_mut(key).expect("collinear host exists");
+            let host_height = i64::from(*spec.heights.iter().min().expect("host has a height"));
+            let height_mm = profile.door_height_mm.clamp(0, host_height);
+            if height_mm == 0 {
+                continue;
+            }
+            spec.hosted_openings.push((
+                hosted_index,
+                OpeningInterval {
+                    start_numerator: start,
+                    end_numerator: end,
+                    height_mm,
+                },
+            ));
+        }
     }
 
     // -- Walls: one partitioned mesh per non-platform host edge. ------------
@@ -897,10 +1014,9 @@ pub(crate) fn compile_scene(
         let mut source_locator_refs = vec![level_locator];
         let mut evidence_refs = vec![wall_evidence];
         let mut intervals = Vec::with_capacity(spec.hosted_openings.len());
-        for hosted_index in &spec.hosted_openings {
-            let opening = &hosted_openings[*hosted_index];
-            debug_assert_eq!(&opening.host_key, key);
-            intervals.push(opening.interval);
+        for &(hosted_index, interval) in &spec.hosted_openings {
+            let opening = &hosted_openings[hosted_index];
+            intervals.push(interval);
             if !source_locator_refs.contains(&opening.locator_ref) {
                 source_locator_refs.push(opening.locator_ref);
             }
@@ -1327,33 +1443,21 @@ fn point_segment_squared_distance(p: [i64; 2], a: [i64; 2], b: [i64; 2]) -> Squa
     let len2 = dx * dx + dy * dy;
     if len2 == 0 {
         let (qx, qy) = (i128::from(px - ax), i128::from(py - ay));
-        return SquaredDistance {
-            numerator: qx * qx + qy * qy,
-            denominator: 1,
-        };
+        return SquaredDistance::new(qx * qx + qy * qy, 1);
     }
     let qx = i128::from(px - ax);
     let qy = i128::from(py - ay);
     let projection = qx * dx + qy * dy;
     if projection <= 0 {
-        return SquaredDistance {
-            numerator: qx * qx + qy * qy,
-            denominator: 1,
-        };
+        return SquaredDistance::new(qx * qx + qy * qy, 1);
     }
     if projection >= len2 {
         let qx = i128::from(px - bx);
         let qy = i128::from(py - by);
-        return SquaredDistance {
-            numerator: qx * qx + qy * qy,
-            denominator: 1,
-        };
+        return SquaredDistance::new(qx * qx + qy * qy, 1);
     }
     let cross = qx * dy - qy * dx;
-    SquaredDistance {
-        numerator: cross * cross,
-        denominator: len2,
-    }
+    SquaredDistance::new(cross * cross, len2)
 }
 
 /// Whether `p` is within `tolerance` millimetres of the segment `a`–`b`.
@@ -1361,6 +1465,25 @@ fn point_near_segment(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> 
     let distance = point_segment_squared_distance(p, a, b);
     let tolerance = i128::from(tolerance).abs();
     distance.numerator <= tolerance * tolerance * distance.denominator
+}
+
+fn point_on_line(p: [i64; 2], a: [i64; 2], b: [i64; 2]) -> bool {
+    let dx = i128::from(b[0] - a[0]);
+    let dy = i128::from(b[1] - a[1]);
+    i128::from(p[0] - a[0]) * dy - i128::from(p[1] - a[1]) * dx == 0
+}
+
+fn segments_are_collinear(a: [i64; 2], b: [i64; 2], c: [i64; 2], d: [i64; 2]) -> bool {
+    a != b && c != d && point_on_line(c, a, b) && point_on_line(d, a, b)
+}
+
+fn opening_overlaps_host(source_a: [i64; 2], source_b: [i64; 2], a: [i64; 2], b: [i64; 2]) -> bool {
+    if segment_len2(a, b) == 0 {
+        return false;
+    }
+    let start = projection_numerator(source_a, a, b).min(projection_numerator(source_b, a, b));
+    let end = projection_numerator(source_a, a, b).max(projection_numerator(source_b, a, b));
+    start < end
 }
 
 fn snapped_interval_endpoints(
@@ -1380,8 +1503,9 @@ mod tests {
     use kiriko_model::spatial::{Axes, Frame, LengthUnit, enu_basis_ecef, wgs84_ecef};
 
     use super::{
-        OpeningInterval, SceneProfile, point_segment_squared_distance, project_local_mm,
-        snapped_interval_endpoints, triangulate_simple, wall_mesh_with_openings,
+        OpeningInterval, SceneProfile, opening_overlaps_host, point_segment_squared_distance,
+        project_local_mm, segments_are_collinear, snapped_interval_endpoints, triangulate_simple,
+        wall_mesh_with_openings,
     };
 
     fn test_frame() -> Frame {
@@ -1425,6 +1549,55 @@ mod tests {
             diagonal.cmp(horizontal).is_lt(),
             "exact rational scoring must not reverse the near-tie through integer truncation"
         );
+    }
+
+    #[test]
+    fn host_scoring_does_not_overflow_on_long_near_coincident_walls() {
+        let nearer_a = [0, 0];
+        let nearer_b = [30_000, 0];
+        let farther_a = [0, 150];
+        let farther_b = [30_000, 150];
+        let source = [[5_000, 50], [8_000, 50]];
+        let nearer = point_segment_squared_distance(source[0], nearer_a, nearer_b).plus(
+            point_segment_squared_distance(source[1], nearer_a, nearer_b),
+        );
+        let farther = point_segment_squared_distance(source[0], farther_a, farther_b).plus(
+            point_segment_squared_distance(source[1], farther_a, farther_b),
+        );
+
+        assert!(
+            nearer.cmp(farther).is_lt(),
+            "unreduced 30 m host scores must compare without overflowing i128"
+        );
+    }
+
+    #[test]
+    fn collinear_split_hosts_overlap_an_opening_that_straddles_the_vertex() {
+        let long_a = [0, 0];
+        let long_b = [10_000, 0];
+        let left_a = [0, 0];
+        let left_b = [5_000, 0];
+        let right_a = [5_000, 0];
+        let right_b = [10_000, 0];
+        let parallel_a = [0, 150];
+        let parallel_b = [10_000, 150];
+        let source_a = [4_000, 0];
+        let source_b = [6_000, 0];
+
+        assert!(segments_are_collinear(long_a, long_b, left_a, left_b));
+        assert!(segments_are_collinear(long_a, long_b, right_a, right_b));
+        assert!(!segments_are_collinear(
+            long_a, long_b, parallel_a, parallel_b
+        ));
+        assert!(opening_overlaps_host(source_a, source_b, long_a, long_b));
+        assert!(opening_overlaps_host(source_a, source_b, left_a, left_b));
+        assert!(opening_overlaps_host(source_a, source_b, right_a, right_b));
+        assert!(!opening_overlaps_host(
+            source_a,
+            source_b,
+            [0, 0],
+            [3_000, 0]
+        ));
     }
 
     #[test]
