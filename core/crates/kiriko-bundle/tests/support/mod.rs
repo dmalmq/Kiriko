@@ -240,6 +240,61 @@ pub fn build_split_shared_edge_opening_imdf_zip() -> Vec<u8> {
     ])
 }
 
+/// Same split-shared-edge topology as [`build_split_shared_edge_opening_imdf_zip`],
+/// but the unsplit unit is 1.8 m high while the split neighbour stays at the
+/// nominal 3.0 m wall height. An opening that straddles the mid-edge vertex
+/// must use 1,800 mm for both the portal and every collinear host cut.
+pub fn build_mixed_height_split_shared_edge_opening_imdf_zip() -> Vec<u8> {
+    let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;
+    let venue = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000001-0000-4000-8000-000000000061",
+            "venue",
+            r#"{"category":"transit","name":{"en":"Mixed Height Split Edge Venue"},"address_id":"a1000002-0000-4000-8000-000000000062"}"#,
+            Some(POLYGON),
+        )
+    );
+    let address = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000002-0000-4000-8000-000000000062",
+            "address",
+            r#"{"address":"1 Mixed Height Way"}"#,
+            None,
+        )
+    );
+    let level_id = "b1000001-0000-4000-8000-000000000061";
+    let levels = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            level_id,
+            "level",
+            r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
+            Some(POLYGON),
+        )
+    );
+    let units = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"c1000001-0000-4000-8000-000000000061","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6806],[139.7678,35.6806],[139.7678,35.6810],[139.7662,35.6810],[139.7662,35.6806]]]}},"properties":{{"category":"walkway","level_id":"{level_id}","height":1.8}}}},
+            {{"id":"c1000002-0000-4000-8000-000000000062","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6810],[139.7670,35.6810],[139.7678,35.6810],[139.7678,35.6814],[139.7662,35.6814],[139.7662,35.6810]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000061","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.7668,35.6810],[139.7672,35.6810]]}},"properties":{{"category":"pedestrian.transit","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    write_zip_entries(&[
+        ("manifest.json", manifest.to_string()),
+        ("venue.geojson", venue),
+        ("address.geojson", address),
+        ("level.geojson", levels),
+        ("unit.geojson", units),
+        ("opening.geojson", openings),
+    ])
+}
+
 /// Two adjacent walkway boundaries separated by about 0.1 m, within the
 /// scene profile's corroboration tolerance.
 pub fn build_offset_shared_edge_opening_imdf_zip() -> Vec<u8> {

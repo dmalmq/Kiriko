@@ -51,6 +51,7 @@ const ALL_ROLES: SemanticRoleName[] = [
   "Ramp",
   "Context",
   "Conveyance",
+  "TicketGate",
 ];
 
 describe("scene palette contrast", () => {

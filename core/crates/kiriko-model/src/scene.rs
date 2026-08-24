@@ -23,6 +23,7 @@ impl PrimitiveRole {
             Self::Ceiling => "ceiling",
             Self::Portal => "portal",
             Self::Conveyance => "conveyance",
+            Self::Fixture => "fixture",
         }
     }
 }
@@ -42,6 +43,9 @@ pub enum PrimitiveRole {
     /// A conveyance form (stairs, ramp, escalator, lift, shaft) — either
     /// source-evidenced or the category-specific neutral fallback.
     Conveyance,
+    /// A point fixture rendered as an illustrative form — a ticket-gate row
+    /// for the fare gates Japanese stations place at their concourses.
+    Fixture,
 }
 
 impl OcclusionClass {

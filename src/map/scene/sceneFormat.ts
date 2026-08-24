@@ -34,7 +34,8 @@ export type SemanticRoleName =
   | "Stairs"
   | "Ramp"
   | "Context"
-  | "Conveyance";
+  | "Conveyance"
+  | "TicketGate";
 
 /** Whether an object may fade for the camera (#32 section 6). */
 export type OcclusionClassName = "Never" | "ProtectedCorridor" | "Context";
@@ -156,6 +157,7 @@ const SEMANTIC_ROLES: Record<SemanticRoleName, true> = {
   Ramp: true,
   Context: true,
   Conveyance: true,
+  TicketGate: true,
 };
 
 const OCCLUSION_CLASSES: Record<OcclusionClassName, true> = {

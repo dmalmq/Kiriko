@@ -203,6 +203,7 @@ fn role_name(role: SemanticRole) -> &'static str {
         SemanticRole::Ramp => "Ramp",
         SemanticRole::Context => "Context",
         SemanticRole::Conveyance => "Conveyance",
+        SemanticRole::TicketGate => "TicketGate",
     }
 }
 

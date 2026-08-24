@@ -1326,7 +1326,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "0e6f4cd8038070170e5b14709e73eb694ef971d29242a65202ce8525dfd03562";
+const GOLDEN_BUNDLE_HASH: &str = "ca32af21aca56ad99833dcef4b936f1c85f21ef56758663ac09547b2cb083368";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -3086,6 +3086,95 @@ fn a_host_clamped_opening_records_its_effective_height() {
     assert_eq!(
         assumption.detail,
         "opening height 1800 mm clamped to host height from nominal 2400 mm"
+    );
+}
+
+#[test]
+fn mixed_height_split_hosts_share_the_shortest_opening() {
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    const OPENING_ID: &str = "d1000001-0000-4000-8000-000000000061";
+
+    let compiled = compile_imdf(
+        &support::build_mixed_height_split_shared_edge_opening_imdf_zip(),
+        metadata(),
+    )
+    .expect("mixed-height split-edge fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let spatial = document.spatial_context.expect("spatial context present");
+    let scene = document.scene.expect("generated scene present");
+    let portal = scene
+        .primitives
+        .iter()
+        .find(|primitive| {
+            primitive.role == PrimitiveRole::Portal
+                && primitive.canonical_feature_id.as_deref() == Some(OPENING_ID)
+        })
+        .expect("mixed-height hosts emit a portal");
+    let PrimitiveGeometry::Portal { opening, .. } = &portal.geometry else {
+        panic!("opening must use portal geometry");
+    };
+    let min_z = opening
+        .positions
+        .iter()
+        .map(|position| position[2])
+        .min()
+        .unwrap();
+    let max_z = opening
+        .positions
+        .iter()
+        .map(|position| position[2])
+        .max()
+        .unwrap();
+    assert_eq!(
+        max_z - min_z,
+        1_800,
+        "portal height is the shortest matched host, not the selected host alone"
+    );
+
+    let evidence = &spatial.registries.registration_evidence[portal.evidence_refs[0] as usize];
+    assert_eq!(evidence.detail, "portal at host-clamped opening height");
+
+    let p0 = opening.positions[0];
+    let p1 = opening.positions[1];
+    let dx = i128::from(p1[0] - p0[0]);
+    let dy = i128::from(p1[1] - p0[1]);
+    let opening_len2 = dx * dx + dy * dy;
+    let along = |position: &[i64; 3]| {
+        i128::from(position[0] - p0[0]) * dx + i128::from(position[1] - p0[1]) * dy
+    };
+    let on_host_line = |position: &[i64; 3]| {
+        i128::from(position[0] - p0[0]) * dy - i128::from(position[1] - p0[1]) * dx == 0
+    };
+
+    let mut header_at_portal = false;
+    for primitive in &scene.primitives {
+        if primitive.role != PrimitiveRole::Wall {
+            continue;
+        }
+        let PrimitiveGeometry::Mesh(mesh) = &primitive.geometry else {
+            continue;
+        };
+        if !mesh.positions.iter().all(on_host_line) {
+            continue;
+        }
+        for face in &mesh.faces {
+            let points = face.map(|index| &mesh.positions[index as usize]);
+            let start = points.iter().map(|position| along(position)).min().unwrap();
+            let end = points.iter().map(|position| along(position)).max().unwrap();
+            if start < opening_len2 && end > 0 {
+                let face_min_z = points.iter().map(|position| position[2]).min().unwrap();
+                assert_eq!(
+                    face_min_z, max_z,
+                    "every collinear host cut must match the portal height, not its own wall height"
+                );
+                header_at_portal = true;
+            }
+        }
+    }
+    assert!(
+        header_at_portal,
+        "the taller split neighbour must still carry a header at the shared 1,800 mm cut"
     );
 }
 
