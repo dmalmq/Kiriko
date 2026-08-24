@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha256};
 
 use kiriko_bundle::{
-    BundleDocument, BundleErrorCode, BundleMetadata, BundleStats, CapabilityReport, CompileError,
-    LevelElevation, ResolutionProfile, SectionCapability, compile_imdf, compile_imdf_with_network,
-    decode_bundle, encode_bundle, export_network, inspect_bundle, level_elevations,
+    compile_imdf, compile_imdf_with_network, decode_bundle, encode_bundle, export_network,
+    inspect_bundle, level_elevations, BundleDocument, BundleErrorCode, BundleMetadata, BundleStats,
+    CapabilityReport, CompileError, LevelElevation, ResolutionProfile, SectionCapability,
 };
 
 fn metadata() -> BundleMetadata {
@@ -1326,7 +1326,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "b995c817f8817d2e5c4144536d208cb96011a2f556c0ac2ad62fff09114b8c6e";
+const GOLDEN_BUNDLE_HASH: &str = "8f2acd3f6d20f6263b35a851d2315102a7ecc0edc3d9cf688e0182f9c52f0c96";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -3207,10 +3207,8 @@ fn a_venue_with_no_package_projects_no_tiles_and_no_source_levels() {
     let projection = kiriko_bundle::scene_projection(&document);
 
     assert_eq!(projection.tiles, None);
-    assert!(
-        projection
-            .levels
-            .iter()
-            .all(|level| level.source_levels.is_empty())
-    );
+    assert!(projection
+        .levels
+        .iter()
+        .all(|level| level.source_levels.is_empty()));
 }

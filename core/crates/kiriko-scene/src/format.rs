@@ -24,6 +24,8 @@ pub enum SemanticRole {
     Ramp,
     Context,
     Conveyance,
+    /// A ticket-gate row — the illustrative form for a fare-gate fixture.
+    TicketGate,
 }
 
 /// Whether an object may occlude the route, selection, or a priority label.

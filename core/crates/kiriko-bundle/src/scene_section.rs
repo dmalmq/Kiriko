@@ -44,6 +44,7 @@ enum PrimitiveRoleDto {
     Ceiling,
     Portal,
     Conveyance,
+    Fixture,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +145,7 @@ impl From<&PrimitiveRole> for PrimitiveRoleDto {
             PrimitiveRole::Ceiling => Self::Ceiling,
             PrimitiveRole::Portal => Self::Portal,
             PrimitiveRole::Conveyance => Self::Conveyance,
+            PrimitiveRole::Fixture => Self::Fixture,
         }
     }
 }
@@ -156,6 +158,7 @@ impl From<PrimitiveRoleDto> for PrimitiveRole {
             PrimitiveRoleDto::Ceiling => Self::Ceiling,
             PrimitiveRoleDto::Portal => Self::Portal,
             PrimitiveRoleDto::Conveyance => Self::Conveyance,
+            PrimitiveRoleDto::Fixture => Self::Fixture,
         }
     }
 }
@@ -803,6 +806,28 @@ mod tests {
             opening: mesh(),
         };
         assert!(encode_scene_section(&scene, &spatial_context()).is_err());
+    }
+
+    #[test]
+    fn a_fixture_primitive_with_mesh_geometry_round_trips() {
+        let mut scene = scene_section();
+        scene.primitives.push(ScenePrimitive {
+            id: "p-fixture".into(),
+            role: PrimitiveRole::Fixture,
+            level_id: "l1".into(),
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref: 0,
+            canonical_feature_id: None,
+            source_locator_refs: vec![0],
+            evidence_refs: vec![0],
+            geometry: PrimitiveGeometry::Mesh(mesh()),
+        });
+        let encoded = encode_scene_section(&scene, &spatial_context()).expect("fixture encodes");
+        let decoded = decode_scene_section(&encoded, &spatial_context()).expect("fixture decodes");
+        assert_eq!(
+            decoded.primitives.last().expect("present").role,
+            PrimitiveRole::Fixture
+        );
     }
 
     #[test]

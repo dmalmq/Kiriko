@@ -8,12 +8,12 @@ use kiriko_model::scene::{
     ScenePrimitive, SceneSection,
 };
 use kiriko_model::spatial::{
-    Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid, EvidenceMethod,
-    Frame, LengthUnit, LevelRecord, LocatorKind, RegistrationEvidence, Registries,
-    ResolutionMethod, SourceLocator, SpatialContext, enu_basis_ecef, wgs84_ecef,
+    enu_basis_ecef, wgs84_ecef, Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind,
+    Datum, Ellipsoid, EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind,
+    RegistrationEvidence, Registries, ResolutionMethod, SourceLocator, SpatialContext,
 };
 use kiriko_scene::{
-    OcclusionClass, SemanticRole, compile_generated_scene, decode_normal_oct, encode_scene,
+    compile_generated_scene, decode_normal_oct, encode_scene, OcclusionClass, SemanticRole,
 };
 use std::collections::BTreeMap;
 
@@ -125,7 +125,7 @@ fn square(z_mm: i64) -> Mesh {
     }
 }
 
-/// A vertical quad from `z_mm` up 3 m — a wall panel.
+/// A vertical quad from `z_mm` up 3 m — a wall panel along y = 0.
 fn wall(z_mm: i64) -> Mesh {
     Mesh {
         positions: vec![
@@ -133,6 +133,21 @@ fn wall(z_mm: i64) -> Mesh {
             [2_000, 0, z_mm],
             [2_000, 0, z_mm + 3_000],
             [0, 0, z_mm + 3_000],
+        ],
+        faces: vec![[0, 1, 2], [0, 2, 3]],
+    }
+}
+
+/// A doorway quad on another line entirely: the shared fixture keeps its
+/// portal off the wall panel, because doorways that cut their host wall are
+/// the dedicated tests' subject below.
+fn off_wall_doorway(z_mm: i64) -> Mesh {
+    Mesh {
+        positions: vec![
+            [4_000, 4_000, z_mm],
+            [6_000, 4_000, z_mm],
+            [6_000, 4_000, z_mm + 2_100],
+            [4_000, 4_000, z_mm + 2_100],
         ],
         faces: vec![[0, 1, 2], [0, 2, 3]],
     }
@@ -204,7 +219,7 @@ fn scene_section() -> SceneSection {
                 None,
                 PrimitiveGeometry::Portal {
                     connects: (1, 2),
-                    opening: wall(0),
+                    opening: off_wall_doorway(0),
                 },
             ),
             // An evidenced conveyance: its canonical unit is an escalator.
@@ -546,10 +561,11 @@ fn the_header_carries_the_frame_world_transform_and_scene_bounds() {
     }
     assert_eq!(transform[15], 1.0);
 
-    // Bounds cover the venue-local metre extent: 0..2 m horizontally, and
-    // vertically from the lowest plane to the upper conveyance's top.
+    // Bounds cover the venue-local metre extent: 0..2 m of floor stack, plus
+    // the shared fixture's doorway parked away from its wall panel (4..6 m,
+    // y = 4 m), and vertically from the lowest plane to the upper conveyance.
     assert_eq!(document.header.bounds_min, [0.0, 0.0, 0.0]);
-    assert_eq!(document.header.bounds_max, [2.0, 2.0, 7.5]);
+    assert_eq!(document.header.bounds_max, [6.0, 4.0, 7.5]);
 }
 
 #[test]
@@ -607,4 +623,448 @@ fn an_empty_scene_compiles_to_a_document_with_no_batches() {
         2,
         "the frame's levels still describe the venue"
     );
+}
+
+/// A 10 m wall along y = 0 from x = 0, rising `height_mm` above `z_mm`.
+fn long_wall(z_mm: i64, height_mm: i64, length_mm: i64) -> Mesh {
+    Mesh {
+        positions: vec![
+            [0, 0, z_mm],
+            [length_mm, 0, z_mm],
+            [length_mm, 0, z_mm + height_mm],
+            [0, 0, z_mm + height_mm],
+        ],
+        faces: vec![[0, 1, 2], [0, 2, 3]],
+    }
+}
+
+/// A doorway quad on y = 0 spanning `x0..x1`, its top `height_mm` above the
+/// plane — the shape §8 emits for an opening on a unit boundary.
+fn doorway(x0: i64, x1: i64, height_mm: i64) -> PrimitiveGeometry {
+    PrimitiveGeometry::Portal {
+        connects: (0, 1),
+        opening: Mesh {
+            positions: vec![
+                [x0, 0, 0],
+                [x1, 0, 0],
+                [x1, 0, height_mm],
+                [x0, 0, height_mm],
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+        },
+    }
+}
+
+fn structure_of(document: &kiriko_scene::SceneDocument) -> kiriko_scene::SceneBatch {
+    document
+        .batches
+        .iter()
+        .find(|batch| batch.role == SemanticRole::Structure)
+        .expect("structure batch")
+        .clone()
+}
+
+/// Restored batch positions, back in venue-local millimetres.
+fn restored_mm(batch: &kiriko_scene::SceneBatch) -> Vec<[f32; 3]> {
+    batch
+        .positions
+        .iter()
+        .map(|quantized| {
+            let mut point = [0.0_f32; 3];
+            for axis in 0..3 {
+                point[axis] = batch.quantization_origin[axis]
+                    + f32::from(quantized[axis]) * batch.quantization_scale[axis];
+            }
+            point
+        })
+        .collect()
+}
+
+#[test]
+fn a_doorway_cuts_a_full_height_hole_in_its_host_wall() {
+    // A 10 m wall with a 2 m doorway centred at 4–6 m, top at 2.1 m: the
+    // compile must leave two full-height side pieces and a lintel, and no
+    // geometry inside the opening below its top.
+    let section = SceneSection {
+        primitives: vec![
+            primitive(
+                "wall-x",
+                PrimitiveRole::Wall,
+                "level-b1",
+                None,
+                PrimitiveGeometry::Mesh(long_wall(0, 3_000, 10_000)),
+            ),
+            primitive(
+                "portal-x",
+                PrimitiveRole::Portal,
+                "level-b1",
+                None,
+                doorway(4_000, 6_000, 2_100),
+            ),
+        ],
+        descriptor: None,
+    };
+    let document =
+        compile_generated_scene(&section, &spatial_context(), &features()).expect("scene compiles");
+
+    let structure = structure_of(&document);
+    assert_eq!(
+        structure.vertex_count, 18,
+        "two side pieces plus one lintel, six vertices each"
+    );
+    for p in restored_mm(&structure) {
+        let inside_span = p[0] > 4.001 && p[0] < 5.999;
+        assert!(
+            !inside_span || p[2] > 2.099,
+            "no wall face fills the doorway below its top: {p:?}"
+        );
+    }
+    // The lintel's soffit sits exactly at the doorway's stated top.
+    let restored = restored_mm(&structure);
+    assert!(
+        restored.iter().any(|p| (p[2] - 2.1).abs() < 0.001),
+        "a lintel bottom edge exists at the doorway top"
+    );
+}
+
+#[test]
+fn a_doorway_taller_than_its_wall_leaves_no_lintel() {
+    let section = SceneSection {
+        primitives: vec![
+            primitive(
+                "wall-x",
+                PrimitiveRole::Wall,
+                "level-b1",
+                None,
+                PrimitiveGeometry::Mesh(long_wall(0, 2_000, 10_000)),
+            ),
+            primitive(
+                "portal-x",
+                PrimitiveRole::Portal,
+                "level-b1",
+                None,
+                doorway(4_000, 6_000, 2_100),
+            ),
+        ],
+        descriptor: None,
+    };
+    let document =
+        compile_generated_scene(&section, &spatial_context(), &features()).expect("scene compiles");
+
+    let structure = structure_of(&document);
+    assert_eq!(structure.vertex_count, 12, "two side pieces, no lintel");
+    for p in restored_mm(&structure) {
+        assert!(
+            p[2] <= 2.001,
+            "nothing stands above the wall's own top: {p:?}"
+        );
+    }
+}
+
+#[test]
+fn a_portal_off_the_wall_line_or_level_cuts_nothing() {
+    // The doorway runs along y at x = 4 m — perpendicular to the wall — and a
+    // second collinear doorway sits on the floor above, where this wall is not.
+    let off_line = PrimitiveGeometry::Portal {
+        connects: (0, 1),
+        opening: Mesh {
+            positions: vec![
+                [4_000, 0, 0],
+                [4_000, 2_000, 0],
+                [4_000, 2_000, 2_100],
+                [4_000, 0, 2_100],
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+        },
+    };
+    let section = SceneSection {
+        primitives: vec![
+            primitive(
+                "wall-x",
+                PrimitiveRole::Wall,
+                "level-b1",
+                None,
+                PrimitiveGeometry::Mesh(long_wall(0, 3_000, 10_000)),
+            ),
+            primitive(
+                "portal-off-line",
+                PrimitiveRole::Portal,
+                "level-b1",
+                None,
+                off_line,
+            ),
+            primitive(
+                "portal-other-level",
+                PrimitiveRole::Portal,
+                "level-1f",
+                None,
+                doorway(4_000, 6_000, 2_100),
+            ),
+        ],
+        descriptor: None,
+    };
+    let document =
+        compile_generated_scene(&section, &spatial_context(), &features()).expect("scene compiles");
+
+    let b1_structure = document
+        .batches
+        .iter()
+        .find(|batch| batch.level_index == 0 && batch.role == SemanticRole::Structure)
+        .expect("b1 structure batch");
+    assert_eq!(b1_structure.vertex_count, 6, "the wall survives intact");
+}
+
+#[test]
+fn overlapping_doorways_merge_and_sliver_pieces_do_not_survive() {
+    // Doorways at 4–5 m and 5–7 m share an edge; a third at 7.006–8 m leaves
+    // only a 6 mm gap to the merged span. The wall compiles as one piece
+    // before the span and one after — never a 6 mm sliver.
+    let section = SceneSection {
+        primitives: vec![
+            primitive(
+                "wall-x",
+                PrimitiveRole::Wall,
+                "level-b1",
+                None,
+                PrimitiveGeometry::Mesh(long_wall(0, 3_000, 10_000)),
+            ),
+            primitive(
+                "portal-a",
+                PrimitiveRole::Portal,
+                "level-b1",
+                None,
+                doorway(4_000, 5_000, 2_100),
+            ),
+            primitive(
+                "portal-b",
+                PrimitiveRole::Portal,
+                "level-b1",
+                None,
+                doorway(5_000, 7_000, 2_100),
+            ),
+            primitive(
+                "portal-c",
+                PrimitiveRole::Portal,
+                "level-b1",
+                None,
+                doorway(7_006, 8_000, 2_100),
+            ),
+        ],
+        descriptor: None,
+    };
+    let document =
+        compile_generated_scene(&section, &spatial_context(), &features()).expect("scene compiles");
+
+    let structure = structure_of(&document);
+    assert_eq!(
+        structure.vertex_count, 18,
+        "one piece before 4 m, one lintel across 4–8 m, one piece after"
+    );
+    for p in restored_mm(&structure) {
+        let under_lintel = p[0] > 4.001 && p[0] < 7.999 && p[2] < 2.099;
+        assert!(!under_lintel, "the merged span is fully open: {p:?}");
+    }
+}
+
+#[test]
+fn a_wall_fully_covered_by_a_doorway_compiles_with_no_geometry() {
+    let section = SceneSection {
+        primitives: vec![
+            primitive(
+                "wall-x",
+                PrimitiveRole::Wall,
+                "level-b1",
+                None,
+                PrimitiveGeometry::Mesh(long_wall(0, 3_000, 2_000)),
+            ),
+            primitive(
+                "portal-x",
+                PrimitiveRole::Portal,
+                "level-b1",
+                None,
+                doorway(0, 2_000, 3_000),
+            ),
+        ],
+        descriptor: None,
+    };
+    let document = compile_generated_scene(&section, &spatial_context(), &features())
+        .expect("an emptied wall still compiles");
+
+    let structure = structure_of(&document);
+    assert_eq!(structure.vertex_count, 0, "nothing of the wall remains");
+    let wall = document
+        .features
+        .iter()
+        .find(|feature| feature.source_object_id == "wall-x")
+        .expect("the wall's feature entry stays for provenance");
+    assert_eq!(wall.min_z, 0.0);
+    assert_eq!(wall.max_z, 0.0);
+}
+
+/// A closed rectangular tube — walls plus lid, no bottom: the shape §9's
+/// neutral conveyance meshes take for a transit footprint.
+fn conduit_box(x0: i64, y0: i64, x1: i64, y1: i64, z0: i64, z1: i64) -> Mesh {
+    let ring = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    let mut positions = Vec::new();
+    for p in ring {
+        positions.push([p[0], p[1], z0]);
+    }
+    for p in ring {
+        positions.push([p[0], p[1], z1]);
+    }
+    let (b, t) = (0u32, 4u32);
+    let mut quad = |faces: &mut Vec<[u32; 3]>, a: u32, b: u32, c: u32, d: u32| {
+        faces.push([a, b, c]);
+        faces.push([a, c, d]);
+    };
+    let mut faces = Vec::new();
+    quad(&mut faces, b, b + 1, t + 1, t);
+    quad(&mut faces, b + 1, b + 2, t + 2, t + 1);
+    quad(&mut faces, b + 2, b + 3, t + 3, t + 2);
+    quad(&mut faces, b + 3, b, t, t + 3);
+    quad(&mut faces, t, t + 1, t + 2, t + 3);
+    Mesh { positions, faces }
+}
+
+fn conveyance_section(category: Option<&str>) -> SceneSection {
+    SceneSection {
+        primitives: vec![primitive(
+            "conveyance-x",
+            PrimitiveRole::Conveyance,
+            "level-b1",
+            category.map(|_| "unit-x"),
+            PrimitiveGeometry::Conveyance {
+                kind: kiriko_model::scene::ConveyanceKind::Neutral,
+                mesh: conduit_box(-3_000, -1_000, 3_000, 1_000, 0, 3_000),
+            },
+        )],
+        descriptor: None,
+    }
+}
+
+fn conveyance_features(category: Option<&str>) -> Vec<VenueFeature> {
+    vec![feature("unit-x", FeatureType::Unit, category)]
+}
+
+#[test]
+fn an_evidenced_stair_run_compiles_to_steps() {
+    let document = compile_generated_scene(
+        &conveyance_section(Some("stairs")),
+        &spatial_context(),
+        &conveyance_features(Some("stairs")),
+    )
+    .expect("scene compiles");
+
+    let batch = document
+        .batches
+        .iter()
+        .find(|batch| batch.role == SemanticRole::Stairs)
+        .expect("stairs batch");
+    // 26 risers of ~175 mm span the 4.5 m to the next plane: one box each.
+    assert_eq!(batch.vertex_count, 26 * 30);
+    let restored = restored_mm(batch);
+    assert!(
+        restored.iter().any(|p| (p[2] - 4.5).abs() < 0.01),
+        "the top step lands on the upper plane"
+    );
+    assert!(
+        restored.iter().any(|p| p[2] > 0.1 && p[2] < 4.4),
+        "intermediate risers exist"
+    );
+    assert!(
+        restored.iter().all(|p| p[1] >= -1.001 && p[1] <= 1.001),
+        "the steps stay inside the authored 2 m footprint"
+    );
+}
+
+#[test]
+fn an_elevator_gets_doors_and_a_roof() {
+    let document = compile_generated_scene(
+        &conveyance_section(Some("elevator")),
+        &spatial_context(),
+        &conveyance_features(Some("elevator")),
+    )
+    .expect("scene compiles");
+
+    let batch = document
+        .batches
+        .iter()
+        .find(|batch| batch.role == SemanticRole::Elevator)
+        .expect("elevator batch");
+    // Shaft + two door panels + roof slab.
+    assert_eq!(batch.vertex_count, 120);
+    let restored = restored_mm(batch);
+    assert!(
+        restored.iter().any(|p| (p[2] - 4.62).abs() < 0.01),
+        "the roof slab exists above the shaft"
+    );
+}
+
+#[test]
+fn an_escalator_gets_rails_and_comb_platforms() {
+    let document = compile_generated_scene(
+        &conveyance_section(Some("escalator")),
+        &spatial_context(),
+        &conveyance_features(Some("escalator")),
+    )
+    .expect("scene compiles");
+
+    let batch = document
+        .batches
+        .iter()
+        .find(|batch| batch.role == SemanticRole::Escalator)
+        .expect("escalator batch");
+    // Deck quad + two balustrade bands + two comb boxes.
+    assert_eq!(batch.vertex_count, 78);
+    let restored = restored_mm(batch);
+    assert!(
+        restored.iter().any(|p| p[2] > 5.0),
+        "balustrades rise above the upper landing"
+    );
+}
+
+#[test]
+fn an_untyped_conveyance_keeps_its_neutral_mesh() {
+    let document = compile_generated_scene(
+        &conveyance_section(None),
+        &spatial_context(),
+        &conveyance_features(None),
+    )
+    .expect("scene compiles");
+
+    let batch = document
+        .batches
+        .iter()
+        .find(|batch| batch.role == SemanticRole::Conveyance)
+        .expect("conveyance batch");
+    assert_eq!(batch.vertex_count, 30, "the authored tube, untouched");
+}
+
+#[test]
+fn a_fixture_compiles_as_a_ticket_gate_row() {
+    let section = SceneSection {
+        primitives: vec![primitive(
+            "fixture-x",
+            PrimitiveRole::Fixture,
+            "level-b1",
+            None,
+            PrimitiveGeometry::Mesh(square(0)),
+        )],
+        descriptor: None,
+    };
+    let document =
+        compile_generated_scene(&section, &spatial_context(), &features()).expect("scene compiles");
+
+    let batch = document
+        .batches
+        .iter()
+        .find(|batch| batch.role == SemanticRole::TicketGate)
+        .expect("ticket-gate batch");
+    assert_eq!(batch.vertex_count, 6, "the authored square, untouched");
+    let gate = document
+        .features
+        .iter()
+        .find(|feature| feature.source_object_id == "fixture-x")
+        .expect("gate feature present");
+    assert_eq!(gate.role, SemanticRole::TicketGate);
 }

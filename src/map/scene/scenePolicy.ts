@@ -36,6 +36,10 @@ export const ROLE_COLORS: Record<SemanticRoleName, readonly [number, number, num
   Context: [0.835, 0.855, 0.891],
   // An untyped conveyance never borrows a kind the source never stated.
   Conveyance: [0.741, 0.773, 0.835],
+  // A ticket gate reads as brushed metal: a warm neutral, one step warmer
+  // than the cool structure family so a gate row separates from the walls
+  // it stands beside.
+  TicketGate: [0.804, 0.784, 0.741],
 };
 
 /** Lower paints first. Coplanar surfaces rely on this being total per role. */
@@ -53,6 +57,7 @@ export const ROLE_PAINT_ORDER: Record<SemanticRoleName, number> = {
   Stairs: 3,
   Ramp: 3,
   Conveyance: 3,
+  TicketGate: 3,
   // Vertical structure, then the openings that pierce it.
   Structure: 4,
   Opening: 5,
@@ -83,6 +88,7 @@ export const ROLE_VERTICAL_NUDGE_MM: Record<SemanticRoleName, number> = {
   Stairs: 0,
   Ramp: 0,
   Conveyance: 0,
+  TicketGate: 0,
   Structure: 0,
   Opening: 0,
   Ceiling: 0,
@@ -100,6 +106,7 @@ export const ROLE_DEPTH_BIAS: Record<SemanticRoleName, number> = {
   Stairs: 0,
   Ramp: 0,
   Conveyance: 0,
+  TicketGate: 0,
   Structure: 0,
   Opening: -4,
   Ceiling: 0,
@@ -113,8 +120,10 @@ export const ROLE_DEPTH_BIAS: Record<SemanticRoleName, number> = {
  */
 const HIDDEN_ROLES_ON_ACTIVE_LEVEL: Record<string, true> = { Ceiling: true };
 
-/** Adjacent floors, when shown as context, stay quiet enough to read past. */
-export const CONTEXT_LEVEL_OPACITY = 0.22;
+/** Adjacent floors, when shown as context, stay quieter than any subject
+ * yet read as floors rather than ghosts: present enough to see where the
+ * floor you left went during a handoff, still far below the active floor. */
+export const CONTEXT_LEVEL_OPACITY = 0.35;
 
 /**
  * A protected-corridor occluder fades to this when it would obstruct what the
@@ -127,13 +136,17 @@ export const OCCLUDER_FADE_OPACITY = 0.15;
  * The higher floor of a retained route pair renders at this opacity — #32
  * section 6's route-floor band, applied by elevation rather than by selection.
  *
- * A cross-floor connection is only legible if the floor above it is see-through:
- * with both floors drawn by selection alone, an active floor sitting above its
- * route partner hid the connector and the whole floor below it. The lower floor
- * of the pair keeps full semantic opacity, so the reviewer reads the connection
- * against solid geometry rather than against two ghosts.
+ * A cross-floor connection is only legible if the lower floor reads against
+ * solid geometry, so the pair's higher floor yields the depth buffer — but it
+ * must stay readable itself: at a quarter opacity the floor above dissolved
+ * into noise and reviewers could not tell what they were looking past. Just
+ * under half keeps every wall and plate legible while the connector below
+ * still shows through.
+ *
+ * The lower floor of the pair keeps full semantic opacity, so the reviewer
+ * reads the connection against solid geometry rather than against two ghosts.
  */
-export const UPPER_FLOOR_OPACITY = 0.25;
+export const UPPER_FLOOR_OPACITY = 0.45;
 
 /**
  * A conveyance shell renders at this opacity, always.

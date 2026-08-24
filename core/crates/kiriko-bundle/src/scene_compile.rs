@@ -21,8 +21,8 @@ use kiriko_model::scene::{
     SceneSection,
 };
 use kiriko_model::spatial::{
-    Assumption, AssumptionKind, Confidence, ConfidenceKind, EvidenceMethod, Frame, LocatorKind,
-    RegistrationEvidence, Registries, SourceLocator, SpatialContext, wgs84_ecef,
+    wgs84_ecef, Assumption, AssumptionKind, Confidence, ConfidenceKind, EvidenceMethod, Frame,
+    LocatorKind, RegistrationEvidence, Registries, SourceLocator, SpatialContext,
 };
 
 use crate::codec::BundleDocument;
@@ -51,6 +51,10 @@ pub struct SceneProfile {
     /// vertical graph connection (a point-to-point connection gets a
     /// nominal volume, never fabricated machinery).
     pub conveyance_half_width_mm: i64,
+    /// Spacing between gate machines in an illustrative ticket-gate row.
+    pub gate_pitch_mm: i64,
+    /// Pedestal height of an illustrative ticket-gate machine.
+    pub gate_height_mm: i64,
 }
 
 impl Default for SceneProfile {
@@ -65,6 +69,8 @@ impl Default for SceneProfile {
             corroboration_tolerance_mm: 200,
             conveyance_height_mm: 3000,
             conveyance_half_width_mm: 600,
+            gate_pitch_mm: 600,
+            gate_height_mm: 1000,
         }
     }
 }
@@ -433,6 +439,7 @@ pub(crate) fn compile_scene(
     let mut nominal_wall_assumption: Option<u32> = None;
     let mut nominal_door_assumption: Option<u32> = None;
     let mut nominal_conveyance_assumption: Option<u32> = None;
+    let mut nominal_gate_assumption: Option<u32> = None;
     let conf_ref = |registries: &mut Registries,
                     assumed: bool,
                     measured: &mut Option<u32>,
@@ -952,6 +959,62 @@ pub(crate) fn compile_scene(
         conveyance_count += 1;
     }
 
+    // -- Fixtures: illustrative ticket-gate rows. -----------------------------
+    // A fixture feature becomes a row of fare-gate machines along its long
+    // axis — the gates Japanese stations line their concourses with. The
+    // position is measured; the form is an illustration, registered as an
+    // assumption like every other nominal shape.
+    let gate_assumption = *nominal_gate_assumption.get_or_insert_with(|| {
+        push_assumption(
+            &mut spatial.registries,
+            "illustrative ticket-gate row (never fabricated machinery detail)",
+        )
+    });
+    for fixture in document
+        .features
+        .iter()
+        .filter(|f| f.feature_type == FeatureType::Fixture)
+    {
+        let Some(level_id) = fixture.level_id.as_deref() else {
+            continue;
+        };
+        let Some(z) = plane_z(level_id) else {
+            continue;
+        };
+        let Some(ring) = fixture.geometry.as_ref().and_then(polygon_ring) else {
+            continue;
+        };
+        let ring_xy: Vec<[i64; 2]> = ring
+            .iter()
+            .map(|[lon, lat]| project_local_mm(frame, *lon, *lat))
+            .collect();
+        let locator = find_or_push_locator(&mut spatial.registries, &fixture.id);
+        let confidence_ref = conf_ref(
+            &mut spatial.registries,
+            true,
+            &mut measured_confidence,
+            &mut assumed_confidence,
+        );
+        let evidence_ref = push_evidence(
+            &mut spatial.registries,
+            locator,
+            Some(confidence_ref),
+            Some(gate_assumption),
+            "ticket-gate row at the measured fixture position",
+        );
+        primitives.push(ScenePrimitive {
+            id: format!("fixture-{}", fixture.id),
+            role: PrimitiveRole::Fixture,
+            level_id: level_id.to_string(),
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref,
+            canonical_feature_id: Some(fixture.id.clone()),
+            source_locator_refs: vec![locator],
+            evidence_refs: vec![evidence_ref],
+            geometry: PrimitiveGeometry::Mesh(ticket_gate_row(&ring_xy, z, profile)),
+        });
+    }
+
     Some(SceneSection {
         primitives,
         descriptor: None,
@@ -1067,6 +1130,141 @@ fn wall_mesh(a: [i64; 2], b: [i64; 2], z: i64, height: i64) -> Mesh {
     }
 }
 
+/// Merge `src` into `dst`, re-basing its face indices.
+fn append_mesh(dst: &mut Mesh, src: Mesh) {
+    let offset = dst.positions.len() as u32;
+    dst.positions.extend(src.positions);
+    for face in src.faces {
+        dst.faces
+            .push([face[0] + offset, face[1] + offset, face[2] + offset]);
+    }
+}
+
+/// An illustrative Japanese fare-gate row along a fixture footprint's long
+/// axis: evenly spaced machines, each a pedestal, flap-bar wings reaching to
+/// both lane edges, and an IC reader head on top. Boxes only — an
+/// illustration of what the gates do, never fabricated machinery detail.
+fn ticket_gate_row(ring_xy: &[[i64; 2]], z: i64, profile: &SceneProfile) -> Mesh {
+    let Some((min, max)) = ring_xy.iter().fold(None::<([i64; 2], [i64; 2])>, |acc, p| {
+        Some(match acc {
+            None => (*p, *p),
+            Some((lo, hi)) => (
+                [lo[0].min(p[0]), lo[1].min(p[1])],
+                [hi[0].max(p[0]), hi[1].max(p[1])],
+            ),
+        })
+    }) else {
+        return Mesh {
+            positions: Vec::new(),
+            faces: Vec::new(),
+        };
+    };
+    let (dx, dy) = ((max[0] - min[0]) as f64, (max[1] - min[1]) as f64);
+    let (origin, u, v, length, cross) = if dx >= dy {
+        (
+            [min[0] as f64, (min[1] + max[1]) as f64 / 2.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            dx,
+            dy,
+        )
+    } else {
+        (
+            [(min[0] + max[0]) as f64 / 2.0, min[1] as f64],
+            [0.0, 1.0],
+            [1.0, 0.0],
+            dy,
+            dx,
+        )
+    };
+    if length < 300.0 || cross < 200.0 {
+        // Too small to read as a gate row: nothing beats drawing nothing.
+        return Mesh {
+            positions: Vec::new(),
+            faces: Vec::new(),
+        };
+    }
+    let half_cross = ((cross / 2.0) as i64 - 40).min(600) as f64;
+    let machines = ((length / profile.gate_pitch_mm as f64).round() as usize).max(1);
+    let at = |t: f64, s: f64| -> [i64; 2] {
+        [
+            (origin[0] + u[0] * (t * length) + v[0] * s).round() as i64,
+            (origin[1] + u[1] * (t * length) + v[1] * s).round() as i64,
+        ]
+    };
+    let rect = |c: [i64; 2], half_u: f64, half_v: f64| -> Vec<[i64; 2]> {
+        vec![
+            [
+                c[0] - (u[0] * half_u).round() as i64 - (v[0] * half_v).round() as i64,
+                c[1] - (u[1] * half_u).round() as i64 - (v[1] * half_v).round() as i64,
+            ],
+            [
+                c[0] + (u[0] * half_u).round() as i64 - (v[0] * half_v).round() as i64,
+                c[1] + (u[1] * half_u).round() as i64 - (v[1] * half_v).round() as i64,
+            ],
+            [
+                c[0] + (u[0] * half_u).round() as i64 + (v[0] * half_v).round() as i64,
+                c[1] + (u[1] * half_u).round() as i64 + (v[1] * half_v).round() as i64,
+            ],
+            [
+                c[0] - (u[0] * half_u).round() as i64 + (v[0] * half_v).round() as i64,
+                c[1] - (u[1] * half_u).round() as i64 + (v[1] * half_v).round() as i64,
+            ],
+        ]
+    };
+    let mut mesh = Mesh {
+        positions: Vec::new(),
+        faces: Vec::new(),
+    };
+    for i in 0..machines {
+        let t = (i as f64 + 0.5) / machines as f64;
+        let c = at(t, 0.0);
+        // Pedestal: a narrow body across the lane's centre.
+        append_mesh(
+            &mut mesh,
+            box_mesh(
+                &rect(c, 150.0, 120.0),
+                &rect(c, 150.0, 120.0),
+                z,
+                z + profile.gate_height_mm,
+            ),
+        );
+        // Flap-bar wings from the body out to both lane edges.
+        for s in [-1.0, 1.0] {
+            let inner = at(t, s * 120.0);
+            let outer = at(t, s * half_cross);
+            let mid = [(inner[0] + outer[0]) / 2, (inner[1] + outer[1]) / 2];
+            let half_len =
+                (((outer[0] - inner[0]) as f64 * u[0] + (outer[1] - inner[1]) as f64 * u[1]).abs()
+                    / 2.0)
+                    .max(1.0)
+                    + (((outer[0] - inner[0]) as f64 * v[0] + (outer[1] - inner[1]) as f64 * v[1])
+                        .abs()
+                        / 2.0);
+            append_mesh(
+                &mut mesh,
+                box_mesh(
+                    &rect(mid, 40.0, half_len),
+                    &rect(mid, 40.0, half_len),
+                    z + 550,
+                    z + 650,
+                ),
+            );
+        }
+        // IC reader head on the body top.
+        append_mesh(
+            &mut mesh,
+            box_mesh(
+                &rect(c, 170.0, 140.0),
+                &rect(c, 170.0, 140.0),
+                z + profile.gate_height_mm,
+                z + profile.gate_height_mm + 150,
+            ),
+        );
+    }
+    mesh
+}
+
 /// A projected, triangulated mesh from an already-projected ring at `z`.
 fn ring_mesh_from_xy(xy: &[[i64; 2]], z: i64) -> Mesh {
     Mesh {
@@ -1103,11 +1301,10 @@ fn point_near_segment(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> 
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod tests {
-    use kiriko_model::spatial::{Axes, Frame, LengthUnit, enu_basis_ecef, wgs84_ecef};
+    use kiriko_model::spatial::{enu_basis_ecef, wgs84_ecef, Axes, Frame, LengthUnit};
 
-    use super::{SceneProfile, project_local_mm, triangulate_simple};
+    use super::{project_local_mm, ticket_gate_row, triangulate_simple, SceneProfile};
 
     fn test_frame() -> Frame {
         let anchor = [139.767, 35.681];
@@ -1136,6 +1333,35 @@ mod tests {
         assert_eq!(profile.corroboration_tolerance_mm, 200);
         assert_eq!(profile.conveyance_height_mm, 3000);
         assert_eq!(profile.conveyance_half_width_mm, 600);
+        assert_eq!(profile.gate_pitch_mm, 600);
+        assert_eq!(profile.gate_height_mm, 1000);
+    }
+
+    #[test]
+    fn ticket_gate_row_places_machines_along_the_long_axis() {
+        let profile = SceneProfile::default();
+        let ring = vec![[0, 0], [6_000, 0], [6_000, 2_000], [0, 2_000]];
+        let mesh = ticket_gate_row(&ring, 4_000, &profile);
+        // Ten machines at the default 600 mm pitch; each is four boxes —
+        // pedestal, two flap wings, and a reader head — of eight positions.
+        assert_eq!(mesh.positions.len(), 10 * 4 * 8);
+        let top = mesh
+            .positions
+            .iter()
+            .map(|p| p[2])
+            .max()
+            .expect("positions");
+        assert_eq!(top, 4_000 + 1_000 + 150, "reader head caps the machine");
+        let xs: std::collections::HashSet<i64> = mesh.positions.iter().map(|p| p[0]).collect();
+        assert!(xs.len() >= 10, "machines spread along the long axis");
+    }
+
+    #[test]
+    fn a_fixture_too_small_for_a_gate_row_stays_empty() {
+        let profile = SceneProfile::default();
+        let ring = vec![[0, 0], [200, 0], [200, 100], [0, 100]];
+        let mesh = ticket_gate_row(&ring, 0, &profile);
+        assert!(mesh.positions.is_empty(), "nothing beats a phantom gate");
     }
 
     #[test]
