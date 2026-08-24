@@ -4,8 +4,8 @@
 //! inside the draw-call budget, every vertex is attributable, and the same
 //! bundle always compiles to the same bytes.
 
-use kiriko_bundle::{compile_imdf, decode_bundle, BundleMetadata};
-use kiriko_scene::{compile_generated_scene, decode_scene, encode_scene, SemanticRole};
+use kiriko_bundle::{BundleMetadata, compile_imdf, decode_bundle};
+use kiriko_scene::{SemanticRole, compile_generated_scene, decode_scene, encode_scene};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod support;

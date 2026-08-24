@@ -165,6 +165,9 @@ fn multi_floor_entries() -> Vec<(&'static str, String)> {
     let openings = r#"{"type":"FeatureCollection","features":[
         {"id":"d1000001-0000-4000-8000-000000000001","type":"Feature","feature_type":"opening",
           "geometry":{"type":"LineString","coordinates":[[139.7670,35.6810],[139.7672,35.6810]]},
+          "properties":{"category":"pedestrian.transit","level_id":"b1000003-0000-4000-8000-000000000003"}},
+        {"id":"d1000002-0000-4000-8000-000000000002","type":"Feature","feature_type":"opening",
+          "geometry":{"type":"LineString","coordinates":[[139.7672,35.6810],[139.7673,35.6810]]},
           "properties":{"category":"pedestrian.transit","level_id":"b1000003-0000-4000-8000-000000000003"}}
     ]}"#;
     let drawings = r#"{"type":"FeatureCollection","features":[
@@ -181,6 +184,221 @@ fn multi_floor_entries() -> Vec<(&'static str, String)> {
         ("opening.geojson", openings.to_string()),
         ("drawing.geojson", drawings.to_string()),
     ]
+}
+
+/// Two walkways sharing a 10 m-class boundary, but only one unit splits that
+/// edge with a mid-edge vertex. An opening that straddles the split must still
+/// connect both surfaces.
+pub fn build_split_shared_edge_opening_imdf_zip() -> Vec<u8> {
+    let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;
+    let venue = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000001-0000-4000-8000-000000000031",
+            "venue",
+            r#"{"category":"transit","name":{"en":"Split Edge Venue"},"address_id":"a1000002-0000-4000-8000-000000000032"}"#,
+            Some(POLYGON),
+        )
+    );
+    let address = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000002-0000-4000-8000-000000000032",
+            "address",
+            r#"{"address":"1 Split Way"}"#,
+            None,
+        )
+    );
+    let level_id = "b1000001-0000-4000-8000-000000000031";
+    let levels = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            level_id,
+            "level",
+            r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
+            Some(POLYGON),
+        )
+    );
+    let units = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"c1000001-0000-4000-8000-000000000031","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6806],[139.7678,35.6806],[139.7678,35.6810],[139.7662,35.6810],[139.7662,35.6806]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}},
+            {{"id":"c1000002-0000-4000-8000-000000000032","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6810],[139.7670,35.6810],[139.7678,35.6810],[139.7678,35.6814],[139.7662,35.6814],[139.7662,35.6810]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000031","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.7668,35.6810],[139.7672,35.6810]]}},"properties":{{"category":"pedestrian.transit","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    write_zip_entries(&[
+        ("manifest.json", manifest.to_string()),
+        ("venue.geojson", venue),
+        ("address.geojson", address),
+        ("level.geojson", levels),
+        ("unit.geojson", units),
+        ("opening.geojson", openings),
+    ])
+}
+
+/// Same split-shared-edge topology as [`build_split_shared_edge_opening_imdf_zip`],
+/// but the unsplit unit is 1.8 m high while the split neighbour stays at the
+/// nominal 3.0 m wall height. An opening that straddles the mid-edge vertex
+/// must use 1,800 mm for both the portal and every collinear host cut.
+pub fn build_mixed_height_split_shared_edge_opening_imdf_zip() -> Vec<u8> {
+    let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;
+    let venue = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000001-0000-4000-8000-000000000061",
+            "venue",
+            r#"{"category":"transit","name":{"en":"Mixed Height Split Edge Venue"},"address_id":"a1000002-0000-4000-8000-000000000062"}"#,
+            Some(POLYGON),
+        )
+    );
+    let address = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000002-0000-4000-8000-000000000062",
+            "address",
+            r#"{"address":"1 Mixed Height Way"}"#,
+            None,
+        )
+    );
+    let level_id = "b1000001-0000-4000-8000-000000000061";
+    let levels = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            level_id,
+            "level",
+            r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
+            Some(POLYGON),
+        )
+    );
+    let units = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"c1000001-0000-4000-8000-000000000061","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6806],[139.7678,35.6806],[139.7678,35.6810],[139.7662,35.6810],[139.7662,35.6806]]]}},"properties":{{"category":"walkway","level_id":"{level_id}","height":1.8}}}},
+            {{"id":"c1000002-0000-4000-8000-000000000062","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6810],[139.7670,35.6810],[139.7678,35.6810],[139.7678,35.6814],[139.7662,35.6814],[139.7662,35.6810]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000061","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.7668,35.6810],[139.7672,35.6810]]}},"properties":{{"category":"pedestrian.transit","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    write_zip_entries(&[
+        ("manifest.json", manifest.to_string()),
+        ("venue.geojson", venue),
+        ("address.geojson", address),
+        ("level.geojson", levels),
+        ("unit.geojson", units),
+        ("opening.geojson", openings),
+    ])
+}
+
+/// Two adjacent walkway boundaries separated by about 0.1 m, within the
+/// scene profile's corroboration tolerance.
+pub fn build_offset_shared_edge_opening_imdf_zip() -> Vec<u8> {
+    let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;
+    let venue = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000001-0000-4000-8000-000000000041",
+            "venue",
+            r#"{"category":"transit","name":{"en":"Offset Edge Venue"},"address_id":"a1000002-0000-4000-8000-000000000042"}"#,
+            Some(POLYGON),
+        )
+    );
+    let address = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000002-0000-4000-8000-000000000042",
+            "address",
+            r#"{"address":"1 Offset Way"}"#,
+            None,
+        )
+    );
+    let level_id = "b1000001-0000-4000-8000-000000000041";
+    let levels = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            level_id,
+            "level",
+            r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
+            Some(POLYGON),
+        )
+    );
+    let units = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"c1000001-0000-4000-8000-000000000041","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6806],[139.7678,35.6806],[139.7678,35.6810],[139.7662,35.6810],[139.7662,35.6806]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}},
+            {{"id":"c1000002-0000-4000-8000-000000000042","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.681001],[139.7678,35.681001],[139.7678,35.6814],[139.7662,35.6814],[139.7662,35.681001]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000041","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.7668,35.6810],[139.7672,35.6810]]}},"properties":{{"category":"pedestrian.transit","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    write_zip_entries(&[
+        ("manifest.json", manifest.to_string()),
+        ("venue.geojson", venue),
+        ("address.geojson", address),
+        ("level.geojson", levels),
+        ("unit.geojson", units),
+        ("opening.geojson", openings),
+    ])
+}
+
+/// One short unit whose exterior edge is unsplit while the level boundary
+/// has an extra vertex in the middle of that same edge.
+pub fn build_split_level_boundary_opening_imdf_zip() -> Vec<u8> {
+    let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;
+    let venue = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000001-0000-4000-8000-000000000051",
+            "venue",
+            r#"{"category":"transit","name":{"en":"Split Level Edge Venue"},"address_id":"a1000002-0000-4000-8000-000000000052"}"#,
+            Some(POLYGON),
+        )
+    );
+    let address = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000002-0000-4000-8000-000000000052",
+            "address",
+            r#"{"address":"1 Split Level Way"}"#,
+            None,
+        )
+    );
+    let level_id = "b1000001-0000-4000-8000-000000000051";
+    let level_geometry = r#"{"type":"Polygon","coordinates":[[[139.7662,35.6806],[139.7678,35.6806],[139.7678,35.6810],[139.7670,35.6810],[139.7662,35.6810],[139.7662,35.6806]]]}"#;
+    let levels = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            level_id,
+            "level",
+            r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
+            Some(level_geometry),
+        )
+    );
+    let units = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"c1000001-0000-4000-8000-000000000051","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6806],[139.7678,35.6806],[139.7678,35.6810],[139.7662,35.6810],[139.7662,35.6806]]]}},"properties":{{"category":"walkway","level_id":"{level_id}","height":1.8}}}}
+        ]}}"#
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000051","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.7668,35.6810],[139.7672,35.6810]]}},"properties":{{"category":"pedestrian.transit","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    write_zip_entries(&[
+        ("manifest.json", manifest.to_string()),
+        ("venue.geojson", venue),
+        ("address.geojson", address),
+        ("level.geojson", levels),
+        ("unit.geojson", units),
+        ("opening.geojson", openings),
+    ])
 }
 
 /// One F1 with a lone platform, plus F2 with a platform sharing an edge with a shop.
@@ -228,12 +446,18 @@ pub fn build_platform_wall_imdf_zip() -> Vec<u8> {
             {{"id":"c1000003-0000-4000-8000-000000000013","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7660,35.6810],[139.7680,35.6810],[139.7680,35.6820],[139.7660,35.6820],[139.7660,35.6810]]]}},"properties":{{"category":"shop","level_id":"{f2}"}}}}
         ]}}"#
     );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000011","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.7668,35.6800],[139.7672,35.6800]]}},"properties":{{"category":"pedestrian.transit","level_id":"{f1}"}}}}
+        ]}}"#
+    );
     write_zip_entries(&[
         ("manifest.json", manifest.to_string()),
         ("venue.geojson", venue),
         ("address.geojson", address),
         ("level.geojson", levels),
         ("unit.geojson", units),
+        ("opening.geojson", openings),
     ])
 }
 
@@ -266,11 +490,18 @@ pub fn build_multipolygon_unit_imdf_zip() -> Vec<u8> {
             level_id,
             "level",
             r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
-            Some(POLYGON),
+            Some(
+                r#"{"type":"MultiPolygon","coordinates":[[[[139.7660,35.6800],[139.7668,35.6800],[139.7668,35.6808],[139.7660,35.6808],[139.7660,35.6800]]],[[[139.7672,35.6812],[139.7680,35.6812],[139.7680,35.6820],[139.7672,35.6820],[139.7672,35.6812]]]]}"#
+            ),
         )
     );
     let units = format!(
-        r#"{{"type":"FeatureCollection","features":[{{"id":"{unit_id}","type":"Feature","feature_type":"unit","geometry":{{"type":"MultiPolygon","coordinates":[[[[139.7660,35.6800],[139.7668,35.6800],[139.7668,35.6808],[139.7660,35.6808],[139.7660,35.6800]]],[[[139.7672,35.6812],[139.7680,35.6812],[139.7680,35.6820],[139.7672,35.6820],[139.7672,35.6812]]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}]}}"#
+        r#"{{"type":"FeatureCollection","features":[{{"id":"{unit_id}","type":"Feature","feature_type":"unit","geometry":{{"type":"MultiPolygon","coordinates":[[[[139.7660,35.6800],[139.7668,35.6800],[139.7668,35.6808],[139.7660,35.6808],[139.7660,35.6800]]],[[[139.7673,35.6812],[139.7679,35.6812],[139.7679,35.6819],[139.7673,35.6819],[139.7673,35.6812]]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}]}}"#
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000021","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.7674,35.6812],[139.7676,35.6812]]}},"properties":{{"category":"pedestrian.transit","level_id":"{level_id}"}}}}
+        ]}}"#
     );
     write_zip_entries(&[
         ("manifest.json", manifest.to_string()),
@@ -278,6 +509,7 @@ pub fn build_multipolygon_unit_imdf_zip() -> Vec<u8> {
         ("address.geojson", address),
         ("level.geojson", levels),
         ("unit.geojson", units),
+        ("opening.geojson", openings),
     ])
 }
 

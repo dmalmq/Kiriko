@@ -8,12 +8,12 @@ use kiriko_model::scene::{
     ScenePrimitive, SceneSection,
 };
 use kiriko_model::spatial::{
-    enu_basis_ecef, wgs84_ecef, Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind,
-    Datum, Ellipsoid, EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind,
-    RegistrationEvidence, Registries, ResolutionMethod, SourceLocator, SpatialContext,
+    Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid, EvidenceMethod,
+    Frame, LengthUnit, LevelRecord, LocatorKind, RegistrationEvidence, Registries,
+    ResolutionMethod, SourceLocator, SpatialContext, enu_basis_ecef, wgs84_ecef,
 };
 use kiriko_scene::{
-    compile_generated_scene, decode_normal_oct, encode_scene, OcclusionClass, SemanticRole,
+    OcclusionClass, SemanticRole, compile_generated_scene, decode_normal_oct, encode_scene,
 };
 use std::collections::BTreeMap;
 
@@ -540,6 +540,7 @@ fn the_header_carries_the_frame_world_transform_and_scene_bounds() {
         compile_generated_scene(&scene_section(), &spatial, &features()).expect("scene compiles");
 
     assert_eq!(document.header.frame_origin_ecef, spatial.frame.ecef_origin);
+    assert_eq!(document.header.deriver_version, 4);
 
     // Column-major 4x4: the ENU basis vectors as columns, translation last.
     let transform = document.header.world_transform;

@@ -22,15 +22,15 @@ use kiriko_model::scene::{Mesh, PrimitiveGeometry, PrimitiveRole, ScenePrimitive
 use kiriko_model::spatial::SpatialContext;
 use sha2::{Digest, Sha256};
 
+use crate::SceneError;
 use crate::format::{
     SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel, SemanticRole,
 };
 use crate::quantize::{encode_normal_oct, quantize_positions};
 use crate::roles::occlusion_for_role;
-use crate::SceneError;
 
 /// Bumped when this producer's output changes for unchanged input.
-const GENERATED_PRODUCER_VERSION: u16 = 3;
+const GENERATED_PRODUCER_VERSION: u16 = 4;
 
 /// The render format this producer writes.
 const SCENE_FORMAT_VERSION: u16 = 1;
