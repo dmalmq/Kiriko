@@ -2957,6 +2957,139 @@ fn an_opening_on_a_split_shared_edge_still_connects_both_units() {
 }
 
 #[test]
+fn tolerance_matched_offset_boundaries_both_connect_to_the_opening() {
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    const OPENING_ID: &str = "d1000001-0000-4000-8000-000000000041";
+    const UNIT_A: &str = "c1000001-0000-4000-8000-000000000041";
+    const UNIT_B: &str = "c1000002-0000-4000-8000-000000000042";
+
+    let compiled = compile_imdf(
+        &support::build_offset_shared_edge_opening_imdf_zip(),
+        metadata(),
+    )
+    .expect("offset-edge fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let scene = document.scene.expect("generated scene present");
+    let portal = scene
+        .primitives
+        .iter()
+        .find(|primitive| primitive.canonical_feature_id.as_deref() == Some(OPENING_ID))
+        .expect("opening between tolerance-matched boundaries emits a portal");
+    let PrimitiveGeometry::Portal { connects, .. } = &portal.geometry else {
+        panic!("opening must use portal geometry");
+    };
+    let mut expected_connects = [UNIT_A, UNIT_B].map(|unit_id| {
+        scene
+            .primitives
+            .iter()
+            .position(|primitive| {
+                primitive.role == PrimitiveRole::Surface
+                    && primitive.canonical_feature_id.as_deref() == Some(unit_id)
+            })
+            .expect("unit surface exists") as u32
+    });
+    expected_connects.sort_unstable();
+    assert_eq!(
+        *connects,
+        (expected_connects[0], expected_connects[1]),
+        "every tolerance-matched host boundary contributes its adjacent surface"
+    );
+}
+
+#[test]
+fn an_exterior_opening_resolves_a_slab_across_split_level_edges() {
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    const LEVEL_ID: &str = "b1000001-0000-4000-8000-000000000051";
+    const OPENING_ID: &str = "d1000001-0000-4000-8000-000000000051";
+    const UNIT_ID: &str = "c1000001-0000-4000-8000-000000000051";
+
+    let compiled = compile_imdf(
+        &support::build_split_level_boundary_opening_imdf_zip(),
+        metadata(),
+    )
+    .expect("split-level-edge fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let scene = document.scene.expect("generated scene present");
+    let portal = scene
+        .primitives
+        .iter()
+        .find(|primitive| primitive.canonical_feature_id.as_deref() == Some(OPENING_ID))
+        .expect("exterior opening emits a portal");
+    let PrimitiveGeometry::Portal { connects, .. } = &portal.geometry else {
+        panic!("opening must use portal geometry");
+    };
+    let surface = scene
+        .primitives
+        .iter()
+        .position(|primitive| {
+            primitive.role == PrimitiveRole::Surface
+                && primitive.canonical_feature_id.as_deref() == Some(UNIT_ID)
+        })
+        .expect("unit surface exists") as u32;
+    let slab = scene
+        .primitives
+        .iter()
+        .position(|primitive| primitive.id == format!("slab-{LEVEL_ID}"))
+        .expect("level slab exists") as u32;
+    assert_eq!(
+        *connects,
+        (surface, slab),
+        "the union of split collinear level edges identifies the exterior slab"
+    );
+}
+
+#[test]
+fn a_host_clamped_opening_records_its_effective_height() {
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    const OPENING_ID: &str = "d1000001-0000-4000-8000-000000000051";
+
+    let compiled = compile_imdf(
+        &support::build_split_level_boundary_opening_imdf_zip(),
+        metadata(),
+    )
+    .expect("short-host fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let spatial = document.spatial_context.expect("spatial context present");
+    let scene = document.scene.expect("generated scene present");
+    let portal = scene
+        .primitives
+        .iter()
+        .find(|primitive| {
+            primitive.role == PrimitiveRole::Portal
+                && primitive.canonical_feature_id.as_deref() == Some(OPENING_ID)
+        })
+        .expect("short host emits a portal");
+    let PrimitiveGeometry::Portal { opening, .. } = &portal.geometry else {
+        panic!("opening must use portal geometry");
+    };
+    let min_z = opening
+        .positions
+        .iter()
+        .map(|position| position[2])
+        .min()
+        .unwrap();
+    let max_z = opening
+        .positions
+        .iter()
+        .map(|position| position[2])
+        .max()
+        .unwrap();
+    assert_eq!(max_z - min_z, 1_800, "portal geometry clamps to its host");
+
+    let evidence = &spatial.registries.registration_evidence[portal.evidence_refs[0] as usize];
+    assert_eq!(evidence.detail, "portal at host-clamped opening height");
+    let assumption = &spatial.registries.assumptions
+        [evidence.assumption_ref.expect("height assumption") as usize];
+    assert_eq!(
+        assumption.detail,
+        "opening height 1800 mm clamped to host height from nominal 2400 mm"
+    );
+}
+
+#[test]
 fn a_lone_platform_unit_emits_no_walls() {
     use kiriko_model::scene::PrimitiveRole;
 

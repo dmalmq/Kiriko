@@ -545,6 +545,7 @@ pub(crate) fn compile_scene(
     let mut nominal_ceiling_assumption: Option<u32> = None;
     let mut nominal_wall_assumption: Option<u32> = None;
     let mut nominal_door_assumption: Option<u32> = None;
+    let mut clamped_door_assumptions: BTreeMap<i64, u32> = BTreeMap::new();
     let mut nominal_conveyance_assumption: Option<u32> = None;
     let conf_ref = |registries: &mut Registries,
                     assumed: bool,
@@ -844,14 +845,13 @@ pub(crate) fn compile_scene(
 
         let host_a = [host_key.1, host_key.2];
         let host_b = [host_key.3, host_key.4];
-        let collinear_hosts: Vec<WallEdgeKey> = walls_by_level
+        let host_keys: Vec<WallEdgeKey> = walls_by_level
             .keys()
             .filter(|key| {
                 let a = [key.1, key.2];
                 let b = [key.3, key.4];
                 key.0 == level_id
-                    && segments_are_collinear(host_a, host_b, a, b)
-                    && opening_overlaps_host(source_a, source_b, a, b)
+                    && opening_hosted_by_wall(source_a, source_b, a, b, host_a, host_b, tolerance)
             })
             .cloned()
             .collect();
@@ -875,12 +875,12 @@ pub(crate) fn compile_scene(
         if effective_height == 0 {
             continue;
         }
-        let mut surfaces: Vec<u32> = collinear_hosts
+        let mut surfaces: Vec<u32> = host_keys
             .iter()
             .flat_map(|key| {
                 walls_by_level
                     .get(key)
-                    .expect("collinear host exists")
+                    .expect("opening host exists")
                     .surface_indices
                     .iter()
                     .copied()
@@ -891,17 +891,16 @@ pub(crate) fn compile_scene(
         let connects = match surfaces.as_slice() {
             [first, second, ..] => (*first, *second),
             [surface] => {
-                let slab = collinear_hosts.iter().find_map(|key| {
-                    let edge_a = [key.1, key.2];
-                    let edge_b = [key.3, key.4];
-                    level_slab_edges.iter().find_map(|(level_edge, slab)| {
-                        let level_a = [level_edge.1, level_edge.2];
-                        let level_b = [level_edge.3, level_edge.4];
-                        (level_edge.0 == key.0
-                            && point_near_segment(edge_a, level_a, level_b, 0)
-                            && point_near_segment(edge_b, level_a, level_b, 0))
-                        .then_some(*slab)
-                    })
+                let slab = level_slab_edges.iter().find_map(|(level_edge, slab)| {
+                    if level_edge.0 != level_id {
+                        return None;
+                    }
+                    let level_a = [level_edge.1, level_edge.2];
+                    let level_b = [level_edge.3, level_edge.4];
+                    opening_hosted_by_wall(
+                        source_a, source_b, level_a, level_b, host_a, host_b, tolerance,
+                    )
+                    .then_some(*slab)
                 });
                 let Some(slab) = slab else { continue };
                 (*surface, slab)
@@ -916,18 +915,34 @@ pub(crate) fn compile_scene(
             &mut measured_confidence,
             &mut assumed_confidence,
         );
-        let opening_assumption = *nominal_door_assumption.get_or_insert_with(|| {
-            push_assumption(
-                &mut spatial.registries,
-                &format!("nominal opening height {} mm", profile.door_height_mm),
-            )
-        });
+        let (opening_assumption, evidence_detail) = if effective_height == profile.door_height_mm {
+            let assumption = *nominal_door_assumption.get_or_insert_with(|| {
+                push_assumption(
+                    &mut spatial.registries,
+                    &format!("nominal opening height {} mm", profile.door_height_mm),
+                )
+            });
+            (assumption, "portal at nominal opening height")
+        } else {
+            let assumption = *clamped_door_assumptions
+                    .entry(effective_height)
+                    .or_insert_with(|| {
+                        push_assumption(
+                            &mut spatial.registries,
+                            &format!(
+                                "opening height {effective_height} mm clamped to host height from nominal {} mm",
+                                profile.door_height_mm
+                            ),
+                        )
+                    });
+            (assumption, "portal at host-clamped opening height")
+        };
         let evidence_ref = push_evidence(
             &mut spatial.registries,
             locator_ref,
             Some(confidence_ref),
             Some(opening_assumption),
-            "portal at nominal opening height",
+            evidence_detail,
         );
         let interval = OpeningInterval {
             start_numerator,
@@ -946,7 +961,7 @@ pub(crate) fn compile_scene(
             evidence_ref,
             confidence_ref,
         });
-        for key in &collinear_hosts {
+        for key in &host_keys {
             let edge_a = [key.1, key.2];
             let edge_b = [key.3, key.4];
             let start = projection_numerator(source_a, edge_a, edge_b)
@@ -956,7 +971,7 @@ pub(crate) fn compile_scene(
             if start == end {
                 continue;
             }
-            let spec = walls_by_level.get_mut(key).expect("collinear host exists");
+            let spec = walls_by_level.get_mut(key).expect("opening host exists");
             let host_height = i64::from(*spec.heights.iter().min().expect("host has a height"));
             let height_mm = profile.door_height_mm.clamp(0, host_height);
             if height_mm == 0 {
@@ -1486,6 +1501,25 @@ fn opening_overlaps_host(source_a: [i64; 2], source_b: [i64; 2], a: [i64; 2], b:
     start < end
 }
 
+/// A wall or level edge hosts an opening when the opening overlaps it and
+/// either both endpoints sit within the configured corroboration tolerance
+/// or the edge is exactly collinear with the selected host.
+fn opening_hosted_by_wall(
+    source_a: [i64; 2],
+    source_b: [i64; 2],
+    a: [i64; 2],
+    b: [i64; 2],
+    selected_a: [i64; 2],
+    selected_b: [i64; 2],
+    tolerance: i64,
+) -> bool {
+    a != b
+        && opening_overlaps_host(source_a, source_b, a, b)
+        && ((point_near_segment(source_a, a, b, tolerance)
+            && point_near_segment(source_b, a, b, tolerance))
+            || segments_are_collinear(selected_a, selected_b, a, b))
+}
+
 fn snapped_interval_endpoints(
     a: [i64; 2],
     b: [i64; 2],
@@ -1503,9 +1537,9 @@ mod tests {
     use kiriko_model::spatial::{Axes, Frame, LengthUnit, enu_basis_ecef, wgs84_ecef};
 
     use super::{
-        OpeningInterval, SceneProfile, opening_overlaps_host, point_segment_squared_distance,
-        project_local_mm, segments_are_collinear, snapped_interval_endpoints, triangulate_simple,
-        wall_mesh_with_openings,
+        OpeningInterval, SceneProfile, opening_hosted_by_wall, opening_overlaps_host,
+        point_segment_squared_distance, project_local_mm, segments_are_collinear,
+        snapped_interval_endpoints, triangulate_simple, wall_mesh_with_openings,
     };
 
     fn test_frame() -> Frame {
@@ -1597,6 +1631,67 @@ mod tests {
             source_b,
             [0, 0],
             [3_000, 0]
+        ));
+    }
+
+    #[test]
+    fn tolerance_matched_offset_and_split_edges_host_an_opening() {
+        let selected_a = [0, 0];
+        let selected_b = [10_000, 0];
+        let source_a = [4_000, 0];
+        let source_b = [6_000, 0];
+        let tolerance = 200;
+
+        assert!(opening_hosted_by_wall(
+            source_a, source_b, selected_a, selected_b, selected_a, selected_b, tolerance,
+        ));
+        assert!(
+            opening_hosted_by_wall(
+                source_a,
+                source_b,
+                [0, 1],
+                [10_000, 1],
+                selected_a,
+                selected_b,
+                tolerance,
+            ),
+            "a 1 mm offset neighbour within corroboration tolerance must still host"
+        );
+        assert!(opening_hosted_by_wall(
+            source_a,
+            source_b,
+            [0, 0],
+            [5_000, 0],
+            selected_a,
+            selected_b,
+            tolerance,
+        ));
+        assert!(opening_hosted_by_wall(
+            source_a,
+            source_b,
+            [5_000, 0],
+            [10_000, 0],
+            selected_a,
+            selected_b,
+            tolerance,
+        ));
+        assert!(
+            !opening_hosted_by_wall(
+                source_a,
+                source_b,
+                [0, 500],
+                [10_000, 500],
+                selected_a,
+                selected_b,
+                tolerance,
+            ),
+            "a parallel wall beyond corroboration tolerance must not host"
+        );
+        assert!(!segments_are_collinear(
+            selected_a,
+            selected_b,
+            [0, 1],
+            [10_000, 1]
         ));
     }
 
