@@ -1,8 +1,3 @@
-// Build @kiriko/node (napi-rs). Cargo can succeed and @napi-rs/cli 3.7.3 still
-// throw `Failed to copy artifact`: it unlinks the dest `.node` then copies, and
-// Clipanion drops the `cause`. Windows refuses the unlink while the addon is
-// loaded; napi also looks only under target/<rustc-host-triple>/. Recover the
-// cdylib, park a locked dest as `.inuse`, then retry so index.js is generated.
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
@@ -75,6 +70,56 @@ function rustcHostTriple(fallback) {
   return fallback;
 }
 
+function reportRecoveryFailure(recovery) {
+  if (recovery.kind === "src-missing") {
+    console.error("[build-node] Cargo artifact not found. Tried:");
+    for (const tried of recovery.tried) {
+      console.error(`  ${tried}`);
+    }
+    return 1;
+  }
+  console.error(
+    `[build-node] ${recovery.dest} is loaded (${recovery.code}). ` +
+      "Stop leftover Node processes that hold the addon, then retry.",
+  );
+  return 1;
+}
+
+function stageNapiExpectedSource(src, workspaceTargetDir) {
+  const fallbackTriple = hostTriples(process.platform, process.arch)[0];
+  if (fallbackTriple === undefined) {
+    console.error(
+      `[build-node] Unsupported native addon target: ${process.platform}-${process.arch}`,
+    );
+    return 1;
+  }
+  const expectedSource = path.join(
+    workspaceTargetDir,
+    rustcHostTriple(fallbackTriple),
+    "release",
+    cdylibFileName("kiriko_node", process.platform),
+  );
+  if (path.resolve(src) !== path.resolve(expectedSource)) {
+    mkdirSync(path.dirname(expectedSource), { recursive: true });
+    copyFileSync(src, expectedSource);
+  }
+  return 0;
+}
+
+function retryNapiAfterRecover(recovery) {
+  if (runNapi() === 0) {
+    return 0;
+  }
+  const indexJs = path.join(crateDir, "index.js");
+  if (existsSync(recovery.dest) && existsSync(indexJs)) {
+    console.warn(
+      `[build-node] napi retry failed after placing ${recovery.dest}.`,
+    );
+    return 0;
+  }
+  return 1;
+}
+
 function main() {
   if (runNapi() === 0) {
     return 0;
@@ -93,53 +138,13 @@ function main() {
     profile: "release",
   });
 
-  if (recovery.kind === "src-missing") {
-    console.error("[build-node] Cargo artifact not found. Tried:");
-    for (const tried of recovery.tried) {
-      console.error(`  ${tried}`);
-    }
+  if (recovery.kind !== "placed") {
+    return reportRecoveryFailure(recovery);
+  }
+  if (stageNapiExpectedSource(recovery.src, workspaceTargetDir) !== 0) {
     return 1;
   }
-
-  if (recovery.kind === "dest-locked") {
-    console.error(
-      `[build-node] ${recovery.dest} is loaded (${recovery.code}). ` +
-        "Stop leftover Node processes that hold the addon, then retry.",
-    );
-    return 1;
-  }
-
-  const fallbackTriple = hostTriples(process.platform, process.arch)[0];
-  if (fallbackTriple === undefined) {
-    console.error(
-      `[build-node] Unsupported native addon target: ${process.platform}-${process.arch}`,
-    );
-    return 1;
-  }
-
-  const expectedSource = path.join(
-    workspaceTargetDir,
-    rustcHostTriple(fallbackTriple),
-    "release",
-    cdylibFileName("kiriko_node", process.platform),
-  );
-  if (path.resolve(recovery.src) !== path.resolve(expectedSource)) {
-    mkdirSync(path.dirname(expectedSource), { recursive: true });
-    copyFileSync(recovery.src, expectedSource);
-  }
-
-  if (runNapi() === 0) {
-    return 0;
-  }
-
-  if (existsSync(recovery.dest) && existsSync(path.join(crateDir, "index.js"))) {
-    console.warn(
-      `[build-node] napi copy still failed, but the addon was placed at ${recovery.dest}.`,
-    );
-    return 0;
-  }
-
-  return 1;
+  return retryNapiAfterRecover(recovery);
 }
 
 process.exit(main());

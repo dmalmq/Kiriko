@@ -55,16 +55,15 @@ export function cdylibFileName(libName, platform) {
 
 function sourceCandidates({ targetDirs, triples, profile, libName, platform }) {
   const fileName = cdylibFileName(libName, platform);
-  const implicitTriple = triples[0] ?? null;
 
   return targetDirs.flatMap((targetDir) => [
     ...triples.map((triple) => ({
       src: path.join(targetDir, triple, profile, fileName),
-      triple,
+      layout: { kind: "triple", triple },
     })),
     {
       src: path.join(targetDir, profile, fileName),
-      triple: implicitTriple,
+      layout: { kind: "host" },
     },
   ]);
 }
@@ -88,6 +87,31 @@ function errorCode(err) {
 export function isLockError(err) {
   const code = errorCode(err);
   return code !== null && LOCK_ERROR_CODES.has(code);
+}
+
+function destTriple(layout, triples) {
+  if (layout.kind === "triple") {
+    return layout.triple;
+  }
+  return triples[0];
+}
+
+function parkLoadedDest(dest) {
+  const parked = `${dest}.inuse`;
+  if (!existsSync(dest)) {
+    return { kind: "clear", parked: null };
+  }
+  try {
+    rmSync(parked, { recursive: true, force: true });
+    renameSync(dest, parked);
+    return { kind: "parked", parked };
+  } catch (err) {
+    const code = errorCode(err);
+    if (code !== null && LOCK_ERROR_CODES.has(code)) {
+      return { kind: "dest-locked", dest, code };
+    }
+    throw err;
+  }
 }
 
 export function recoverAddon({
@@ -116,25 +140,20 @@ export function recoverAddon({
     return { kind: "src-missing", tried: candidates.map(({ src }) => src) };
   }
 
-  const triple = found.triple ?? triples[0];
+  const triple = destTriple(found.layout, triples);
   const platformArchABI = PLATFORM_ARCH_ABI_BY_TRIPLE[triple];
   if (platformArchABI === undefined) {
     throw new Error(`Unsupported Rust host triple: ${triple}`);
   }
 
   const dest = path.join(crateDir, addonDestName({ binaryName, platformArchABI }));
-  const parked = `${dest}.inuse`;
-  let parkedDest = null;
-
   try {
-    if (existsSync(dest)) {
-      if (existsSync(parked)) {
-        rmSync(parked, { recursive: true, force: true });
-      }
-      renameSync(dest, parked);
-      parkedDest = parked;
+    const parked = parkLoadedDest(dest);
+    if (parked.kind === "dest-locked") {
+      return parked;
     }
     copyFileSync(found.src, dest);
+    return { kind: "placed", src: found.src, dest, parked: parked.parked };
   } catch (err) {
     const code = errorCode(err);
     if (code !== null && LOCK_ERROR_CODES.has(code)) {
@@ -142,6 +161,4 @@ export function recoverAddon({
     }
     throw err;
   }
-
-  return { kind: "placed", src: found.src, dest, parked: parkedDest };
 }
