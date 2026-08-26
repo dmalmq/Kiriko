@@ -664,6 +664,24 @@ export const api = {
     return parseGenerateNetworkAccepted(body);
   },
 
+  async regenerateScene(
+    venueId: number,
+  ): Promise<GenerateNetworkAccepted> {
+    const res = await fetch("/api/gdb/regenerate-scene", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ venueId }),
+    });
+    if (!res.ok) {
+      let parsed: GdbError = { code: "gdb_conversion_failed", message: `${res.status}` };
+      try { parsed = (await res.json()) as GdbError; } catch { /* non-JSON */ }
+      throw parsed;
+    }
+    const body: unknown = await res.json();
+    return parseGenerateNetworkAccepted(body);
+  },
+
   async exportNetwork(venueId: number): Promise<{ blob: Blob; filename: string }> {
     const res = await fetch("/api/gdb/export-network", {
       method: "POST",

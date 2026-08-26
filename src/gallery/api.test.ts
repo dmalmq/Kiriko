@@ -398,6 +398,38 @@ describe("generateNetwork", () => {
   });
 });
 
+describe("regenerateScene", () => {
+  it("posts venueId and returns the accepted job", async () => {
+    const fetchSpy = vi.fn(
+      (..._args: unknown[]) =>
+        Promise.resolve(
+          new Response(JSON.stringify({ jobId: "s1", versionId: 4, seq: 4, estimatedDurationSeconds: null }), { status: 202 }),
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    const out = await api.regenerateScene(9);
+    expect(out).toEqual({ jobId: "s1", versionId: 4, seq: 4, estimatedDurationSeconds: null });
+    expectTypeOf(out).toEqualTypeOf<{
+      jobId: string;
+      versionId: number;
+      seq: number;
+      estimatedDurationSeconds: number | null;
+    }>();
+    const call = fetchSpy.mock.calls[0]!;
+    expect(call[0]).toBe("/api/gdb/regenerate-scene");
+    const init = call[1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toEqual({ venueId: 9 });
+  });
+
+  it("throws the parsed GdbError on failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "no_base_version" }), { status: 404 })),
+    );
+    await expect(api.regenerateScene(9)).rejects.toMatchObject({ error: "no_base_version" });
+  });
+});
+
 describe("importNetwork", () => {
   it("posts the edited graph keyed by slug and returns the accepted job", async () => {
     const fetchSpy = vi.fn(

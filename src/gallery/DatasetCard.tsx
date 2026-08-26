@@ -13,6 +13,7 @@ const ui = {
   addData: { ja: "経路・地点データを追加", en: "Add routing / facilities" },
   editMapping: { ja: "マッピングを編集", en: "Edit mapping" },
   generateRouting: { ja: "経路を生成", en: "Generate routing" },
+  regenerateScene: { ja: "3Dを再生成", en: "Regenerate 3D" },
   checkStatus: { ja: "状況を確認", en: "Check status" },
   exportNetwork: { ja: "ネットワークを書き出し", en: "Export network" },
   reviewNetwork: { ja: "ネットワークを確認", en: "Review network" },
@@ -35,6 +36,8 @@ export interface DatasetCardProps {
   onEditMapping?: () => void;
   onGenerateRouting?: () => void;
   generateRoutingLabel?: string;
+  onRegenerateScene?: () => void;
+  regenerateSceneLabel?: string;
   onExportNetwork?: () => void;
   onReviewNetwork?: () => void;
   onUploadImdf?: () => void;
@@ -53,6 +56,8 @@ export function DatasetCard({
   onEditMapping,
   onGenerateRouting,
   generateRoutingLabel,
+  onRegenerateScene,
+  regenerateSceneLabel,
   onExportNetwork,
   onReviewNetwork,
   onUploadImdf,
@@ -61,6 +66,7 @@ export function DatasetCard({
   const stats = venue.latest?.stats ?? null;
   const date = (venue.latest?.createdAt ?? venue.createdAt).slice(0, 10);
   const generateDisabled = actionsDisabled && generateRoutingLabel === undefined;
+  const regenerateSceneDisabled = actionsDisabled && regenerateSceneLabel === undefined;
   return (
     <article className="dataset-card">
       <button type="button" className="dataset-card__thumb" aria-hidden="true" tabIndex={-1} onClick={onOpen} disabled={actionsDisabled} />
@@ -111,6 +117,11 @@ export function DatasetCard({
         {onGenerateRouting ? (
           <button type="button" className="btn-ghost" onClick={onGenerateRouting} disabled={generateDisabled}>
             {generateRoutingLabel ?? ui.generateRouting[locale]}
+          </button>
+        ) : null}
+        {onRegenerateScene ? (
+          <button type="button" className="btn-ghost" onClick={onRegenerateScene} disabled={regenerateSceneDisabled}>
+            {regenerateSceneLabel ?? ui.regenerateScene[locale]}
           </button>
         ) : null}
         {onExportNetwork ? (

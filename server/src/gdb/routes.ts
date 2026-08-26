@@ -44,6 +44,7 @@ import { newPublicVersionId } from "../venues/uploadRoute";
 import { exportVenueNetwork, CoreExportError } from "../core/native";
 import { packageNetworkGdbZip } from "./exportGdb";
 import { storedPlanClipsToSelection } from "./plan";
+import { evaluationTarget } from "../tiles/activation";
 
 const TENANT_ID = 1;
 
@@ -828,6 +829,103 @@ export function registerGdbRoutes(app: FastifyInstance): void {
       );
       const { jobId, versionId } = accepted;
       return reply.code(202).send({ jobId, versionId, seq: nextSeq, estimatedDurationSeconds });
+    },
+  );
+
+
+  app.post(
+    "/api/gdb/regenerate-scene",
+    {
+      preHandler: requireSession,
+      schema: {
+        body: Type.Object({
+          venueId: Type.Integer({ minimum: 1 }),
+        }),
+        response: {
+          202: Type.Object({
+            jobId: Type.String(),
+            versionId: Type.Number(),
+            seq: Type.Number(),
+            estimatedDurationSeconds: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
+          }),
+          404: Type.Object({ error: Type.String() }),
+        },
+      },
+    },
+    async (request, reply) => {
+      const { venueId } = request.body as { venueId: number };
+      const db = request.server.db;
+      const venue = db
+        .prepare("SELECT id FROM venues WHERE id = ? AND tenant_id = ?")
+        .get(venueId, TENANT_ID);
+      if (!venue) {
+        return reply.code(404).send({ error: "not_found" });
+      }
+      const target = evaluationTarget(db, venueId);
+      if (!target) {
+        return reply.code(404).send({ error: "no_base_version" });
+      }
+
+      let networkJunctionsHash: string | null = target.networkJunctionsBlobHash;
+      let networkPathsHash: string | null = target.networkPathsBlobHash;
+      if (networkJunctionsHash !== null && networkPathsHash !== null) {
+        // Imported graph, or a previously exported synthesized graph: copy hashes.
+      } else if (target.synthesized) {
+        try {
+          const bundle = request.server.blobs.read(target.bundleHash);
+          const exported = await exportVenueNetwork(bundle);
+          const junctionsBlob = request.server.blobs.put(Buffer.from(exported.junctions, "utf8"));
+          const pathsBlob = request.server.blobs.put(Buffer.from(exported.paths, "utf8"));
+          const insertBlob = db.prepare("INSERT OR IGNORE INTO blobs (hash, size) VALUES (?, ?)");
+          insertBlob.run(junctionsBlob.hash, junctionsBlob.size);
+          insertBlob.run(pathsBlob.hash, pathsBlob.size);
+          networkJunctionsHash = junctionsBlob.hash;
+          networkPathsHash = pathsBlob.hash;
+        } catch (error) {
+          if (!(error instanceof CoreExportError) || error.code !== "no_graph") {
+            throw error;
+          }
+          networkJunctionsHash = null;
+          networkPathsHash = null;
+        }
+      } else {
+        networkJunctionsHash = null;
+        networkPathsHash = null;
+      }
+
+      const maxRow = db
+        .prepare("SELECT MAX(seq) AS m FROM versions WHERE venue_id = ?")
+        .get(venueId) as { m: number | null };
+      const nextSeq = (maxRow.m ?? 0) + 1;
+      const accepted = request.server.queue.enqueuePublication(
+        "publish_imdf",
+        {
+          venueId,
+          seq: nextSeq,
+          publicId: newPublicVersionId(),
+          sourceBlobHash: target.sourceBlobHash,
+          sourceKind: target.sourceKind,
+          gdbSourceBlobHash: target.gdbSourceBlobHash,
+          gdbPlanJson: target.gdbPlanJson,
+          networkJunctionsBlobHash: networkJunctionsHash,
+          networkPathsBlobHash: networkPathsHash,
+          facilitiesBlobHash: target.facilitiesBlobHash,
+          synthesized: target.synthesized,
+        },
+        {
+          operation: "regenerate_scene",
+          ...(networkJunctionsHash !== null && networkPathsHash !== null
+            ? {
+                networkJunctionsHash,
+                networkPathsHash,
+              }
+            : {}),
+          facilitiesGeoJsonHash: target.facilitiesBlobHash ?? undefined,
+          clipToSelection: storedPlanClipsToSelection(target.gdbPlanJson),
+        },
+      );
+      const { jobId, versionId } = accepted;
+      return reply.code(202).send({ jobId, versionId, seq: nextSeq, estimatedDurationSeconds: null });
     },
   );
 

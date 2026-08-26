@@ -167,6 +167,54 @@ describe("DatasetCard", () => {
     expect(screen.queryByRole("button", { name: "Generate routing" })).toBeNull();
   });
 
+  it("shows Regenerate 3D and calls onRegenerateScene when provided", () => {
+    const onRegenerateScene = vi.fn();
+    render(
+      <DatasetCard
+        venue={venue}
+        locale="en"
+        onOpen={() => {}}
+        onDelete={() => {}}
+        onRegenerateScene={onRegenerateScene}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate 3D" }));
+    expect(onRegenerateScene).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the in-flight label when regenerateSceneLabel is provided", () => {
+    render(
+      <DatasetCard
+        venue={venue}
+        locale="en"
+        onOpen={() => {}}
+        onDelete={() => {}}
+        onRegenerateScene={() => {}}
+        regenerateSceneLabel="Check status"
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Regenerate 3D" })).toBeNull();
+  });
+
+  it("labels Regenerate 3D in Japanese when locale is ja", () => {
+    render(
+      <DatasetCard
+        venue={venue}
+        locale="ja"
+        onOpen={() => {}}
+        onDelete={() => {}}
+        onRegenerateScene={() => {}}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "3Dを再生成" })).toBeTruthy();
+  });
+
+  it("hides Regenerate 3D when onRegenerateScene is omitted", () => {
+    render(<DatasetCard venue={venue} locale="en" onOpen={() => {}} onDelete={() => {}} />);
+    expect(screen.queryByRole("button", { name: "Regenerate 3D" })).toBeNull();
+  });
+
   it("shows Export network and calls onExportNetwork when provided", () => {
     const onExportNetwork = vi.fn();
     render(

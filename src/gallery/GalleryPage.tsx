@@ -52,6 +52,8 @@ const ui = {
   },
   checkStatus: { ja: "状況を確認", en: "Check status" },
   regenerateRouting: { ja: "経路を再生成", en: "Regenerate routing" },
+  generatingScene: { ja: "3Dを再生成中…", en: "Regenerating 3D…" },
+  sceneGenerated: { ja: "3Dを再生成しました", en: "3D regenerated" },
   noGraphToExport: {
     ja: "書き出せる経路ネットワークがありません。先に生成してください。",
     en: "No routing network to export — generate one first.",
@@ -136,7 +138,7 @@ interface RoutingProgressState {
   timedOut: boolean;
 }
 
-type TopLevelOwner = "gdb" | "add-data" | "routing";
+type TopLevelOwner = "gdb" | "add-data" | "routing" | "scene";
 
 export function GalleryPage() {
   const [locale, setLocale] = useState<LocaleCode>("ja");
@@ -150,6 +152,7 @@ export function GalleryPage() {
   const [uploadTarget, setUploadTarget] = useState<UploadModalTarget | null>(null);
   const [deleting, setDeleting] = useState<VenueSummary | null>(null);
   const [regenerating, setRegenerating] = useState<VenueSummary | null>(null);
+  const [regeneratingScene, setRegeneratingScene] = useState<VenueSummary | null>(null);
   const [tilesVenue, setTilesVenue] = useState<VenueSummary | null>(null);
   const [gdbFlow, setGdbFlow] = useState<GdbFlow>({ phase: "idle" });
   const [gdbNotice, setGdbNotice] = useState<string | null>(null);
@@ -158,6 +161,9 @@ export function GalleryPage() {
   const [routingJob, setRoutingJob] = useState<{ venueId: number; jobId: string } | null>(null);
   const [routingProgress, setRoutingProgress] = useState<RoutingProgressState | null>(null);
   const [routingClockMs, setRoutingClockMs] = useState(() => Date.now());
+  const [generatingSceneId, setGeneratingSceneId] = useState<number | null>(null);
+  const [sceneJob, setSceneJob] = useState<{ venueId: number; jobId: string } | null>(null);
+  const [sceneProgress, setSceneProgress] = useState<RoutingProgressState | null>(null);
   const gdbInputRef = useRef<HTMLInputElement>(null);
   const gdbTargetRef = useRef<GdbTarget>({ mode: "create" });
   const aliveRef = useRef(true);
@@ -172,6 +178,7 @@ export function GalleryPage() {
   const addDataFacilitiesGenerationRef = useRef(0);
   const addDataPublishGenerationRef = useRef(0);
   const routingGenerationRef = useRef(0);
+  const sceneGenerationRef = useRef(0);
   const exportGenerationRef = useRef(0);
   const noticeGenerationRef = useRef(0);
   const acceptedOwner: TopLevelOwner | null =
@@ -181,7 +188,9 @@ export function GalleryPage() {
         ? "add-data"
         : routingJob !== null || generatingId !== null
           ? "routing"
-          : null;
+          : sceneJob !== null || generatingSceneId !== null
+            ? "scene"
+            : null;
 
   const invalidateGdbRequests = () => {
     gdbGenerationRef.current += 1;
@@ -200,8 +209,11 @@ export function GalleryPage() {
     setAddData({ phase: "idle" });
     setGeneratingId(null);
     setRoutingJob(null);
+    setGeneratingSceneId(null);
+    setSceneJob(null);
     setGdbNotice(null);
     setRoutingProgress(null);
+    setSceneProgress(null);
     gdbTargetRef.current = { mode: "create" };
     if (gdbInputRef.current) gdbInputRef.current.value = "";
   };
@@ -209,6 +221,7 @@ export function GalleryPage() {
     invalidateGdbRequests();
     invalidateAddDataRequests();
     routingGenerationRef.current += 1;
+    sceneGenerationRef.current += 1;
     exportGenerationRef.current += 1;
     noticeGenerationRef.current += 1;
   };
@@ -227,8 +240,12 @@ export function GalleryPage() {
       setAddData({ phase: "idle" });
     }
     setGeneratingId(null);
+    setGeneratingSceneId(null);
     if (owner !== "routing") {
       setRoutingJob(null);
+    }
+    if (owner !== "scene") {
+      setSceneJob(null);
     }
     setGdbNotice(null);
     return true;
@@ -270,14 +287,14 @@ export function GalleryPage() {
   }, [reload]);
 
   useEffect(() => {
-    if (routingProgress === null) return;
+    if (routingProgress === null && sceneProgress === null) return;
     const timer = window.setInterval(() => {
       setRoutingClockMs(Date.now());
     }, 1_000);
     return () => {
       window.clearInterval(timer);
     };
-  }, [routingProgress]);
+  }, [routingProgress, sceneProgress]);
 
   const openCreateUpload = () => {
     if (acceptedOwner !== null) return;
@@ -806,6 +823,105 @@ export function GalleryPage() {
     })();
   };
 
+  const generateScene = (venue: VenueSummary) => {
+    if (generatingSceneId !== null) return;
+    if (sceneJob !== null && sceneJob.venueId !== venue.id) return;
+    if (acceptedOwner !== null && acceptedOwner !== "scene") return;
+    let accepted = sceneJob?.venueId === venue.id ? sceneJob : null;
+    let estimate =
+      sceneProgress?.venueId === venue.id ? sceneProgress.estimatedDurationSeconds : null;
+    if (!beginTopLevelActivity("scene")) return;
+    const generation = sceneGenerationRef.current;
+    const noticeGeneration = noticeGenerationRef.current;
+    const sessionGeneration = sessionGenerationRef.current;
+    setGeneratingSceneId(venue.id);
+    setRoutingClockMs(Date.now());
+    setSceneProgress((current) =>
+      current?.venueId === venue.id
+        ? { ...current, timedOut: false }
+        : {
+            venueId: venue.id,
+            venueName: venue.name,
+            startedAtMs: Date.now(),
+            estimatedDurationSeconds: null,
+            timedOut: false,
+          },
+    );
+    setGdbNotice(accepted === null ? ui.generatingScene[locale] : ui.processingContinues[locale]);
+    void (async () => {
+      try {
+        if (accepted === null) {
+          const res = await api.regenerateScene(venue.id);
+          accepted = { venueId: venue.id, jobId: res.jobId };
+          estimate = res.estimatedDurationSeconds;
+          if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
+          if (generation === sceneGenerationRef.current) {
+            setSceneJob(accepted);
+            setSceneProgress((current) =>
+              current?.venueId === venue.id
+                ? { ...current, estimatedDurationSeconds: res.estimatedDurationSeconds }
+                : current,
+            );
+          }
+        }
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
+        const job = await api.waitForJob(accepted.jobId, {
+          timeoutMs: generateWaitTimeoutMs(estimate),
+        });
+        if (!aliveRef.current || sessionGeneration !== sessionGenerationRef.current) return;
+        const canTouchNotice = noticeGeneration === noticeGenerationRef.current && generation === sceneGenerationRef.current;
+        if (job.status === "done") {
+          if (canTouchNotice) {
+            setSceneJob(null);
+            setSceneProgress(null);
+            setGdbNotice(ui.sceneGenerated[locale]);
+          }
+          await reload();
+        } else if (job.status === "timeout") {
+          if (canTouchNotice) {
+            setSceneJob(accepted);
+            setSceneProgress((current) =>
+              current?.venueId === venue.id
+                ? { ...current, timedOut: true }
+                : current,
+            );
+            setGdbNotice(ui.processingContinues[locale]);
+          }
+        } else {
+          if (canTouchNotice) {
+            setSceneJob(null);
+            setSceneProgress(null);
+            setGdbNotice(gdbErrorMessage({ code: "gdb_conversion_failed", message: job.error }, locale));
+          }
+          await reload();
+        }
+      } catch (err) {
+        if (
+          aliveRef.current &&
+          generation === sceneGenerationRef.current &&
+          noticeGeneration === noticeGenerationRef.current
+        ) {
+          if (accepted !== null) {
+            setSceneJob(accepted);
+            setSceneProgress((current) =>
+              current?.venueId === venue.id
+                ? { ...current, timedOut: true }
+                : current,
+            );
+            setGdbNotice(ui.processingContinues[locale]);
+          } else {
+            setSceneProgress(null);
+            setGdbNotice(gdbErrorMessage(err as GdbError, locale));
+          }
+        }
+      } finally {
+        if (aliveRef.current && generation === sceneGenerationRef.current) {
+          setGeneratingSceneId(null);
+        }
+      }
+    })();
+  };
+
   const exportNetwork = (venue: VenueSummary) => {
     if (!beginTopLevelActivity()) return;
     const generation = exportGenerationRef.current;
@@ -1063,6 +1179,20 @@ export function GalleryPage() {
                   : venue.hasNetwork
                     ? { generateRoutingLabel: ui.regenerateRouting[locale] }
                     : {})}
+                {...(venue.latest?.status === "published"
+                  ? {
+                      onRegenerateScene: () => {
+                        if (sceneJob?.venueId === venue.id) {
+                          generateScene(venue);
+                          return;
+                        }
+                        setRegeneratingScene(venue);
+                      },
+                      ...(sceneJob?.venueId === venue.id || generatingSceneId === venue.id
+                        ? { regenerateSceneLabel: ui.checkStatus[locale] }
+                        : {}),
+                    }
+                  : {})}
                 {...(venue.hasGraph === true
                   ? {
                       onExportNetwork: () => {
@@ -1114,6 +1244,22 @@ export function GalleryPage() {
             const venue = regenerating;
             setRegenerating(null);
             generateRouting(venue);
+          }}
+        />
+      ) : null}
+      {regeneratingScene !== null ? (
+        <ConfirmRegenerateModal
+          locale={locale}
+          venueName={regeneratingScene.name}
+          kind="scene"
+          tilesActive={regeneratingScene.tiles?.activeOnLatest === true}
+          onCancel={() => {
+            setRegeneratingScene(null);
+          }}
+          onConfirm={() => {
+            const venue = regeneratingScene;
+            setRegeneratingScene(null);
+            generateScene(venue);
           }}
         />
       ) : null}

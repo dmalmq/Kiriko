@@ -16,6 +16,7 @@ const getGdbMapping = vi.fn();
 const waitForJob = vi.fn();
 const deleteVenue = vi.fn();
 const generateNetwork = vi.fn<(venueId: number) => Promise<GenerateNetworkAccepted>>();
+const regenerateScene = vi.fn<(venueId: number) => Promise<GenerateNetworkAccepted>>();
 const exportNetwork = vi.fn();
 const logout = vi.fn();
 const login = vi.fn();
@@ -39,6 +40,7 @@ vi.mock("./api", async (importOriginal) => {
       waitForJob: (...args: unknown[]) => waitForJob(...args),
       deleteVenue: (...args: unknown[]) => deleteVenue(...args),
       generateNetwork: (venueId: number) => generateNetwork(venueId),
+      regenerateScene: (venueId: number) => regenerateScene(venueId),
       exportNetwork: (...args: unknown[]) => exportNetwork(...args),
       logout: () => logout(),
       login: (...args: unknown[]) => login(...args),
@@ -1440,6 +1442,129 @@ describe("GalleryPage generate routing", () => {
     await waitFor(() => expect(generateNetwork).toHaveBeenCalledTimes(1));
     expect(generateNetwork).toHaveBeenCalledWith(43);
     await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
+  });
+});
+
+
+describe("GalleryPage regenerate 3D", () => {
+  function publishedVenue(overrides: Partial<VenueSummary> = {}): VenueSummary {
+    return {
+      id: 43,
+      slug: "with-network",
+      name: "With Network",
+      createdAt: "2026-07-20 00:00:00",
+      latest: {
+        seq: 1,
+        publicVersionId: PUBLIC_ID,
+        status: "published",
+        stats: { levels: 2, features: 9 },
+        createdAt: "2026-07-20 00:00:00",
+      },
+      ...overrides,
+    };
+  }
+
+  it("offers Regenerate 3D on a published dataset even without Open in 3D", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([publishedVenue()]);
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("With Network")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    expect(screen.getByRole("button", { name: "Regenerate 3D" })).toBeTruthy();
+  });
+
+  it("hides Regenerate 3D when the latest version is not published", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      publishedVenue({
+        latest: {
+          seq: 1,
+          publicVersionId: PUBLIC_ID,
+          status: "processing",
+          stats: null,
+          createdAt: "2026-07-20 00:00:00",
+        },
+      }),
+    ]);
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("With Network")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    expect(screen.queryByRole("button", { name: "Regenerate 3D" })).toBeNull();
+  });
+
+  it("does not start regeneration when confirm is cancelled", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([publishedVenue()]);
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("With Network")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Regenerate 3D" }));
+    expect(screen.getByRole("alertdialog", { name: "Regenerate 3D?" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog", { name: "Regenerate 3D?" })).toBeNull();
+    expect(regenerateScene).not.toHaveBeenCalled();
+  });
+
+  it("creates a new version after regenerate 3D is confirmed", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([publishedVenue()]);
+    regenerateScene.mockResolvedValue({
+      jobId: "regen-3d",
+      versionId: 8,
+      seq: 2,
+      estimatedDurationSeconds: null,
+    });
+    waitForJob.mockResolvedValue({ status: "done" });
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("With Network")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Regenerate 3D" }));
+    expect(screen.getByText(/routing stays on the new version/i)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Regenerate" }));
+    await waitFor(() => expect(regenerateScene).toHaveBeenCalledTimes(1));
+    expect(regenerateScene).toHaveBeenCalledWith(43);
+    await waitFor(() => expect(listVenues).toHaveBeenCalledTimes(2));
+  });
+
+  it("warns that activated 3D Tiles stay on the previous version", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([
+      publishedVenue({ tiles: { packages: 1, activeOnLatest: true } }),
+    ]);
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("With Network")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Regenerate 3D" }));
+    expect(screen.getByText(/activated 3d tiles stay on the previous version/i)).toBeTruthy();
+  });
+
+  it("relabels the in-flight action Check status", async () => {
+    me.mockResolvedValue({ id: 1, username: "daniel", role: "admin" });
+    listVenues.mockResolvedValue([publishedVenue()]);
+    const accepted = deferred<GenerateNetworkAccepted>();
+    regenerateScene.mockReturnValue(accepted.promise);
+    waitForJob.mockResolvedValue({ status: "timeout" });
+    const user = userEvent.setup();
+    render(<GalleryPage />);
+    await waitFor(() => expect(screen.getByText("With Network")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(screen.getByRole("button", { name: "Regenerate 3D" }));
+    await user.click(screen.getByRole("button", { name: "Regenerate" }));
+    await waitFor(() => expect(regenerateScene).toHaveBeenCalledWith(43));
+    expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
+    await act(async () => {
+      accepted.resolve({
+        jobId: "slow-3d",
+        versionId: 9,
+        seq: 2,
+        estimatedDurationSeconds: null,
+      });
+    });
   });
 });
 

@@ -1022,6 +1022,173 @@ describe("POST /api/gdb/generate-network", () => {
   });
 });
 
+describe("POST /api/gdb/regenerate-scene", () => {
+  async function publishBaseWithFacilities(app: FastifyInstance, cookie: string): Promise<number> {
+    const venueId = await createVenue(app, cookie);
+    const blobHash = putBlob(app, await validGdbZipBytes("venue.gdb"));
+    const facilitiesBlobHash = putBlob(app, await validGdbZipBytes("facilities.gdb"));
+    const r = await app.inject({
+      method: "POST", url: "/api/gdb/publish", headers: { cookie },
+      payload: { venueId, blobHash, facilitiesBlobHash, plan: PUBLISH_PLAN },
+    });
+    expect(r.statusCode, r.body).toBe(202);
+    await app.queue.idle();
+    return venueId;
+  }
+
+  const EXPORTED_JUNCTIONS = '{"type":"FeatureCollection","name":"net_junction","features":[]}';
+  const EXPORTED_PATHS = '{"type":"FeatureCollection","name":"net_path","features":[]}';
+
+  it("404s when the venue is missing", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/regenerate-scene", headers: { cookie },
+      payload: { venueId: 9999 },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toMatchObject({ error: "not_found" });
+  });
+
+  it("404s no_base_version when the venue has no published version", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await createVenue(app, cookie);
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/regenerate-scene", headers: { cookie },
+      payload: { venueId },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toMatchObject({ error: "no_base_version" });
+  });
+
+  it("copies imported network hashes and does not synthesize", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await publishBaseWithFacilities(app, cookie);
+    const junctionsHash = putBlob(app, new TextEncoder().encode(JUNCTIONS_GEOJSON));
+    const pathsHash = putBlob(app, new TextEncoder().encode(PATHS_GEOJSON));
+    app.db
+      .prepare("UPDATE versions SET net_junctions_blob_hash = ?, net_paths_blob_hash = ? WHERE venue_id = ?")
+      .run(junctionsHash, pathsHash, venueId);
+    fake.compileCalls.length = 0;
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/regenerate-scene", headers: { cookie },
+      payload: { venueId },
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    const { versionId, seq } = res.json() as { versionId: number; seq: number };
+    expect(seq).toBe(2);
+    await app.queue.idle();
+
+    const row = app.db
+      .prepare("SELECT net_junctions_blob_hash AS j, net_paths_blob_hash AS t, synthesized AS syn, facilities_blob_hash AS f FROM versions WHERE id = ?")
+      .get(versionId) as { j: string | null; t: string | null; syn: number; f: string | null };
+    expect(row.j).toBe(junctionsHash);
+    expect(row.t).toBe(pathsHash);
+    expect(row.syn).toBe(0);
+    expect(row.f).not.toBeNull();
+    expect(fake.compileCalls[0]!.metadata["synthesizeNetwork"]).not.toBe(true);
+    expect(fake.compileCalls[0]!.metadata["networkJunctionsGeoJson"]).toBe(JUNCTIONS_GEOJSON);
+    expect(fake.compileCalls[0]!.metadata["tilesDescriptorJson"]).toBeUndefined();
+    expect(fake.compileCalls[0]!.metadata["facilitiesGeoJson"]).toBe(FACILITIES_GEOJSON);
+  });
+
+  it("exports a synthesized graph into the new version instead of synthesizing again", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await publishBaseWithFacilities(app, cookie);
+    const generated = await app.inject({
+      method: "POST", url: "/api/gdb/generate-network", headers: { cookie },
+      payload: { venueId },
+    });
+    expect(generated.statusCode, generated.body).toBe(202);
+    await app.queue.idle();
+    fake.compileCalls.length = 0;
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/regenerate-scene", headers: { cookie },
+      payload: { venueId },
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    const { versionId, seq } = res.json() as { versionId: number; seq: number };
+    expect(seq).toBe(3);
+    await app.queue.idle();
+
+    const row = app.db
+      .prepare("SELECT net_junctions_blob_hash AS j, net_paths_blob_hash AS t, synthesized AS syn FROM versions WHERE id = ?")
+      .get(versionId) as { j: string | null; t: string | null; syn: number };
+    expect(row.syn).toBe(1);
+    expect(row.j).not.toBeNull();
+    expect(row.t).not.toBeNull();
+    expect(fake.compileCalls[0]!.metadata["synthesizeNetwork"]).not.toBe(true);
+    expect(fake.compileCalls[0]!.metadata["networkJunctionsGeoJson"]).toBe(EXPORTED_JUNCTIONS);
+    expect(fake.compileCalls[0]!.metadata["networkPathsGeoJson"]).toBe(EXPORTED_PATHS);
+    expect(fake.compileCalls[0]!.metadata["tilesDescriptorJson"]).toBeUndefined();
+  });
+
+  it("forwards the stored clip choice", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await publishBaseWithFacilities(app, cookie);
+    const plan = app.db
+      .prepare("SELECT gdb_plan_json AS p FROM versions WHERE venue_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(venueId) as { p: string };
+    const parsed = JSON.parse(plan.p) as Record<string, unknown>;
+    parsed.clipToSelection = true;
+    app.db.prepare("UPDATE versions SET gdb_plan_json = ? WHERE venue_id = ?").run(JSON.stringify(parsed), venueId);
+    fake.compileCalls.length = 0;
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/regenerate-scene", headers: { cookie },
+      payload: { venueId },
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    await app.queue.idle();
+    expect(fake.compileCalls[0]!.metadata["clipToVenue"]).toBe(true);
+  });
+
+  it("compiles without a graph when the published version has none", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await publishBaseWithFacilities(app, cookie);
+    fake.compileCalls.length = 0;
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/regenerate-scene", headers: { cookie },
+      payload: { venueId },
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    const { versionId } = res.json() as { versionId: number };
+    await app.queue.idle();
+    const row = app.db
+      .prepare("SELECT net_junctions_blob_hash AS j, synthesized AS syn FROM versions WHERE id = ?")
+      .get(versionId) as { j: string | null; syn: number };
+    expect(row.j).toBeNull();
+    expect(row.syn).toBe(0);
+    expect(fake.compileCalls[0]!.metadata["synthesizeNetwork"]).not.toBe(true);
+    expect(fake.compileCalls[0]!.metadata["networkJunctionsGeoJson"]).toBeUndefined();
+  });
+
+  it("rolls back the draft version when queue job insertion fails", async () => {
+    const { app } = await makeTestApp();
+    const cookie = await loginCookie(app);
+    const venueId = await publishBaseWithFacilities(app, cookie);
+    const before = countVersions(app);
+    failPublishJobInserts(app);
+
+    const res = await app.inject({
+      method: "POST", url: "/api/gdb/regenerate-scene", headers: { cookie },
+      payload: { venueId },
+    });
+
+    expect(res.statusCode).toBe(500);
+    expect(countVersions(app)).toBe(before);
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM versions WHERE status = 'draft'").get()).toEqual({ n: 0 });
+  });
+});
+
 describe("POST /api/gdb/import-network", () => {
   async function publishBase(
     app: FastifyInstance,
