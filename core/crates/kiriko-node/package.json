@@ -8,7 +8,7 @@
     "binaryName": "kiriko-node"
   },
   "scripts": {
-    "build": "napi build --platform --release"
+    "build": "node ../../../scripts/build-node.mjs"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.7.3"
