@@ -240,6 +240,168 @@ pub fn build_split_shared_edge_opening_imdf_zip() -> Vec<u8> {
     ])
 }
 
+/// Both units insert the same mid-edge vertex on the shared boundary, the
+/// topology a GIS export actually produces. An opening that straddles that
+/// vertex has no single host segment covering both endpoints.
+pub fn build_both_sides_split_shared_edge_opening_imdf_zip() -> Vec<u8> {
+    let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;
+    let venue = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000001-0000-4000-8000-000000000071",
+            "venue",
+            r#"{"category":"transit","name":{"en":"Both Sides Split Edge Venue"},"address_id":"a1000002-0000-4000-8000-000000000072"}"#,
+            Some(POLYGON),
+        )
+    );
+    let address = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000002-0000-4000-8000-000000000072",
+            "address",
+            r#"{"address":"1 Both-Sides Split Way"}"#,
+            None,
+        )
+    );
+    let level_id = "b1000001-0000-4000-8000-000000000071";
+    let levels = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            level_id,
+            "level",
+            r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
+            Some(POLYGON),
+        )
+    );
+    let units = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"c1000001-0000-4000-8000-000000000071","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6806],[139.7678,35.6806],[139.7678,35.6810],[139.7670,35.6810],[139.7662,35.6810],[139.7662,35.6806]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}},
+            {{"id":"c1000002-0000-4000-8000-000000000072","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6810],[139.7670,35.6810],[139.7678,35.6810],[139.7678,35.6814],[139.7662,35.6814],[139.7662,35.6810]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000071","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.7668,35.6810],[139.7672,35.6810]]}},"properties":{{"category":"pedestrian.transit","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    write_zip_entries(&[
+        ("manifest.json", manifest.to_string()),
+        ("venue.geojson", venue),
+        ("address.geojson", address),
+        ("level.geojson", levels),
+        ("unit.geojson", units),
+        ("opening.geojson", openings),
+    ])
+}
+
+/// Same one-sided split topology as [`build_split_shared_edge_opening_imdf_zip`],
+/// but the opening is a GDB-style `MultiLineString` whose longest part is the
+/// doorway and whose extra part is a short stray segment.
+pub fn build_multilinestring_opening_imdf_zip() -> Vec<u8> {
+    let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;
+    let venue = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000001-0000-4000-8000-000000000081",
+            "venue",
+            r#"{"category":"transit","name":{"en":"MultiLineString Opening Venue"},"address_id":"a1000002-0000-4000-8000-000000000082"}"#,
+            Some(POLYGON),
+        )
+    );
+    let address = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000002-0000-4000-8000-000000000082",
+            "address",
+            r#"{"address":"1 MultiLineString Way"}"#,
+            None,
+        )
+    );
+    let level_id = "b1000001-0000-4000-8000-000000000081";
+    let levels = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            level_id,
+            "level",
+            r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
+            Some(POLYGON),
+        )
+    );
+    let units = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"c1000001-0000-4000-8000-000000000081","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6806],[139.7678,35.6806],[139.7678,35.6810],[139.7662,35.6810],[139.7662,35.6806]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}},
+            {{"id":"c1000002-0000-4000-8000-000000000082","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6810],[139.7670,35.6810],[139.7678,35.6810],[139.7678,35.6814],[139.7662,35.6814],[139.7662,35.6810]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000081","type":"Feature","feature_type":"opening","geometry":{{"type":"MultiLineString","coordinates":[[[139.7668,35.6800],[139.76681,35.6800]],[[139.7668,35.6810],[139.7672,35.6810]]]}},"properties":{{"category":"pedestrian.transit","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    write_zip_entries(&[
+        ("manifest.json", manifest.to_string()),
+        ("venue.geojson", venue),
+        ("address.geojson", address),
+        ("level.geojson", levels),
+        ("unit.geojson", units),
+        ("opening.geojson", openings),
+    ])
+}
+
+/// Two-island level. The unit lives on the west island but its east wall
+/// (and opening) sits in the gap, closer to the east island than to the
+/// west island's boundary. The portal must still connect to the west slab.
+pub fn build_inset_opening_near_neighbouring_island_imdf_zip() -> Vec<u8> {
+    let manifest = r#"{"version":"1.0.0","created":"2026-01-01T00:00:00Z","language":"en","generated_by":"kiriko-bundle-fixture","extensions":[]}"#;
+    let venue = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000001-0000-4000-8000-000000000091",
+            "venue",
+            r#"{"category":"transit","name":{"en":"Neighbouring Island Opening Venue"},"address_id":"a1000002-0000-4000-8000-000000000092"}"#,
+            Some(POLYGON),
+        )
+    );
+    let address = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            "a1000002-0000-4000-8000-000000000092",
+            "address",
+            r#"{"address":"1 Neighbouring Island Way"}"#,
+            None,
+        )
+    );
+    let level_id = "b1000001-0000-4000-8000-000000000091";
+    let unit_id = "c1000001-0000-4000-8000-000000000091";
+    let levels = format!(
+        r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+        feature(
+            level_id,
+            "level",
+            r#"{"category":"unspecified","ordinal":0,"name":{"en":"F1"},"short_name":{"en":"F1"},"elevation":10.0}"#,
+            Some(
+                r#"{"type":"MultiPolygon","coordinates":[[[[139.7660,35.6800],[139.7670,35.6800],[139.7670,35.6820],[139.7660,35.6820],[139.7660,35.6800]]],[[[139.7674,35.6809],[139.7676,35.6809],[139.7676,35.6811],[139.7674,35.6811],[139.7674,35.6809]]]]}"#,
+            ),
+        )
+    );
+    let units = format!(
+        r#"{{"type":"FeatureCollection","features":[{{"id":"{unit_id}","type":"Feature","feature_type":"unit","geometry":{{"type":"Polygon","coordinates":[[[139.7662,35.6809],[139.76725,35.6809],[139.76725,35.6811],[139.7662,35.6811],[139.7662,35.6809]]]}},"properties":{{"category":"walkway","level_id":"{level_id}"}}}}]}}"#
+    );
+    let openings = format!(
+        r#"{{"type":"FeatureCollection","features":[
+            {{"id":"d1000001-0000-4000-8000-000000000091","type":"Feature","feature_type":"opening","geometry":{{"type":"LineString","coordinates":[[139.76725,35.68095],[139.76725,35.68105]]}},"properties":{{"category":"pedestrian.transit","level_id":"{level_id}"}}}}
+        ]}}"#
+    );
+    write_zip_entries(&[
+        ("manifest.json", manifest.to_string()),
+        ("venue.geojson", venue),
+        ("address.geojson", address),
+        ("level.geojson", levels),
+        ("unit.geojson", units),
+        ("opening.geojson", openings),
+    ])
+}
+
 /// Same split-shared-edge topology as [`build_split_shared_edge_opening_imdf_zip`],
 /// but the unsplit unit is 1.8 m high while the split neighbour stays at the
 /// nominal 3.0 m wall height. An opening that straddles the mid-edge vertex
