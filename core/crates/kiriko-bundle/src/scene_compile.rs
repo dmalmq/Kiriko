@@ -327,8 +327,8 @@ fn polygon_ring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
 }
 
 /// Vertices of an opening line, as `[lon, lat]`. `MultiLineString` uses its
-/// longest part, matching the routing synthesizer; GDB `*_Opening` layers
-/// arrive as `MultiLineString` and must still host a wall cut.
+/// longest part in metres, matching the routing synthesizer; GDB `*_Opening`
+/// layers arrive as `MultiLineString` and must still host a wall cut.
 fn linestring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
     let obj = geometry.as_object()?;
     let kind = obj.get("type")?.as_str()?;
@@ -349,7 +349,7 @@ fn linestring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
                 let Some(line) = line_vertices(part) else {
                     continue;
                 };
-                let length = polyline_planar_length(&line);
+                let length = polyline_length_m(&line);
                 if best
                     .as_ref()
                     .is_none_or(|(best_length, _)| length > *best_length)
@@ -377,13 +377,9 @@ fn line_vertices(coords: &Value) -> Option<Vec<[f64; 2]>> {
     (line.len() >= 2).then_some(line)
 }
 
-fn polyline_planar_length(line: &[[f64; 2]]) -> f64 {
+fn polyline_length_m(line: &[[f64; 2]]) -> f64 {
     line.windows(2)
-        .map(|window| {
-            let dx = window[1][0] - window[0][0];
-            let dy = window[1][1] - window[0][1];
-            (dx * dx + dy * dy).sqrt()
-        })
+        .map(|window| crate::synth::haversine_m(window[0], window[1]))
         .sum()
 }
 
@@ -680,6 +676,7 @@ pub(crate) fn compile_scene(
 
     // -- Slabs: one per level, on the resolved plane. -----------------------
     let mut level_slab_edges: Vec<(WallEdgeKey, u32)> = Vec::new();
+    let mut level_slabs: Vec<(String, u32, Vec<[i64; 2]>)> = Vec::new();
     for level in &levels_data {
         let locator = find_or_push_locator(&mut spatial.registries, &level.id);
         let confidence_ref = conf_ref(
@@ -711,6 +708,7 @@ pub(crate) fn compile_scene(
             evidence_refs: vec![evidence_ref],
             geometry: PrimitiveGeometry::Mesh(ring_mesh_from_xy(&level.ring_xy, level.z)),
         });
+        level_slabs.push((level.id.clone(), slab_index, level.ring_xy.clone()));
         for (a, b) in ring_edges(&level.ring_xy) {
             let (a, b) = if a <= b { (a, b) } else { (b, a) };
             level_slab_edges.push(((level.id.clone(), a[0], a[1], b[0], b[1]), slab_index));
@@ -952,6 +950,11 @@ pub(crate) fn compile_scene(
         let connects = match surfaces.as_slice() {
             [first, second, ..] => (*first, *second),
             [surface] => {
+                let host_interior = units_data.iter().find_map(|unit| {
+                    (unit.surface_index == Some(*surface))
+                        .then(|| ring_centroid_mm(&unit.ring_xy))
+                        .flatten()
+                });
                 let Some(slab) = slab_for_exterior_opening(
                     level_id,
                     source_a,
@@ -960,6 +963,8 @@ pub(crate) fn compile_scene(
                     host_b,
                     tolerance,
                     &level_slab_edges,
+                    &level_slabs,
+                    host_interior,
                 ) else {
                     continue;
                 };
@@ -1744,9 +1749,11 @@ fn point_near_line(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> boo
 }
 
 /// One-surface openings connect to a level slab. Prefer a geometrically
-/// hosted level-boundary edge so split MultiPolygon islands stay distinct;
-/// otherwise the nearest same-level slab so an inset exterior doorway still
-/// opens instead of silently dropping the portal and wall cut.
+/// hosted level-boundary edge so split MultiPolygon islands stay distinct.
+/// Otherwise the slab that contains the opening, then the slab that contains
+/// the host unit, so an inset exterior doorway still opens onto its own
+/// island rather than a nearer neighbour. Nearest same-level edge is last
+/// resort when neither point sits in a slab.
 fn slab_for_exterior_opening(
     level_id: &str,
     source_a: [i64; 2],
@@ -1755,6 +1762,8 @@ fn slab_for_exterior_opening(
     host_b: [i64; 2],
     tolerance: i64,
     level_slab_edges: &[(WallEdgeKey, u32)],
+    level_slabs: &[(String, u32, Vec<[i64; 2]>)],
+    host_interior: Option<[i64; 2]>,
 ) -> Option<u32> {
     let hosted = level_slab_edges.iter().find_map(|(level_edge, slab)| {
         if level_edge.0 != level_id {
@@ -1774,6 +1783,14 @@ fn slab_for_exterior_opening(
         source_a[0].saturating_add(source_b[0]) / 2,
         source_a[1].saturating_add(source_b[1]) / 2,
     ];
+    if let Some(slab) = containing_slab(level_id, midpoint, level_slabs) {
+        return Some(slab);
+    }
+    if let Some(interior) = host_interior {
+        if let Some(slab) = containing_slab(level_id, interior, level_slabs) {
+            return Some(slab);
+        }
+    }
     level_slab_edges
         .iter()
         .filter(|(edge, _)| edge.0 == level_id)
@@ -1793,6 +1810,57 @@ fn slab_for_exterior_opening(
                 .then_with(|| left_edge.cmp(right_edge))
         })
         .map(|(_, slab)| *slab)
+}
+
+fn containing_slab(
+    level_id: &str,
+    point: [i64; 2],
+    level_slabs: &[(String, u32, Vec<[i64; 2]>)],
+) -> Option<u32> {
+    level_slabs
+        .iter()
+        .filter(|(id, _, ring)| id == level_id && point_in_ring_mm(ring, point))
+        .min_by(|(_, left_slab, left_ring), (_, right_slab, right_ring)| {
+            signed_area2(left_ring)
+                .abs()
+                .cmp(&signed_area2(right_ring).abs())
+                .then_with(|| left_slab.cmp(right_slab))
+        })
+        .map(|(_, slab, _)| *slab)
+}
+
+/// Even-odd ray cast in millimetres. A point on a vertical edge is outside.
+fn point_in_ring_mm(ring: &[[i64; 2]], p: [i64; 2]) -> bool {
+    let n = ring.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[(i + 1) % n];
+        if (a[1] > p[1]) == (b[1] > p[1]) {
+            continue;
+        }
+        let dy = i128::from(b[1] - a[1]);
+        let rhs = i128::from(a[0]) * dy + i128::from(p[1] - a[1]) * i128::from(b[0] - a[0]);
+        let lhs = i128::from(p[0]) * dy;
+        if (dy > 0 && lhs < rhs) || (dy < 0 && lhs > rhs) {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+fn ring_centroid_mm(ring: &[[i64; 2]]) -> Option<[i64; 2]> {
+    if ring.len() < 3 {
+        return None;
+    }
+    let n = i128::try_from(ring.len()).ok()?;
+    let (sx, sy) = ring.iter().fold((0i128, 0i128), |(sx, sy), point| {
+        (sx + i128::from(point[0]), sy + i128::from(point[1]))
+    });
+    Some([(sx / n) as i64, (sy / n) as i64])
 }
 
 fn point_on_line(p: [i64; 2], a: [i64; 2], b: [i64; 2]) -> bool {
@@ -1854,8 +1922,8 @@ mod tests {
     use super::{
         OpeningInterval, SceneProfile, linestring, opening_hosted_by_wall, opening_overlaps_host,
         point_near_line, point_near_segment, point_segment_squared_distance, project_local_mm,
-        segments_are_collinear, snapped_interval_endpoints, ticket_gate_row, triangulate_simple,
-        wall_mesh_with_openings,
+        segments_are_collinear, slab_for_exterior_opening, snapped_interval_endpoints,
+        ticket_gate_row, triangulate_simple, wall_mesh_with_openings,
     };
 
     fn test_frame() -> Frame {
@@ -2061,6 +2129,77 @@ mod tests {
             kiriko_model::canonical::canonicalize(&json).expect("fixture geometry is finite");
         let line = linestring(&geometry).expect("MultiLineString opening is readable");
         assert_eq!(line, vec![[139.7668, 35.6810], [139.7672, 35.6810]]);
+    }
+
+    #[test]
+    fn linestring_prefers_the_metre_longer_multilinestring_part() {
+        // At 60°N a 0.002° easting is longer in degree space than a 0.0012°
+        // northing, but shorter in metres because longitude degrees shrink.
+        let json = serde_json::json!({
+            "type": "MultiLineString",
+            "coordinates": [
+                [[139.0, 60.0], [139.002, 60.0]],
+                [[139.0, 60.0], [139.0, 60.0012]]
+            ]
+        });
+        let geometry =
+            kiriko_model::canonical::canonicalize(&json).expect("fixture geometry is finite");
+        let line = linestring(&geometry).expect("MultiLineString opening is readable");
+        assert_eq!(
+            line,
+            vec![[139.0, 60.0], [139.0, 60.0012]],
+            "the physically longer part hosts the cut, matching the routing synthesizer"
+        );
+    }
+
+    #[test]
+    fn an_inset_opening_uses_the_containing_host_island_not_a_nearer_neighbour() {
+        let large = vec![[0, 0], [100_000, 0], [100_000, 100_000], [0, 100_000]];
+        let small = vec![
+            [101_000, 40_000],
+            [110_000, 40_000],
+            [110_000, 60_000],
+            [101_000, 60_000],
+        ];
+        let mut edges = Vec::new();
+        let mut slabs = Vec::new();
+        for (index, ring) in [(0u32, &large), (1u32, &small)] {
+            slabs.push(("L0".to_string(), index, ring.clone()));
+            for i in 0..ring.len() {
+                let a = ring[i];
+                let b = ring[(i + 1) % ring.len()];
+                let (a, b) = if a <= b { (a, b) } else { (b, a) };
+                edges.push((("L0".to_string(), a[0], a[1], b[0], b[1]), index));
+            }
+        }
+        let opening_a = [100_700, 50_000];
+        let opening_b = [100_700, 51_000];
+        let host_a = [99_000, 50_000];
+        let host_b = [99_000, 51_000];
+        let nearer = slab_for_exterior_opening(
+            "L0", opening_a, opening_b, host_a, host_b, 200, &edges, &slabs, None,
+        );
+        assert_eq!(
+            nearer,
+            Some(1),
+            "without a host interior the gap opening is nearer the small island"
+        );
+        let contained = slab_for_exterior_opening(
+            "L0",
+            opening_a,
+            opening_b,
+            host_a,
+            host_b,
+            200,
+            &edges,
+            &slabs,
+            Some([50_000, 50_000]),
+        );
+        assert_eq!(
+            contained,
+            Some(0),
+            "the host unit's island owns the portal even when a neighbour is closer"
+        );
     }
 
     #[test]

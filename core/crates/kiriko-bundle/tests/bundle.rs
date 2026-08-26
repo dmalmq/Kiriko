@@ -3086,6 +3086,55 @@ fn the_product_fixture_emits_a_portal_for_each_opening() {
 }
 
 #[test]
+fn an_inset_exterior_opening_connects_to_its_host_island_not_a_nearer_neighbour() {
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    const LEVEL_ID: &str = "b1000001-0000-4000-8000-000000000091";
+    const OPENING_ID: &str = "d1000001-0000-4000-8000-000000000091";
+    const UNIT_ID: &str = "c1000001-0000-4000-8000-000000000091";
+
+    let compiled = compile_imdf(
+        &support::build_inset_opening_near_neighbouring_island_imdf_zip(),
+        metadata(),
+    )
+    .expect("neighbouring-island fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let scene = document.scene.expect("generated scene present");
+    let portal = scene
+        .primitives
+        .iter()
+        .find(|primitive| primitive.canonical_feature_id.as_deref() == Some(OPENING_ID))
+        .expect("inset exterior opening still emits a portal");
+    let PrimitiveGeometry::Portal { connects, .. } = &portal.geometry else {
+        panic!("opening must use portal geometry");
+    };
+    let surface = scene
+        .primitives
+        .iter()
+        .position(|primitive| {
+            primitive.role == PrimitiveRole::Surface
+                && primitive.canonical_feature_id.as_deref() == Some(UNIT_ID)
+        })
+        .expect("unit surface exists") as u32;
+    let host_slab = scene
+        .primitives
+        .iter()
+        .position(|primitive| primitive.id == format!("slab-{LEVEL_ID}"))
+        .expect("west island slab exists") as u32;
+    let neighbour_slab = scene
+        .primitives
+        .iter()
+        .position(|primitive| primitive.id == format!("slab-{LEVEL_ID}-1"))
+        .expect("east island slab exists") as u32;
+    assert_ne!(host_slab, neighbour_slab);
+    assert_eq!(
+        *connects,
+        (surface, host_slab),
+        "the portal must connect to the host unit's island, not the nearer neighbour"
+    );
+}
+
+#[test]
 fn a_multilinestring_opening_still_cuts_its_host_wall() {
     use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
 
