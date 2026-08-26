@@ -1326,7 +1326,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "ca32af21aca56ad99833dcef4b936f1c85f21ef56758663ac09547b2cb083368";
+const GOLDEN_BUNDLE_HASH: &str = "32c3878153903734580a6f8b7aa21874ddbb8c7047057373e3e2fef8aa558880";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -2954,6 +2954,223 @@ fn an_opening_on_a_split_shared_edge_still_connects_both_units() {
             }
         }
     }
+}
+
+#[test]
+fn an_opening_that_straddles_a_split_on_both_host_walls_still_cuts_them() {
+    use kiriko_model::model::FeatureType;
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    const OPENING_ID: &str = "d1000001-0000-4000-8000-000000000071";
+    const UNIT_A: &str = "c1000001-0000-4000-8000-000000000071";
+    const UNIT_B: &str = "c1000002-0000-4000-8000-000000000072";
+
+    let compiled = compile_imdf(
+        &support::build_both_sides_split_shared_edge_opening_imdf_zip(),
+        metadata(),
+    )
+    .expect("both-sides split-edge fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let opening_count = document
+        .features
+        .iter()
+        .filter(|feature| feature.feature_type == FeatureType::Opening)
+        .count();
+    let scene = document.scene.expect("generated scene present");
+    let portal = scene
+        .primitives
+        .iter()
+        .find(|primitive| primitive.canonical_feature_id.as_deref() == Some(OPENING_ID))
+        .expect("an opening that straddles a vertex on both host walls still emits a portal");
+    let PrimitiveGeometry::Portal { connects, opening } = &portal.geometry else {
+        panic!("opening must use portal geometry");
+    };
+    assert_eq!(
+        scene
+            .primitives
+            .iter()
+            .filter(|primitive| primitive.role == PrimitiveRole::Portal)
+            .count(),
+        opening_count,
+        "every opening must become a portal"
+    );
+    let mut expected_connects = [UNIT_A, UNIT_B].map(|unit_id| {
+        scene
+            .primitives
+            .iter()
+            .position(|primitive| {
+                primitive.role == PrimitiveRole::Surface
+                    && primitive.canonical_feature_id.as_deref() == Some(unit_id)
+            })
+            .expect("unit surface exists") as u32
+    });
+    expected_connects.sort_unstable();
+    assert_eq!(
+        *connects,
+        (expected_connects[0], expected_connects[1]),
+        "split segments on both sides of the shared edge must still connect both surfaces"
+    );
+
+    let p0 = opening.positions[0];
+    let p1 = opening.positions[1];
+    let dx = i128::from(p1[0] - p0[0]);
+    let dy = i128::from(p1[1] - p0[1]);
+    let opening_len2 = dx * dx + dy * dy;
+    let along = |position: &[i64; 3]| {
+        i128::from(position[0] - p0[0]) * dx + i128::from(position[1] - p0[1]) * dy
+    };
+    let on_host_line = |position: &[i64; 3]| {
+        i128::from(position[0] - p0[0]) * dy - i128::from(position[1] - p0[1]) * dx == 0
+    };
+    let portal_top = opening
+        .positions
+        .iter()
+        .map(|position| position[2])
+        .max()
+        .unwrap();
+    let mut host_walls = 0usize;
+    for primitive in &scene.primitives {
+        if primitive.role != PrimitiveRole::Wall {
+            continue;
+        }
+        let PrimitiveGeometry::Mesh(mesh) = &primitive.geometry else {
+            continue;
+        };
+        if !mesh.positions.iter().all(on_host_line) {
+            continue;
+        }
+        host_walls += 1;
+        for face in &mesh.faces {
+            let points = face.map(|index| &mesh.positions[index as usize]);
+            let start = points.iter().map(|position| along(position)).min().unwrap();
+            let end = points.iter().map(|position| along(position)).max().unwrap();
+            if start < opening_len2 && end > 0 {
+                let min_z = points.iter().map(|position| position[2]).min().unwrap();
+                assert!(
+                    min_z >= portal_top,
+                    "no host-wall triangle may occupy the opening interval below its top"
+                );
+            }
+        }
+    }
+    assert!(
+        host_walls >= 2,
+        "each split neighbour still emits a host wall, got {host_walls}"
+    );
+}
+
+#[test]
+fn the_product_fixture_emits_a_portal_for_each_opening() {
+    use kiriko_model::model::FeatureType;
+    use kiriko_model::scene::PrimitiveRole;
+
+    let compiled = compile_imdf(&support::build_minimal_imdf_zip(), metadata())
+        .expect("product fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let opening_count = document
+        .features
+        .iter()
+        .filter(|feature| feature.feature_type == FeatureType::Opening)
+        .count();
+    assert!(opening_count > 0, "the product fixture carries openings");
+    let scene = document.scene.expect("generated scene present");
+    let portal_count = scene
+        .primitives
+        .iter()
+        .filter(|primitive| primitive.role == PrimitiveRole::Portal)
+        .count();
+    assert_eq!(
+        portal_count, opening_count,
+        "every product-fixture opening must become a portal, not a solid wall"
+    );
+}
+
+#[test]
+fn a_multilinestring_opening_still_cuts_its_host_wall() {
+    use kiriko_model::scene::{PrimitiveGeometry, PrimitiveRole};
+
+    const OPENING_ID: &str = "d1000001-0000-4000-8000-000000000081";
+    const UNIT_A: &str = "c1000001-0000-4000-8000-000000000081";
+    const UNIT_B: &str = "c1000002-0000-4000-8000-000000000082";
+
+    let compiled = compile_imdf(
+        &support::build_multilinestring_opening_imdf_zip(),
+        metadata(),
+    )
+    .expect("MultiLineString opening fixture compiles");
+    let document = decode_bundle(&compiled.bytes).expect("bundle decodes");
+    let scene = document.scene.expect("generated scene present");
+    let portal = scene
+        .primitives
+        .iter()
+        .find(|primitive| primitive.canonical_feature_id.as_deref() == Some(OPENING_ID))
+        .expect("a GDB MultiLineString opening still emits a portal");
+    let PrimitiveGeometry::Portal { connects, opening } = &portal.geometry else {
+        panic!("opening must use portal geometry");
+    };
+    let mut expected_connects = [UNIT_A, UNIT_B].map(|unit_id| {
+        scene
+            .primitives
+            .iter()
+            .position(|primitive| {
+                primitive.role == PrimitiveRole::Surface
+                    && primitive.canonical_feature_id.as_deref() == Some(unit_id)
+            })
+            .expect("unit surface exists") as u32
+    });
+    expected_connects.sort_unstable();
+    assert_eq!(
+        *connects,
+        (expected_connects[0], expected_connects[1]),
+        "the longest MultiLineString part hosts the shared wall"
+    );
+
+    let p0 = opening.positions[0];
+    let p1 = opening.positions[1];
+    let dx = i128::from(p1[0] - p0[0]);
+    let dy = i128::from(p1[1] - p0[1]);
+    let opening_len2 = dx * dx + dy * dy;
+    let along = |position: &[i64; 3]| {
+        i128::from(position[0] - p0[0]) * dx + i128::from(position[1] - p0[1]) * dy
+    };
+    let on_host_line = |position: &[i64; 3]| {
+        i128::from(position[0] - p0[0]) * dy - i128::from(position[1] - p0[1]) * dx == 0
+    };
+    let portal_top = opening
+        .positions
+        .iter()
+        .map(|position| position[2])
+        .max()
+        .unwrap();
+    let mut host_cut = false;
+    for primitive in &scene.primitives {
+        if primitive.role != PrimitiveRole::Wall {
+            continue;
+        }
+        let PrimitiveGeometry::Mesh(mesh) = &primitive.geometry else {
+            continue;
+        };
+        if !mesh.positions.iter().all(on_host_line) {
+            continue;
+        }
+        for face in &mesh.faces {
+            let points = face.map(|index| &mesh.positions[index as usize]);
+            let start = points.iter().map(|position| along(position)).min().unwrap();
+            let end = points.iter().map(|position| along(position)).max().unwrap();
+            if start < opening_len2 && end > 0 {
+                let min_z = points.iter().map(|position| position[2]).min().unwrap();
+                assert!(
+                    min_z >= portal_top,
+                    "no host-wall triangle may occupy the MultiLineString opening below its top"
+                );
+                host_cut = true;
+            }
+        }
+    }
+    assert!(
+        host_cut,
+        "the longest MultiLineString part must cut a host wall"
+    );
 }
 
 #[test]

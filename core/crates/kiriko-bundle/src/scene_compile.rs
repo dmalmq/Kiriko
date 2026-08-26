@@ -326,8 +326,9 @@ fn polygon_ring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
     polygon_outers(geometry).into_iter().next()
 }
 
-/// The vertices of the first `LineString` in `geometry`, as `[lon, lat]`.
-#[allow(dead_code)] // portals (next pass) consume opening lines
+/// Vertices of an opening line, as `[lon, lat]`. `MultiLineString` uses its
+/// longest part, matching the routing synthesizer; GDB `*_Opening` layers
+/// arrive as `MultiLineString` and must still host a wall cut.
 fn linestring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
     let obj = geometry.as_object()?;
     let kind = obj.get("type")?.as_str()?;
@@ -339,20 +340,51 @@ fn linestring(geometry: &Value) -> Option<Vec<[f64; 2]>> {
         }
         return None;
     }
-    if kind != "LineString" {
-        return None;
+    let coords = obj.get("coordinates")?;
+    match kind {
+        "LineString" => line_vertices(coords),
+        "MultiLineString" => {
+            let mut best: Option<(f64, Vec<[f64; 2]>)> = None;
+            for part in coords.as_array()? {
+                let Some(line) = line_vertices(part) else {
+                    continue;
+                };
+                let length = polyline_planar_length(&line);
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_length, _)| length > *best_length)
+                {
+                    best = Some((length, line));
+                }
+            }
+            best.map(|(_, line)| line)
+        }
+        _ => None,
     }
-    let positions = obj.get("coordinates")?.as_array()?;
+}
+
+fn line_vertices(coords: &Value) -> Option<Vec<[f64; 2]>> {
+    let positions = coords.as_array()?;
     let mut line = Vec::with_capacity(positions.len());
     for position in positions {
-        let coords = position.as_array()?;
-        let (lon, lat) = (coords.first()?.as_f64()?, coords.get(1)?.as_f64()?);
+        let pair = position.as_array()?;
+        let (lon, lat) = (pair.first()?.as_f64()?, pair.get(1)?.as_f64()?);
         if !lon.is_finite() || !lat.is_finite() {
             return None;
         }
         line.push([lon, lat]);
     }
     (line.len() >= 2).then_some(line)
+}
+
+fn polyline_planar_length(line: &[[f64; 2]]) -> f64 {
+    line.windows(2)
+        .map(|window| {
+            let dx = window[1][0] - window[0][0];
+            let dy = window[1][1] - window[0][1];
+            (dx * dx + dy * dy).sqrt()
+        })
+        .sum()
 }
 
 // -- Registry helpers ------------------------------------------------------
@@ -823,6 +855,10 @@ pub(crate) fn compile_scene(
             line.last().expect("line has two endpoints")[0],
             line.last().expect("line has two endpoints")[1],
         );
+        // Both endpoints near the *line* of a host, overlapping its extent.
+        // GIS shared edges split every adjacent polygon at the same mid
+        // vertex, so no single segment covers both endpoints; scoring still
+        // uses segment distance so a full-length neighbour wins when present.
         let matching: Vec<(SquaredDistance, WallEdgeKey)> = walls_by_level
             .keys()
             .filter(|key| key.0 == level_id)
@@ -830,8 +866,9 @@ pub(crate) fn compile_scene(
                 let a = [key.1, key.2];
                 let b = [key.3, key.4];
                 if a == b
-                    || !point_near_segment(source_a, a, b, tolerance)
-                    || !point_near_segment(source_b, a, b, tolerance)
+                    || !opening_overlaps_host(source_a, source_b, a, b)
+                    || !point_near_line(source_a, a, b, tolerance)
+                    || !point_near_line(source_b, a, b, tolerance)
                 {
                     return None;
                 }
@@ -915,18 +952,17 @@ pub(crate) fn compile_scene(
         let connects = match surfaces.as_slice() {
             [first, second, ..] => (*first, *second),
             [surface] => {
-                let slab = level_slab_edges.iter().find_map(|(level_edge, slab)| {
-                    if level_edge.0 != level_id {
-                        return None;
-                    }
-                    let level_a = [level_edge.1, level_edge.2];
-                    let level_b = [level_edge.3, level_edge.4];
-                    opening_hosted_by_wall(
-                        source_a, source_b, level_a, level_b, host_a, host_b, tolerance,
-                    )
-                    .then_some(*slab)
-                });
-                let Some(slab) = slab else { continue };
+                let Some(slab) = slab_for_exterior_opening(
+                    level_id,
+                    source_a,
+                    source_b,
+                    host_a,
+                    host_b,
+                    tolerance,
+                    &level_slab_edges,
+                ) else {
+                    continue;
+                };
                 (*surface, slab)
             }
             [] => continue,
@@ -1692,6 +1728,73 @@ fn point_near_segment(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> 
     distance.numerator <= tolerance * tolerance * distance.denominator
 }
 
+/// Whether `p` is within `tolerance` millimetres of the infinite line through
+/// `a`–`b`. Unlike [`point_near_segment`], a point past either endpoint still
+/// matches — the predicate an opening needs when it straddles a split vertex.
+fn point_near_line(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> bool {
+    let dx = i128::from(b[0] - a[0]);
+    let dy = i128::from(b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    if len2 == 0 {
+        return false;
+    }
+    let cross = (i128::from(p[0] - a[0]) * dy - i128::from(p[1] - a[1]) * dx).abs();
+    let tolerance = i128::from(tolerance).abs();
+    cross * cross <= tolerance * tolerance * len2
+}
+
+/// One-surface openings connect to a level slab. Prefer a geometrically
+/// hosted level-boundary edge so split MultiPolygon islands stay distinct;
+/// otherwise the nearest same-level slab so an inset exterior doorway still
+/// opens instead of silently dropping the portal and wall cut.
+fn slab_for_exterior_opening(
+    level_id: &str,
+    source_a: [i64; 2],
+    source_b: [i64; 2],
+    host_a: [i64; 2],
+    host_b: [i64; 2],
+    tolerance: i64,
+    level_slab_edges: &[(WallEdgeKey, u32)],
+) -> Option<u32> {
+    let hosted = level_slab_edges.iter().find_map(|(level_edge, slab)| {
+        if level_edge.0 != level_id {
+            return None;
+        }
+        let level_a = [level_edge.1, level_edge.2];
+        let level_b = [level_edge.3, level_edge.4];
+        opening_hosted_by_wall(
+            source_a, source_b, level_a, level_b, host_a, host_b, tolerance,
+        )
+        .then_some(*slab)
+    });
+    if hosted.is_some() {
+        return hosted;
+    }
+    let midpoint = [
+        source_a[0].saturating_add(source_b[0]) / 2,
+        source_a[1].saturating_add(source_b[1]) / 2,
+    ];
+    level_slab_edges
+        .iter()
+        .filter(|(edge, _)| edge.0 == level_id)
+        .min_by(|(left_edge, left_slab), (right_edge, right_slab)| {
+            let left = point_segment_squared_distance(
+                midpoint,
+                [left_edge.1, left_edge.2],
+                [left_edge.3, left_edge.4],
+            );
+            let right = point_segment_squared_distance(
+                midpoint,
+                [right_edge.1, right_edge.2],
+                [right_edge.3, right_edge.4],
+            );
+            left.cmp(right)
+                .then_with(|| left_slab.cmp(right_slab))
+                .then_with(|| left_edge.cmp(right_edge))
+        })
+        .map(|(_, slab)| *slab)
+}
+
 fn point_on_line(p: [i64; 2], a: [i64; 2], b: [i64; 2]) -> bool {
     let dx = i128::from(b[0] - a[0]);
     let dy = i128::from(b[1] - a[1]);
@@ -1712,8 +1815,10 @@ fn opening_overlaps_host(source_a: [i64; 2], source_b: [i64; 2], a: [i64; 2], b:
 }
 
 /// A wall or level edge hosts an opening when the opening overlaps it and
-/// either both endpoints sit within the configured corroboration tolerance
-/// or the edge is exactly collinear with the selected host.
+/// either both endpoints sit within the configured corroboration tolerance of
+/// that edge's *segment* or the edge is exactly collinear with the selected
+/// host. The selected host itself may be a split piece that does not cover
+/// both endpoints; collinear neighbours then inherit the cut.
 fn opening_hosted_by_wall(
     source_a: [i64; 2],
     source_b: [i64; 2],
@@ -1747,9 +1852,10 @@ mod tests {
     use kiriko_model::spatial::{Axes, Frame, LengthUnit, enu_basis_ecef, wgs84_ecef};
 
     use super::{
-        OpeningInterval, SceneProfile, opening_hosted_by_wall, opening_overlaps_host,
-        point_segment_squared_distance, project_local_mm, segments_are_collinear,
-        snapped_interval_endpoints, ticket_gate_row, triangulate_simple, wall_mesh_with_openings,
+        OpeningInterval, SceneProfile, linestring, opening_hosted_by_wall, opening_overlaps_host,
+        point_near_line, point_near_segment, point_segment_squared_distance, project_local_mm,
+        segments_are_collinear, snapped_interval_endpoints, ticket_gate_row, triangulate_simple,
+        wall_mesh_with_openings,
     };
 
     fn test_frame() -> Frame {
@@ -1932,6 +2038,29 @@ mod tests {
             [0, 1],
             [10_000, 1]
         ));
+    }
+
+    #[test]
+    fn a_point_beyond_a_segment_end_is_still_near_the_line() {
+        assert!(point_near_line([12_000, 0], [0, 0], [10_000, 0], 200));
+        assert!(!point_near_segment([12_000, 0], [0, 0], [10_000, 0], 200));
+        assert!(!point_near_line([5_000, 500], [0, 0], [10_000, 0], 200));
+        assert!(!point_near_line([5_000, 0], [0, 0], [0, 0], 200));
+    }
+
+    #[test]
+    fn linestring_reads_the_longest_multilinestring_part() {
+        let json = serde_json::json!({
+            "type": "MultiLineString",
+            "coordinates": [
+                [[139.0, 35.0], [139.00001, 35.0]],
+                [[139.7668, 35.6810], [139.7672, 35.6810]]
+            ]
+        });
+        let geometry =
+            kiriko_model::canonical::canonicalize(&json).expect("fixture geometry is finite");
+        let line = linestring(&geometry).expect("MultiLineString opening is readable");
+        assert_eq!(line, vec![[139.7668, 35.6810], [139.7672, 35.6810]]);
     }
 
     #[test]
