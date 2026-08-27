@@ -2,8 +2,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::SceneError;
 
-/// Container magic. Bumped only when the byte layout changes incompatibly.
-pub const SCENE_MAGIC: &[u8; 4] = b"KSC1";
+/// Container magic for the current byte layout. Bumped whenever the postcard
+/// layout changes incompatibly: postcard is positional, so a reader cannot
+/// recover from a field it does not expect. `KSC2` added
+/// [`SceneBatch::colors`].
+pub const SCENE_MAGIC: &[u8; 4] = b"KSC2";
+
+/// The layout before [`SceneBatch::colors`]. Read-only: documents derived
+/// once at activation are served immutably, so previously activated packages
+/// keep these bytes forever and must keep decoding.
+const SCENE_MAGIC_V1: &[u8; 4] = b"KSC1";
 
 /// Semantic roles from the renderer-neutral visual language (issue #32). The
 /// renderer styles these; it never sees a source material. `Conveyance` is
@@ -108,7 +116,7 @@ pub struct SceneDocument {
     pub batches: Vec<SceneBatch>,
 }
 
-/// `KSC1` magic followed by zstd-compressed postcard.
+/// [`SCENE_MAGIC`] followed by zstd-compressed postcard.
 pub fn encode_scene(document: &SceneDocument) -> Result<Vec<u8>, SceneError> {
     let raw = postcard::to_allocvec(document)?;
     let compressed = zstd::encode_all(raw.as_slice(), 19)?;
@@ -118,10 +126,72 @@ pub fn encode_scene(document: &SceneDocument) -> Result<Vec<u8>, SceneError> {
     Ok(out)
 }
 
+/// Decode either container version. A `KSC1` document is read through the
+/// pre-`colors` layout and reports `colors: None` — the same absence a fresh
+/// deriver emits — rather than failing on the byte it never encoded.
 pub fn decode_scene(bytes: &[u8]) -> Result<SceneDocument, SceneError> {
-    let Some(body) = bytes.strip_prefix(SCENE_MAGIC) else {
+    if let Some(body) = bytes.strip_prefix(SCENE_MAGIC) {
+        return Ok(postcard::from_bytes(&zstd::decode_all(body)?)?);
+    }
+    let Some(body) = bytes.strip_prefix(SCENE_MAGIC_V1) else {
         return Err(SceneError::Magic);
     };
-    let raw = zstd::decode_all(body)?;
-    Ok(postcard::from_bytes(&raw)?)
+    let legacy: v1::SceneDocumentV1 = postcard::from_bytes(&zstd::decode_all(body)?)?;
+    Ok(legacy.into())
+}
+
+/// The `KSC1` layout. Identical to the current document except that a batch
+/// carries no per-vertex colours, so it needs its own positional mirror of
+/// [`SceneBatch`]. Deserialize-only: nothing writes `KSC1` any more.
+mod v1 {
+    use serde::Deserialize;
+
+    use super::{SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel, SemanticRole};
+
+    #[derive(Deserialize)]
+    pub(super) struct SceneDocumentV1 {
+        header: SceneHeader,
+        levels: Vec<SceneLevel>,
+        features: Vec<SceneFeature>,
+        batches: Vec<SceneBatchV1>,
+    }
+
+    #[derive(Deserialize)]
+    struct SceneBatchV1 {
+        level_index: u32,
+        role: SemanticRole,
+        quantization_origin: [f32; 3],
+        quantization_scale: [f32; 3],
+        vertex_count: u32,
+        positions: Vec<[u16; 3]>,
+        normals: Vec<[i16; 2]>,
+        feature_indices: Vec<u32>,
+    }
+
+    impl From<SceneDocumentV1> for SceneDocument {
+        fn from(document: SceneDocumentV1) -> Self {
+            Self {
+                header: document.header,
+                levels: document.levels,
+                features: document.features,
+                batches: document.batches.into_iter().map(SceneBatch::from).collect(),
+            }
+        }
+    }
+
+    impl From<SceneBatchV1> for SceneBatch {
+        fn from(batch: SceneBatchV1) -> Self {
+            Self {
+                level_index: batch.level_index,
+                role: batch.role,
+                quantization_origin: batch.quantization_origin,
+                quantization_scale: batch.quantization_scale,
+                vertex_count: batch.vertex_count,
+                positions: batch.positions,
+                normals: batch.normals,
+                feature_indices: batch.feature_indices,
+                colors: None,
+            }
+        }
+    }
 }
