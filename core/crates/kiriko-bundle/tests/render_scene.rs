@@ -1,4 +1,4 @@
-//! The generated §9 scene compiled into the shared KSC1 render document, on a
+//! The generated §9 scene compiled into the shared KSC render document, on a
 //! real published bundle rather than hand-built input. These assertions are
 //! the renderer's structural contract (issue #60): a visible floor stays
 //! inside the draw-call budget, every vertex is attributable, and the same

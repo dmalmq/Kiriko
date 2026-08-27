@@ -1087,11 +1087,11 @@ export class CoreTileSceneError extends Error {
   }
 }
 
-/** The `KSC1` container magic every derived document starts with. */
-const SCENE_MAGIC = Buffer.from("KSC1", "ascii");
+/** The container magic a freshly derived document starts with. */
+const SCENE_MAGIC = Buffer.from("KSC2", "ascii");
 
 /**
- * Derive an activated package's render document: the same `KSC1` format the
+ * Derive an activated package's render document: the same `KSC2` format the
  * generated scene compiles to, so the renderer consumes both unchanged.
  *
  * Called once, at activation. A 172 MiB package cannot be re-derived per
@@ -1137,8 +1137,10 @@ export async function deriveTileScene(
   const scene = "scene" in response ? response.scene : undefined;
   if (!Buffer.isBuffer(scene) || !scene.subarray(0, 4).equals(SCENE_MAGIC)) {
     // The bytes go straight into the blob store and out to viewers; a
-    // container that is not KSC1 would be served as one.
-    throw new CoreTileSceneError("bridge_error", "native derive returned no KSC1 document");
+    // container that is not the current KSC version would be served as one.
+    // Packages activated before `KSC2` keep their stored `KSC1` bytes, which
+    // the reader still decodes; nothing may *write* an older container.
+    throw new CoreTileSceneError("bridge_error", "native derive returned no KSC2 document");
   }
   return scene;
 }

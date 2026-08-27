@@ -82,13 +82,40 @@ fn encoded_scene_is_smaller_than_postcard_alone() {
     let doc = sample_document();
     let compressed = encode_scene(&doc).expect("encode");
     // zstd container must actually be applied: a magic prefix identifies it.
-    assert_eq!(&compressed[0..4], b"KSC1");
+    assert_eq!(&compressed[0..4], b"KSC2");
 }
 
 #[test]
 fn decode_rejects_foreign_magic() {
     let err = decode_scene(b"NOPE0000").expect_err("must reject");
     assert!(format!("{err}").contains("magic"));
+}
+
+/// The spike's committed fixture is a `KSC1` document, written before batches
+/// carried per-vertex colours. Postcard is positional, so the current reader
+/// only sees it through the legacy layout — the same path every package
+/// activated before `KSC2` depends on.
+#[test]
+fn a_legacy_ksc1_document_decodes_without_colors() {
+    const FIXTURE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../src/spikes/renderer/fixtures/tiny.kscene"
+    ));
+
+    assert_eq!(
+        &FIXTURE[0..4],
+        b"KSC1",
+        "the fixture is the legacy container"
+    );
+    let decoded = decode_scene(FIXTURE).expect("a KSC1 document still decodes");
+    assert!(!decoded.batches.is_empty(), "the fixture carries geometry");
+    for batch in &decoded.batches {
+        assert!(
+            batch.colors.is_none(),
+            "KSC1 states no colours, so the reader must not invent any"
+        );
+        assert_eq!(batch.positions.len(), batch.vertex_count as usize);
+    }
 }
 
 use kiriko_scene::{decode_normal_oct, encode_normal_oct, quantize_positions};

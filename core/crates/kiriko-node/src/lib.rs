@@ -779,7 +779,7 @@ pub fn evaluate_tile_activation(
 }
 
 /// JS-facing discriminated tile-scene result. Success carries the encoded
-/// `KSC1` document as a `Buffer`; failure carries `{ code, message }`.
+/// `KSC2` document as a `Buffer`; failure carries `{ code, message }`.
 #[napi(object)]
 pub struct NativeTileSceneResponse {
     pub ok: bool,
@@ -941,7 +941,7 @@ impl Task for TileSceneTask {
     }
 }
 
-/// Derive an activated tile package's `KSC1` render document — the same format
+/// Derive an activated tile package's `KSC2` render document — the same format
 /// the generated scene compiles to, so the renderer consumes both unchanged.
 ///
 /// Derived once, at activation: a 172 MiB package cannot be re-derived per

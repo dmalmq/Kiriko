@@ -297,7 +297,7 @@ pub struct PackageIdentity {
 
 /// Derive the render document for an activated tile package.
 ///
-/// Produces the *same* KSC1 the generated source compiles to — that is what
+/// Produces the *same* KSC the generated source compiles to — that is what
 /// lets one renderer, one picking path, and one visual language serve both
 /// sources. What only a package can supply is identity: each composite level
 /// carries the canonical floor it was registered to, each source object carries
