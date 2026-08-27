@@ -1,5 +1,5 @@
 //! The Generated scene producer: a bundle's §9 semantic primitives plus §8
-//! spatial context compiled into the KSC1 render document the Tiles deriver
+//! spatial context compiled into the KSC render document the Tiles deriver
 //! also emits. One render format means one renderer, so a source can never
 //! fork the visual language (issue #23, decision D4).
 //!

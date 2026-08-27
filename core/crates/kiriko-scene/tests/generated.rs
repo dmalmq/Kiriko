@@ -1,5 +1,5 @@
 //! The Generated scene producer: a bundle's §9 semantic primitives plus §8
-//! spatial context compiled into the same KSC1 render document the Tiles
+//! spatial context compiled into the same KSC render document the Tiles
 //! deriver emits, so one renderer serves both sources (#23 D4).
 
 use kiriko_model::model::{FeatureType, VenueFeature};
