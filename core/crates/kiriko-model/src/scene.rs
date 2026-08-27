@@ -101,8 +101,14 @@ pub struct Mesh {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrimitiveGeometry {
     Mesh(Mesh),
-    Portal { connects: (u32, u32), opening: Mesh },
-    Conveyance { kind: ConveyanceKind, mesh: Mesh },
+    Portal {
+        connects: (u32, u32),
+        opening: Mesh,
+    },
+    Conveyance {
+        kind: ConveyanceKind,
+        mesh: Mesh,
+    },
     /// Illustration with per-vertex tints. `vertex_colors.len()` equals
     /// `mesh.positions.len()`. Valid only on [`PrimitiveRole::Fixture`].
     TintedMesh {

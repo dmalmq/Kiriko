@@ -52,12 +52,12 @@ pub(crate) fn illustrate_fixture(
 ) -> Option<PrimitiveGeometry> {
     match form {
         FixtureForm::Absent => None,
-        FixtureForm::JrAutomaticGate => jr_automatic_gate_row(ring_xy, z, profile).map(|tinted| {
-            PrimitiveGeometry::TintedMesh {
+        FixtureForm::JrAutomaticGate => {
+            jr_automatic_gate_row(ring_xy, z, profile).map(|tinted| PrimitiveGeometry::TintedMesh {
                 mesh: tinted.mesh,
                 vertex_colors: tinted.vertex_colors,
-            }
-        }),
+            })
+        }
     }
 }
 
@@ -228,13 +228,31 @@ fn jr_automatic_gate_row(
         }
 
         let sensor = rect_at(&axes, row_c, 0.0, half_w * 0.45, half_l * 0.92);
-        append_tinted_box(&mut dst, &sensor, body_top, z + height, GateFinish::SensorBlack);
+        append_tinted_box(
+            &mut dst,
+            &sensor,
+            body_top,
+            z + height,
+            GateFinish::SensorBlack,
+        );
 
         let pad = rect_at(&axes, row_c, half_l - 100.0, 90.0, 100.0);
-        append_tinted_box(&mut dst, &pad, z + height, z + height + 25, GateFinish::SkyBlue);
+        append_tinted_box(
+            &mut dst,
+            &pad,
+            z + height,
+            z + height + 25,
+            GateFinish::SkyBlue,
+        );
 
         let plaque = rect_at(&axes, row_c, half_l + 6.0, 40.0, 8.0);
-        append_tinted_box(&mut dst, &plaque, z + 380, z + 520, GateFinish::SignalYellow);
+        append_tinted_box(
+            &mut dst,
+            &plaque,
+            z + 380,
+            z + 520,
+            GateFinish::SignalYellow,
+        );
     }
 
     if dst.mesh.positions.is_empty() {

@@ -662,11 +662,7 @@ pub fn encode_bundle(document: &BundleDocument) -> Result<Vec<u8>, BundleError> 
     // Section id 11 sorts after 9 and before 12. Emitted when a graph and
     // §8 are both present (QA requires spatial context). Computed at encode
     // time from the graph; the document's `network_qa` field is decode-only.
-    if document
-        .graph
-        .as_ref()
-        .is_some_and(|g| g.is_empty() == false)
-        && document.spatial_context.is_some()
+    if document.graph.as_ref().is_some_and(|g| !g.is_empty()) && document.spatial_context.is_some()
     {
         let qa = analyze_network(document);
         section_list.push((
@@ -690,8 +686,8 @@ pub fn encode_bundle(document: &BundleDocument) -> Result<Vec<u8>, BundleError> 
         ));
     }
     if let Some(graph) = &document.graph
-        && graph.is_empty() == false
-        && graph.edges.iter().any(|e| e.flags.is_default() == false)
+        && !graph.is_empty()
+        && graph.edges.iter().any(|e| !e.flags.is_default())
     {
         section_list.push((
             format::SECTION_GRAPH_TRAVERSAL,
@@ -840,9 +836,12 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<BundleDocument, BundleError> {
         directory.declared_version(format::SECTION_GRAPH_TRAVERSAL),
     ) {
         (Some(graph), Some(_)) => {
-            classify_section(&directory, &payload, format::SECTION_GRAPH_TRAVERSAL, |bytes| {
-                sections::apply_graph_traversal(graph, bytes)
-            })
+            classify_section(
+                &directory,
+                &payload,
+                format::SECTION_GRAPH_TRAVERSAL,
+                |bytes| sections::apply_graph_traversal(graph, bytes),
+            )
             .1
         }
         (_, None) => SectionCapability::Absent,

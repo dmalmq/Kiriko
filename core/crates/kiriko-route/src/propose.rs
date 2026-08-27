@@ -181,7 +181,7 @@ fn indistinct(a: &[[f64; 2]], b: &[[f64; 2]]) -> bool {
         return false;
     }
     let ratio = la / lb;
-    ratio >= LENGTH_RATIO_LO && ratio <= LENGTH_RATIO_HI && hausdorff_m(a, b) < HAUSDORFF_M
+    (LENGTH_RATIO_LO..=LENGTH_RATIO_HI).contains(&ratio) && hausdorff_m(a, b) < HAUSDORFF_M
 }
 
 fn flatten_route(route: &Route) -> Vec<[f64; 2]> {
@@ -626,7 +626,7 @@ mod tests {
         let out = propose_paths(
             &graph,
             &[10, 11],
-            &[floor.clone()],
+            std::slice::from_ref(&floor),
             10,
             11,
             &RouteProfile::walking(),
@@ -703,7 +703,7 @@ mod tests {
         let out = propose_paths(
             &graph,
             &[10, 11],
-            &[floor.clone()],
+            std::slice::from_ref(&floor),
             10,
             11,
             &RouteProfile::walking(),

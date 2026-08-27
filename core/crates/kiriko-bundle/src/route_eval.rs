@@ -272,7 +272,7 @@ fn sample_pairs(graph: &RouteGraph) -> Vec<(usize, usize)> {
             continue;
         }
         let dist = dijkstra_m(&adj, i);
-        for j in (i + 1)..n {
+        for (j, d) in dist.iter().enumerate().skip(i + 1) {
             if pairs.len() >= STRETCH_SAMPLES {
                 break;
             }
@@ -286,7 +286,7 @@ fn sample_pairs(graph: &RouteGraph) -> Vec<(usize, usize)> {
             if eu <= STRETCH_MIN_M || eu > STRETCH_MAX_M {
                 continue;
             }
-            let Some(net) = dist[j] else {
+            let Some(net) = *d else {
                 continue;
             };
             if net <= 0.0 {
@@ -389,9 +389,7 @@ mod tests {
 
     use kiriko_model::canonical::Value;
     use kiriko_model::model::{FeatureType, ImdfManifest, VenueFeature, ViewerLevel};
-    use kiriko_route::{
-        EdgeAttrs, EdgeKind, RouteEdge, RouteGraph, RouteNode, meters_to_cost,
-    };
+    use kiriko_route::{EdgeAttrs, EdgeKind, RouteEdge, RouteGraph, RouteNode, meters_to_cost};
 
     use super::*;
     use crate::codec::{BundleDocument, BundleMetadata, BundleStats, CapabilityReport};
@@ -578,22 +576,11 @@ mod tests {
         // 40 × 4 m corridor; door path vertex at (20, 0.3) — within 0.6 m of
         // the wall, coincident with the Opening midpoint so smoothing cannot
         // drop it. Endpoints sit on the centreline (≥ 0.6 m from walls).
-        let corridor = polygon_ring(&[
-            [0.0, 0.0],
-            [40.0, 0.0],
-            [40.0, 4.0],
-            [0.0, 4.0],
-            [0.0, 0.0],
-        ]);
+        let corridor =
+            polygon_ring(&[[0.0, 0.0], [40.0, 0.0], [40.0, 4.0], [0.0, 4.0], [0.0, 0.0]]);
         let opening = linestring_m(&[[19.0, 0.3], [21.0, 0.3]]);
         let features = vec![
-            feature(
-                "walk0",
-                FeatureType::Unit,
-                "l0",
-                Some("walkway"),
-                corridor,
-            ),
+            feature("walk0", FeatureType::Unit, "l0", Some("walkway"), corridor),
             feature("door0", FeatureType::Opening, "l0", None, opening),
         ];
         let graph = RouteGraph {

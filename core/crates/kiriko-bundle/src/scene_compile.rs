@@ -964,11 +964,13 @@ pub(crate) fn compile_scene(
                 });
                 let Some(slab) = slab_for_exterior_opening(
                     level_id,
-                    source_a,
-                    source_b,
-                    host_a,
-                    host_b,
-                    tolerance,
+                    &OpeningHost {
+                        source_a,
+                        source_b,
+                        host_a,
+                        host_b,
+                        tolerance,
+                    },
                     &level_slab_edges,
                     &level_slabs,
                     host_interior,
@@ -1635,6 +1637,17 @@ fn point_near_line(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> boo
     cross * cross <= tolerance * tolerance * len2
 }
 
+/// One opening measured against the wall edge selected as its host, plus the
+/// corroboration tolerance the two share. The five values always travel
+/// together, so they move as one.
+struct OpeningHost {
+    source_a: [i64; 2],
+    source_b: [i64; 2],
+    host_a: [i64; 2],
+    host_b: [i64; 2],
+    tolerance: i64,
+}
+
 /// One-surface openings connect to a level slab. Prefer a geometrically
 /// hosted level-boundary edge so split MultiPolygon islands stay distinct.
 /// Otherwise the slab that contains the opening, then the slab that contains
@@ -1643,11 +1656,7 @@ fn point_near_line(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> boo
 /// resort when neither point sits in a slab.
 fn slab_for_exterior_opening(
     level_id: &str,
-    source_a: [i64; 2],
-    source_b: [i64; 2],
-    host_a: [i64; 2],
-    host_b: [i64; 2],
-    tolerance: i64,
+    opening: &OpeningHost,
     level_slab_edges: &[(WallEdgeKey, u32)],
     level_slabs: &[(String, u32, Vec<[i64; 2]>)],
     host_interior: Option<[i64; 2]>,
@@ -1659,7 +1668,13 @@ fn slab_for_exterior_opening(
         let level_a = [level_edge.1, level_edge.2];
         let level_b = [level_edge.3, level_edge.4];
         opening_hosted_by_wall(
-            source_a, source_b, level_a, level_b, host_a, host_b, tolerance,
+            opening.source_a,
+            opening.source_b,
+            level_a,
+            level_b,
+            opening.host_a,
+            opening.host_b,
+            opening.tolerance,
         )
         .then_some(*slab)
     });
@@ -1667,16 +1682,16 @@ fn slab_for_exterior_opening(
         return hosted;
     }
     let midpoint = [
-        source_a[0].saturating_add(source_b[0]) / 2,
-        source_a[1].saturating_add(source_b[1]) / 2,
+        opening.source_a[0].saturating_add(opening.source_b[0]) / 2,
+        opening.source_a[1].saturating_add(opening.source_b[1]) / 2,
     ];
     if let Some(slab) = containing_slab(level_id, midpoint, level_slabs) {
         return Some(slab);
     }
-    if let Some(interior) = host_interior {
-        if let Some(slab) = containing_slab(level_id, interior, level_slabs) {
-            return Some(slab);
-        }
+    if let Some(interior) = host_interior
+        && let Some(slab) = containing_slab(level_id, interior, level_slabs)
+    {
+        return Some(slab);
     }
     level_slab_edges
         .iter()
@@ -1807,10 +1822,10 @@ mod tests {
     use kiriko_model::spatial::{Axes, Frame, LengthUnit, enu_basis_ecef, wgs84_ecef};
 
     use super::{
-        OpeningInterval, SceneProfile, linestring, opening_hosted_by_wall, opening_overlaps_host,
-        point_near_line, point_near_segment, point_segment_squared_distance, project_local_mm,
-        segments_are_collinear, slab_for_exterior_opening, snapped_interval_endpoints,
-        triangulate_simple, wall_mesh_with_openings,
+        OpeningHost, OpeningInterval, SceneProfile, linestring, opening_hosted_by_wall,
+        opening_overlaps_host, point_near_line, point_near_segment, point_segment_squared_distance,
+        project_local_mm, segments_are_collinear, slab_for_exterior_opening,
+        snapped_interval_endpoints, triangulate_simple, wall_mesh_with_openings,
     };
     use crate::fixture_illustration::{FixtureForm, fixture_form, illustrate_fixture};
     use kiriko_model::scene::PrimitiveGeometry;
@@ -1888,15 +1903,15 @@ mod tests {
         let distinct: std::collections::HashSet<_> = colors.iter().copied().collect();
         assert!(distinct.len() > 1, "JR finishes use more than one RGB");
         assert!(
-            colors.iter().any(|c| *c == [205, 200, 189]),
+            colors.contains(&[205, 200, 189]),
             "stainless matches ROLE_COLORS.TicketGate * 255"
         );
         assert!(
-            !colors.iter().any(|c| *c == [180, 83, 9]),
+            !colors.contains(&[180, 83, 9]),
             "signal yellow is not review amber"
         );
         assert!(
-            colors.iter().any(|c| *c == [245, 208, 16]),
+            colors.contains(&[245, 208, 16]),
             "entry plaque is signal yellow"
         );
 
@@ -1933,10 +1948,10 @@ mod tests {
             .filter(|p| p[0] < 600)
             .copied()
             .collect();
-        let x_span = first.iter().map(|p| p[0]).max().unwrap()
-            - first.iter().map(|p| p[0]).min().unwrap();
-        let y_span = first.iter().map(|p| p[1]).max().unwrap()
-            - first.iter().map(|p| p[1]).min().unwrap();
+        let x_span =
+            first.iter().map(|p| p[0]).max().unwrap() - first.iter().map(|p| p[0]).min().unwrap();
+        let y_span =
+            first.iter().map(|p| p[1]).max().unwrap() - first.iter().map(|p| p[1]).min().unwrap();
         assert!(
             y_span > x_span,
             "JR housing is elongated along travel, not a short pedestal"
@@ -2160,29 +2175,21 @@ mod tests {
                 edges.push((("L0".to_string(), a[0], a[1], b[0], b[1]), index));
             }
         }
-        let opening_a = [100_700, 50_000];
-        let opening_b = [100_700, 51_000];
-        let host_a = [99_000, 50_000];
-        let host_b = [99_000, 51_000];
-        let nearer = slab_for_exterior_opening(
-            "L0", opening_a, opening_b, host_a, host_b, 200, &edges, &slabs, None,
-        );
+        let opening = OpeningHost {
+            source_a: [100_700, 50_000],
+            source_b: [100_700, 51_000],
+            host_a: [99_000, 50_000],
+            host_b: [99_000, 51_000],
+            tolerance: 200,
+        };
+        let nearer = slab_for_exterior_opening("L0", &opening, &edges, &slabs, None);
         assert_eq!(
             nearer,
             Some(1),
             "without a host interior the gap opening is nearer the small island"
         );
-        let contained = slab_for_exterior_opening(
-            "L0",
-            opening_a,
-            opening_b,
-            host_a,
-            host_b,
-            200,
-            &edges,
-            &slabs,
-            Some([50_000, 50_000]),
-        );
+        let contained =
+            slab_for_exterior_opening("L0", &opening, &edges, &slabs, Some([50_000, 50_000]));
         assert_eq!(
             contained,
             Some(0),

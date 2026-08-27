@@ -193,8 +193,12 @@ fn obstacle_rings(geometry: &Value) -> Vec<Vec<[f64; 2]>> {
         .collect()
 }
 
+/// One polygon part split into its exterior ring and its hole rings, or
+/// `None` when the part has no usable exterior.
+type SplitRings = Option<(Vec<[f64; 2]>, Vec<Vec<[f64; 2]>>)>;
+
 /// First ring is the exterior; the rest are holes.
-fn split_rings(rings: Vec<Vec<[f64; 2]>>) -> Option<(Vec<[f64; 2]>, Vec<Vec<[f64; 2]>>)> {
+fn split_rings(rings: Vec<Vec<[f64; 2]>>) -> SplitRings {
     let mut rings = rings.into_iter();
     let exterior = rings.next().filter(|r| !r.is_empty())?;
     Some((exterior, rings.collect()))
@@ -221,7 +225,12 @@ fn ring_coords(v: &Value) -> Vec<[f64; 2]> {
 /// adapter wires the same two steps itself. Use [`route_smoothed_with`] for
 /// a travel-mode profile.
 pub fn route_smoothed(document: &BundleDocument, origin: Point3, dest: Point3) -> Option<Route> {
-    route_smoothed_with(document, origin, dest, &kiriko_route::RouteProfile::walking())
+    route_smoothed_with(
+        document,
+        origin,
+        dest,
+        &kiriko_route::RouteProfile::walking(),
+    )
 }
 
 /// [`route_smoothed`] with a travel-mode profile.
@@ -447,15 +456,13 @@ mod tests {
         // A room-only venue carries no walkable geometry: `walkable_floors`
         // is empty and smoothing is the identity (the existing routeBundle
         // worker contract depends on this).
-        let features = vec![
-            feature(
-                "room0",
-                FeatureType::Unit,
-                "L0",
-                Some("room"),
-                polygon(&rect(0.0, 0.0, 20.0, 4.0)),
-            ),
-        ];
+        let features = vec![feature(
+            "room0",
+            FeatureType::Unit,
+            "L0",
+            Some("room"),
+            polygon(&rect(0.0, 0.0, 20.0, 4.0)),
+        )];
         let mut doc = document(&[("L0", 0.0)], features);
         let graph = sawtooth_graph();
         doc.graph = Some(graph.clone());
@@ -508,10 +515,7 @@ mod tests {
             let steps = (haversine(&a, &b) / 0.25).ceil().max(1.0) as usize;
             (0..=steps).all(|s| {
                 let t = s as f64 / steps as f64;
-                !point_in_ring(
-                    ring,
-                    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t],
-                )
+                !point_in_ring(ring, [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
             })
         })
     }
@@ -619,7 +623,11 @@ mod tests {
             .iter()
             .map(|p| p.exterior.clone())
             .collect();
-        assert_eq!(exteriors.len(), 2, "both parts survive as separate polygons");
+        assert_eq!(
+            exteriors.len(),
+            2,
+            "both parts survive as separate polygons"
+        );
         for ring in [&big, &small] {
             assert!(
                 exteriors.contains(ring),
