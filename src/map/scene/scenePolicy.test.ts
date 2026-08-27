@@ -27,7 +27,13 @@ const CONVEYANCE_ROLE_NAMES: SemanticRoleName[] = [
   "Conveyance",
 ];
 
-const CONVEYANCE_SHELL_ROLE_NAMES: SemanticRoleName[] = ["Ramp", "Conveyance"];
+const CONVEYANCE_SHELL_ROLE_NAMES: SemanticRoleName[] = [
+  "Elevator",
+  "Escalator",
+  "Stairs",
+  "Ramp",
+  "Conveyance",
+];
 
 const ILLUSTRATED_CONVEYANCE_ROLE_NAMES: SemanticRoleName[] = [
   "Elevator",
@@ -206,7 +212,7 @@ describe("conveyance shells", () => {
     levelPlanesM: [0, 4],
   };
 
-  it("renders untyped and ramp shells see-through so the graph inside stays visible", () => {
+  it("renders conveyance shells see-through so the graph inside stays visible", () => {
     // A shell exists to say "a conveyance is here", not to hide the routing
     // graph it explains. Illustrated stairs / escalators / elevators are the
     // exception: they are station silhouettes, like a ticket-gate row.
@@ -222,7 +228,9 @@ describe("conveyance shells", () => {
 
   it("paints illustrated stairs, escalators, and elevators opaque on the active floor", () => {
     for (const role of ILLUSTRATED_CONVEYANCE_ROLE_NAMES) {
-      expect(batchOpacity({ levelIndex: 0, role }, state)).toBe(1);
+      expect(
+        batchOpacity({ levelIndex: 0, role, illustrated: true }, state),
+      ).toBe(1);
     }
     expect(batchOpacity({ levelIndex: 0, role: "TicketGate" }, state)).toBe(1);
   });
@@ -238,8 +246,14 @@ describe("conveyance shells", () => {
       Math.min(UPPER_FLOOR_OPACITY, CONVEYANCE_SHELL_OPACITY),
     );
     expect(batchOpacity({ levelIndex: 0, role: "Escalator" }, pair)).toBe(
-      UPPER_FLOOR_OPACITY,
+      Math.min(UPPER_FLOOR_OPACITY, CONVEYANCE_SHELL_OPACITY),
     );
+    expect(
+      batchOpacity(
+        { levelIndex: 0, role: "Escalator", illustrated: true },
+        pair,
+      ),
+    ).toBe(UPPER_FLOOR_OPACITY);
     const handoff = {
       activeLevelIndices: [0],
       contextLevelIndices: [],
@@ -250,8 +264,14 @@ describe("conveyance shells", () => {
       Math.min(CONTEXT_LEVEL_OPACITY, CONVEYANCE_SHELL_OPACITY),
     );
     expect(batchOpacity({ levelIndex: 1, role: "Elevator" }, handoff)).toBe(
-      CONTEXT_LEVEL_OPACITY,
+      Math.min(CONTEXT_LEVEL_OPACITY, CONVEYANCE_SHELL_OPACITY),
     );
+    expect(
+      batchOpacity(
+        { levelIndex: 1, role: "Elevator", illustrated: true },
+        handoff,
+      ),
+    ).toBe(CONTEXT_LEVEL_OPACITY);
   });
 
   it("tints each conveyance kind apart from neutral structure", () => {
@@ -349,7 +369,7 @@ describe("planSceneDraw", () => {
         { levelIndex: 0, role: "Walkable" as const },
         { levelIndex: 1, role: "Walkable" as const },
         { levelIndex: 0, role: "Ramp" as const },
-        { levelIndex: 1, role: "Stairs" as const },
+        { levelIndex: 1, role: "Stairs" as const, illustrated: true },
       ],
       state,
     );
@@ -416,6 +436,15 @@ describe("paint order and depth bias", () => {
       expect(ROLE_DEPTH_BIAS[role]).toBeTypeOf("number");
       expect(ROLE_COLORS[role]).toHaveLength(3);
     }
+  });
+
+  it("locks stairs fill bytes to the producer's mixed-batch backfill", () => {
+    // kiriko-scene `role_fill_rgb(Stairs)` copies this so a unit surface that
+    // shares a batch with an illustrated run stays the stairs colour, not
+    // ticket-gate stainless.
+    expect(ROLE_COLORS.Stairs.map((channel) => Math.round(channel * 255))).toEqual(
+      [197, 205, 222],
+    );
   });
 
   it("puts contextual mass under the finishes that sit coplanar on it", () => {

@@ -199,18 +199,35 @@ export const CONTEXT_HANDOFF_MS = 160;
 const PROTECTED_CORRIDOR_ROLES: Record<string, true> = { Ceiling: true };
 
 /**
- * Transport forms that stay shells. Illustrated stairs / escalators /
- * elevators are absent: they paint at the carrying floor's opacity, like a
- * ticket-gate row.
+ * Transport forms that stay shells. A typed stair / escalator / elevator is
+ * still a shell when the producer could not illustrate it (no plane above,
+ * unrecognized footprint): the leftover closed prism must not hide the graph
+ * inside. Vertex-colored silhouettes opt out via `illustrated`.
  */
 const CONVEYANCE_SHELL_ROLES: Record<string, true> = {
+  Elevator: true,
+  Escalator: true,
+  Stairs: true,
   Ramp: true,
   Conveyance: true,
+};
+
+/** Typed conveyances whose illustrated form paints like a ticket-gate row. */
+const ILLUSTRATED_SOLID_ROLES: Record<string, true> = {
+  Elevator: true,
+  Escalator: true,
+  Stairs: true,
 };
 
 export interface BatchVisibility {
   levelIndex: number;
   role: SemanticRoleName;
+  /**
+   * Vertex-colored station silhouette. Absent or false keeps a typed
+   * conveyance on the shell treatment, because absence of illustration is
+   * not success.
+   */
+  illustrated?: boolean;
 }
 
 export interface VisibilityState {
@@ -304,6 +321,12 @@ export function batchOpacity(batch: BatchVisibility, state: VisibilityState): nu
   // set can only ever quieten a surface further.
   if (Object.hasOwn(PROTECTED_CORRIDOR_ROLES, batch.role)) {
     return Math.min(floor, OCCLUDER_FADE_OPACITY);
+  }
+  if (
+    batch.illustrated === true &&
+    Object.hasOwn(ILLUSTRATED_SOLID_ROLES, batch.role)
+  ) {
+    return floor;
   }
   if (Object.hasOwn(CONVEYANCE_SHELL_ROLES, batch.role)) {
     return Math.min(floor, CONVEYANCE_SHELL_OPACITY);

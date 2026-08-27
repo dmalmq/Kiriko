@@ -541,7 +541,7 @@ fn the_header_carries_the_frame_world_transform_and_scene_bounds() {
         compile_generated_scene(&scene_section(), &spatial, &features()).expect("scene compiles");
 
     assert_eq!(document.header.frame_origin_ecef, spatial.frame.ecef_origin);
-    assert_eq!(document.header.deriver_version, 8);
+    assert_eq!(document.header.deriver_version, 9);
 
     // Column-major 4x4: the ENU basis vectors as columns, translation last.
     let transform = document.header.world_transform;
@@ -951,6 +951,7 @@ fn conveyance_features(category: Option<&str>) -> Vec<VenueFeature> {
 const STAINLESS: [u8; 3] = [205, 200, 189];
 const SIGNAL_YELLOW: [u8; 3] = [245, 208, 16];
 const REVIEW_AMBER: [u8; 3] = [180, 83, 9];
+const STAIRS_ROLE: [u8; 3] = [197, 205, 222];
 
 fn illustrated_colors(batch: &kiriko_scene::SceneBatch) -> &Vec<[u8; 3]> {
     let colors = batch.colors.as_ref().expect("illustrated form is tinted");
@@ -1128,6 +1129,93 @@ fn an_untyped_conveyance_keeps_its_neutral_mesh() {
     assert!(
         batch.colors.is_none(),
         "an untyped shell still paints from ROLE_COLORS"
+    );
+}
+
+#[test]
+fn a_typed_conveyance_on_the_highest_level_keeps_the_neutral_shell() {
+    let section = SceneSection {
+        primitives: vec![primitive(
+            "conveyance-x",
+            PrimitiveRole::Conveyance,
+            "level-1f",
+            Some("unit-x"),
+            PrimitiveGeometry::Conveyance {
+                kind: kiriko_model::scene::ConveyanceKind::Neutral,
+                mesh: conduit_box(-3_000, -1_000, 3_000, 1_000, 4_500, 7_500),
+            },
+        )],
+        descriptor: None,
+    };
+    let document = compile_generated_scene(
+        &section,
+        &spatial_context(),
+        &conveyance_features(Some("stairs")),
+    )
+    .expect("scene compiles");
+
+    let batch = document
+        .batches
+        .iter()
+        .find(|batch| batch.role == SemanticRole::Stairs)
+        .expect("stairs batch");
+    assert_eq!(batch.vertex_count, 30, "the authored tube, untouched");
+    assert!(
+        batch.colors.is_none(),
+        "a fallback shell still paints from ROLE_COLORS"
+    );
+}
+
+#[test]
+fn an_illustrated_stair_does_not_recolor_its_unit_surface_stainless() {
+    let section = SceneSection {
+        primitives: vec![
+            primitive(
+                "surface-x",
+                PrimitiveRole::Surface,
+                "level-b1",
+                Some("unit-x"),
+                PrimitiveGeometry::Mesh(square(0)),
+            ),
+            primitive(
+                "conveyance-x",
+                PrimitiveRole::Conveyance,
+                "level-b1",
+                Some("unit-x"),
+                PrimitiveGeometry::Conveyance {
+                    kind: kiriko_model::scene::ConveyanceKind::Neutral,
+                    mesh: conduit_box(-3_000, -1_000, 3_000, 1_000, 0, 3_000),
+                },
+            ),
+        ],
+        descriptor: None,
+    };
+    let document = compile_generated_scene(
+        &section,
+        &spatial_context(),
+        &conveyance_features(Some("stairs")),
+    )
+    .expect("scene compiles");
+
+    let stairs: Vec<_> = document
+        .batches
+        .iter()
+        .filter(|batch| batch.role == SemanticRole::Stairs)
+        .collect();
+    assert_eq!(
+        stairs.len(),
+        1,
+        "one draw call per role, even when a unit surface shares it"
+    );
+    let colors = illustrated_colors(stairs[0]);
+    assert_eq!(
+        &colors[..6],
+        &[STAIRS_ROLE; 6],
+        "the unit surface backfills from ROLE_COLORS.Stairs, not ticket-gate stainless"
+    );
+    assert!(
+        colors[6..].contains(&STAINLESS),
+        "the illustrated run still carries stainless rails"
     );
 }
 

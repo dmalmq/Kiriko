@@ -299,6 +299,8 @@ interface BatchResources {
   vertexCount: number;
   levelIndex: number;
   role: SemanticRoleName;
+  /** Vertex-colored silhouette, so typed conveyances may paint opaque. */
+  illustrated: boolean;
   /** Depth-buffer bias resolving coplanar geometry against its neighbours. */
   depthBias: number;
   /** Model matrix with this batch's dequantization folded in, `f64`. */
@@ -1570,6 +1572,7 @@ export class SceneLayer implements CustomLayerInterface {
       vertexCount: batch.vertexCount,
       levelIndex: batch.levelIndex,
       role: batch.role,
+      illustrated: batch.colors !== null,
       depthBias: ROLE_DEPTH_BIAS[batch.role],
       quantizationOrigin: batch.quantizationOrigin,
       quantizationScale: batch.quantizationScale,

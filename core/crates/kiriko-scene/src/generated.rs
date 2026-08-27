@@ -30,7 +30,7 @@ use crate::quantize::{encode_normal_oct, quantize_positions};
 use crate::roles::occlusion_for_role;
 
 /// Bumped when this producer's output changes for unchanged input.
-const GENERATED_PRODUCER_VERSION: u16 = 8;
+const GENERATED_PRODUCER_VERSION: u16 = 9;
 
 /// The render format this producer writes.
 const SCENE_FORMAT_VERSION: u16 = 1;
@@ -1277,9 +1277,30 @@ fn role_class(role: PrimitiveRole) -> u8 {
     }
 }
 
-/// Brushed-metal fallback matching `GateFinish::Stainless` /
-/// `ROLE_COLORS.TicketGate`.
+/// Brushed-metal matching `GateFinish::Stainless` / `ROLE_COLORS.TicketGate`.
 const TICKET_GATE_STAINLESS: [u8; 3] = [205, 200, 189];
+
+/// Byte RGB matching the renderer's `ROLE_COLORS` table. Mixed batches backfill
+/// untinted vertices from this, never from a ticket-gate stainless that the
+/// role did not earn.
+fn role_fill_rgb(role: SemanticRole) -> [u8; 3] {
+    match role {
+        SemanticRole::Walkable => [250, 250, 249],
+        SemanticRole::Public => [233, 237, 244],
+        SemanticRole::Service => [240, 235, 224],
+        SemanticRole::Restricted
+        | SemanticRole::Structure
+        | SemanticRole::Ceiling
+        | SemanticRole::Context => [213, 218, 227],
+        SemanticRole::Opening => [154, 163, 178],
+        SemanticRole::Elevator => [183, 193, 214],
+        SemanticRole::Escalator => [169, 182, 206],
+        SemanticRole::Stairs => [197, 205, 222],
+        SemanticRole::Ramp => [210, 216, 230],
+        SemanticRole::Conveyance => [189, 197, 213],
+        SemanticRole::TicketGate => TICKET_GATE_STAINLESS,
+    }
+}
 
 /// Accumulates one `(level, role)` batch before quantization.
 struct BatchAccumulator {
@@ -1306,14 +1327,14 @@ impl BatchAccumulator {
         if let Some(tints) = tints {
             match &mut self.colors {
                 None => {
-                    let mut colors = vec![TICKET_GATE_STAINLESS; self.vertices.len()];
+                    let mut colors = vec![role_fill_rgb(self.role); self.vertices.len()];
                     colors.extend_from_slice(tints);
                     self.colors = Some(colors);
                 }
                 Some(colors) => colors.extend_from_slice(tints),
             }
         } else if let Some(colors) = &mut self.colors {
-            colors.extend(std::iter::repeat_n(TICKET_GATE_STAINLESS, n));
+            colors.extend(std::iter::repeat_n(role_fill_rgb(self.role), n));
         }
         self.vertices.extend_from_slice(&triangles.vertices);
         self.normals.extend_from_slice(&triangles.normals);
