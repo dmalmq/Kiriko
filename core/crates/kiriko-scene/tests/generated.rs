@@ -541,7 +541,7 @@ fn the_header_carries_the_frame_world_transform_and_scene_bounds() {
         compile_generated_scene(&scene_section(), &spatial, &features()).expect("scene compiles");
 
     assert_eq!(document.header.frame_origin_ecef, spatial.frame.ecef_origin);
-    assert_eq!(document.header.deriver_version, 9);
+    assert_eq!(document.header.deriver_version, 10);
 
     // Column-major 4x4: the ENU basis vectors as columns, translation last.
     let transform = document.header.world_transform;
@@ -951,7 +951,6 @@ fn conveyance_features(category: Option<&str>) -> Vec<VenueFeature> {
 const STAINLESS: [u8; 3] = [205, 200, 189];
 const SIGNAL_YELLOW: [u8; 3] = [245, 208, 16];
 const REVIEW_AMBER: [u8; 3] = [180, 83, 9];
-const STAIRS_ROLE: [u8; 3] = [197, 205, 222];
 
 fn illustrated_colors(batch: &kiriko_scene::SceneBatch) -> &Vec<[u8; 3]> {
     let colors = batch.colors.as_ref().expect("illustrated form is tinted");
@@ -1202,21 +1201,82 @@ fn an_illustrated_stair_does_not_recolor_its_unit_surface_stainless() {
         .iter()
         .filter(|batch| batch.role == SemanticRole::Stairs)
         .collect();
-    assert_eq!(
-        stairs.len(),
-        1,
-        "one draw call per role, even when a unit surface shares it"
-    );
-    let colors = illustrated_colors(stairs[0]);
-    assert_eq!(
-        &colors[..6],
-        &[STAIRS_ROLE; 6],
-        "the unit surface backfills from ROLE_COLORS.Stairs, not ticket-gate stainless"
-    );
+    assert_eq!(stairs.len(), 2, "the illustrated run is its own batch");
+    let plain = stairs
+        .iter()
+        .find(|batch| batch.colors.is_none())
+        .expect("unit surface still paints from ROLE_COLORS");
+    assert_eq!(plain.vertex_count, 6, "the authored square, untouched");
+    let tinted = stairs
+        .iter()
+        .copied()
+        .find(|batch| batch.colors.is_some())
+        .expect("illustrated run is tinted");
+    let colors = illustrated_colors(tinted);
     assert!(
-        colors[6..].contains(&STAINLESS),
+        colors.contains(&STAINLESS),
         "the illustrated run still carries stainless rails"
     );
+}
+
+#[test]
+fn an_illustrated_stair_does_not_promote_a_same_floor_fallback_shell() {
+    let section = SceneSection {
+        primitives: vec![
+            primitive(
+                "conveyance-ok",
+                PrimitiveRole::Conveyance,
+                "level-b1",
+                Some("unit-x"),
+                PrimitiveGeometry::Conveyance {
+                    kind: kiriko_model::scene::ConveyanceKind::Neutral,
+                    mesh: conduit_box(-3_000, -1_000, 3_000, 1_000, 0, 3_000),
+                },
+            ),
+            primitive(
+                "conveyance-fallback",
+                PrimitiveRole::Conveyance,
+                "level-b1",
+                Some("unit-y"),
+                PrimitiveGeometry::Conveyance {
+                    kind: kiriko_model::scene::ConveyanceKind::Neutral,
+                    mesh: wall(0),
+                },
+            ),
+        ],
+        descriptor: None,
+    };
+    let document = compile_generated_scene(
+        &section,
+        &spatial_context(),
+        &[
+            feature("unit-x", FeatureType::Unit, Some("stairs")),
+            feature("unit-y", FeatureType::Unit, Some("stairs")),
+        ],
+    )
+    .expect("scene compiles");
+
+    let stairs: Vec<_> = document
+        .batches
+        .iter()
+        .filter(|batch| batch.role == SemanticRole::Stairs)
+        .collect();
+    assert_eq!(
+        stairs.len(),
+        2,
+        "a leftover prism cannot share the illustrated batch"
+    );
+    let shell = stairs
+        .iter()
+        .find(|batch| batch.colors.is_none())
+        .expect("fallback shell still paints from ROLE_COLORS");
+    assert_eq!(shell.vertex_count, 6, "the unrecognized wall, untouched");
+    let tinted = stairs
+        .iter()
+        .copied()
+        .find(|batch| batch.colors.is_some())
+        .expect("illustrated run is tinted");
+    assert!(tinted.vertex_count > 26 * 60);
 }
 
 #[test]

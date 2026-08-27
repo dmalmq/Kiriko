@@ -14,8 +14,9 @@
  *   dequantized by the model matrix, which is composed in `f64` relative to
  *   the venue anchor. No `f32` value ever holds an un-offset ECEF component.
  * - **Draw calls.** Geometry is merged upstream, so a visible floor costs one
- *   call per semantic role present — the budget is 8 (#26 section 4), and
- *   `stats()` reports what the last frame actually spent.
+ *   call per merged batch — the budget is 8 (#26 section 4), and
+ *   `stats()` reports what the last frame actually spent. Illustrated
+ *   conveyances are a sibling batch so a leftover shell can stay see-through.
  * - **Borrowed state.** MapLibre owns the context. Everything this layer
  *   changes is captured on entry and restored on exit, so a render never
  *   leaks depth, blend, or binding state into the basemap's own passes.
@@ -1520,7 +1521,8 @@ export class SceneLayer implements CustomLayerInterface {
     this._batches = this._scene.batches
       .map((batch) => this._createBatch(gl, batch))
       // Paint order is the renderer's own concern, not the producer's: batches
-      // arrive keyed by (level, role) and are composited by role here.
+      // arrive keyed by (level, role), with illustrated conveyances as a
+      // sibling when a leftover shell must not inherit their opacity.
       .sort((left, right) => ROLE_PAINT_ORDER[left.role] - ROLE_PAINT_ORDER[right.role]);
     this._drawPlan = null;
   }

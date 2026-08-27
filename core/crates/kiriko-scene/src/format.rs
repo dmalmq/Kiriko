@@ -90,8 +90,10 @@ pub struct SceneFeature {
     pub max_z: f32,
 }
 
-/// Merged geometry for one `(level, role)` pair. Vertices are triangle-list
-/// order; no index buffer, because the source indexes 1:1 with vertices.
+/// Merged geometry for one `(level, role)` pair, or for the illustrated
+/// sibling of that pair when a leftover shell must stay see-through. Vertices
+/// are triangle-list order; no index buffer, because the source indexes 1:1
+/// with vertices.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneBatch {
     pub level_index: u32,

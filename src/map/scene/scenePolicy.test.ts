@@ -438,10 +438,10 @@ describe("paint order and depth bias", () => {
     }
   });
 
-  it("locks stairs fill bytes to the producer's mixed-batch backfill", () => {
-    // kiriko-scene `role_fill_rgb(Stairs)` copies this so a unit surface that
-    // shares a batch with an illustrated run stays the stairs colour, not
-    // ticket-gate stainless.
+  it("locks stairs fill bytes to the producer's role backfill", () => {
+    // kiriko-scene `role_fill_rgb(Stairs)` copies this so untinted vertices
+    // that still share a tinted batch stay the stairs colour, not ticket-gate
+    // stainless.
     expect(ROLE_COLORS.Stairs.map((channel) => Math.round(channel * 255))).toEqual(
       [197, 205, 222],
     );

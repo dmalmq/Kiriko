@@ -30,7 +30,7 @@ use crate::quantize::{encode_normal_oct, quantize_positions};
 use crate::roles::occlusion_for_role;
 
 /// Bumped when this producer's output changes for unchanged input.
-const GENERATED_PRODUCER_VERSION: u16 = 9;
+const GENERATED_PRODUCER_VERSION: u16 = 10;
 
 /// The render format this producer writes.
 const SCENE_FORMAT_VERSION: u16 = 1;
@@ -101,9 +101,10 @@ pub fn compile_generated_scene(
         })
         .collect();
 
-    // Geometry accumulates per (level, role) so a visible floor draws in a
-    // handful of calls rather than once per primitive.
-    let mut batched: BTreeMap<(u32, u8), BatchAccumulator> = BTreeMap::new();
+    // Geometry accumulates per (level, role, tinted). Illustrated silhouettes
+    // cannot share a batch with leftover shells: one opacity uniform would
+    // paint the closed prism opaque and hide the graph it failed to illustrate.
+    let mut batched: BTreeMap<(u32, u8, bool), BatchAccumulator> = BTreeMap::new();
     let mut scene_features: Vec<SceneFeature> = Vec::with_capacity(scene.primitives.len());
     let mut bounds_min = [f32::INFINITY; 3];
     let mut bounds_max = [f32::NEG_INFINITY; 3];
@@ -210,8 +211,9 @@ pub fn compile_generated_scene(
             }
         }
 
+        let tinted = expanded_colors.is_some();
         let accumulator = batched
-            .entry((level_index, role_key(role)))
+            .entry((level_index, role_key(role), tinted))
             .or_insert_with(|| BatchAccumulator::new(role));
         accumulator.push(&triangles, feature_index, expanded_colors.as_deref());
     }
@@ -223,7 +225,7 @@ pub fn compile_generated_scene(
 
     let batches: Vec<SceneBatch> = batched
         .into_iter()
-        .map(|((level_index, _), accumulator)| accumulator.finish(level_index))
+        .map(|((level_index, _, _), accumulator)| accumulator.finish(level_index))
         .collect();
 
     let header = SceneHeader {
