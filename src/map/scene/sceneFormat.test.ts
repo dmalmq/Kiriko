@@ -10,6 +10,7 @@ import {
   drawCallsForLevel,
   primitiveCollapse,
   readGeneratedScene,
+  readScene,
   type SceneView,
 } from "./sceneFormat";
 
@@ -62,6 +63,9 @@ describe("readGeneratedScene", () => {
       expect(batch.positions).toHaveLength(batch.vertexCount * 3);
       expect(batch.normals).toHaveLength(batch.vertexCount * 2);
       expect(batch.featureIndices).toHaveLength(batch.vertexCount);
+      if (batch.colors !== null) {
+        expect(batch.colors).toHaveLength(batch.vertexCount * 3);
+      }
       expect(batch.vertexCount % 3).toBe(0);
       for (const axis of [0, 1, 2]) {
         expect(batch.quantizationScale[axis]).toBeGreaterThan(0);
@@ -144,5 +148,62 @@ describe("readGeneratedScene", () => {
   it("refuses a scene whose spatial context is unavailable rather than placing it", () => {
     const disabled = new Uint8Array(readFileSync(DISABLED_BUNDLE));
     expect(() => readGeneratedScene(disabled)).toThrow(/no spatial context|no generated scene/);
+  });
+});
+
+describe("readScene colors", () => {
+  it("treats a missing colorsOffset as no per-vertex tints", () => {
+    const payload = new Uint8Array(44);
+    new Uint16Array(payload.buffer, 0, 9).set([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    new Int16Array(payload.buffer, 20, 6).set([0, 0, 0, 0, 0, 0]);
+    new Uint32Array(payload.buffer, 32, 3).set([0, 0, 0]);
+    const scene = readScene({
+      meta: JSON.stringify({
+        header: {
+          formatVersion: 1,
+          deriverVersion: 1,
+          sourceHash: "0".repeat(64),
+          frameOriginEcef: [0, 0, 0],
+          worldTransform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+          boundsMin: [0, 0, 0],
+          boundsMax: [1, 1, 1],
+        },
+        levels: [
+          {
+            canonicalId: "l1",
+            sourceLevelKey: "",
+            sourceLevelName: "",
+            sourceElevationMeters: null,
+            resolvedPlaneZ: 0,
+            quantizedElevationDm: 0,
+          },
+        ],
+        features: [
+          {
+            sourceObjectId: "f1",
+            canonicalId: null,
+            levelIndex: 0,
+            role: "TicketGate",
+            occlusion: "Never",
+            minZ: 0,
+            maxZ: 1,
+          },
+        ],
+        batches: [
+          {
+            levelIndex: 0,
+            role: "TicketGate",
+            quantizationOrigin: [0, 0, 0],
+            quantizationScale: [1, 1, 1],
+            vertexCount: 3,
+            positionsOffset: 0,
+            normalsOffset: 20,
+            featureIndicesOffset: 32,
+          },
+        ],
+      }),
+      payload,
+    });
+    expect(scene.batches[0]!.colors).toBeNull();
   });
 });

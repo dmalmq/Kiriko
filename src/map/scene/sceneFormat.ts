@@ -94,6 +94,8 @@ export interface SceneBatchView {
   normals: Int16Array;
   /** Index into `features` per vertex. */
   featureIndices: Uint32Array;
+  /** Per-vertex RGB, length `vertexCount * 3`, or `null` to use `ROLE_COLORS[role]`. */
+  colors: Uint8Array | null;
 }
 
 export interface SceneView {
@@ -140,6 +142,7 @@ interface SceneMeta {
     positionsOffset: number;
     normalsOffset: number;
     featureIndicesOffset: number;
+    colorsOffset?: number;
   }[];
 }
 
@@ -207,6 +210,10 @@ export function readScene(described: DescribedSceneDto): SceneView {
       positions: new Uint16Array(buffer, base + batch.positionsOffset, vertexCount * 3),
       normals: new Int16Array(buffer, base + batch.normalsOffset, vertexCount * 2),
       featureIndices: new Uint32Array(buffer, base + batch.featureIndicesOffset, vertexCount),
+      colors:
+        batch.colorsOffset == null
+          ? null
+          : new Uint8Array(buffer, base + batch.colorsOffset, vertexCount * 3),
     };
   });
 

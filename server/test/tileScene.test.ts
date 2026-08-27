@@ -20,7 +20,7 @@ import { venuePlaneFromBundle } from "./tileRegistrationFixtures";
 afterEach(cleanupTestApps);
 
 const LEVEL_B1 = "b1000001-0000-4000-8000-0000000000b1";
-const SCENE_MAGIC = "KSC1";
+const SCENE_MAGIC = "KSC2";
 const PINNED_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const LATEST_CACHE_CONTROL = "public, max-age=0, must-revalidate";
 

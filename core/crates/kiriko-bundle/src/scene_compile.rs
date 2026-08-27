@@ -28,6 +28,7 @@ use kiriko_model::spatial::{
 };
 
 use crate::codec::BundleDocument;
+use crate::fixture_illustration::{fixture_form, illustrate_fixture};
 
 /// Versioned scene profile: nominal dimensions and tolerances, never global
 /// constants.
@@ -53,17 +54,21 @@ pub struct SceneProfile {
     /// vertical graph connection (a point-to-point connection gets a
     /// nominal volume, never fabricated machinery).
     pub conveyance_half_width_mm: i64,
-    /// Spacing between gate machines in an illustrative ticket-gate row.
+    /// Spacing between gate machines along the row (mm).
     pub gate_pitch_mm: i64,
-    /// Pedestal height of an illustrative ticket-gate machine.
+    /// Housing height of an illustrative ticket-gate machine.
     pub gate_height_mm: i64,
+    /// Housing extent along passenger travel (mm).
+    pub gate_housing_length_mm: i64,
+    /// Housing width across the row, perpendicular to travel (mm).
+    pub gate_housing_width_mm: i64,
 }
 
 impl Default for SceneProfile {
-    /// The versioned default scene profile (v2).
+    /// The versioned default scene profile (v3).
     fn default() -> Self {
         Self {
-            profile_version: 2,
+            profile_version: 3,
             wall_height_mm: 3000,
             ceiling_height_mm: 3000,
             door_height_mm: 2400,
@@ -73,6 +78,8 @@ impl Default for SceneProfile {
             conveyance_half_width_mm: 600,
             gate_pitch_mm: 600,
             gate_height_mm: 1000,
+            gate_housing_length_mm: 1600,
+            gate_housing_width_mm: 280,
         }
     }
 }
@@ -957,11 +964,13 @@ pub(crate) fn compile_scene(
                 });
                 let Some(slab) = slab_for_exterior_opening(
                     level_id,
-                    source_a,
-                    source_b,
-                    host_a,
-                    host_b,
-                    tolerance,
+                    &OpeningHost {
+                        source_a,
+                        source_b,
+                        host_a,
+                        host_b,
+                        tolerance,
+                    },
                     &level_slab_edges,
                     &level_slabs,
                     host_interior,
@@ -1265,17 +1274,12 @@ pub(crate) fn compile_scene(
         conveyance_count += 1;
     }
 
-    // -- Fixtures: illustrative ticket-gate rows. -----------------------------
-    // A fixture feature becomes a row of fare-gate machines along its long
-    // axis — the gates Japanese stations line their concourses with. The
-    // position is measured; the form is an illustration, registered as an
-    // assumption like every other nominal shape.
-    let gate_assumption = *nominal_gate_assumption.get_or_insert_with(|| {
-        push_assumption(
-            &mut spatial.registries,
-            "illustrative ticket-gate row (never fabricated machinery detail)",
-        )
-    });
+    // -- Fixtures: illustrative JR ticket-gate housings. ----------------------
+    // A `ticketgate` fixture becomes a row of fare-gate machines along its
+    // row axis — the gates Japanese stations line their concourses with.
+    // The position is measured; the JR housing silhouette is an illustration,
+    // registered as an assumption like every other nominal shape. Other
+    // fixture categories contribute no primitive.
     for fixture in document
         .features
         .iter()
@@ -1294,6 +1298,16 @@ pub(crate) fn compile_scene(
             .iter()
             .map(|[lon, lat]| project_local_mm(frame, *lon, *lat))
             .collect();
+        let form = fixture_form(fixture.category.as_deref());
+        let Some(geometry) = illustrate_fixture(form, &ring_xy, z, profile) else {
+            continue;
+        };
+        let gate_assumption = *nominal_gate_assumption.get_or_insert_with(|| {
+            push_assumption(
+                &mut spatial.registries,
+                "illustrative JR ticket-gate housing silhouette (never fabricated machinery detail)",
+            )
+        });
         let locator = find_or_push_locator(&mut spatial.registries, &fixture.id);
         let confidence_ref = conf_ref(
             &mut spatial.registries,
@@ -1317,7 +1331,7 @@ pub(crate) fn compile_scene(
             canonical_feature_id: Some(fixture.id.clone()),
             source_locator_refs: vec![locator],
             evidence_refs: vec![evidence_ref],
-            geometry: PrimitiveGeometry::Mesh(ticket_gate_row(&ring_xy, z, profile)),
+            geometry,
         });
     }
 
@@ -1384,7 +1398,7 @@ fn extrude_ring_mesh(ring: &[[i64; 2]], z0: i64, z1: i64) -> Mesh {
 
 /// A closed box: `bottom` and `top` rings of equal length, at `z0`/`z1`.
 /// Faces: bottom + top triangulated, one quad per side.
-fn box_mesh(bottom: &[[i64; 2]], top: &[[i64; 2]], z0: i64, z1: i64) -> Mesh {
+pub(crate) fn box_mesh(bottom: &[[i64; 2]], top: &[[i64; 2]], z0: i64, z1: i64) -> Mesh {
     let n = bottom.len();
     let mut positions = Vec::with_capacity(2 * n);
     for [x, y] in bottom {
@@ -1559,138 +1573,13 @@ fn wall_mesh_with_openings(
 }
 
 /// Merge `src` into `dst`, re-basing its face indices.
-fn append_mesh(dst: &mut Mesh, src: Mesh) {
+pub(crate) fn append_mesh(dst: &mut Mesh, src: Mesh) {
     let offset = dst.positions.len() as u32;
     dst.positions.extend(src.positions);
     for face in src.faces {
         dst.faces
             .push([face[0] + offset, face[1] + offset, face[2] + offset]);
     }
-}
-
-/// An illustrative Japanese fare-gate row along a fixture footprint's long
-/// axis: evenly spaced machines, each a pedestal, flap-bar wings reaching to
-/// both lane edges, and an IC reader head on top. Boxes only — an
-/// illustration of what the gates do, never fabricated machinery detail.
-fn ticket_gate_row(ring_xy: &[[i64; 2]], z: i64, profile: &SceneProfile) -> Mesh {
-    let Some((min, max)) = ring_xy.iter().fold(None::<([i64; 2], [i64; 2])>, |acc, p| {
-        Some(match acc {
-            None => (*p, *p),
-            Some((lo, hi)) => (
-                [lo[0].min(p[0]), lo[1].min(p[1])],
-                [hi[0].max(p[0]), hi[1].max(p[1])],
-            ),
-        })
-    }) else {
-        return Mesh {
-            positions: Vec::new(),
-            faces: Vec::new(),
-        };
-    };
-    let (dx, dy) = ((max[0] - min[0]) as f64, (max[1] - min[1]) as f64);
-    let (origin, u, v, length, cross) = if dx >= dy {
-        (
-            [min[0] as f64, (min[1] + max[1]) as f64 / 2.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            dx,
-            dy,
-        )
-    } else {
-        (
-            [(min[0] + max[0]) as f64 / 2.0, min[1] as f64],
-            [0.0, 1.0],
-            [1.0, 0.0],
-            dy,
-            dx,
-        )
-    };
-    if length < 300.0 || cross < 200.0 {
-        // Too small to read as a gate row: nothing beats drawing nothing.
-        return Mesh {
-            positions: Vec::new(),
-            faces: Vec::new(),
-        };
-    }
-    let half_cross = ((cross / 2.0) as i64 - 40).min(600) as f64;
-    let machines = ((length / profile.gate_pitch_mm as f64).round() as usize).max(1);
-    let at = |t: f64, s: f64| -> [i64; 2] {
-        [
-            (origin[0] + u[0] * (t * length) + v[0] * s).round() as i64,
-            (origin[1] + u[1] * (t * length) + v[1] * s).round() as i64,
-        ]
-    };
-    let rect = |c: [i64; 2], half_u: f64, half_v: f64| -> Vec<[i64; 2]> {
-        vec![
-            [
-                c[0] - (u[0] * half_u).round() as i64 - (v[0] * half_v).round() as i64,
-                c[1] - (u[1] * half_u).round() as i64 - (v[1] * half_v).round() as i64,
-            ],
-            [
-                c[0] + (u[0] * half_u).round() as i64 - (v[0] * half_v).round() as i64,
-                c[1] + (u[1] * half_u).round() as i64 - (v[1] * half_v).round() as i64,
-            ],
-            [
-                c[0] + (u[0] * half_u).round() as i64 + (v[0] * half_v).round() as i64,
-                c[1] + (u[1] * half_u).round() as i64 + (v[1] * half_v).round() as i64,
-            ],
-            [
-                c[0] - (u[0] * half_u).round() as i64 + (v[0] * half_v).round() as i64,
-                c[1] - (u[1] * half_u).round() as i64 + (v[1] * half_v).round() as i64,
-            ],
-        ]
-    };
-    let mut mesh = Mesh {
-        positions: Vec::new(),
-        faces: Vec::new(),
-    };
-    for i in 0..machines {
-        let t = (i as f64 + 0.5) / machines as f64;
-        let c = at(t, 0.0);
-        // Pedestal: a narrow body across the lane's centre.
-        append_mesh(
-            &mut mesh,
-            box_mesh(
-                &rect(c, 150.0, 120.0),
-                &rect(c, 150.0, 120.0),
-                z,
-                z + profile.gate_height_mm,
-            ),
-        );
-        // Flap-bar wings from the body out to both lane edges.
-        for s in [-1.0, 1.0] {
-            let inner = at(t, s * 120.0);
-            let outer = at(t, s * half_cross);
-            let mid = [(inner[0] + outer[0]) / 2, (inner[1] + outer[1]) / 2];
-            let half_len =
-                (((outer[0] - inner[0]) as f64 * u[0] + (outer[1] - inner[1]) as f64 * u[1]).abs()
-                    / 2.0)
-                    .max(1.0)
-                    + (((outer[0] - inner[0]) as f64 * v[0] + (outer[1] - inner[1]) as f64 * v[1])
-                        .abs()
-                        / 2.0);
-            append_mesh(
-                &mut mesh,
-                box_mesh(
-                    &rect(mid, 40.0, half_len),
-                    &rect(mid, 40.0, half_len),
-                    z + 550,
-                    z + 650,
-                ),
-            );
-        }
-        // IC reader head on the body top.
-        append_mesh(
-            &mut mesh,
-            box_mesh(
-                &rect(c, 170.0, 140.0),
-                &rect(c, 170.0, 140.0),
-                z + profile.gate_height_mm,
-                z + profile.gate_height_mm + 150,
-            ),
-        );
-    }
-    mesh
 }
 
 /// A projected, triangulated mesh from an already-projected ring at `z`.
@@ -1748,6 +1637,17 @@ fn point_near_line(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> boo
     cross * cross <= tolerance * tolerance * len2
 }
 
+/// One opening measured against the wall edge selected as its host, plus the
+/// corroboration tolerance the two share. The five values always travel
+/// together, so they move as one.
+struct OpeningHost {
+    source_a: [i64; 2],
+    source_b: [i64; 2],
+    host_a: [i64; 2],
+    host_b: [i64; 2],
+    tolerance: i64,
+}
+
 /// One-surface openings connect to a level slab. Prefer a geometrically
 /// hosted level-boundary edge so split MultiPolygon islands stay distinct.
 /// Otherwise the slab that contains the opening, then the slab that contains
@@ -1756,11 +1656,7 @@ fn point_near_line(p: [i64; 2], a: [i64; 2], b: [i64; 2], tolerance: i64) -> boo
 /// resort when neither point sits in a slab.
 fn slab_for_exterior_opening(
     level_id: &str,
-    source_a: [i64; 2],
-    source_b: [i64; 2],
-    host_a: [i64; 2],
-    host_b: [i64; 2],
-    tolerance: i64,
+    opening: &OpeningHost,
     level_slab_edges: &[(WallEdgeKey, u32)],
     level_slabs: &[(String, u32, Vec<[i64; 2]>)],
     host_interior: Option<[i64; 2]>,
@@ -1772,7 +1668,13 @@ fn slab_for_exterior_opening(
         let level_a = [level_edge.1, level_edge.2];
         let level_b = [level_edge.3, level_edge.4];
         opening_hosted_by_wall(
-            source_a, source_b, level_a, level_b, host_a, host_b, tolerance,
+            opening.source_a,
+            opening.source_b,
+            level_a,
+            level_b,
+            opening.host_a,
+            opening.host_b,
+            opening.tolerance,
         )
         .then_some(*slab)
     });
@@ -1780,16 +1682,16 @@ fn slab_for_exterior_opening(
         return hosted;
     }
     let midpoint = [
-        source_a[0].saturating_add(source_b[0]) / 2,
-        source_a[1].saturating_add(source_b[1]) / 2,
+        opening.source_a[0].saturating_add(opening.source_b[0]) / 2,
+        opening.source_a[1].saturating_add(opening.source_b[1]) / 2,
     ];
     if let Some(slab) = containing_slab(level_id, midpoint, level_slabs) {
         return Some(slab);
     }
-    if let Some(interior) = host_interior {
-        if let Some(slab) = containing_slab(level_id, interior, level_slabs) {
-            return Some(slab);
-        }
+    if let Some(interior) = host_interior
+        && let Some(slab) = containing_slab(level_id, interior, level_slabs)
+    {
+        return Some(slab);
     }
     level_slab_edges
         .iter()
@@ -1920,11 +1822,13 @@ mod tests {
     use kiriko_model::spatial::{Axes, Frame, LengthUnit, enu_basis_ecef, wgs84_ecef};
 
     use super::{
-        OpeningInterval, SceneProfile, linestring, opening_hosted_by_wall, opening_overlaps_host,
-        point_near_line, point_near_segment, point_segment_squared_distance, project_local_mm,
-        segments_are_collinear, slab_for_exterior_opening, snapped_interval_endpoints,
-        ticket_gate_row, triangulate_simple, wall_mesh_with_openings,
+        OpeningHost, OpeningInterval, SceneProfile, linestring, opening_hosted_by_wall,
+        opening_overlaps_host, point_near_line, point_near_segment, point_segment_squared_distance,
+        project_local_mm, segments_are_collinear, slab_for_exterior_opening,
+        snapped_interval_endpoints, triangulate_simple, wall_mesh_with_openings,
     };
+    use crate::fixture_illustration::{FixtureForm, fixture_form, illustrate_fixture};
+    use kiriko_model::scene::PrimitiveGeometry;
 
     fn test_frame() -> Frame {
         let anchor = [139.767, 35.681];
@@ -1943,9 +1847,9 @@ mod tests {
     }
 
     #[test]
-    fn the_default_scene_profile_is_version_two() {
+    fn the_default_scene_profile_is_version_three() {
         let profile = SceneProfile::default();
-        assert_eq!(profile.profile_version, 2);
+        assert_eq!(profile.profile_version, 3);
         assert_eq!(profile.wall_height_mm, 3000);
         assert_eq!(profile.ceiling_height_mm, 3000);
         assert_eq!(profile.door_height_mm, 2400);
@@ -1955,33 +1859,132 @@ mod tests {
         assert_eq!(profile.conveyance_half_width_mm, 600);
         assert_eq!(profile.gate_pitch_mm, 600);
         assert_eq!(profile.gate_height_mm, 1000);
+        assert_eq!(profile.gate_housing_length_mm, 1600);
+        assert_eq!(profile.gate_housing_width_mm, 280);
+    }
+
+    #[test]
+    fn fixture_form_maps_ticketgate_to_the_jr_automatic_gate() {
+        assert_eq!(
+            fixture_form(Some("ticketgate")),
+            FixtureForm::JrAutomaticGate
+        );
+    }
+
+    #[test]
+    fn fixture_form_treats_other_categories_as_absent() {
+        assert_eq!(fixture_form(Some("bench")), FixtureForm::Absent);
+        assert_eq!(fixture_form(Some("column")), FixtureForm::Absent);
+        assert_eq!(fixture_form(None), FixtureForm::Absent);
+    }
+
+    fn tinted_gate(ring: &[[i64; 2]], z: i64) -> (kiriko_model::scene::Mesh, Vec<[u8; 3]>) {
+        let geometry = illustrate_fixture(
+            FixtureForm::JrAutomaticGate,
+            ring,
+            z,
+            &SceneProfile::default(),
+        )
+        .expect("gate row");
+        match geometry {
+            PrimitiveGeometry::TintedMesh {
+                mesh,
+                vertex_colors,
+            } => (mesh, vertex_colors),
+            other => panic!("expected TintedMesh, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_six_by_two_metre_ticket_gate_row_is_a_jr_tinted_housing() {
+        let ring = vec![[0, 0], [6_000, 0], [6_000, 2_000], [0, 2_000]];
+        let (mesh, colors) = tinted_gate(&ring, 4_000);
+        assert_eq!(colors.len(), mesh.positions.len());
+        let distinct: std::collections::HashSet<_> = colors.iter().copied().collect();
+        assert!(distinct.len() > 1, "JR finishes use more than one RGB");
+        assert!(
+            colors.contains(&[205, 200, 189]),
+            "stainless matches ROLE_COLORS.TicketGate * 255"
+        );
+        assert!(
+            !colors.contains(&[180, 83, 9]),
+            "signal yellow is not review amber"
+        );
+        assert!(
+            colors.contains(&[245, 208, 16]),
+            "entry plaque is signal yellow"
+        );
+
+        let first: Vec<_> = mesh
+            .positions
+            .iter()
+            .filter(|p| p[0] < 600)
+            .copied()
+            .collect();
+        let xs = first.iter().map(|p| p[0]);
+        let ys = first.iter().map(|p| p[1]);
+        let x_span = xs.clone().max().unwrap() - xs.min().unwrap();
+        let y_span = ys.clone().max().unwrap() - ys.min().unwrap();
+        assert!(
+            y_span > x_span,
+            "housing is longer along travel than across the row"
+        );
+        assert!(
+            x_span <= 340,
+            "housing is about 280 mm across the row, plus retracted flaps, not a lane-spanning wing"
+        );
+
+        let row_xs: std::collections::HashSet<i64> = mesh.positions.iter().map(|p| p[0]).collect();
+        assert!(row_xs.len() >= 10, "machines spaced along the 6 m row");
     }
 
     #[test]
     fn ticket_gate_row_places_machines_along_the_long_axis() {
-        let profile = SceneProfile::default();
         let ring = vec![[0, 0], [6_000, 0], [6_000, 2_000], [0, 2_000]];
-        let mesh = ticket_gate_row(&ring, 4_000, &profile);
-        // Ten machines at the default 600 mm pitch; each is four boxes —
-        // pedestal, two flap wings, and a reader head — of eight positions.
-        assert_eq!(mesh.positions.len(), 10 * 4 * 8);
-        let top = mesh
+        let (mesh, _) = tinted_gate(&ring, 4_000);
+        let first: Vec<_> = mesh
             .positions
             .iter()
-            .map(|p| p[2])
-            .max()
-            .expect("positions");
-        assert_eq!(top, 4_000 + 1_000 + 150, "reader head caps the machine");
-        let xs: std::collections::HashSet<i64> = mesh.positions.iter().map(|p| p[0]).collect();
-        assert!(xs.len() >= 10, "machines spread along the long axis");
+            .filter(|p| p[0] < 600)
+            .copied()
+            .collect();
+        let x_span =
+            first.iter().map(|p| p[0]).max().unwrap() - first.iter().map(|p| p[0]).min().unwrap();
+        let y_span =
+            first.iter().map(|p| p[1]).max().unwrap() - first.iter().map(|p| p[1]).min().unwrap();
+        assert!(
+            y_span > x_span,
+            "JR housing is elongated along travel, not a short pedestal"
+        );
+
+        let pitch = SceneProfile::default().gate_pitch_mm;
+        for p in &mesh.positions {
+            let slot = (p[0] as f64 / pitch as f64).floor();
+            let center = (slot + 0.5) * pitch as f64;
+            let row_offset = (p[0] as f64 - center).abs();
+            let travel_from_mid = (p[1] - 1_000).abs();
+            let at_old_flap_height = (p[2] - 4_000) >= 500 && (p[2] - 4_000) <= 700;
+            // Old wings ended near 600 mm along travel at 40 mm row half-width.
+            // The JR housing's travel end is ~800 mm and must not trip this.
+            assert!(
+                !(row_offset < 50.0
+                    && travel_from_mid > 500
+                    && travel_from_mid < 700
+                    && at_old_flap_height),
+                "old 40×half_cross flap wing at {p:?}"
+            );
+        }
     }
 
     #[test]
     fn a_fixture_too_small_for_a_gate_row_stays_empty() {
         let profile = SceneProfile::default();
         let ring = vec![[0, 0], [200, 0], [200, 100], [0, 100]];
-        let mesh = ticket_gate_row(&ring, 0, &profile);
-        assert!(mesh.positions.is_empty(), "nothing beats a phantom gate");
+        assert!(
+            illustrate_fixture(FixtureForm::JrAutomaticGate, &ring, 0, &profile).is_none(),
+            "nothing beats a phantom gate"
+        );
+        assert!(illustrate_fixture(FixtureForm::Absent, &ring, 4_000, &profile).is_none());
     }
 
     #[test]
@@ -2172,29 +2175,21 @@ mod tests {
                 edges.push((("L0".to_string(), a[0], a[1], b[0], b[1]), index));
             }
         }
-        let opening_a = [100_700, 50_000];
-        let opening_b = [100_700, 51_000];
-        let host_a = [99_000, 50_000];
-        let host_b = [99_000, 51_000];
-        let nearer = slab_for_exterior_opening(
-            "L0", opening_a, opening_b, host_a, host_b, 200, &edges, &slabs, None,
-        );
+        let opening = OpeningHost {
+            source_a: [100_700, 50_000],
+            source_b: [100_700, 51_000],
+            host_a: [99_000, 50_000],
+            host_b: [99_000, 51_000],
+            tolerance: 200,
+        };
+        let nearer = slab_for_exterior_opening("L0", &opening, &edges, &slabs, None);
         assert_eq!(
             nearer,
             Some(1),
             "without a host interior the gap opening is nearer the small island"
         );
-        let contained = slab_for_exterior_opening(
-            "L0",
-            opening_a,
-            opening_b,
-            host_a,
-            host_b,
-            200,
-            &edges,
-            &slabs,
-            Some([50_000, 50_000]),
-        );
+        let contained =
+            slab_for_exterior_opening("L0", &opening, &edges, &slabs, Some([50_000, 50_000]));
         assert_eq!(
             contained,
             Some(0),

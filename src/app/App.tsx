@@ -2329,14 +2329,14 @@ export function App() {
                         return null;
                       }
                       return (
-                        <span key={`qa-${index}`} className="review-report" role="status">
+                        <span key={`qa-${index}`} className="review-finding" role="status">
                           {label}
                         </span>
                       );
                     })
                   : null}
                 {reviewActive && bundleProvenance && bundleProvenance.networkQa && bundleProvenance.networkQa.stretch ? (
-                  <span className="review-report" role="status">
+                  <span className="review-stretch" role="status">
                     {ui.reviewStretch[locale]} {bundleProvenance.networkQa.stretch.rhoMax.toFixed(1)}
                   </span>
                 ) : null}

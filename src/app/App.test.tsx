@@ -216,7 +216,7 @@ vi.mock("../bundle/routeKirikoBundle", () => ({
   routeKirikoBundle: (...args: unknown[]) => routeKirikoBundleMock(...args),
 }));
 
-const walkableChordMock = vi.fn(() => true);
+const walkableChordMock = vi.fn((..._args: unknown[]) => true);
 const proposeNetworkPathsMock = vi.fn();
 
 vi.mock("../bundle/wasm", () => ({
@@ -1868,7 +1868,7 @@ describe("App directions mode", () => {
     await waitFor(() => {
       expect(routeKirikoBundleMock).toHaveBeenCalled();
       const args = routeKirikoBundleMock.mock.calls[0];
-      expect(args[args.length - 1]).toEqual({ accessible: true });
+      expect(args?.at(-1)).toEqual({ accessible: true });
     });
   });
 

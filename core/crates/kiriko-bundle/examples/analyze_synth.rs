@@ -10,9 +10,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use kiriko_bundle::{
-    BundleMetadata, compile_imdf_with_network, decode_bundle, evaluate_routes,
-};
+use kiriko_bundle::{BundleMetadata, compile_imdf_with_network, decode_bundle, evaluate_routes};
 use kiriko_model::canonical::Value;
 use kiriko_model::model::FeatureType;
 

@@ -328,6 +328,21 @@ function styleReady(map: MapLibreMap): boolean {
   }
 }
 
+/**
+ * Whether the map still *has* a style. A lost GL context makes MapLibre
+ * destroy it and null the field, after which every source and terrain call
+ * throws from inside the library. `isStyleLoaded` reports that state as
+ * `undefined` — distinct from the `false` it returns while a live style is
+ * mid-load, when source work is still legal.
+ */
+function styleAlive(map: MapLibreMap): boolean {
+  try {
+    return map.isStyleLoaded() !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 /** The scene layer's id; also the handle the e2e harness reads stats through. */
 const SCENE_LAYER_ID = "kiriko-scene";
 
@@ -927,6 +942,11 @@ function syncContextIndoorOverlay(
   contextOrdinals: readonly number[],
   walkwayColor: string,
 ): void {
+  // A destroyed style owns no sources: the overlay died with it, and the
+  // re-attach after the context is restored syncs it again.
+  if (!styleAlive(map)) {
+    return;
+  }
   const empty: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
   let data = empty;
   if (scene !== null && contextOrdinals.length > 0 && floorState.activePlaneM !== null) {
@@ -1227,7 +1247,9 @@ export function IndoorMap({
       // `isStyleLoaded()` also becomes false for transient source work. Once
       // the initial style exists, source replacement and terrain mutation stay
       // legal; only initial construction or context loss blocks style calls.
-      if (!styleReady(map) && !mapStyleAvailableRef.current) {
+      // A lost context leaves no style at all, and `mapStyleAvailableRef`
+      // remembers the one that is gone — so that flag cannot stand in for it.
+      if (!styleAlive(map) || (!styleReady(map) && !mapStyleAvailableRef.current)) {
         return floorState;
       }
 
@@ -2300,7 +2322,10 @@ export function IndoorMap({
       sceneLayerRef.current = null;
       floorElevationReadyCancelRef.current?.();
       floorElevationReadyCancelRef.current = null;
+      // `setTerrain` asserts a loaded style, so a remembered style is not
+      // enough: after a context loss there is nothing left to detach from.
       if (
+        styleAlive(map) &&
         (styleReady(map) || mapStyleAvailableRef.current) &&
         floorElevationAttachedUrlRef.current !== null
       ) {

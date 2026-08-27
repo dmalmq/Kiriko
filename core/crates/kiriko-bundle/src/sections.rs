@@ -797,7 +797,6 @@ pub(crate) fn apply_graph_attrs(
     Ok(())
 }
 
-
 /// Serializable mirror of one `kiriko_route::EdgeFlags` row (§13).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub(crate) struct GraphTraversalRowDto {
@@ -816,7 +815,9 @@ pub(crate) struct GraphTraversalSectionDto {
     edges: Vec<GraphTraversalRowDto>,
 }
 
-pub(crate) fn encode_graph_traversal(graph: &kiriko_route::RouteGraph) -> Result<Vec<u8>, BundleError> {
+pub(crate) fn encode_graph_traversal(
+    graph: &kiriko_route::RouteGraph,
+) -> Result<Vec<u8>, BundleError> {
     let mut edges = Vec::with_capacity(graph.edges.len());
     for edge in &graph.edges {
         edges.push(GraphTraversalRowDto {
@@ -914,7 +915,7 @@ pub(crate) fn encode_network_qa(qa: &NetworkQa) -> Result<Vec<u8>, BundleError> 
     let stretch = match &qa.stretch {
         None => None,
         Some(s) => {
-            if s.rho_max.is_finite() == false {
+            if !s.rho_max.is_finite() {
                 return Err(BundleError::new(
                     BundleErrorCode::InvalidBundle,
                     "network QA stretch rho_max must be finite",
@@ -953,7 +954,7 @@ pub(crate) fn decode_network_qa(bytes: &[u8]) -> Result<NetworkQa, BundleError> 
     let stretch = match dto.stretch {
         None => None,
         Some(s) => {
-            if s.rho_max.is_finite() == false {
+            if !s.rho_max.is_finite() {
                 return Err(BundleError::new(
                     BundleErrorCode::InvalidBundle,
                     "network QA stretch rho_max must be finite",
@@ -979,7 +980,6 @@ pub(crate) fn decode_network_qa(bytes: &[u8]) -> Result<NetworkQa, BundleError> 
         stretch,
     })
 }
-
 
 fn attrs_from_dto(dto: &GraphEdgeAttrDto) -> Result<kiriko_route::EdgeAttrs, BundleError> {
     use kiriko_route::{EdgeKind, PathwayRank, VerticalKind};
@@ -2240,7 +2240,8 @@ mod tests {
             }],
         })
         .expect("traversal dto encodes");
-        let bytes = wrap_bundle_with_graph_and_traversal(manifest_bytes, graph_bytes, traversal_bytes);
+        let bytes =
+            wrap_bundle_with_graph_and_traversal(manifest_bytes, graph_bytes, traversal_bytes);
         let decoded =
             crate::decode_bundle(&bytes).expect("an invalid §13 must not fail the bundle");
         let graph = decoded.graph.expect("the §5 graph still loads");
@@ -2312,12 +2313,31 @@ mod tests {
         let mut doc = with_spatial(minimal_document());
         doc.graph = Some(RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.002, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.003, lat: 35.0, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.002,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.003,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
-            edges: vec![RouteEdge::new(0, 1, 100.0, 0.0), RouteEdge::new(2, 3, 100.0, 0.0)],
+            edges: vec![
+                RouteEdge::new(0, 1, 100.0, 0.0),
+                RouteEdge::new(2, 3, 100.0, 0.0),
+            ],
         });
         let bytes = crate::encode_bundle(&doc).expect("graph + spatial encodes");
         let decoded = crate::decode_bundle(&bytes).expect("a QA bundle decodes");
@@ -2330,7 +2350,9 @@ mod tests {
         );
         let qa = decoded.network_qa.expect("decoded §11");
         assert!(
-            qa.findings.iter().any(|f| f.code == "disconnected_component"),
+            qa.findings
+                .iter()
+                .any(|f| f.code == "disconnected_component"),
             "findings = {:?}",
             qa.findings
         );
@@ -2343,8 +2365,16 @@ mod tests {
         let mut doc = minimal_document();
         doc.graph = Some(RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
             edges: vec![RouteEdge::new(0, 1, 100.0, 0.0)],
         });
@@ -2366,8 +2396,16 @@ mod tests {
         use kiriko_route::{RouteEdge, RouteGraph, RouteNode};
         doc.graph = Some(RouteGraph {
             nodes: vec![
-                RouteNode { lon: 139.0, lat: 35.0, ordinal: 0.0 },
-                RouteNode { lon: 139.001, lat: 35.0, ordinal: 0.0 },
+                RouteNode {
+                    lon: 139.0,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
+                RouteNode {
+                    lon: 139.001,
+                    lat: 35.0,
+                    ordinal: 0.0,
+                },
             ],
             edges: vec![RouteEdge::new(0, 1, 100.0, 0.0)],
         });

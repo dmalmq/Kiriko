@@ -77,6 +77,10 @@ enum PrimitiveGeometryDto {
         kind: ConveyanceKindDto,
         mesh: MeshDto,
     },
+    TintedMesh {
+        mesh: MeshDto,
+        vertex_colors: Vec<[u8; 3]>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -246,6 +250,13 @@ fn geometry_to_dto(geometry: &PrimitiveGeometry) -> PrimitiveGeometryDto {
             kind: ConveyanceKindDto::from(kind),
             mesh: mesh_to_dto(mesh),
         },
+        PrimitiveGeometry::TintedMesh {
+            mesh,
+            vertex_colors,
+        } => PrimitiveGeometryDto::TintedMesh {
+            mesh: mesh_to_dto(mesh),
+            vertex_colors: vertex_colors.clone(),
+        },
     }
 }
 
@@ -259,6 +270,13 @@ fn geometry_from_dto(dto: &PrimitiveGeometryDto) -> PrimitiveGeometry {
         PrimitiveGeometryDto::Conveyance { kind, mesh } => PrimitiveGeometry::Conveyance {
             kind: ConveyanceKind::from(*kind),
             mesh: mesh_from_dto(mesh),
+        },
+        PrimitiveGeometryDto::TintedMesh {
+            mesh,
+            vertex_colors,
+        } => PrimitiveGeometry::TintedMesh {
+            mesh: mesh_from_dto(mesh),
+            vertex_colors: vertex_colors.clone(),
         },
     }
 }
@@ -490,6 +508,22 @@ fn validate_scene(scene: &SceneSection, spatial: &SpatialContext) -> Result<(), 
                 }
                 let _ = kind;
                 validate_mesh(mesh, &format!("primitive {i} conveyance mesh"))?;
+            }
+            PrimitiveGeometry::TintedMesh {
+                mesh,
+                vertex_colors,
+            } => {
+                if primitive.role != PrimitiveRole::Fixture {
+                    return Err(invalid(format!(
+                        "primitive {i} tinted mesh is only valid on a fixture"
+                    )));
+                }
+                validate_mesh(mesh, &format!("primitive {i} tinted mesh"))?;
+                if vertex_colors.len() != mesh.positions.len() {
+                    return Err(invalid(
+                        "illustration tint count must match positions".to_string(),
+                    ));
+                }
             }
         }
     }
@@ -900,5 +934,66 @@ mod tests {
         let mut padded = bytes.clone();
         padded.push(0u8);
         assert!(decode_scene_section(&padded, &spatial_context()).is_err());
+    }
+
+    #[test]
+    fn a_tinted_fixture_round_trips() {
+        let mut scene = scene_section();
+        let mesh = mesh();
+        let n = mesh.positions.len();
+        scene.primitives.push(ScenePrimitive {
+            id: "p-tinted".into(),
+            role: PrimitiveRole::Fixture,
+            level_id: "l1".into(),
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref: 0,
+            canonical_feature_id: None,
+            source_locator_refs: vec![0],
+            evidence_refs: vec![0],
+            geometry: PrimitiveGeometry::TintedMesh {
+                mesh,
+                vertex_colors: vec![[205, 200, 189]; n],
+            },
+        });
+        let encoded = encode_scene_section(&scene, &spatial_context()).expect("tinted encodes");
+        let decoded = decode_scene_section(&encoded, &spatial_context()).expect("tinted decodes");
+        let PrimitiveGeometry::TintedMesh { vertex_colors, .. } =
+            &decoded.primitives.last().expect("present").geometry
+        else {
+            panic!("expected TintedMesh");
+        };
+        assert_eq!(vertex_colors.len(), n);
+    }
+
+    #[test]
+    fn a_tinted_mesh_on_a_wall_is_rejected() {
+        let mut scene = scene_section();
+        let mesh = mesh();
+        let n = mesh.positions.len();
+        scene.primitives[0].geometry = PrimitiveGeometry::TintedMesh {
+            mesh,
+            vertex_colors: vec![[1, 2, 3]; n],
+        };
+        assert!(encode_scene_section(&scene, &spatial_context()).is_err());
+    }
+
+    #[test]
+    fn a_tinted_mesh_tint_count_must_match_positions() {
+        let mut scene = scene_section();
+        scene.primitives.push(ScenePrimitive {
+            id: "p-tinted".into(),
+            role: PrimitiveRole::Fixture,
+            level_id: "l1".into(),
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref: 0,
+            canonical_feature_id: None,
+            source_locator_refs: vec![0],
+            evidence_refs: vec![0],
+            geometry: PrimitiveGeometry::TintedMesh {
+                mesh: mesh(),
+                vertex_colors: vec![[1, 2, 3]],
+            },
+        });
+        assert!(encode_scene_section(&scene, &spatial_context()).is_err());
     }
 }

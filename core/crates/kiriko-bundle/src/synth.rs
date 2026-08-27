@@ -388,6 +388,12 @@ enum Tag {
     Opening(usize),
 }
 
+/// Cross-floor transit record: node index, centroid, category, ordinal, accessibility.
+type TransitAllEntry = (u32, [f64; 2], String, f64, Vec<String>);
+
+/// Opening kept after hub filtering: midpoint, adjacent hub indices, accessibility, feature id.
+type KeptOpening = ([f64; 2], Vec<usize>, Vec<String>, String);
+
 /// Synthesize a routing graph from a parsed venue model that carries no
 /// network. Walkway and transit units become hubs joined within a floor by
 /// shared `opening` doorways and shared unit boundaries; transit units are
@@ -411,7 +417,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
     let mut edges: Vec<RouteEdge> = Vec::new();
     let mut warnings: Vec<RouteBuildWarning> = Vec::new();
     // Transit nodes across every floor: (node index, centroid, category, ordinal).
-    let mut transit_all: Vec<(u32, [f64; 2], String, f64, Vec<String>)> = Vec::new();
+    let mut transit_all: Vec<TransitAllEntry> = Vec::new();
     let directed = directed_by_opening(&parse_relationships(&document.features));
 
     for &ord in &ordinals {
@@ -460,7 +466,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         // Keep only openings adjacent to at least one hub; record adjacencies
         // (indices into `hubs`). Openings are the standard IMDF connectivity
         // signal, joining walkways and transit units through their doorways.
-        let mut kept_openings: Vec<([f64; 2], Vec<usize>, Vec<String>, String)> = Vec::new();
+        let mut kept_openings: Vec<KeptOpening> = Vec::new();
         for (op, access, opening_id) in &openings {
             let op = *op;
             let adj: Vec<usize> = hubs
@@ -634,7 +640,13 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
         // Record transit hubs for the vertical-linking pass.
         for (i, h) in hubs.iter().enumerate() {
             if let Some(category) = h.transit {
-                transit_all.push((hub_idx[i], h.pt, category.to_string(), ord, h.accessibility.clone()));
+                transit_all.push((
+                    hub_idx[i],
+                    h.pt,
+                    category.to_string(),
+                    ord,
+                    h.accessibility.clone(),
+                ));
             }
         }
     }
@@ -694,7 +706,7 @@ pub fn synthesize_network(document: &BundleDocument) -> RouteGraphBuild {
                     .map(|entry| entry.4.as_slice())
                     .unwrap_or(&[]);
                 let mut flags = flags_from_accessibility(lower_acc);
-                if flags_from_accessibility(upper_acc).wheelchair == false {
+                if !flags_from_accessibility(upper_acc).wheelchair {
                     flags.wheelchair = false;
                 }
                 edges.push(RouteEdge {
@@ -972,7 +984,11 @@ mod tests {
         let e = &build.graph.edges[0];
         // Coincident footprints → vertical weight is the stairs entry-plus-
         // per-floor cost: (0 m + 1 floor × 10 m) × 1000 cost units per metre.
-        assert_eq!(e.weight, kiriko_route::meters_to_cost(10.0), "stairs one floor");
+        assert_eq!(
+            e.weight,
+            kiriko_route::meters_to_cost(10.0),
+            "stairs one floor"
+        );
         assert_eq!(e.ordinal, 0.0);
     }
 
@@ -998,7 +1014,12 @@ mod tests {
             ),
         ];
         let build = synthesize_network(&document(&[("L0", 0.0), ("L2", 2.0)], features));
-        assert_eq!(build.graph.edges.len(), 1, "edges = {:?}", build.graph.edges);
+        assert_eq!(
+            build.graph.edges.len(),
+            1,
+            "edges = {:?}",
+            build.graph.edges
+        );
         assert_eq!(
             build.graph.edges[0].weight,
             kiriko_route::meters_to_cost(20.0),
@@ -1231,7 +1252,6 @@ mod tests {
         );
     }
 
-
     fn relationship_feature(
         origin: &str,
         dest: &str,
@@ -1307,7 +1327,7 @@ mod tests {
                 saw_fwd = true;
             }
         }
-        assert_eq!(saw_rev, true);
-        assert_eq!(saw_fwd, true);
+        assert!(saw_rev);
+        assert!(saw_fwd);
     }
 }

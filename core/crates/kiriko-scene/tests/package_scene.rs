@@ -1,6 +1,6 @@
 //! Deriving the render document from an activated tile package (#75).
 //!
-//! The document is the *same* KSC1 the generated source compiles to — that is
+//! The document is the *same* KSC the generated source compiles to — that is
 //! what lets one renderer serve both sources. So these tests are about the
 //! parts only a package can supply: composite levels carrying the canonical
 //! floor they were registered to, source objects carrying the canonical feature
@@ -323,7 +323,7 @@ fn the_derived_document_round_trips_through_the_container_the_client_reads() {
     );
 
     let bytes = encode_scene(&derived.document).expect("the document encodes");
-    assert_eq!(&bytes[0..4], b"KSC1");
+    assert_eq!(&bytes[0..4], b"KSC2");
     let decoded = decode_scene(&bytes).expect("the document decodes");
 
     assert_eq!(decoded, derived.document);

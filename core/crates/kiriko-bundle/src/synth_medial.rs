@@ -481,7 +481,6 @@ fn clearance_attr(c: f64) -> Option<f32> {
     (c.is_finite() && c > 0.0).then_some(c as f32)
 }
 
-
 /// True when the leaf faces a flat endcap and remains inside a narrow channel
 /// immediately behind it. The endcap is perpendicular to the branch tangent;
 /// stable clearance supplies the side-wall evidence that distinguishes a
@@ -934,13 +933,7 @@ fn straighten_degree_two_chains(
                     }
                 }
                 if best >= i + 2 {
-                    redistribute_chain_window(
-                        &mut skeleton,
-                        &chain_nodes,
-                        &step_lengths,
-                        i,
-                        best,
-                    );
+                    redistribute_chain_window(&mut skeleton, &chain_nodes, &step_lengths, i, best);
                     i = best;
                 } else {
                     i += 1;
@@ -1045,10 +1038,23 @@ fn choose_spacing(area: &MultiPolygon<f64>, original: usize) -> Option<f64> {
 
 /// One floor's transit unit: centroid, category, largest footprint polygon
 /// (for vertical matching), and the source geometry (for doorway matching).
-type TransitUnit<'a> = ([f64; 2], String, Option<Polygon<f64>>, &'a Value, Vec<String>);
+type TransitUnit<'a> = (
+    [f64; 2],
+    String,
+    Option<Polygon<f64>>,
+    &'a Value,
+    Vec<String>,
+);
 
 /// Cross-floor transit record accumulated while scanning ordinals.
-type TransitAllEntry = (u32, [f64; 2], String, f64, Option<Polygon<f64>>, Vec<String>);
+type TransitAllEntry = (
+    u32,
+    [f64; 2],
+    String,
+    f64,
+    Option<Polygon<f64>>,
+    Vec<String>,
+);
 
 /// Union-find root with path compression (over a `parent` slice).
 fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
@@ -1286,7 +1292,6 @@ fn apply_relationship_directions(
         }
     }
 }
-
 
 /// Min-heap entry for the bounded Dijkstra inside [`shortcut_chords`].
 #[derive(Clone, Copy, PartialEq)]
@@ -1532,7 +1537,13 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                         }
                         Some(category) if is_transit(category) => {
                             if let Some(c) = polygon_centroid(geom) {
-                                transit.push((c, category.to_string(), largest_polygon(geom), geom, f.accessibility.clone()));
+                                transit.push((
+                                    c,
+                                    category.to_string(),
+                                    largest_polygon(geom),
+                                    geom,
+                                    f.accessibility.clone(),
+                                ));
                             }
                         }
                         // Every other unit — rooms, shops, service areas, and
@@ -2029,7 +2040,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                 } else {
                     (mid_idx, mid)
                 };
-                let to = (base + local) as usize;
+                let to = base + local;
                 let ei = edges.len();
                 edges.push(RouteEdge {
                     from: t_idx as u32,
@@ -2048,13 +2059,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
             }
             doorway_nodes.push(doorway);
         }
-        apply_relationship_directions(
-            &mut edges,
-            &doorway_emits,
-            &directed,
-            &nodes,
-            &unit_polys,
-        );
+        apply_relationship_directions(&mut edges, &doorway_emits, &directed, &nodes, &unit_polys);
 
         // Near-blob bridging: fuse distinct blobs that abut without a doorway.
         // Bucket skeleton nodes on an ~ADJACENCY_BRIDGE_M grid, then keep the
@@ -2268,7 +2273,14 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     break;
                 }
             }
-            transit_all.push((idx as u32, *tp, category.clone(), ord, footprint.clone(), access.clone()));
+            transit_all.push((
+                idx as u32,
+                *tp,
+                category.clone(),
+                ord,
+                footprint.clone(),
+                access.clone(),
+            ));
         }
 
         rank_room_crossing_edges(&mut edges[floor_edges_start..], &nodes, &room_polys);
@@ -2334,7 +2346,7 @@ pub fn synthesize_network_medial(document: &BundleDocument) -> RouteGraphBuild {
                     .map(|entry| entry.5.as_slice())
                     .unwrap_or(&[]);
                 let mut flags = flags_from_accessibility(lower_acc);
-                if flags_from_accessibility(upper_acc).wheelchair == false {
+                if !flags_from_accessibility(upper_acc).wheelchair {
                     flags.wheelchair = false;
                 }
                 edges.push(RouteEdge {
@@ -2649,15 +2661,22 @@ mod tests {
                 rect(139.70000, 35.600007, 0.00006, 0.00001),
             ),
         ];
-        let build =
-            synthesize_network_medial(&document(&[("l0", 0.0), ("l1", 1.0)], features));
+        let build = synthesize_network_medial(&document(&[("l0", 0.0), ("l1", 1.0)], features));
         assert!(
-            build.graph.edges.iter().any(|e| e.attrs.kind == EdgeKind::Skeleton
-                && e.attrs.clearance_m.is_some_and(|c| c > 0.0)),
+            build
+                .graph
+                .edges
+                .iter()
+                .any(|e| e.attrs.kind == EdgeKind::Skeleton
+                    && e.attrs.clearance_m.is_some_and(|c| c > 0.0)),
             "centerline edges carry measured clearance"
         );
         assert!(
-            build.graph.edges.iter().any(|e| e.attrs.kind == EdgeKind::Vertical),
+            build
+                .graph
+                .edges
+                .iter()
+                .any(|e| e.attrs.kind == EdgeKind::Vertical),
             "stacked transit is typed Vertical"
         );
     }
@@ -2799,9 +2818,7 @@ mod tests {
     fn segment_crosses_fixture(e: &RouteEdge, g: &RouteGraph, fixture: &Polygon<f64>) -> bool {
         let a = Point::new(g.nodes[e.from as usize].lon, g.nodes[e.from as usize].lat);
         let b = Point::new(g.nodes[e.to as usize].lon, g.nodes[e.to as usize].lat);
-        fixture.contains(&a)
-            || fixture.contains(&b)
-            || fixture.intersects(&geo::Line::new(a, b))
+        fixture.contains(&a) || fixture.contains(&b) || fixture.intersects(&geo::Line::new(a, b))
     }
 
     #[test]
@@ -2916,7 +2933,6 @@ mod tests {
             "zero-length segment is skipped"
         );
     }
-
 
     /// Canonical axis-aligned rectangle `Polygon` centered at `(cx, cy)`.
     fn rect(cx: f64, cy: f64, w: f64, h: f64) -> Value {
@@ -3961,10 +3977,7 @@ mod tests {
             .iter()
             .filter(|e| e.attrs.kind == EdgeKind::Doorway)
             .collect();
-        assert!(
-            doorways.is_empty() == false,
-            "expected at least one Doorway edge"
-        );
+        assert!(!doorways.is_empty(), "expected at least one Doorway edge");
         for e in &doorways {
             let c = e.attrs.clearance_m.expect("doorway clearance is known");
             assert!(
@@ -3995,8 +4008,6 @@ mod tests {
             "wheelchair min_clearance 1.5 m cannot use a 1.2 m doorway"
         );
     }
-
-    /// Two thin walkways joined by one north–south opening at lon 139.7.
 
     fn relationship_feature(
         id: &str,
@@ -4035,6 +4046,7 @@ mod tests {
         }
     }
 
+    /// Two thin walkways joined by one north–south opening at lon 139.7.
     fn two_walkway_door_doc(door_access: &[&str]) -> BundleDocument {
         let door = line(139.70000, 35.600004, 139.70000, 35.600010);
         document(
@@ -4078,10 +4090,10 @@ mod tests {
     fn accessibility_wheelchair_tag_sets_doorway_flag() {
         let build = synthesize_network_medial(&two_walkway_door_doc(&["wheelchair"]));
         let flags = doorway_flags(&build.graph);
-        assert!(flags.is_empty() == false, "expected doorway edges");
+        assert!(!flags.is_empty(), "expected doorway edges");
         for f in flags {
-            assert_eq!(f.wheelchair, true);
-            assert_eq!(f.accessible_only, false);
+            assert!(f.wheelchair);
+            assert!(!f.accessible_only);
         }
     }
 
@@ -4090,10 +4102,10 @@ mod tests {
         let build = synthesize_network_medial(&two_walkway_door_doc(&["assisted"]));
         let g = &build.graph;
         let flags = doorway_flags(g);
-        assert!(flags.is_empty() == false, "expected doorway edges");
+        assert!(!flags.is_empty(), "expected doorway edges");
         for f in flags {
-            assert_eq!(f.wheelchair, false);
-            assert_eq!(f.accessible_only, false);
+            assert!(!f.wheelchair);
+            assert!(!f.accessible_only);
         }
         let origin = kiriko_route::Point3 {
             lon: 139.70000,
@@ -4111,13 +4123,8 @@ mod tests {
             "walking still uses an assisted-only doorway"
         );
         assert!(
-            kiriko_route::route_with(
-                g,
-                origin,
-                dest,
-                &kiriko_route::RouteProfile::wheelchair()
-            )
-            .is_none(),
+            kiriko_route::route_with(g, origin, dest, &kiriko_route::RouteProfile::wheelchair())
+                .is_none(),
             "wheelchair profile cannot traverse a non-wheelchair doorway"
         );
     }
@@ -4126,10 +4133,10 @@ mod tests {
     fn accessibility_empty_list_keeps_wheelchair_true() {
         let build = synthesize_network_medial(&two_walkway_door_doc(&[]));
         let flags = doorway_flags(&build.graph);
-        assert!(flags.is_empty() == false, "expected doorway edges");
+        assert!(!flags.is_empty(), "expected doorway edges");
         for f in flags {
-            assert_eq!(f.wheelchair, true);
-            assert_eq!(f.accessible_only, false);
+            assert!(f.wheelchair);
+            assert!(!f.accessible_only);
         }
     }
 
@@ -4137,16 +4144,10 @@ mod tests {
     fn relationship_without_direction_leaves_doorway_both() {
         let mut doc = two_walkway_door_doc(&[]);
         doc.features.push(relationship_feature(
-            "rel",
-            "wa",
-            "wb",
-            "door",
-            None,
-            None,
-            None,
+            "rel", "wa", "wb", "door", None, None, None,
         ));
         let flags = doorway_flags(&synthesize_network_medial(&doc).graph);
-        assert!(flags.is_empty() == false, "expected doorway edges");
+        assert!(!flags.is_empty(), "expected doorway edges");
         for f in flags {
             assert_eq!(f.direction, kiriko_route::TravelDirection::Both);
         }
@@ -4181,8 +4182,8 @@ mod tests {
                 saw_fwd = true;
             }
         }
-        assert_eq!(saw_rev, true, "origin-side doorway should be Reverse");
-        assert_eq!(saw_fwd, true, "dest-side doorway should be Forward");
+        assert!(saw_rev, "origin-side doorway should be Reverse");
+        assert!(saw_fwd, "dest-side doorway should be Forward");
     }
 
     #[test]
@@ -4198,7 +4199,7 @@ mod tests {
             None,
         ));
         let flags = doorway_flags(&synthesize_network_medial(&doc).graph);
-        assert!(flags.is_empty() == false, "expected doorway edges");
+        assert!(!flags.is_empty(), "expected doorway edges");
         for f in flags {
             assert_eq!(f.direction, kiriko_route::TravelDirection::Both);
         }
@@ -4235,13 +4236,12 @@ mod tests {
             None,
         ));
         let flags = doorway_flags(&synthesize_network_medial(&doc).graph);
-        assert!(flags.is_empty() == false, "expected doorway edges");
+        assert!(!flags.is_empty(), "expected doorway edges");
         for f in flags {
             assert_eq!(f.start_minute, -1);
             assert_eq!(f.end_minute, -1);
         }
     }
-
 
     #[test]
     fn nearby_openings_share_one_doorway_bridge() {

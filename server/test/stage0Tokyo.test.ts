@@ -167,7 +167,8 @@ describe.skipIf(!DATA_PRESENT)("Stage 0 acceptance on the registered Tokyo datas
       .features;
     const origin = junctions[0]!.geometry.coordinates;
     const dest = junctions[1]!.geometry.coordinates;
-    const route = routeBundle(bundle, origin[0], origin[1], 0, dest[0], dest[1], 0);
+    // `null` is the walking profile: this asserts the graph connects at all.
+    const route = routeBundle(bundle, origin[0], origin[1], 0, dest[0], dest[1], 0, null);
     expect(route).not.toBeNull();
   }, 600_000);
 });

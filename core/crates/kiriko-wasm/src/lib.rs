@@ -285,13 +285,10 @@ fn network_qa_dto(document: &BundleDocument) -> Option<NetworkQaJsDto> {
                         feature_id: f.feature_id.clone(),
                     })
                     .collect(),
-                stretch: match qa.stretch.as_ref() {
-                    Some(s) => Some(NetworkQaStretchJsDto {
-                        sample_count: s.sample_count,
-                        rho_max: s.rho_max,
-                    }),
-                    None => None,
-                },
+                stretch: qa.stretch.as_ref().map(|s| NetworkQaStretchJsDto {
+                    sample_count: s.sample_count,
+                    rho_max: s.rho_max,
+                }),
             }),
             None => Some(NetworkQaJsDto {
                 findings: Vec::new(),
@@ -407,10 +404,10 @@ fn profile_from_js(value: &JsValue) -> RouteProfile {
     } else {
         RouteProfile::walking()
     };
-    if let Some(clearance) = dto.min_clearance_m {
-        if clearance.is_finite() {
-            profile.min_clearance_m = Some(clearance);
-        }
+    if let Some(clearance) = dto.min_clearance_m
+        && clearance.is_finite()
+    {
+        profile.min_clearance_m = Some(clearance);
     }
     profile
 }
@@ -439,6 +436,10 @@ fn route_in_document(
 /// with the same json-compatible `serde-wasm-bindgen` serializer as
 /// [`to_js`]. Bundle-format failures throw (unlike [`decode_bundle_js`],
 /// which reports them structurally).
+// Deliberately wide: the lon/lat/ordinal endpoints are the JS-facing call
+// signature `src/bundle/wasm.ts` spreads. Folding them into a struct would
+// change that API.
+#[allow(clippy::too_many_arguments)]
 #[wasm_bindgen(js_name = "routeBundle")]
 pub fn route_bundle(
     bundle: &[u8],
@@ -1255,7 +1256,10 @@ fn describe_scene(document: &kiriko_scene::SceneDocument) -> Result<DecodedScene
         for index in &batch.feature_indices {
             payload.extend_from_slice(&index.to_le_bytes());
         }
-        batch_meta.push(serde_json::json!({
+        while !payload.len().is_multiple_of(4) {
+            payload.push(0);
+        }
+        let mut meta = serde_json::json!({
             "levelIndex": batch.level_index,
             "role": format!("{:?}", batch.role),
             "quantizationOrigin": batch.quantization_origin,
@@ -1264,7 +1268,18 @@ fn describe_scene(document: &kiriko_scene::SceneDocument) -> Result<DecodedScene
             "positionsOffset": positions_offset,
             "normalsOffset": normals_offset,
             "featureIndicesOffset": features_offset,
-        }));
+        });
+        if let Some(colors) = &batch.colors {
+            let colors_offset = payload.len();
+            for rgb in colors {
+                payload.extend_from_slice(rgb);
+            }
+            while !payload.len().is_multiple_of(4) {
+                payload.push(0);
+            }
+            meta["colorsOffset"] = serde_json::json!(colors_offset);
+        }
+        batch_meta.push(meta);
     }
 
     let meta = serde_json::json!({

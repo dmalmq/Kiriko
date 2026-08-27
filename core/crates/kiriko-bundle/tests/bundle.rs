@@ -1326,7 +1326,7 @@ fn golden_fixture_matches_committed_bytes_and_checksum() {
 
 /// SHA-256 of the complete committed golden bundle file (envelope included),
 /// i.e. the exact content of `tests/fixtures/minimal.kvb.sha256`.
-const GOLDEN_BUNDLE_HASH: &str = "32c3878153903734580a6f8b7aa21874ddbb8c7047057373e3e2fef8aa558880";
+const GOLDEN_BUNDLE_HASH: &str = "b7fcd7b24f7528c000a2caad64c09d039c53973b6e90fde58b33c7208cc72517";
 
 const LEVEL_B1: &str = "b1000001-0000-4000-8000-0000000000b1";
 const LEVEL_1F: &str = "b1000002-0000-4000-8000-00000000001f";
@@ -3638,7 +3638,7 @@ fn the_scene_profile_drives_nominal_dimensions() {
         }
     }
     assert!(
-        header_minima.first().is_some() && header_minima.iter().all(|min_z| *min_z == portal_top),
+        !header_minima.is_empty() && header_minima.iter().all(|min_z| *min_z == portal_top),
         "the overlapping header starts exactly at the profile-driven portal top"
     );
 }

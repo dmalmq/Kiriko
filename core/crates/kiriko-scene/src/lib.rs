@@ -46,4 +46,6 @@ pub enum SceneError {
     Json(#[from] serde_json::Error),
     #[error("primitive {primitive} names level {level}, which the spatial context does not carry")]
     UnplaceablePrimitive { primitive: String, level: String },
+    #[error("primitive {primitive} illustration tints do not match mesh positions")]
+    InvalidIllustrationTint { primitive: String },
 }
