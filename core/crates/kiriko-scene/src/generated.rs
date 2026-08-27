@@ -30,7 +30,7 @@ use crate::roles::occlusion_for_role;
 use crate::SceneError;
 
 /// Bumped when this producer's output changes for unchanged input.
-const GENERATED_PRODUCER_VERSION: u16 = 6;
+const GENERATED_PRODUCER_VERSION: u16 = 7;
 
 /// The render format this producer writes.
 const SCENE_FORMAT_VERSION: u16 = 1;
@@ -419,12 +419,13 @@ const ELEVATOR_DOOR_H_MM: i64 = 2100;
 
 /// Station finishes: stainless and signal yellow match the JR ticket-gate
 /// row; stone, glass, rubber, and deck are the extra conveyance materials.
-const FINISH_STONE: [u8; 3] = [197, 205, 222];
-const FINISH_STONE_DARK: [u8; 3] = [148, 156, 174];
+const FINISH_STONE: [u8; 3] = [168, 164, 156];
+const FINISH_STONE_DARK: [u8; 3] = [112, 116, 124];
 const FINISH_STAINLESS: [u8; 3] = [205, 200, 189];
 const FINISH_RUBBER: [u8; 3] = [36, 36, 40];
-const FINISH_DECK: [u8; 3] = [64, 68, 76];
-const FINISH_GLASS: [u8; 3] = [154, 186, 210];
+const FINISH_DECK: [u8; 3] = [52, 54, 60];
+const FINISH_DECK_GROOVE: [u8; 3] = [78, 80, 86];
+const FINISH_GLASS: [u8; 3] = [88, 140, 176];
 const FINISH_COMB: [u8; 3] = [176, 180, 188];
 const FINISH_SIGNAL: [u8; 3] = [245, 208, 16];
 const FINISH_CABIN: [u8; 3] = [72, 76, 84];
@@ -678,7 +679,19 @@ fn stair_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
         let top = z0 + ((i + 1) as f64 / steps * rise).round() as i64;
         let p = vadd(run.a, vscale(vsub(run.b, run.a), i as f64 / steps));
         let q = vadd(run.a, vscale(vsub(run.b, run.a), (i + 1) as f64 / steps));
-        push_colored_box(&mut out, p, q, run.w, z0, top, FINISH_STONE);
+        push_colored_box(
+            &mut out,
+            p,
+            q,
+            run.w,
+            z0,
+            top,
+            if i % 2 == 0 {
+                FINISH_STONE
+            } else {
+                FINISH_STONE_DARK
+            },
+        );
         if i == 0 || i + 1 == steps as i64 {
             push_colored_box(
                 &mut out,
@@ -694,9 +707,9 @@ fn stair_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
     let n = vunit(run.w);
     let u = vunit(vsub(run.b, run.a));
     for s in [-1.0, 1.0] {
-        let (p, q, w) = side_strip(run, s, 28.0, 28.0);
+        let (p, q, w) = side_strip(run, s, 40.0, 40.0);
         push_inclined_prism(&mut out, p, q, w, [z0, z1], [-80, 40], FINISH_STONE_DARK);
-        let (rp, rq, rw) = side_strip(run, s, 22.0, 28.0);
+        let (rp, rq, rw) = side_strip(run, s, 32.0, 40.0);
         push_inclined_prism(
             &mut out,
             rp,
@@ -726,19 +739,26 @@ fn stair_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
 /// handrails, and comb platforms at both landings.
 fn escalator_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
     let mut out = IllustratedMesh::new();
-    let u = vunit(vsub(run.b, run.a));
+    let span = vsub(run.b, run.a);
+    let u = vunit(span);
     let deck_w = vscale(run.w, 0.78);
-    push_inclined_prism(
-        &mut out,
-        run.a,
-        run.b,
-        deck_w,
-        [z0, z1],
-        [-80, 0],
-        FINISH_DECK,
-    );
+    let treads = 12_i64;
+    for i in 0..treads {
+        let t0 = i as f64 / treads as f64;
+        let t1 = (i + 1) as f64 / treads as f64;
+        let p = vadd(run.a, vscale(span, t0));
+        let q = vadd(run.a, vscale(span, t1));
+        let zp = z0 + ((z1 - z0) as f64 * t0).round() as i64;
+        let zq = z0 + ((z1 - z0) as f64 * t1).round() as i64;
+        let rgb = if i % 2 == 0 {
+            FINISH_DECK
+        } else {
+            FINISH_DECK_GROOVE
+        };
+        push_inclined_prism(&mut out, p, q, deck_w, [zp, zq], [-50, 8], rgb);
+    }
     for s in [-1.0, 1.0] {
-        let (p, q, w) = side_strip(run, s, 40.0, -20.0);
+        let (p, q, w) = side_strip(run, s, 48.0, -16.0);
         push_inclined_prism(
             &mut out,
             p,
@@ -748,7 +768,7 @@ fn escalator_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
             [-80, RAIL_H_MM - 50],
             FINISH_STAINLESS,
         );
-        let (gp, gq, gw) = side_strip(run, s, 10.0, -70.0);
+        let (gp, gq, gw) = side_strip(run, s, 12.0, -64.0);
         push_inclined_prism(
             &mut out,
             gp,
@@ -758,7 +778,7 @@ fn escalator_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
             [80, RAIL_H_MM - 80],
             FINISH_GLASS,
         );
-        let (rp, rq, rw) = side_strip(run, s, 28.0, -20.0);
+        let (rp, rq, rw) = side_strip(run, s, 36.0, -16.0);
         push_inclined_prism(
             &mut out,
             rp,
@@ -864,6 +884,15 @@ fn elevator_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
                 FINISH_STAINLESS,
             );
         }
+        push_colored_box(
+            &mut out,
+            vsub(face_mid, vscale(u, 12.0)),
+            vadd(face_mid, vscale(u, 12.0)),
+            vscale(n, 36.0 * s),
+            z0 + 80,
+            door_h,
+            FINISH_RUBBER,
+        );
         let lamp = vadd(face_mid, vscale(n, 55.0 * s));
         push_colored_box(
             &mut out,

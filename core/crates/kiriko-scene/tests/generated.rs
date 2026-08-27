@@ -541,7 +541,7 @@ fn the_header_carries_the_frame_world_transform_and_scene_bounds() {
         compile_generated_scene(&scene_section(), &spatial, &features()).expect("scene compiles");
 
     assert_eq!(document.header.frame_origin_ecef, spatial.frame.ecef_origin);
-    assert_eq!(document.header.deriver_version, 6);
+    assert_eq!(document.header.deriver_version, 7);
 
     // Column-major 4x4: the ENU basis vectors as columns, translation last.
     let transform = document.header.world_transform;
@@ -1061,7 +1061,10 @@ fn an_escalator_is_a_tinted_truss() {
     );
     let colors = illustrated_colors(batch);
     let finishes = distinct_finishes(colors);
-    assert!(finishes.len() >= 4, "deck, stainless, rubber, and a comb");
+    assert!(
+        finishes.len() >= 4,
+        "grooved deck, stainless, rubber, and a comb"
+    );
     assert!(colors.contains(&STAINLESS));
     assert!(colors.contains(&SIGNAL_YELLOW), "comb safety strip");
     assert!(colors.contains(&[36, 36, 40]), "rubber handrail");
