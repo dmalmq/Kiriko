@@ -22,15 +22,15 @@ use kiriko_model::scene::{Mesh, PrimitiveGeometry, PrimitiveRole, ScenePrimitive
 use kiriko_model::spatial::SpatialContext;
 use sha2::{Digest, Sha256};
 
-use crate::SceneError;
 use crate::format::{
     SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel, SemanticRole,
 };
 use crate::quantize::{encode_normal_oct, quantize_positions};
 use crate::roles::occlusion_for_role;
+use crate::SceneError;
 
 /// Bumped when this producer's output changes for unchanged input.
-const GENERATED_PRODUCER_VERSION: u16 = 5;
+const GENERATED_PRODUCER_VERSION: u16 = 6;
 
 /// The render format this producer writes.
 const SCENE_FORMAT_VERSION: u16 = 1;
@@ -113,14 +113,16 @@ pub fn compile_generated_scene(
     // nothing: cutting never guesses about shapes it was not built to see.
     let mut doorways: BTreeMap<&str, Vec<Doorway>> = BTreeMap::new();
     for primitive in &scene.primitives {
-        if let PrimitiveGeometry::Portal { opening, .. } = &primitive.geometry {
-            if let Some((a, b, _, top_z_mm)) = vertical_quad(opening) {
-                doorways
-                    .entry(primitive.level_id.as_str())
-                    .or_default()
-                    .push(Doorway { a, b, top_z_mm });
-            }
-        }
+        let PrimitiveGeometry::Portal { opening, .. } = &primitive.geometry else {
+            continue;
+        };
+        let Some((a, b, _, top_z_mm)) = vertical_quad(opening) else {
+            continue;
+        };
+        doorways
+            .entry(primitive.level_id.as_str())
+            .or_default()
+            .push(Doorway { a, b, top_z_mm });
     }
 
     for primitive in &scene.primitives {
@@ -133,24 +135,35 @@ pub fn compile_generated_scene(
 
         let role = semantic_role(primitive, &categories);
         // Walls compile with their portals' voids cut out; evidenced
-        // conveyances compile as illustrative forms (stepped stairs, an
-        // inclined escalator, an elevator shaft). Everything else contributes
-        // exactly the mesh §9 carries.
+        // conveyances compile as tinted station silhouettes (stairs, escalator,
+        // elevator) — the same illustration contract as a ticket-gate row.
+        // Everything else contributes exactly the mesh §9 carries.
         let shaped;
+        let illustration_tints: Option<Vec<[u8; 3]>>;
         let mesh_ref: &Mesh = match primitive.role {
             PrimitiveRole::Wall => {
+                illustration_tints = None;
                 let doorways = doorways
                     .get(primitive.level_id.as_str())
                     .map_or(&[][..], Vec::as_slice);
                 shaped = cut_doorways(mesh_of(primitive), doorways);
                 &shaped
             }
-            PrimitiveRole::Conveyance => {
-                shaped = reshape_conveyance(primitive, role, spatial)
-                    .unwrap_or_else(|| mesh_of(primitive).clone());
-                &shaped
+            PrimitiveRole::Conveyance => match reshape_conveyance(primitive, role, spatial) {
+                Some(illustrated) => {
+                    illustration_tints = Some(illustrated.vertex_colors);
+                    shaped = illustrated.mesh;
+                    &shaped
+                }
+                None => {
+                    illustration_tints = None;
+                    mesh_of(primitive)
+                }
+            },
+            _ => {
+                illustration_tints = None;
+                mesh_of(primitive)
             }
-            _ => mesh_of(primitive),
         };
         let triangles = triangulate(mesh_ref);
         let expanded_colors = match &primitive.geometry {
@@ -165,7 +178,17 @@ pub fn compile_generated_scene(
                 }
                 Some(expand_vertex_colors(mesh, vertex_colors))
             }
-            _ => None,
+            _ => match illustration_tints.as_deref() {
+                Some(tints) => {
+                    if tints.len() != mesh_ref.positions.len() {
+                        return Err(SceneError::InvalidIllustrationTint {
+                            primitive: primitive.id.clone(),
+                        });
+                    }
+                    Some(expand_vertex_colors(mesh_ref, tints))
+                }
+                None => None,
+            },
         };
         let feature_index = scene_features.len() as u32;
 
@@ -385,13 +408,46 @@ fn cut_doorways(mesh: &Mesh, doorways: &[Doorway]) -> Mesh {
 /// Nominal stair riser. Steps are an illustration, not a measurement: the
 /// run divides so each step lands near this height.
 const STAIR_RISER_MM: f64 = 175.0;
-/// Escalator balustrade height above the deck.
-const ESCALATOR_RAIL_H_MM: i64 = 950;
+/// Escalator balustrade / stair rail height above the deck.
+const RAIL_H_MM: i64 = 950;
 /// Fraction of the run given to a flat comb platform at each end.
 const ESCALATOR_COMB_FRAC: f64 = 0.12;
 /// Elevator door panel width and roof slab thickness.
 const ELEVATOR_DOOR_W_MM: f64 = 1800.0;
 const ELEVATOR_ROOF_MM: i64 = 120;
+const ELEVATOR_DOOR_H_MM: i64 = 2100;
+
+/// Station finishes: stainless and signal yellow match the JR ticket-gate
+/// row; stone, glass, rubber, and deck are the extra conveyance materials.
+const FINISH_STONE: [u8; 3] = [197, 205, 222];
+const FINISH_STONE_DARK: [u8; 3] = [148, 156, 174];
+const FINISH_STAINLESS: [u8; 3] = [205, 200, 189];
+const FINISH_RUBBER: [u8; 3] = [36, 36, 40];
+const FINISH_DECK: [u8; 3] = [64, 68, 76];
+const FINISH_GLASS: [u8; 3] = [154, 186, 210];
+const FINISH_COMB: [u8; 3] = [176, 180, 188];
+const FINISH_SIGNAL: [u8; 3] = [245, 208, 16];
+const FINISH_CABIN: [u8; 3] = [72, 76, 84];
+const FINISH_SKY: [u8; 3] = [90, 176, 214];
+
+/// Indexed mesh plus a matching per-position tint, expanded to a triangle
+/// list later by [`expand_vertex_colors`].
+struct IllustratedMesh {
+    mesh: Mesh,
+    vertex_colors: Vec<[u8; 3]>,
+}
+
+impl IllustratedMesh {
+    fn new() -> Self {
+        Self {
+            mesh: Mesh {
+                positions: Vec::new(),
+                faces: Vec::new(),
+            },
+            vertex_colors: Vec::new(),
+        }
+    }
+}
 
 /// A conveyance footprint's run: centre-line endpoints and the half-width
 /// vector, recovered from the ground outline of §9's neutral mesh. The
@@ -465,7 +521,7 @@ fn footprint_run(mesh: &Mesh) -> Option<Run> {
     }
     lower.pop();
     upper.pop();
-    let hull: Vec<[i64; 2]> = lower.into_iter().chain(upper.into_iter()).collect();
+    let hull: Vec<[i64; 2]> = lower.into_iter().chain(upper).collect();
 
     // Longest hull edge sets the run axis.
     let mut best: Option<([i64; 2], [i64; 2], u128)> = None;
@@ -474,7 +530,7 @@ fn footprint_run(mesh: &Mesh) -> Option<Run> {
         let t = hull[(i + 1) % hull.len()];
         let d = [i128::from(t[0] - s[0]), i128::from(t[1] - s[1])];
         let l2 = (d[0] * d[0] + d[1] * d[1]) as u128;
-        if best.map_or(true, |(_, _, bl)| l2 > bl) {
+        if best.is_none_or(|(_, _, bl)| l2 > bl) {
             best = Some((s, t, l2));
         }
     }
@@ -534,128 +590,302 @@ fn push_box(out: &mut Mesh, p: [f64; 2], q: [f64; 2], w: [f64; 2], z0: i64, z1: 
     quad(t, t + 1, t + 2, t + 3);
 }
 
-/// A stepped run rising from `z0` to `z1` along the footprint.
-fn stair_mesh(run: &Run, z0: i64, z1: i64) -> Mesh {
+fn push_colored_box(
+    out: &mut IllustratedMesh,
+    p: [f64; 2],
+    q: [f64; 2],
+    w: [f64; 2],
+    z0: i64,
+    z1: i64,
+    rgb: [u8; 3],
+) {
+    if z1 <= z0 {
+        return;
+    }
+    let start = out.mesh.positions.len();
+    push_box(&mut out.mesh, p, q, w, z0, z1);
+    out.vertex_colors
+        .extend(std::iter::repeat_n(rgb, out.mesh.positions.len() - start));
+}
+
+/// Inclined prism whose bottom and top sit `relative_z[0]` / `relative_z[1]`
+/// millimetres relative to the deck at each end (positive is up).
+fn push_inclined_prism(
+    out: &mut IllustratedMesh,
+    p: [f64; 2],
+    q: [f64; 2],
+    w: [f64; 2],
+    deck_z: [i64; 2],
+    relative_z: [i64; 2],
+    rgb: [u8; 3],
+) {
+    let [z0, z1] = deck_z;
+    let [below_mm, above_mm] = relative_z;
+    if above_mm <= below_mm {
+        return;
+    }
+    let g = |pt: [f64; 2]| [pt[0].round() as i64, pt[1].round() as i64];
+    let corners = [vsub(p, w), vsub(q, w), vadd(q, w), vadd(p, w)];
+    let z_lo = [z0 + below_mm, z1 + below_mm, z1 + below_mm, z0 + below_mm];
+    let z_hi = [z0 + above_mm, z1 + above_mm, z1 + above_mm, z0 + above_mm];
+    let base = out.mesh.positions.len() as u32;
+    for (c, z) in corners.iter().zip(z_lo) {
+        let xy = g(*c);
+        out.mesh.positions.push([xy[0], xy[1], z]);
+    }
+    for (c, z) in corners.iter().zip(z_hi) {
+        let xy = g(*c);
+        out.mesh.positions.push([xy[0], xy[1], z]);
+    }
+    out.vertex_colors.extend(std::iter::repeat_n(rgb, 8));
+    let t = base + 4;
+    let mut quad = |a: u32, b: u32, c: u32, d: u32| {
+        out.mesh.faces.push([a, b, c]);
+        out.mesh.faces.push([a, c, d]);
+    };
+    quad(base, base + 1, t + 1, t);
+    quad(base + 1, base + 2, t + 2, t + 1);
+    quad(base + 2, base + 3, t + 3, t + 2);
+    quad(base + 3, base, t, t + 3);
+    quad(t, t + 1, t + 2, t + 3);
+    quad(base + 3, base + 2, base + 1, base);
+}
+
+/// Centre-line of a strip along one long edge of `run`. `outset` is extra
+/// millimetres outside the footprint (0 sits on the edge).
+fn side_strip(
+    run: &Run,
+    sign: f64,
+    half_thick: f64,
+    outset: f64,
+) -> ([f64; 2], [f64; 2], [f64; 2]) {
+    let n = vunit(run.w);
+    let offset = vscale(n, sign * (vlen(run.w) + outset));
+    (
+        vadd(run.a, offset),
+        vadd(run.b, offset),
+        vscale(n, half_thick),
+    )
+}
+
+/// A stepped run rising from `z0` to `z1` along the footprint, with stone
+/// treads, dark stringers, stainless rails, and yellow safety nosings.
+fn stair_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
     let rise = (z1 - z0).max(1) as f64;
     let steps = (rise / STAIR_RISER_MM).round().max(1.0);
-    let mut mesh = Mesh {
-        positions: Vec::new(),
-        faces: Vec::new(),
-    };
+    let mut out = IllustratedMesh::new();
     for i in 0..(steps as i64) {
         let top = z0 + ((i + 1) as f64 / steps * rise).round() as i64;
-        push_box(
-            &mut mesh,
-            vadd(run.a, vscale(vsub(run.b, run.a), i as f64 / steps)),
-            vadd(run.a, vscale(vsub(run.b, run.a), (i + 1) as f64 / steps)),
-            run.w,
-            z0,
-            top,
-        );
+        let p = vadd(run.a, vscale(vsub(run.b, run.a), i as f64 / steps));
+        let q = vadd(run.a, vscale(vsub(run.b, run.a), (i + 1) as f64 / steps));
+        push_colored_box(&mut out, p, q, run.w, z0, top, FINISH_STONE);
+        if i == 0 || i + 1 == steps as i64 {
+            push_colored_box(
+                &mut out,
+                p,
+                q,
+                vscale(run.w, 0.92),
+                top,
+                top + 18,
+                FINISH_SIGNAL,
+            );
+        }
     }
-    mesh
-}
-
-/// An inclined deck with side balustrades and flat comb platforms at both
-/// landings.
-fn escalator_mesh(run: &Run, z0: i64, z1: i64) -> Mesh {
-    let mut mesh = Mesh {
-        positions: Vec::new(),
-        faces: Vec::new(),
-    };
-    // Deck: one inclined quad, both sides visible (the renderer culls nothing).
-    let base = mesh.positions.len() as u32;
-    let deck_corners = [
-        vsub(run.a, run.w),
-        vadd(run.a, run.w),
-        vadd(run.b, run.w),
-        vsub(run.b, run.w),
-    ];
-    for (pt, z) in [
-        (deck_corners[0], z0),
-        (deck_corners[1], z0),
-        (deck_corners[2], z1),
-        (deck_corners[3], z1),
-    ] {
-        mesh.positions
-            .push([pt[0].round() as i64, pt[1].round() as i64, z]);
-    }
-    mesh.faces.push([base, base + 1, base + 2]);
-    mesh.faces.push([base, base + 2, base + 3]);
-    // Balustrades: bands raised along both deck edges.
+    let n = vunit(run.w);
     let u = vunit(vsub(run.b, run.a));
     for s in [-1.0, 1.0] {
-        let edge = vscale(run.w, s);
-        let pa = vadd(run.a, edge);
-        let pb = vadd(run.b, edge);
-        let pb_base = mesh.positions.len() as u32;
-        for (p, z) in [
-            (pa, z0),
-            (pb, z1),
-            (pb, z1 + ESCALATOR_RAIL_H_MM),
-            (pa, z0 + ESCALATOR_RAIL_H_MM),
-        ] {
-            mesh.positions
-                .push([p[0].round() as i64, p[1].round() as i64, z]);
+        let (p, q, w) = side_strip(run, s, 28.0, 28.0);
+        push_inclined_prism(&mut out, p, q, w, [z0, z1], [-80, 40], FINISH_STONE_DARK);
+        let (rp, rq, rw) = side_strip(run, s, 22.0, 28.0);
+        push_inclined_prism(
+            &mut out,
+            rp,
+            rq,
+            rw,
+            [z0, z1],
+            [RAIL_H_MM - 40, RAIL_H_MM],
+            FINISH_STAINLESS,
+        );
+        for (origin, z_deck, along) in [(run.a, z0, 50.0), (run.b, z1, -50.0)] {
+            let base = vadd(vadd(origin, vscale(run.w, s)), vscale(u, along));
+            push_colored_box(
+                &mut out,
+                vsub(base, vscale(u, 40.0)),
+                vadd(base, vscale(u, 40.0)),
+                vscale(n, 40.0),
+                z_deck,
+                z_deck + RAIL_H_MM,
+                FINISH_STAINLESS,
+            );
         }
-        mesh.faces.push([pb_base, pb_base + 1, pb_base + 2]);
-        mesh.faces.push([pb_base, pb_base + 2, pb_base + 3]);
     }
-    // Comb platforms at both landings, slightly wider than the deck.
-    let comb_len = vlen(vsub(run.b, run.a)) * ESCALATOR_COMB_FRAC;
-    let wide = vscale(run.w, 1.08);
-    push_box(
-        &mut mesh,
-        run.a,
-        vadd(run.a, vscale(u, comb_len.max(400.0))),
-        wide,
-        z0,
-        z0 + 100,
-    );
-    push_box(
-        &mut mesh,
-        vadd(run.b, vscale(u, -comb_len.max(400.0))),
-        run.b,
-        wide,
-        z1,
-        z1 + 100,
-    );
-    mesh
+    out
 }
 
-/// An elevator shaft with door panels on both long faces and a roof slab.
-fn elevator_mesh(run: &Run, z0: i64, z1: i64) -> Mesh {
-    let mut mesh = Mesh {
-        positions: Vec::new(),
-        faces: Vec::new(),
-    };
-    push_box(&mut mesh, run.a, run.b, run.w, z0, z1);
-    let span = vsub(run.b, run.a);
-    let u = vunit(span);
-    let mid = vadd(run.a, vscale(span, 0.5));
-    let door_w = (vlen(span) * 0.4).min(ELEVATOR_DOOR_W_MM).max(600.0);
-    let wn = vunit(run.w);
-    let wl = vlen(run.w);
+/// An inclined deck with stainless skirts, glass inner panels, rubber
+/// handrails, and comb platforms at both landings.
+fn escalator_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
+    let mut out = IllustratedMesh::new();
+    let u = vunit(vsub(run.b, run.a));
+    let deck_w = vscale(run.w, 0.78);
+    push_inclined_prism(
+        &mut out,
+        run.a,
+        run.b,
+        deck_w,
+        [z0, z1],
+        [-80, 0],
+        FINISH_DECK,
+    );
     for s in [-1.0, 1.0] {
-        let face_mid = vadd(mid, vscale(wn, wl * s));
-        push_box(
-            &mut mesh,
-            vsub(face_mid, vscale(u, door_w / 2.0)),
-            vadd(face_mid, vscale(u, door_w / 2.0)),
-            vscale(wn, 60.0 * s),
-            z0,
-            (z0 + 2100).min(z1),
+        let (p, q, w) = side_strip(run, s, 40.0, -20.0);
+        push_inclined_prism(
+            &mut out,
+            p,
+            q,
+            w,
+            [z0, z1],
+            [-80, RAIL_H_MM - 50],
+            FINISH_STAINLESS,
+        );
+        let (gp, gq, gw) = side_strip(run, s, 10.0, -70.0);
+        push_inclined_prism(
+            &mut out,
+            gp,
+            gq,
+            gw,
+            [z0, z1],
+            [80, RAIL_H_MM - 80],
+            FINISH_GLASS,
+        );
+        let (rp, rq, rw) = side_strip(run, s, 28.0, -20.0);
+        push_inclined_prism(
+            &mut out,
+            rp,
+            rq,
+            rw,
+            [z0, z1],
+            [RAIL_H_MM - 50, RAIL_H_MM + 30],
+            FINISH_RUBBER,
         );
     }
-    push_box(
-        &mut mesh,
+    let comb_len = vlen(vsub(run.b, run.a)) * ESCALATOR_COMB_FRAC;
+    let wide = vscale(run.w, 1.04);
+    let lower_end = vadd(run.a, vscale(u, comb_len.max(400.0)));
+    let upper_start = vadd(run.b, vscale(u, -comb_len.max(400.0)));
+    push_colored_box(&mut out, run.a, lower_end, wide, z0, z0 + 90, FINISH_COMB);
+    push_colored_box(&mut out, upper_start, run.b, wide, z1, z1 + 90, FINISH_COMB);
+    push_colored_box(
+        &mut out,
+        run.a,
+        lower_end,
+        vscale(run.w, 0.96),
+        z0 + 90,
+        z0 + 108,
+        FINISH_SIGNAL,
+    );
+    push_colored_box(
+        &mut out,
+        upper_start,
+        run.b,
+        vscale(run.w, 0.96),
+        z1 + 90,
+        z1 + 108,
+        FINISH_SIGNAL,
+    );
+    out
+}
+
+/// An elevator cabin: stainless posts and doors, glass end walls, a floor
+/// slab, and a roof — a silhouette, never fabricated machinery.
+fn elevator_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
+    let mut out = IllustratedMesh::new();
+    let span = vsub(run.b, run.a);
+    let u = vunit(span);
+    let n = vunit(run.w);
+    let wl = vlen(run.w);
+    let sl = vlen(span);
+    let mid = vadd(run.a, vscale(span, 0.5));
+    let post = 50.0;
+    let door_h = (z0 + ELEVATOR_DOOR_H_MM).min(z1 - 80).max(z0 + 400);
+
+    push_colored_box(&mut out, run.a, run.b, run.w, z0, z0 + 80, FINISH_CABIN);
+
+    for along in [-1.0, 1.0] {
+        let origin = if along < 0.0 { run.a } else { run.b };
+        for across in [-1.0, 1.0] {
+            let corner = vadd(origin, vscale(run.w, across));
+            let inset = vadd(vscale(u, -along * post), vscale(n, -across * post));
+            let c = vadd(corner, inset);
+            push_colored_box(
+                &mut out,
+                vsub(c, vscale(u, post)),
+                vadd(c, vscale(u, post)),
+                vscale(n, post),
+                z0,
+                z1,
+                FINISH_STAINLESS,
+            );
+        }
+        let face = vadd(origin, vscale(u, -along * 24.0));
+        push_colored_box(
+            &mut out,
+            vsub(face, vscale(u, 18.0)),
+            vadd(face, vscale(u, 18.0)),
+            vscale(run.w, 0.86),
+            z0 + 80,
+            z1 - 40,
+            FINISH_GLASS,
+        );
+    }
+
+    let door_w = (sl * 0.4).clamp(600.0, ELEVATOR_DOOR_W_MM);
+    for s in [-1.0, 1.0] {
+        let face_mid = vadd(mid, vscale(n, wl * s));
+        let jamb_w = vscale(n, 40.0 * s);
+        push_colored_box(
+            &mut out,
+            vsub(face_mid, vscale(u, door_w / 2.0 + 40.0)),
+            vadd(face_mid, vscale(u, door_w / 2.0 + 40.0)),
+            jamb_w,
+            door_h,
+            z1,
+            FINISH_STAINLESS,
+        );
+        for leaf in [-1.0, 1.0] {
+            let leaf_c = vadd(face_mid, vscale(u, leaf * door_w / 4.0));
+            push_colored_box(
+                &mut out,
+                vsub(leaf_c, vscale(u, door_w / 4.0 - 10.0)),
+                vadd(leaf_c, vscale(u, door_w / 4.0 - 10.0)),
+                vscale(n, 32.0 * s),
+                z0 + 80,
+                door_h,
+                FINISH_STAINLESS,
+            );
+        }
+        let lamp = vadd(face_mid, vscale(n, 55.0 * s));
+        push_colored_box(
+            &mut out,
+            vsub(lamp, vscale(u, 70.0)),
+            vadd(lamp, vscale(u, 70.0)),
+            vscale(n, 18.0),
+            door_h + 20,
+            (door_h + 140).min(z1 + 40),
+            FINISH_SKY,
+        );
+    }
+
+    push_colored_box(
+        &mut out,
         run.a,
         run.b,
         vscale(run.w, 1.06),
         z1,
         z1 + ELEVATOR_ROOF_MM,
+        FINISH_STAINLESS,
     );
-    mesh
+    out
 }
 
 /// Rebuild an evidenced conveyance as its illustrative form. Untyped forms,
@@ -665,7 +895,7 @@ fn reshape_conveyance(
     primitive: &ScenePrimitive,
     role: SemanticRole,
     spatial: &SpatialContext,
-) -> Option<Mesh> {
+) -> Option<IllustratedMesh> {
     match role {
         SemanticRole::Stairs | SemanticRole::Escalator | SemanticRole::Elevator => {}
         _ => return None,
@@ -986,12 +1216,7 @@ impl BatchAccumulator {
         }
     }
 
-    fn push(
-        &mut self,
-        triangles: &Triangles,
-        feature_index: u32,
-        tints: Option<&[[u8; 3]]>,
-    ) {
+    fn push(&mut self, triangles: &Triangles, feature_index: u32, tints: Option<&[[u8; 3]]>) {
         let n = triangles.vertices.len();
         if let Some(tints) = tints {
             match &mut self.colors {

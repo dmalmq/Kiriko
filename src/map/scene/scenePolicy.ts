@@ -149,14 +149,13 @@ export const OCCLUDER_FADE_OPACITY = 0.15;
 export const UPPER_FLOOR_OPACITY = 0.45;
 
 /**
- * A conveyance shell renders at this opacity, always.
+ * An untyped or ramp shell renders at this opacity, always.
  *
- * The shell is a neutral volume standing in for machinery the source never
- * described (#19), and it is the one form whose whole purpose is to say that a
- * route leaves the floor here. Drawn opaque it hid the graph inside it, which
- * is the question the reviewer opened 3D to answer. It stays a visible form —
- * both faces blend, so a shell still reads as a volume — without becoming the
- * lid on its own evidence.
+ * Typed stairs, escalators, and elevators compile as illustrative station
+ * silhouettes — the same contract as a ticket-gate row — and paint opaque.
+ * A ramp and a conveyance whose transport type the source never stated stay
+ * shells: they exist to mark a vertical connection, not to impersonate a
+ * machine the source did not describe.
  */
 export const CONVEYANCE_SHELL_OPACITY = 0.3;
 
@@ -199,11 +198,12 @@ export const CONTEXT_HANDOFF_MS = 160;
 /** Roles classified as protected-corridor occluders (#32's fade set). */
 const PROTECTED_CORRIDOR_ROLES: Record<string, true> = { Ceiling: true };
 
-/** Transport forms: the roles whose shells must never hide the graph inside. */
-const CONVEYANCE_ROLES: Record<string, true> = {
-  Elevator: true,
-  Escalator: true,
-  Stairs: true,
+/**
+ * Transport forms that stay shells. Illustrated stairs / escalators /
+ * elevators are absent: they paint at the carrying floor's opacity, like a
+ * ticket-gate row.
+ */
+const CONVEYANCE_SHELL_ROLES: Record<string, true> = {
   Ramp: true,
   Conveyance: true,
 };
@@ -305,7 +305,7 @@ export function batchOpacity(batch: BatchVisibility, state: VisibilityState): nu
   if (Object.hasOwn(PROTECTED_CORRIDOR_ROLES, batch.role)) {
     return Math.min(floor, OCCLUDER_FADE_OPACITY);
   }
-  if (Object.hasOwn(CONVEYANCE_ROLES, batch.role)) {
+  if (Object.hasOwn(CONVEYANCE_SHELL_ROLES, batch.role)) {
     return Math.min(floor, CONVEYANCE_SHELL_OPACITY);
   }
   if (batch.role === "Opening") {

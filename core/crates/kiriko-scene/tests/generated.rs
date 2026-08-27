@@ -8,15 +8,15 @@ use kiriko_model::scene::{
     ScenePrimitive, SceneSection,
 };
 use kiriko_model::spatial::{
-    Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid, EvidenceMethod,
-    Frame, LengthUnit, LevelRecord, LocatorKind, RegistrationEvidence, Registries,
-    ResolutionMethod, SourceLocator, SpatialContext, enu_basis_ecef, wgs84_ecef,
+    enu_basis_ecef, wgs84_ecef, Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind,
+    Datum, Ellipsoid, EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind,
+    RegistrationEvidence, Registries, ResolutionMethod, SourceLocator, SpatialContext,
 };
 use kiriko_scene::{
-    OcclusionClass, SceneError, SemanticRole, compile_generated_scene, decode_normal_oct,
-    encode_scene,
+    compile_generated_scene, decode_normal_oct, encode_scene, OcclusionClass, SceneError,
+    SemanticRole,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 const ANCHOR_LON: f64 = 139.7671;
 const ANCHOR_LAT: f64 = 35.6812;
@@ -541,7 +541,7 @@ fn the_header_carries_the_frame_world_transform_and_scene_bounds() {
         compile_generated_scene(&scene_section(), &spatial, &features()).expect("scene compiles");
 
     assert_eq!(document.header.frame_origin_ecef, spatial.frame.ecef_origin);
-    assert_eq!(document.header.deriver_version, 5);
+    assert_eq!(document.header.deriver_version, 6);
 
     // Column-major 4x4: the ENU basis vectors as columns, translation last.
     let transform = document.header.world_transform;
@@ -915,7 +915,7 @@ fn conduit_box(x0: i64, y0: i64, x1: i64, y1: i64, z0: i64, z1: i64) -> Mesh {
         positions.push([p[0], p[1], z1]);
     }
     let (b, t) = (0u32, 4u32);
-    let mut quad = |faces: &mut Vec<[u32; 3]>, a: u32, b: u32, c: u32, d: u32| {
+    let quad = |faces: &mut Vec<[u32; 3]>, a: u32, b: u32, c: u32, d: u32| {
         faces.push([a, b, c]);
         faces.push([a, c, d]);
     };
@@ -948,8 +948,31 @@ fn conveyance_features(category: Option<&str>) -> Vec<VenueFeature> {
     vec![feature("unit-x", FeatureType::Unit, category)]
 }
 
+const STAINLESS: [u8; 3] = [205, 200, 189];
+const SIGNAL_YELLOW: [u8; 3] = [245, 208, 16];
+const REVIEW_AMBER: [u8; 3] = [180, 83, 9];
+
+fn illustrated_colors(batch: &kiriko_scene::SceneBatch) -> &Vec<[u8; 3]> {
+    let colors = batch.colors.as_ref().expect("illustrated form is tinted");
+    assert_eq!(colors.len(), batch.vertex_count as usize);
+    assert!(
+        !colors.contains(&REVIEW_AMBER),
+        "signal yellow is not review amber"
+    );
+    assert!(
+        batch.vertex_count <= 1_800,
+        "illustration stays a box budget, got {}",
+        batch.vertex_count
+    );
+    colors
+}
+
+fn distinct_finishes(colors: &[[u8; 3]]) -> HashSet<[u8; 3]> {
+    colors.iter().copied().collect()
+}
+
 #[test]
-fn an_evidenced_stair_run_compiles_to_steps() {
+fn an_evidenced_stair_run_compiles_to_tinted_steps() {
     let document = compile_generated_scene(
         &conveyance_section(Some("stairs")),
         &spatial_context(),
@@ -962,8 +985,17 @@ fn an_evidenced_stair_run_compiles_to_steps() {
         .iter()
         .find(|batch| batch.role == SemanticRole::Stairs)
         .expect("stairs batch");
-    // 26 risers of ~175 mm span the 4.5 m to the next plane: one box each.
-    assert_eq!(batch.vertex_count, 26 * 30);
+    // 26 risers plus stringers, rails, newels, and nosings — more than the
+    // old solid steps, still a box budget.
+    assert!(batch.vertex_count > 26 * 30);
+    let colors = illustrated_colors(batch);
+    let finishes = distinct_finishes(colors);
+    assert!(finishes.len() >= 3, "stone, stainless, and a safety nosing");
+    assert!(colors.contains(&STAINLESS), "handrails are stainless");
+    assert!(
+        colors.contains(&SIGNAL_YELLOW),
+        "first and last treads carry a safety nosing"
+    );
     let restored = restored_mm(batch);
     assert!(
         restored.iter().any(|p| (p[2] - 4.5).abs() < 0.01),
@@ -974,13 +1006,17 @@ fn an_evidenced_stair_run_compiles_to_steps() {
         "intermediate risers exist"
     );
     assert!(
-        restored.iter().all(|p| p[1] >= -1.001 && p[1] <= 1.001),
-        "the steps stay inside the authored 2 m footprint"
+        restored.iter().any(|p| p[2] > 5.2),
+        "handrails rise above the upper landing"
+    );
+    assert!(
+        restored.iter().all(|p| p[1] >= -1.12 && p[1] <= 1.12),
+        "stringers sit on the footprint edge, not a second run beside it"
     );
 }
 
 #[test]
-fn an_elevator_gets_doors_and_a_roof() {
+fn an_elevator_is_a_tinted_cabin() {
     let document = compile_generated_scene(
         &conveyance_section(Some("elevator")),
         &spatial_context(),
@@ -993,8 +1029,11 @@ fn an_elevator_gets_doors_and_a_roof() {
         .iter()
         .find(|batch| batch.role == SemanticRole::Elevator)
         .expect("elevator batch");
-    // Shaft + two door panels + roof slab.
-    assert_eq!(batch.vertex_count, 120);
+    assert!(batch.vertex_count > 120, "posts, doors, glass, and a roof");
+    let colors = illustrated_colors(batch);
+    let finishes = distinct_finishes(colors);
+    assert!(finishes.len() >= 3, "stainless, glass, and a cabin floor");
+    assert!(colors.contains(&STAINLESS), "doors are stainless");
     let restored = restored_mm(batch);
     assert!(
         restored.iter().any(|p| (p[2] - 4.62).abs() < 0.01),
@@ -1003,7 +1042,7 @@ fn an_elevator_gets_doors_and_a_roof() {
 }
 
 #[test]
-fn an_escalator_gets_rails_and_comb_platforms() {
+fn an_escalator_is_a_tinted_truss() {
     let document = compile_generated_scene(
         &conveyance_section(Some("escalator")),
         &spatial_context(),
@@ -1016,8 +1055,16 @@ fn an_escalator_gets_rails_and_comb_platforms() {
         .iter()
         .find(|batch| batch.role == SemanticRole::Escalator)
         .expect("escalator batch");
-    // Deck quad + two balustrade bands + two comb boxes.
-    assert_eq!(batch.vertex_count, 78);
+    assert!(
+        batch.vertex_count > 78,
+        "deck, skirts, glass, rails, and combs"
+    );
+    let colors = illustrated_colors(batch);
+    let finishes = distinct_finishes(colors);
+    assert!(finishes.len() >= 4, "deck, stainless, rubber, and a comb");
+    assert!(colors.contains(&STAINLESS));
+    assert!(colors.contains(&SIGNAL_YELLOW), "comb safety strip");
+    assert!(colors.contains(&[36, 36, 40]), "rubber handrail");
     let restored = restored_mm(batch);
     assert!(
         restored.iter().any(|p| p[2] > 5.0),
@@ -1040,6 +1087,10 @@ fn an_untyped_conveyance_keeps_its_neutral_mesh() {
         .find(|batch| batch.role == SemanticRole::Conveyance)
         .expect("conveyance batch");
     assert_eq!(batch.vertex_count, 30, "the authored tube, untouched");
+    assert!(
+        batch.colors.is_none(),
+        "an untyped shell still paints from ROLE_COLORS"
+    );
 }
 
 #[test]

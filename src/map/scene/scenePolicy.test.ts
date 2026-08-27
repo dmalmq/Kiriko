@@ -27,6 +27,14 @@ const CONVEYANCE_ROLE_NAMES: SemanticRoleName[] = [
   "Conveyance",
 ];
 
+const CONVEYANCE_SHELL_ROLE_NAMES: SemanticRoleName[] = ["Ramp", "Conveyance"];
+
+const ILLUSTRATED_CONVEYANCE_ROLE_NAMES: SemanticRoleName[] = [
+  "Elevator",
+  "Escalator",
+  "Stairs",
+];
+
 const ALL_ROLES: SemanticRoleName[] = [
   "Walkable",
   "Public",
@@ -198,10 +206,11 @@ describe("conveyance shells", () => {
     levelPlanesM: [0, 4],
   };
 
-  it("renders every conveyance kind see-through so the graph inside stays visible", () => {
-    // The shell exists to say "a conveyance is here", not to hide the routing
-    // graph it explains. A wall still reads as a wall.
-    for (const role of CONVEYANCE_ROLE_NAMES) {
+  it("renders untyped and ramp shells see-through so the graph inside stays visible", () => {
+    // A shell exists to say "a conveyance is here", not to hide the routing
+    // graph it explains. Illustrated stairs / escalators / elevators are the
+    // exception: they are station silhouettes, like a ticket-gate row.
+    for (const role of CONVEYANCE_SHELL_ROLE_NAMES) {
       expect(batchOpacity({ levelIndex: 0, role }, state)).toBe(
         CONVEYANCE_SHELL_OPACITY,
       );
@@ -211,6 +220,13 @@ describe("conveyance shells", () => {
     expect(CONVEYANCE_SHELL_OPACITY).toBeLessThan(1);
   });
 
+  it("paints illustrated stairs, escalators, and elevators opaque on the active floor", () => {
+    for (const role of ILLUSTRATED_CONVEYANCE_ROLE_NAMES) {
+      expect(batchOpacity({ levelIndex: 0, role }, state)).toBe(1);
+    }
+    expect(batchOpacity({ levelIndex: 0, role: "TicketGate" }, state)).toBe(1);
+  });
+
   it("never draws a shell more opaque than the floor carrying it", () => {
     const pair = {
       activeLevelIndices: [0],
@@ -218,8 +234,11 @@ describe("conveyance shells", () => {
       showContextLevels: false,
       levelPlanesM: [8, 4],
     };
-    expect(batchOpacity({ levelIndex: 0, role: "Escalator" }, pair)).toBe(
+    expect(batchOpacity({ levelIndex: 0, role: "Ramp" }, pair)).toBe(
       Math.min(UPPER_FLOOR_OPACITY, CONVEYANCE_SHELL_OPACITY),
+    );
+    expect(batchOpacity({ levelIndex: 0, role: "Escalator" }, pair)).toBe(
+      UPPER_FLOOR_OPACITY,
     );
     const handoff = {
       activeLevelIndices: [0],
@@ -227,8 +246,11 @@ describe("conveyance shells", () => {
       showContextLevels: true,
       levelPlanesM: [0, 4],
     };
-    expect(batchOpacity({ levelIndex: 1, role: "Elevator" }, handoff)).toBe(
+    expect(batchOpacity({ levelIndex: 1, role: "Conveyance" }, handoff)).toBe(
       Math.min(CONTEXT_LEVEL_OPACITY, CONVEYANCE_SHELL_OPACITY),
+    );
+    expect(batchOpacity({ levelIndex: 1, role: "Elevator" }, handoff)).toBe(
+      CONTEXT_LEVEL_OPACITY,
     );
   });
 
@@ -288,7 +310,9 @@ describe("inter-floor connectors", () => {
 describe("batchPickable", () => {
   it("keeps see-through active-floor geometry selectable", () => {
     // A shell and an upper-floor surface are translucent by policy, not gone:
-    // the reviewer must still be able to click either one.
+    // the reviewer must still be able to click either one. Illustrated
+    // conveyances on the upper floor of a pair stay pickable at that floor's
+    // see-through opacity.
     const state = {
       activeLevelIndices: [0],
       contextLevelIndices: [1],
@@ -324,14 +348,15 @@ describe("planSceneDraw", () => {
       [
         { levelIndex: 0, role: "Walkable" as const },
         { levelIndex: 1, role: "Walkable" as const },
-        { levelIndex: 0, role: "Escalator" as const },
+        { levelIndex: 0, role: "Ramp" as const },
+        { levelIndex: 1, role: "Stairs" as const },
       ],
       state,
     );
-    expect(plan.opaque.map((entry) => entry.batch.levelIndex)).toEqual([1]);
+    expect(plan.opaque.map((entry) => entry.batch.role)).toEqual(["Walkable", "Stairs"]);
     expect(plan.translucent.map((entry) => entry.batch.role)).toEqual([
       "Walkable",
-      "Escalator",
+      "Ramp",
     ]);
   });
 
