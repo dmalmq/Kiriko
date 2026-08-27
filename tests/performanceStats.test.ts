@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  DRAG_LONGTASK_CI_MS,
+  DRAG_LONGTASK_WORKSTATION_MS,
   LEVEL_CHANGE_CI_MEDIAN_MS,
   LEVEL_CHANGE_CI_P95_MS,
   LEVEL_CHANGE_WORKSTATION_P95_MS,
+  longTasksOverBudget,
   percentileNearestRank,
 } from "./performanceStats";
 
@@ -43,5 +46,32 @@ describe("level-change CI budget", () => {
     expect(p95).toBeGreaterThan(LEVEL_CHANGE_WORKSTATION_P95_MS);
     expect(median).toBeLessThanOrEqual(LEVEL_CHANGE_CI_MEDIAN_MS);
     expect(p95).toBeLessThanOrEqual(LEVEL_CHANGE_CI_P95_MS);
+  });
+});
+
+// Linux acceptance 33053796337 (this branch, drag passed).
+const CONVEYANCE_DRAG_PASSED_MS = [
+  82, 71, 69, 70, 71, 70, 70, 74, 73, 71, 71, 71, 71, 70, 71, 69, 70, 70, 71, 69, 70, 73,
+  71, 73, 71, 71, 69, 69, 70, 68, 68, 67, 69, 67, 63, 62, 91,
+];
+
+// Linux acceptance 33056034476 attempt 1 (drag failed: one 101ms task).
+const CONVEYANCE_DRAG_FAILED_MS = [
+  82, 74, 69, 68, 69, 67, 70, 101, 73, 70, 68, 69, 70, 68, 68, 69, 67, 68, 68, 67, 70, 70,
+  71, 71, 71, 70, 70, 72, 68, 68, 67, 66, 67, 67, 66, 65, 70, 65, 65, 62, 63, 65, 63, 66,
+];
+
+describe("drag longtask CI budget", () => {
+  it("keeps the passing GHA series inside the workstation cap", () => {
+    expect(longTasksOverBudget(CONVEYANCE_DRAG_PASSED_MS, DRAG_LONGTASK_WORKSTATION_MS)).toEqual(
+      [],
+    );
+  });
+
+  it("documents that a 101ms observer overage missed 100ms and stays inside 120ms", () => {
+    expect(longTasksOverBudget(CONVEYANCE_DRAG_FAILED_MS, DRAG_LONGTASK_WORKSTATION_MS)).toEqual(
+      [101],
+    );
+    expect(longTasksOverBudget(CONVEYANCE_DRAG_FAILED_MS, DRAG_LONGTASK_CI_MS)).toEqual([]);
   });
 });

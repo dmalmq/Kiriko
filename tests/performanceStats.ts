@@ -31,3 +31,20 @@ export const LEVEL_CHANGE_CI_P95_MS = 180;
  * above this means the body of the distribution moved, not just the tail.
  */
 export const LEVEL_CHANGE_CI_MEDIAN_MS = 120;
+
+/** Architecture §11: one-second drag, workstation longtask cap. */
+export const DRAG_LONGTASK_WORKSTATION_MS = 100;
+
+/**
+ * CI longtask cap. GHA 33056034476 failed on a single 101ms task among
+ * ~40 tasks of 62–82ms (frames were 108). 120ms keeps that 1ms observer
+ * overage from failing the job without hiding a 200ms stall.
+ */
+export const DRAG_LONGTASK_CI_MS = 120;
+
+export function longTasksOverBudget(
+  longTasks: readonly number[],
+  budgetMs: number,
+): number[] {
+  return longTasks.filter((duration) => duration > budgetMs);
+}

@@ -1,7 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
+  DRAG_LONGTASK_CI_MS,
   LEVEL_CHANGE_CI_MEDIAN_MS,
   LEVEL_CHANGE_CI_P95_MS,
+  longTasksOverBudget,
   percentileNearestRank,
 } from "../tests/performanceStats";
 import {
@@ -236,7 +238,7 @@ test.describe("viewer performance", () => {
     ).toBeLessThanOrEqual(LEVEL_CHANGE_CI_P95_MS);
   });
 
-  test("1s drag keeps ≥30 frames and no longtask > 100ms", async ({ page }) => {
+  test("1s drag keeps ≥30 frames and no longtask > 120ms", async ({ page }) => {
     test.setTimeout(60_000);
     const zipBuffer = await minimalImdfZipBuffer();
     await page.goto(VIEWER_URL);
@@ -377,7 +379,7 @@ test.describe("viewer performance", () => {
       result.frames,
       `expected ≥30 animation frames, got ${result.frames}`,
     ).toBeGreaterThanOrEqual(30);
-    const over = result.longTasks.filter((d) => d > 100);
-    expect(over, `longtasks > 100ms: ${over.join(", ")}`).toEqual([]);
+    const over = longTasksOverBudget(result.longTasks, DRAG_LONGTASK_CI_MS);
+    expect(over, `longtasks > ${DRAG_LONGTASK_CI_MS}ms: ${over.join(", ")}`).toEqual([]);
   });
 });
