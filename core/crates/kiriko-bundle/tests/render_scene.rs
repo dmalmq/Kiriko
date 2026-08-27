@@ -7,6 +7,8 @@
 use kiriko_bundle::{BundleMetadata, compile_imdf, decode_bundle};
 use kiriko_scene::{SemanticRole, compile_generated_scene, decode_scene, encode_scene};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::PathBuf;
 
 mod support;
 
@@ -60,6 +62,31 @@ fn a_visible_floor_stays_inside_the_draw_call_budget() {
         "all levels visible draw in {} calls, over the 320-call budget",
         document.batches.len()
     );
+}
+
+#[test]
+fn stage0_visible_floors_stay_inside_the_draw_call_budget() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let bytes = fs::read(repo_root.join("tests/fixtures/stage0.kvb"))
+        .expect("tests/fixtures/stage0.kvb must be committed");
+    let bundle = decode_bundle(&bytes).expect("stage0 decodes");
+    let scene = bundle.scene.expect("stage0 carries a generated scene");
+    let spatial = bundle
+        .spatial_context
+        .expect("stage0 carries spatial context");
+    let document =
+        compile_generated_scene(&scene, &spatial, &bundle.features).expect("stage0 scene compiles");
+
+    let mut per_level: BTreeMap<u32, usize> = BTreeMap::new();
+    for batch in &document.batches {
+        *per_level.entry(batch.level_index).or_default() += 1;
+    }
+    for (level_index, batches) in &per_level {
+        assert!(
+            *batches <= 8,
+            "stage0 level {level_index} draws in {batches} calls, over the 8-call budget"
+        );
+    }
 }
 
 #[test]

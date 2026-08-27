@@ -1062,10 +1062,15 @@ fn conveyance_role(category: &str) -> Option<SemanticRole> {
 /// is closed, so this matches exact values rather than guessing at substrings;
 /// an unlisted category is public floor rather than navigable walkway.
 fn surface_role(category: &str) -> SemanticRole {
-    if let Some(role) = conveyance_role(category) {
-        return role;
-    }
     match category {
+        // A transit unit's floor plate is the landing you walk onto, not the
+        // machine. The conveyance primitive carries Elevator / Escalator /
+        // Stairs / Ramp; putting the plate on that role either merges it into
+        // an illustrated batch (hiding leftover shells) or spends a second
+        // draw call that a busy floor cannot afford.
+        "elevator" | "escalator" | "stairs" | "steps" | "ramp" | "movingwalkway" => {
+            SemanticRole::Walkable
+        }
         // Circulation: the surfaces a route may traverse.
         "walkway" | "pedestrian" | "concourse" | "corridor" | "lobby" | "plaza" | "footbridge"
         | "parkingcirculation" | "platform" | "walkwayisland" => SemanticRole::Walkable,

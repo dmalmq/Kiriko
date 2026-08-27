@@ -1196,23 +1196,23 @@ fn an_illustrated_stair_does_not_recolor_its_unit_surface_stainless() {
     )
     .expect("scene compiles");
 
+    let walkable = document
+        .batches
+        .iter()
+        .find(|batch| batch.role == SemanticRole::Walkable)
+        .expect("unit surface is walkable floor, not the machine");
+    assert_eq!(walkable.vertex_count, 6, "the authored square, untouched");
+    assert!(
+        walkable.colors.is_none(),
+        "the landing still paints from ROLE_COLORS"
+    );
     let stairs: Vec<_> = document
         .batches
         .iter()
         .filter(|batch| batch.role == SemanticRole::Stairs)
         .collect();
-    assert_eq!(stairs.len(), 2, "the illustrated run is its own batch");
-    let plain = stairs
-        .iter()
-        .find(|batch| batch.colors.is_none())
-        .expect("unit surface still paints from ROLE_COLORS");
-    assert_eq!(plain.vertex_count, 6, "the authored square, untouched");
-    let tinted = stairs
-        .iter()
-        .copied()
-        .find(|batch| batch.colors.is_some())
-        .expect("illustrated run is tinted");
-    let colors = illustrated_colors(tinted);
+    assert_eq!(stairs.len(), 1, "only the illustrated run is Stairs");
+    let colors = illustrated_colors(stairs[0]);
     assert!(
         colors.contains(&STAINLESS),
         "the illustrated run still carries stainless rails"
