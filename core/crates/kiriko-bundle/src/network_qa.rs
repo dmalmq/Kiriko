@@ -5,9 +5,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use kiriko_route::{
-    RouteEdge, RouteGraph, RouteProfile, TravelDirection, edge_allowed,
-};
+use kiriko_route::{RouteEdge, RouteGraph, RouteProfile, TravelDirection, edge_allowed};
 
 use crate::codec::BundleDocument;
 use crate::synth::haversine_m;
@@ -67,7 +65,7 @@ pub fn analyze_network(document: &BundleDocument) -> NetworkQa {
         let mut seen = vec![false; n];
         for i in 0..n {
             let r = uf_find(&mut parent, i);
-            if seen[r] == false {
+            if !seen[r] {
                 seen[r] = true;
                 component_roots += 1;
             }
@@ -127,7 +125,7 @@ fn walking_adj(graph: &RouteGraph) -> Vec<Vec<(usize, f64)>> {
     let mut adj = vec![Vec::new(); n];
     let profile = RouteProfile::walking();
     for e in &graph.edges {
-        if edge_allowed(e, &profile) == false {
+        if !edge_allowed(e, &profile) {
             continue;
         }
         let len = polyline_m(graph, e);
@@ -217,11 +215,11 @@ fn stretch_summary(graph: &RouteGraph) -> Option<StretchSummary> {
                 break;
             }
         }
-        if candidate == false {
+        if !candidate {
             continue;
         }
         let dist = dijkstra_m(&adj, i);
-        for j in (i + 1)..n {
+        for (j, d) in dist.iter().enumerate().skip(i + 1) {
             if sample_count as usize >= STRETCH_SAMPLES {
                 break;
             }
@@ -235,7 +233,7 @@ fn stretch_summary(graph: &RouteGraph) -> Option<StretchSummary> {
             if eu <= STRETCH_MIN_M || eu > STRETCH_MAX_M {
                 continue;
             }
-            let Some(net) = dist[j] else {
+            let Some(net) = *d else {
                 continue;
             };
             if net <= 0.0 {
@@ -257,7 +255,6 @@ fn stretch_summary(graph: &RouteGraph) -> Option<StretchSummary> {
         })
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -398,9 +395,8 @@ mod tests {
         };
         let qa = analyze_network(&document_with_graph(g));
         assert_eq!(qa.stretch, None);
-        assert_eq!(
-            codes(&qa).contains(&"disconnected_component"),
-            false,
+        assert!(
+            !codes(&qa).contains(&"disconnected_component"),
             "one component, findings = {:?}",
             qa.findings
         );

@@ -3638,7 +3638,7 @@ fn the_scene_profile_drives_nominal_dimensions() {
         }
     }
     assert!(
-        header_minima.first().is_some() && header_minima.iter().all(|min_z| *min_z == portal_top),
+        !header_minima.is_empty() && header_minima.iter().all(|min_z| *min_z == portal_top),
         "the overlapping header starts exactly at the profile-driven portal top"
     );
 }

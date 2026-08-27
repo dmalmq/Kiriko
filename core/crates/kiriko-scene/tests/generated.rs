@@ -1,5 +1,5 @@
 //! The Generated scene producer: a bundle's §9 semantic primitives plus §8
-//! spatial context compiled into the same KSC1 render document the Tiles
+//! spatial context compiled into the same KSC render document the Tiles
 //! deriver emits, so one renderer serves both sources (#23 D4).
 
 use kiriko_model::model::{FeatureType, VenueFeature};
@@ -915,7 +915,7 @@ fn conduit_box(x0: i64, y0: i64, x1: i64, y1: i64, z0: i64, z1: i64) -> Mesh {
         positions.push([p[0], p[1], z1]);
     }
     let (b, t) = (0u32, 4u32);
-    let mut quad = |faces: &mut Vec<[u32; 3]>, a: u32, b: u32, c: u32, d: u32| {
+    let quad = |faces: &mut Vec<[u32; 3]>, a: u32, b: u32, c: u32, d: u32| {
         faces.push([a, b, c]);
         faces.push([a, c, d]);
     };

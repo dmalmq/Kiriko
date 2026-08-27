@@ -1,5 +1,5 @@
 //! The Generated scene producer: a bundle's §9 semantic primitives plus §8
-//! spatial context compiled into the KSC1 render document the Tiles deriver
+//! spatial context compiled into the KSC render document the Tiles deriver
 //! also emits. One render format means one renderer, so a source can never
 //! fork the visual language (issue #23, decision D4).
 //!
@@ -113,13 +113,13 @@ pub fn compile_generated_scene(
     // nothing: cutting never guesses about shapes it was not built to see.
     let mut doorways: BTreeMap<&str, Vec<Doorway>> = BTreeMap::new();
     for primitive in &scene.primitives {
-        if let PrimitiveGeometry::Portal { opening, .. } = &primitive.geometry {
-            if let Some((a, b, _, top_z_mm)) = vertical_quad(opening) {
-                doorways
-                    .entry(primitive.level_id.as_str())
-                    .or_default()
-                    .push(Doorway { a, b, top_z_mm });
-            }
+        if let PrimitiveGeometry::Portal { opening, .. } = &primitive.geometry
+            && let Some((a, b, _, top_z_mm)) = vertical_quad(opening)
+        {
+            doorways
+                .entry(primitive.level_id.as_str())
+                .or_default()
+                .push(Doorway { a, b, top_z_mm });
         }
     }
 
@@ -465,7 +465,7 @@ fn footprint_run(mesh: &Mesh) -> Option<Run> {
     }
     lower.pop();
     upper.pop();
-    let hull: Vec<[i64; 2]> = lower.into_iter().chain(upper.into_iter()).collect();
+    let hull: Vec<[i64; 2]> = lower.into_iter().chain(upper).collect();
 
     // Longest hull edge sets the run axis.
     let mut best: Option<([i64; 2], [i64; 2], u128)> = None;
@@ -474,7 +474,7 @@ fn footprint_run(mesh: &Mesh) -> Option<Run> {
         let t = hull[(i + 1) % hull.len()];
         let d = [i128::from(t[0] - s[0]), i128::from(t[1] - s[1])];
         let l2 = (d[0] * d[0] + d[1] * d[1]) as u128;
-        if best.map_or(true, |(_, _, bl)| l2 > bl) {
+        if best.is_none_or(|(_, _, bl)| l2 > bl) {
             best = Some((s, t, l2));
         }
     }
@@ -633,7 +633,7 @@ fn elevator_mesh(run: &Run, z0: i64, z1: i64) -> Mesh {
     let span = vsub(run.b, run.a);
     let u = vunit(span);
     let mid = vadd(run.a, vscale(span, 0.5));
-    let door_w = (vlen(span) * 0.4).min(ELEVATOR_DOOR_W_MM).max(600.0);
+    let door_w = (vlen(span) * 0.4).clamp(600.0, ELEVATOR_DOOR_W_MM);
     let wn = vunit(run.w);
     let wl = vlen(run.w);
     for s in [-1.0, 1.0] {
@@ -986,12 +986,7 @@ impl BatchAccumulator {
         }
     }
 
-    fn push(
-        &mut self,
-        triangles: &Triangles,
-        feature_index: u32,
-        tints: Option<&[[u8; 3]]>,
-    ) {
+    fn push(&mut self, triangles: &Triangles, feature_index: u32, tints: Option<&[[u8; 3]]>) {
         let n = triangles.vertices.len();
         if let Some(tints) = tints {
             match &mut self.colors {

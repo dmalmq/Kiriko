@@ -663,7 +663,10 @@ mod tests {
         let net = export_network(&bundle_with_graph(graph.clone())).expect("export");
         let p: Json = serde_json::from_str(&net.paths).unwrap();
         let pf = p["features"].as_array().unwrap();
-        assert_eq!(pf[0]["properties"]["PATHID"], 1, "kept feature is smaller PATHID");
+        assert_eq!(
+            pf[0]["properties"]["PATHID"], 1,
+            "kept feature is smaller PATHID"
+        );
         assert_eq!(pf[0]["properties"]["direction"], 1);
         assert_eq!(pf[0]["properties"]["BARRIER"], 1);
         assert_eq!(pf[0]["properties"]["GATE"], 1);
@@ -674,8 +677,8 @@ mod tests {
             .expect("re-import")
             .graph;
         assert_eq!(g1.edges[0].flags.direction, TravelDirection::Forward);
-        assert_eq!(g1.edges[0].flags.barrier, true);
-        assert_eq!(g1.edges[0].flags.gate, true);
+        assert!(g1.edges[0].flags.barrier);
+        assert!(g1.edges[0].flags.gate);
         assert_eq!(g1.edges[0].flags.start_minute, 600);
         assert_eq!(g1.edges[0].flags.end_minute, 720);
         assert_eq!(g1, graph, "flags round-trip through the GeoJSON wire");

@@ -5,8 +5,8 @@ use geojson::{FeatureCollection, GeoJson, Value};
 
 use crate::floor::floor_to_ordinal;
 use crate::graph::{
-    EdgeAttrs, EdgeFlags, EdgeKind, PathwayRank, RouteEdge, RouteGraph, RouteNode,
-    TravelDirection, kind_from_key, vertical_from_key,
+    EdgeAttrs, EdgeFlags, EdgeKind, PathwayRank, RouteEdge, RouteGraph, RouteNode, TravelDirection,
+    kind_from_key, vertical_from_key,
 };
 
 /// Non-fatal problem encountered while building a route graph.
@@ -270,7 +270,6 @@ fn prop<'a>(
     properties.as_ref()?.get(key)
 }
 
-
 /// Read GDB traversal properties from a path feature: `direction`, `BARRIER`,
 /// `GATE`, `STARTTIME`, `ENDTIME`. Missing or unrecognized values fall back
 /// to [`EdgeFlags::default()`] (bidirectional, open). GATE is stored, not a
@@ -278,9 +277,9 @@ fn prop<'a>(
 fn flags_from_properties(
     properties: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> EdgeFlags {
-    let direction = match prop(properties, "direction").and_then(|v| {
-        v.as_i64().or_else(|| v.as_u64().map(|n| n as i64))
-    }) {
+    let direction = match prop(properties, "direction")
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
+    {
         Some(1) => TravelDirection::Forward,
         Some(2) => TravelDirection::Reverse,
         _ => TravelDirection::Both,
@@ -288,14 +287,8 @@ fn flags_from_properties(
     let int_prop = |key: &str| {
         prop(properties, key).and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
     };
-    let barrier = match int_prop("BARRIER").unwrap_or(0) {
-        0 => false,
-        _ => true,
-    };
-    let gate = match int_prop("GATE").unwrap_or(0) {
-        0 => false,
-        _ => true,
-    };
+    let barrier = int_prop("BARRIER").unwrap_or(0) != 0;
+    let gate = int_prop("GATE").unwrap_or(0) != 0;
     let start_minute = int_prop("STARTTIME").unwrap_or(-1) as i32;
     let end_minute = int_prop("ENDTIME").unwrap_or(-1) as i32;
     EdgeFlags {
@@ -671,8 +664,8 @@ mod tests {
           {"type":"Feature","properties":{"FNODEID":1,"TNODEID":2,"cost":100,"BARRIER":1},
            "geometry":{"type":"MultiLineString","coordinates":[[[139.0,35.0],[139.001,35.0]]]}}]}"#;
         let b = build_route_graph(J, P, &[0.0]).unwrap();
-        assert_eq!(b.graph.edges[0].flags.barrier, true);
-        assert_eq!(b.graph.edges[0].flags.gate, false);
+        assert!(b.graph.edges[0].flags.barrier);
+        assert!(!b.graph.edges[0].flags.gate);
     }
 
     #[test]

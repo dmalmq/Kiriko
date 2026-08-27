@@ -90,11 +90,11 @@ fn smooth_segment(seg: RouteSegment, floors: &[WalkableFloor]) -> RouteSegment {
 /// in the floor's walkable union, and no lock sits within [`DOOR_LOCK_M`] of
 /// an intermediate vertex that the chord would skip.
 pub(crate) fn chord_ok(coords: &[[f64; 2]], i: usize, j: usize, floor: &WalkableFloor) -> bool {
-    for k in (i + 1)..j {
+    for c in coords.iter().take(j).skip(i + 1) {
         if floor
             .locks
             .iter()
-            .any(|lock| haversine_m(coords[k][0], coords[k][1], lock[0], lock[1]) < DOOR_LOCK_M)
+            .any(|lock| haversine_m(c[0], c[1], lock[0], lock[1]) < DOOR_LOCK_M)
         {
             return false;
         }

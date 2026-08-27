@@ -58,18 +58,18 @@ pub fn edge_allowed(edge: &RouteEdge, profile: &RouteProfile) -> bool {
             return false;
         }
     }
-    if let (Some(min), Some(c)) = (profile.min_clearance_m, edge.attrs.clearance_m) {
-        if c < min {
-            return false;
-        }
+    if let (Some(min), Some(c)) = (profile.min_clearance_m, edge.attrs.clearance_m)
+        && c < min
+    {
+        return false;
     }
-    if edge.flags.barrier && profile.allow_barriers == false {
+    if edge.flags.barrier && !profile.allow_barriers {
         return false;
     }
     if profile.exclude_accessible_only && edge.flags.accessible_only {
         return false;
     }
-    if profile.require_wheelchair && edge.flags.wheelchair == false {
+    if profile.require_wheelchair && !edge.flags.wheelchair {
         return false;
     }
     if let Some(t) = profile.at_minutes {
@@ -82,7 +82,7 @@ pub fn edge_allowed(edge: &RouteEdge, profile: &RouteProfile) -> bool {
             } else {
                 t >= start || t < end
             };
-            if inside == false {
+            if !inside {
                 return false;
             }
         }
@@ -252,14 +252,14 @@ fn connector_cost(p: &Point3, s: &EdgeSnap) -> f64 {
     )))
 }
 
+/// Per-node outgoing `(next_node, edge_index, weight)` triples.
+type Adjacency = Vec<Vec<(usize, usize, f32)>>;
+
 /// Directed adjacency used by [`route_with`] and [`route_node_path`]:
 /// `(next_node, edge_index, weight)` per node, plus the heuristic scale `k`.
-fn profile_adjacency(
-    graph: &RouteGraph,
-    profile: &RouteProfile,
-) -> (Vec<Vec<(usize, usize, f32)>>, f64) {
+fn profile_adjacency(graph: &RouteGraph, profile: &RouteProfile) -> (Adjacency, f64) {
     let n = graph.nodes.len();
-    let mut adj: Vec<Vec<(usize, usize, f32)>> = vec![Vec::new(); n];
+    let mut adj: Adjacency = vec![Vec::new(); n];
     let mut k = f64::INFINITY;
     for (ei, e) in graph.edges.iter().enumerate() {
         if !edge_allowed(e, profile) {
@@ -1685,8 +1685,8 @@ mod tests {
         let visits_stairs = w_coords
             .iter()
             .any(|c| (c[0] - 139.001).abs() < 1e-9 && (c[1] - 35.0).abs() < 1e-9);
-        assert_eq!(
-            visits_stairs, false,
+        assert!(
+            !visits_stairs,
             "wheelchair must not visit the stair landing, got {w_coords:?}"
         );
         let walk_coords = route_coords(&walking);

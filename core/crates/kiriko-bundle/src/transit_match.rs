@@ -153,8 +153,8 @@ pub(crate) fn minimum_cost_maximum_matching(admissible_pairs: &[TransitPair]) ->
 
     // 8. A forward pair edge at zero residual capacity carried the flow.
     let mut selected: Vec<TransitPair> = Vec::new();
-    for from in lower_offset..upper_offset {
-        for edge in &graph[from] {
+    for edges in &graph[lower_offset..upper_offset] {
+        for edge in edges {
             if edge.capacity == 0
                 && edge.rank_delta > 0
                 && let Some(pair_index) = edge.pair_index

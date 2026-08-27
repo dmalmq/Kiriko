@@ -67,13 +67,11 @@ fn feature_ref(props: &Object, key: &str) -> Option<String> {
 /// relationships that name both endpoints. Conflicting records for the same
 /// opening are dropped rather than guessed.
 #[must_use]
-pub(crate) fn directed_by_opening(
-    rels: &[Relationship],
-) -> HashMap<String, (String, String)> {
+pub(crate) fn directed_by_opening(rels: &[Relationship]) -> HashMap<String, (String, String)> {
     let mut map: HashMap<String, (String, String)> = HashMap::new();
     let mut conflict: HashMap<String, bool> = HashMap::new();
     for r in rels {
-        if r.directed == false {
+        if !r.directed {
             continue;
         }
         let Some(opening) = r.intermediary.clone() else {
@@ -165,10 +163,7 @@ mod tests {
             props.insert("direction".into(), Value::String(d.into()));
         }
         // OSM hours must not affect parse / direction.
-        props.insert(
-            "hours".into(),
-            Value::String("Mo-Fr 09:00-17:00".into()),
-        );
+        props.insert("hours".into(), Value::String("Mo-Fr 09:00-17:00".into()));
         VenueFeature {
             id: "rel-1".into(),
             feature_type: FeatureType::Relationship,
@@ -186,14 +181,9 @@ mod tests {
 
     #[test]
     fn relationship_without_direction_leaves_both() {
-        let parsed = parse_relationships(&[rel(
-            Some("u-a"),
-            Some("u-b"),
-            Some("op-1"),
-            None,
-        )]);
+        let parsed = parse_relationships(&[rel(Some("u-a"), Some("u-b"), Some("op-1"), None)]);
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].directed, false);
+        assert!(!parsed[0].directed);
         assert!(directed_by_opening(&parsed).is_empty());
     }
 
@@ -205,7 +195,7 @@ mod tests {
             Some("op-1"),
             Some("undirected"),
         )]);
-        assert_eq!(parsed[0].directed, false);
+        assert!(!parsed[0].directed);
         assert!(directed_by_opening(&parsed).is_empty());
     }
 
@@ -218,21 +208,13 @@ mod tests {
             Some("directed"),
         )]);
         let map = directed_by_opening(&parsed);
-        assert_eq!(
-            map.get("op-1"),
-            Some(&("u-a".into(), "u-b".into()))
-        );
+        assert_eq!(map.get("op-1"), Some(&("u-a".into(), "u-b".into())));
     }
 
     #[test]
     fn relationship_directed_missing_endpoint_is_ignored() {
-        let parsed = parse_relationships(&[rel(
-            Some("u-a"),
-            None,
-            Some("op-1"),
-            Some("directed"),
-        )]);
-        assert_eq!(parsed[0].directed, true);
+        let parsed = parse_relationships(&[rel(Some("u-a"), None, Some("op-1"), Some("directed"))]);
+        assert!(parsed[0].directed);
         assert!(directed_by_opening(&parsed).is_empty());
     }
 
@@ -242,7 +224,7 @@ mod tests {
         let mut b = rel(Some("u-b"), Some("u-a"), Some("op-1"), Some("directed"));
         b.id = "rel-2".into();
         let map = directed_by_opening(&parse_relationships(&[a, b]));
-        assert!(map.get("op-1").is_none());
+        assert!(!map.contains_key("op-1"));
     }
 
     #[test]
