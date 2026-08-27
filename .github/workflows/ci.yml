@@ -1,12 +1,7 @@
 name: CI
 
-# A branch with an open PR is validated by `pull_request`, against the merge
-# commit rather than the branch tip. Leaving `push` unfiltered ran the whole
-# 25-minute acceptance suite twice for every such push, so `push` covers only
-# `main` — where a direct commit or a merge has no pull request to cover it.
 on:
   push:
-    branches: [main]
   pull_request:
 
 permissions:
