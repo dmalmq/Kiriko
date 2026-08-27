@@ -8,13 +8,13 @@ use kiriko_model::scene::{
     ScenePrimitive, SceneSection,
 };
 use kiriko_model::spatial::{
-    enu_basis_ecef, wgs84_ecef, Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind,
-    Datum, Ellipsoid, EvidenceMethod, Frame, LengthUnit, LevelRecord, LocatorKind,
-    RegistrationEvidence, Registries, ResolutionMethod, SourceLocator, SpatialContext,
+    Assumption, AssumptionKind, Axes, Confidence, ConfidenceKind, Datum, Ellipsoid, EvidenceMethod,
+    Frame, LengthUnit, LevelRecord, LocatorKind, RegistrationEvidence, Registries,
+    ResolutionMethod, SourceLocator, SpatialContext, enu_basis_ecef, wgs84_ecef,
 };
 use kiriko_scene::{
-    compile_generated_scene, decode_normal_oct, encode_scene, OcclusionClass, SceneError,
-    SemanticRole,
+    OcclusionClass, SceneError, SemanticRole, compile_generated_scene, decode_normal_oct,
+    encode_scene,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -541,7 +541,7 @@ fn the_header_carries_the_frame_world_transform_and_scene_bounds() {
         compile_generated_scene(&scene_section(), &spatial, &features()).expect("scene compiles");
 
     assert_eq!(document.header.frame_origin_ecef, spatial.frame.ecef_origin);
-    assert_eq!(document.header.deriver_version, 7);
+    assert_eq!(document.header.deriver_version, 8);
 
     // Column-major 4x4: the ENU basis vectors as columns, translation last.
     let transform = document.header.world_transform;
@@ -960,7 +960,7 @@ fn illustrated_colors(batch: &kiriko_scene::SceneBatch) -> &Vec<[u8; 3]> {
         "signal yellow is not review amber"
     );
     assert!(
-        batch.vertex_count <= 1_800,
+        batch.vertex_count <= 3_600,
         "illustration stays a box budget, got {}",
         batch.vertex_count
     );
@@ -985,16 +985,25 @@ fn an_evidenced_stair_run_compiles_to_tinted_steps() {
         .iter()
         .find(|batch| batch.role == SemanticRole::Stairs)
         .expect("stairs batch");
-    // 26 risers plus stringers, rails, newels, and nosings — more than the
-    // old solid steps, still a box budget.
-    assert!(batch.vertex_count > 26 * 30);
+    // Dark undercroft, light tread caps, and a nosing on every going — more
+    // than a single box per step, still a silhouette budget.
+    assert!(batch.vertex_count > 26 * 60);
     let colors = illustrated_colors(batch);
     let finishes = distinct_finishes(colors);
-    assert!(finishes.len() >= 3, "stone, stainless, and a safety nosing");
+    assert!(finishes.len() >= 4, "riser stone, tread, stainless, nosing");
     assert!(colors.contains(&STAINLESS), "handrails are stainless");
     assert!(
-        colors.contains(&SIGNAL_YELLOW),
-        "first and last treads carry a safety nosing"
+        colors.contains(&[168, 164, 156]),
+        "treads are the lighter stone"
+    );
+    assert!(
+        colors.contains(&[112, 116, 124]),
+        "risers are the darker stone"
+    );
+    let yellow = colors.iter().filter(|c| **c == SIGNAL_YELLOW).count();
+    assert!(
+        yellow > 26 * 20,
+        "every tread carries a safety nosing, got {yellow} yellow verts"
     );
     let restored = restored_mm(batch);
     assert!(
@@ -1004,6 +1013,13 @@ fn an_evidenced_stair_run_compiles_to_tinted_steps() {
     assert!(
         restored.iter().any(|p| p[2] > 0.1 && p[2] < 4.4),
         "intermediate risers exist"
+    );
+    assert!(
+        restored
+            .iter()
+            .zip(colors.iter())
+            .any(|(p, c)| *c == SIGNAL_YELLOW && p[2] > 1.0 && p[2] < 3.5),
+        "nosings sit on intermediate treads, not only the landings"
     );
     assert!(
         restored.iter().any(|p| p[2] > 5.2),
@@ -1034,6 +1050,10 @@ fn an_elevator_is_a_tinted_cabin() {
     let finishes = distinct_finishes(colors);
     assert!(finishes.len() >= 3, "stainless, glass, and a cabin floor");
     assert!(colors.contains(&STAINLESS), "doors are stainless");
+    assert!(
+        colors.contains(&SIGNAL_YELLOW),
+        "door sills carry a safety threshold"
+    );
     let restored = restored_mm(batch);
     assert!(
         restored.iter().any(|p| (p[2] - 4.62).abs() < 0.01),
@@ -1057,7 +1077,7 @@ fn an_escalator_is_a_tinted_truss() {
         .expect("escalator batch");
     assert!(
         batch.vertex_count > 78,
-        "deck, skirts, glass, rails, and combs"
+        "deck, truss, skirts, glass, rails, and combs"
     );
     let colors = illustrated_colors(batch);
     let finishes = distinct_finishes(colors);
@@ -1072,6 +1092,21 @@ fn an_escalator_is_a_tinted_truss() {
     assert!(
         restored.iter().any(|p| p[2] > 5.0),
         "balustrades rise above the upper landing"
+    );
+    assert!(
+        restored
+            .iter()
+            .zip(colors.iter())
+            .any(|(p, c)| *c == SIGNAL_YELLOW && p[2] > 1.0 && p[2] < 3.5),
+        "a yellow safety strip runs along the inclined deck"
+    );
+    let cabin = [72_u8, 76, 84];
+    assert!(
+        restored
+            .iter()
+            .zip(colors.iter())
+            .any(|(p, c)| *c == cabin && p[2] > 0.4 && p[2] < 3.8),
+        "a dark truss sits under the deck along the rise"
     );
 }
 

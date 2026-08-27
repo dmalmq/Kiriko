@@ -22,15 +22,15 @@ use kiriko_model::scene::{Mesh, PrimitiveGeometry, PrimitiveRole, ScenePrimitive
 use kiriko_model::spatial::SpatialContext;
 use sha2::{Digest, Sha256};
 
+use crate::SceneError;
 use crate::format::{
     SceneBatch, SceneDocument, SceneFeature, SceneHeader, SceneLevel, SemanticRole,
 };
 use crate::quantize::{encode_normal_oct, quantize_positions};
 use crate::roles::occlusion_for_role;
-use crate::SceneError;
 
 /// Bumped when this producer's output changes for unchanged input.
-const GENERATED_PRODUCER_VERSION: u16 = 7;
+const GENERATED_PRODUCER_VERSION: u16 = 8;
 
 /// The render format this producer writes.
 const SCENE_FORMAT_VERSION: u16 = 1;
@@ -408,8 +408,15 @@ fn cut_doorways(mesh: &Mesh, doorways: &[Doorway]) -> Mesh {
 /// Nominal stair riser. Steps are an illustration, not a measurement: the
 /// run divides so each step lands near this height.
 const STAIR_RISER_MM: f64 = 175.0;
+/// Light tread cap sitting on the dark undercroft.
+const TREAD_THICK_MM: i64 = 48;
+/// Yellow nosing strip on the leading edge of every tread.
+const NOSING_H_MM: i64 = 16;
+const NOSING_DEPTH_MM: f64 = 70.0;
 /// Escalator balustrade / stair rail height above the deck.
 const RAIL_H_MM: i64 = 950;
+/// Lower stair rail, so the side elevation reads as a banister not a single bar.
+const RAIL_MID_MM: i64 = 480;
 /// Fraction of the run given to a flat comb platform at each end.
 const ESCALATOR_COMB_FRAC: f64 = 0.12;
 /// Elevator door panel width and roof slab thickness.
@@ -669,43 +676,45 @@ fn side_strip(
     )
 }
 
-/// A stepped run rising from `z0` to `z1` along the footprint, with stone
-/// treads, dark stringers, stainless rails, and yellow safety nosings.
+/// A stepped run rising from `z0` to `z1` along the footprint, with a dark
+/// closed undercroft, light tread caps, a yellow nosing on every going,
+/// dark stringers, and stainless rails.
 fn stair_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
     let rise = (z1 - z0).max(1) as f64;
     let steps = (rise / STAIR_RISER_MM).round().max(1.0);
     let mut out = IllustratedMesh::new();
+    let span = vsub(run.b, run.a);
+    let u = vunit(span);
     for i in 0..(steps as i64) {
         let top = z0 + ((i + 1) as f64 / steps * rise).round() as i64;
-        let p = vadd(run.a, vscale(vsub(run.b, run.a), i as f64 / steps));
-        let q = vadd(run.a, vscale(vsub(run.b, run.a), (i + 1) as f64 / steps));
+        let p = vadd(run.a, vscale(span, i as f64 / steps));
+        let q = vadd(run.a, vscale(span, (i + 1) as f64 / steps));
+        // Closed mass so the run is never a hollow ribbon, painted as the
+        // riser: dark stone against a light tread cap.
+        push_colored_box(&mut out, p, q, run.w, z0, top, FINISH_STONE_DARK);
+        let cap_z = (top - TREAD_THICK_MM).max(z0);
         push_colored_box(
             &mut out,
             p,
             q,
-            run.w,
-            z0,
+            vscale(run.w, 0.96),
+            cap_z,
             top,
-            if i % 2 == 0 {
-                FINISH_STONE
-            } else {
-                FINISH_STONE_DARK
-            },
+            FINISH_STONE,
         );
-        if i == 0 || i + 1 == steps as i64 {
-            push_colored_box(
-                &mut out,
-                p,
-                q,
-                vscale(run.w, 0.92),
-                top,
-                top + 18,
-                FINISH_SIGNAL,
-            );
-        }
+        let going = vlen(vsub(q, p));
+        let nosing = vscale(u, NOSING_DEPTH_MM.min(going * 0.4));
+        push_colored_box(
+            &mut out,
+            p,
+            vadd(p, nosing),
+            vscale(run.w, 0.94),
+            top,
+            top + NOSING_H_MM,
+            FINISH_SIGNAL,
+        );
     }
     let n = vunit(run.w);
-    let u = vunit(vsub(run.b, run.a));
     for s in [-1.0, 1.0] {
         let (p, q, w) = side_strip(run, s, 40.0, 40.0);
         push_inclined_prism(&mut out, p, q, w, [z0, z1], [-80, 40], FINISH_STONE_DARK);
@@ -717,6 +726,16 @@ fn stair_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
             rw,
             [z0, z1],
             [RAIL_H_MM - 40, RAIL_H_MM],
+            FINISH_STAINLESS,
+        );
+        let (mp, mq, mw) = side_strip(run, s, 24.0, 40.0);
+        push_inclined_prism(
+            &mut out,
+            mp,
+            mq,
+            mw,
+            [z0, z1],
+            [RAIL_MID_MM - 24, RAIL_MID_MM + 12],
             FINISH_STAINLESS,
         );
         for (origin, z_deck, along) in [(run.a, z0, 50.0), (run.b, z1, -50.0)] {
@@ -756,7 +775,35 @@ fn escalator_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
             FINISH_DECK_GROOVE
         };
         push_inclined_prism(&mut out, p, q, deck_w, [zp, zq], [-50, 8], rgb);
+        let n = vunit(run.w);
+        for s in [-1.0, 1.0] {
+            let inset = vscale(n, s * vlen(run.w) * 0.72);
+            push_inclined_prism(
+                &mut out,
+                vadd(p, inset),
+                vadd(q, inset),
+                vscale(n, 18.0),
+                [zp, zq],
+                [8, 22],
+                FINISH_SIGNAL,
+            );
+        }
     }
+    // Truss body along the rise, inset from both combs so it sits above the
+    // landing slabs rather than punching through the floor plate.
+    let truss_p = vadd(run.a, vscale(span, 0.16));
+    let truss_q = vadd(run.a, vscale(span, 0.84));
+    let truss_z0 = z0 + ((z1 - z0) as f64 * 0.16).round() as i64;
+    let truss_z1 = z0 + ((z1 - z0) as f64 * 0.84).round() as i64;
+    push_inclined_prism(
+        &mut out,
+        truss_p,
+        truss_q,
+        vscale(run.w, 0.9),
+        [truss_z0, truss_z1],
+        [-280, -40],
+        FINISH_CABIN,
+    );
     for s in [-1.0, 1.0] {
         let (p, q, w) = side_strip(run, s, 48.0, -16.0);
         push_inclined_prism(
@@ -892,6 +939,15 @@ fn elevator_mesh(run: &Run, z0: i64, z1: i64) -> IllustratedMesh {
             z0 + 80,
             door_h,
             FINISH_RUBBER,
+        );
+        push_colored_box(
+            &mut out,
+            vsub(face_mid, vscale(u, door_w / 2.0)),
+            vadd(face_mid, vscale(u, door_w / 2.0)),
+            vscale(n, 55.0 * s),
+            z0 + 80,
+            z0 + 102,
+            FINISH_SIGNAL,
         );
         let lamp = vadd(face_mid, vscale(n, 55.0 * s));
         push_colored_box(
