@@ -64,6 +64,7 @@ fn sample_document() -> SceneDocument {
             positions: vec![[0, 0, 0], [100, 0, 0], [0, 100, 0]],
             normals: vec![[0, 0], [0, 0], [0, 0]],
             feature_indices: vec![0, 0, 0],
+            colors: None,
         }],
     }
 }

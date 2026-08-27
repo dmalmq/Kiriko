@@ -19,6 +19,7 @@ mod clip;
 mod codec;
 mod error;
 mod export;
+mod fixture_illustration;
 mod format;
 mod network_qa;
 mod route_eval;

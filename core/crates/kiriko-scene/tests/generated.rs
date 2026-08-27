@@ -13,7 +13,8 @@ use kiriko_model::spatial::{
     ResolutionMethod, SourceLocator, SpatialContext, enu_basis_ecef, wgs84_ecef,
 };
 use kiriko_scene::{
-    OcclusionClass, SemanticRole, compile_generated_scene, decode_normal_oct, encode_scene,
+    OcclusionClass, SceneError, SemanticRole, compile_generated_scene, decode_normal_oct,
+    encode_scene,
 };
 use std::collections::BTreeMap;
 
@@ -540,7 +541,7 @@ fn the_header_carries_the_frame_world_transform_and_scene_bounds() {
         compile_generated_scene(&scene_section(), &spatial, &features()).expect("scene compiles");
 
     assert_eq!(document.header.frame_origin_ecef, spatial.frame.ecef_origin);
-    assert_eq!(document.header.deriver_version, 4);
+    assert_eq!(document.header.deriver_version, 5);
 
     // Column-major 4x4: the ENU basis vectors as columns, translation last.
     let transform = document.header.world_transform;
@@ -1062,10 +1063,77 @@ fn a_fixture_compiles_as_a_ticket_gate_row() {
         .find(|batch| batch.role == SemanticRole::TicketGate)
         .expect("ticket-gate batch");
     assert_eq!(batch.vertex_count, 6, "the authored square, untouched");
+    assert!(
+        batch.colors.is_none(),
+        "a plain Mesh still paints from ROLE_COLORS"
+    );
     let gate = document
         .features
         .iter()
         .find(|feature| feature.source_object_id == "fixture-x")
         .expect("gate feature present");
     assert_eq!(gate.role, SemanticRole::TicketGate);
+}
+
+#[test]
+fn a_tinted_fixture_compiles_with_triangle_list_colors() {
+    let mesh = square(0);
+    let vertex_colors = vec![
+        [205, 200, 189],
+        [90, 176, 214],
+        [28, 28, 32],
+        [245, 208, 16],
+    ];
+    let section = SceneSection {
+        primitives: vec![primitive(
+            "fixture-tinted",
+            PrimitiveRole::Fixture,
+            "level-b1",
+            None,
+            PrimitiveGeometry::TintedMesh {
+                mesh,
+                vertex_colors,
+            },
+        )],
+        descriptor: None,
+    };
+    let document =
+        compile_generated_scene(&section, &spatial_context(), &features()).expect("scene compiles");
+
+    let batch = document
+        .batches
+        .iter()
+        .find(|batch| batch.role == SemanticRole::TicketGate)
+        .expect("ticket-gate batch");
+    let colors = batch.colors.as_ref().expect("tints present");
+    assert_eq!(colors.len(), batch.vertex_count as usize);
+    let gate = document
+        .features
+        .iter()
+        .find(|feature| feature.source_object_id == "fixture-tinted")
+        .expect("gate feature present");
+    assert_eq!(gate.role, SemanticRole::TicketGate);
+}
+
+#[test]
+fn a_tinted_mesh_with_mismatched_colors_is_rejected() {
+    let section = SceneSection {
+        primitives: vec![primitive(
+            "fixture-bad-tints",
+            PrimitiveRole::Fixture,
+            "level-b1",
+            None,
+            PrimitiveGeometry::TintedMesh {
+                mesh: square(0),
+                vertex_colors: vec![[0, 0, 0]],
+            },
+        )],
+        descriptor: None,
+    };
+    let err = compile_generated_scene(&section, &spatial_context(), &features())
+        .expect_err("mismatched tints are not renderable");
+    assert!(matches!(
+        err,
+        SceneError::InvalidIllustrationTint { primitive } if primitive == "fixture-bad-tints"
+    ));
 }

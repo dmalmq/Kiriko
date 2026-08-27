@@ -208,6 +208,7 @@ pub fn derive_scene_with_report(
                 .map(|normal| encode_normal_oct(*normal))
                 .collect(),
             feature_indices: group.feature_indices,
+            colors: None,
         });
     }
 
@@ -498,6 +499,7 @@ fn batch_geometry(
                     .map(|normal| encode_normal_oct(*normal))
                     .collect(),
                 feature_indices: group.feature_indices,
+                colors: None,
             }
         })
         .collect();

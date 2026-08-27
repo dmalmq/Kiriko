@@ -87,6 +87,7 @@ const KEY_LIGHT_ENU: readonly [number, number, number] = [-0.35, -0.35, 0.87];
 const ATTR_POSITION = 0;
 const ATTR_NORMAL = 1;
 const ATTR_FEATURE = 2;
+const ATTR_COLOR = 3;
 
 const VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -94,7 +95,9 @@ uniform mat4 u_matrix;
 layout(location = ${ATTR_POSITION}) in vec3 a_position;
 layout(location = ${ATTR_NORMAL}) in vec2 a_normal;
 layout(location = ${ATTR_FEATURE}) in uint a_featureIndex;
+layout(location = ${ATTR_COLOR}) in vec3 a_color;
 out vec3 v_normal;
+out vec3 v_color;
 // flat: a feature index is a per-surface constant, and interpolating it across
 // a triangle lets 747 arrive as 746.9999 — an off-by-one that attributes a
 // surface to the wrong feature, and the wrong floor.
@@ -103,6 +106,7 @@ void main() {
   // Dequantization is folded into u_matrix, so the raw u16 attribute feeds
   // straight through and no intermediate holds a large offset in f32.
   v_normal = vec3(a_normal, 1.0 - abs(a_normal.x) - abs(a_normal.y));
+  v_color = a_color;
   v_feature = a_featureIndex;
   gl_Position = u_matrix * vec4(a_position, 1.0);
 }
@@ -110,7 +114,6 @@ void main() {
 
 const FRAGMENT_SHADER = `#version 300 es
 precision highp float;
-uniform vec3 u_baseColor;
 uniform float u_opacity;
 uniform vec3 u_lightDir;
 uniform vec3 u_interactionColor;
@@ -118,6 +121,7 @@ uniform vec3 u_interactionColor;
 uniform uint u_selected;
 uniform uint u_hovered;
 in vec3 v_normal;
+in vec3 v_color;
 flat in uint v_feature;
 out vec4 outColor;
 void main() {
@@ -128,7 +132,7 @@ void main() {
   // section 5) — a wall turned away from the key still reads as cool stone,
   // never as a hole.
   float light = mix(0.88, 1.0, key);
-  vec3 rgb = u_baseColor * light;
+  vec3 rgb = v_color * light;
   // One interaction colour, two strengths: selection reads clearly, hover only
   // hints. Nothing else in the scene may use this hue (#32).
   uint shifted = v_feature + 1u;
@@ -290,6 +294,8 @@ interface BatchResources {
   normals: WebGLBuffer;
   /** Uploaded for the pick pass (#61); the colour program does not read it. */
   featureIndices: WebGLBuffer;
+  /** Per-vertex RGB, or `null` when the batch paints from `ROLE_COLORS`. */
+  colors: WebGLBuffer | null;
   vertexCount: number;
   levelIndex: number;
   role: SemanticRoleName;
@@ -468,7 +474,6 @@ export class SceneLayer implements CustomLayerInterface {
   private _program: WebGLProgram | null = null;
   private _uniforms: {
     matrix: WebGLUniformLocation;
-    baseColor: WebGLUniformLocation;
     opacity: WebGLUniformLocation;
     lightDir: WebGLUniformLocation;
     interactionColor: WebGLUniformLocation;
@@ -1317,7 +1322,6 @@ export class SceneLayer implements CustomLayerInterface {
   ): number {
     for (const entry of entries) {
       const batch = entry.batch;
-      const color = ROLE_COLORS[batch.role];
       // f64 compose, downcast once: the translation is already anchor-
       // relative, so f32 keeps sub-millimetre resolution across the venue.
       const matrix = this._multiply(viewProjection, batch.matrix);
@@ -1325,10 +1329,18 @@ export class SceneLayer implements CustomLayerInterface {
         this._matrixF32[index] = matrix[index]!;
       }
       gl.uniformMatrix4fv(uniforms.matrix, false, this._matrixF32);
-      gl.uniform3f(uniforms.baseColor, color[0], color[1], color[2]);
       gl.uniform1f(uniforms.opacity, entry.opacity);
       gl.polygonOffset(0, batch.depthBias);
       gl.bindVertexArray(batch.vao);
+      if (batch.colors !== null) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, batch.colors);
+        gl.enableVertexAttribArray(ATTR_COLOR);
+        gl.vertexAttribPointer(ATTR_COLOR, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+      } else {
+        const color = ROLE_COLORS[batch.role];
+        gl.disableVertexAttribArray(ATTR_COLOR);
+        gl.vertexAttrib3f(ATTR_COLOR, color[0], color[1], color[2]);
+      }
       gl.drawArrays(gl.TRIANGLES, 0, batch.vertexCount);
     }
     return entries.length;
@@ -1410,7 +1422,6 @@ export class SceneLayer implements CustomLayerInterface {
   private _buildProgram(gl: WebGL2RenderingContext): void {
     const program = linkProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER);
     const matrix = gl.getUniformLocation(program, "u_matrix");
-    const baseColor = gl.getUniformLocation(program, "u_baseColor");
     const opacity = gl.getUniformLocation(program, "u_opacity");
     const lightDir = gl.getUniformLocation(program, "u_lightDir");
     const interactionColor = gl.getUniformLocation(program, "u_interactionColor");
@@ -1418,7 +1429,6 @@ export class SceneLayer implements CustomLayerInterface {
     const hovered = gl.getUniformLocation(program, "u_hovered");
     if (
       !matrix ||
-      !baseColor ||
       !opacity ||
       !lightDir ||
       !interactionColor ||
@@ -1431,7 +1441,6 @@ export class SceneLayer implements CustomLayerInterface {
     this._program = program;
     this._uniforms = {
       matrix,
-      baseColor,
       opacity,
       lightDir,
       interactionColor,
@@ -1518,8 +1527,10 @@ export class SceneLayer implements CustomLayerInterface {
     const positions = gl.createBuffer();
     const normals = gl.createBuffer();
     const featureIndices = gl.createBuffer();
+    const colors =
+      batch.colors === null ? null : gl.createBuffer();
     const vao = gl.createVertexArray();
-    if (!positions || !normals || !featureIndices || !vao) {
+    if (!positions || !normals || !featureIndices || !vao || (batch.colors !== null && !colors)) {
       throw new Error("scene: WebGL failed to create a batch resource");
     }
 
@@ -1529,6 +1540,10 @@ export class SceneLayer implements CustomLayerInterface {
     gl.bufferData(gl.ARRAY_BUFFER, batch.normals, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, featureIndices);
     gl.bufferData(gl.ARRAY_BUFFER, batch.featureIndices, gl.STATIC_DRAW);
+    if (colors !== null && batch.colors !== null) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, colors);
+      gl.bufferData(gl.ARRAY_BUFFER, batch.colors, gl.STATIC_DRAW);
+    }
 
     gl.bindVertexArray(vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, positions);
@@ -1551,6 +1566,7 @@ export class SceneLayer implements CustomLayerInterface {
       positions,
       normals,
       featureIndices,
+      colors,
       vertexCount: batch.vertexCount,
       levelIndex: batch.levelIndex,
       role: batch.role,
@@ -1573,6 +1589,9 @@ export class SceneLayer implements CustomLayerInterface {
         gl.deleteBuffer(batch.positions);
         gl.deleteBuffer(batch.normals);
         gl.deleteBuffer(batch.featureIndices);
+        if (batch.colors !== null) {
+          gl.deleteBuffer(batch.colors);
+        }
         gl.deleteVertexArray(batch.vao);
       }
       if (this._program) {

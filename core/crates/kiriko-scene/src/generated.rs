@@ -30,7 +30,7 @@ use crate::quantize::{encode_normal_oct, quantize_positions};
 use crate::roles::occlusion_for_role;
 
 /// Bumped when this producer's output changes for unchanged input.
-const GENERATED_PRODUCER_VERSION: u16 = 4;
+const GENERATED_PRODUCER_VERSION: u16 = 5;
 
 /// The render format this producer writes.
 const SCENE_FORMAT_VERSION: u16 = 1;
@@ -153,6 +153,20 @@ pub fn compile_generated_scene(
             _ => mesh_of(primitive),
         };
         let triangles = triangulate(mesh_ref);
+        let expanded_colors = match &primitive.geometry {
+            PrimitiveGeometry::TintedMesh {
+                mesh,
+                vertex_colors,
+            } => {
+                if vertex_colors.len() != mesh.positions.len() {
+                    return Err(SceneError::InvalidIllustrationTint {
+                        primitive: primitive.id.clone(),
+                    });
+                }
+                Some(expand_vertex_colors(mesh, vertex_colors))
+            }
+            _ => None,
+        };
         let feature_index = scene_features.len() as u32;
 
         scene_features.push(SceneFeature {
@@ -176,7 +190,7 @@ pub fn compile_generated_scene(
         let accumulator = batched
             .entry((level_index, role_key(role)))
             .or_insert_with(|| BatchAccumulator::new(role));
-        accumulator.push(&triangles, feature_index);
+        accumulator.push(&triangles, feature_index, expanded_colors.as_deref());
     }
 
     if scene_features.is_empty() {
@@ -238,6 +252,7 @@ fn mesh_of(primitive: &ScenePrimitive) -> &Mesh {
         PrimitiveGeometry::Mesh(mesh) => mesh,
         PrimitiveGeometry::Portal { opening, .. } => opening,
         PrimitiveGeometry::Conveyance { mesh, .. } => mesh,
+        PrimitiveGeometry::TintedMesh { mesh, .. } => mesh,
     }
 }
 
@@ -823,6 +838,12 @@ fn source_hash(scene: &SceneSection, spatial: &SpatialContext) -> String {
                 digest.update(component.to_le_bytes());
             }
         }
+        if let PrimitiveGeometry::TintedMesh { vertex_colors, .. } = &primitive.geometry {
+            digest.update((vertex_colors.len() as u64).to_le_bytes());
+            for rgb in vertex_colors {
+                digest.update(rgb);
+            }
+        }
     }
     format!("{:x}", digest.finalize())
 }
@@ -893,6 +914,23 @@ fn facet_normal(corners: &[[f32; 3]]) -> [f32; 3] {
     [normal[0] / length, normal[1] / length, normal[2] / length]
 }
 
+/// Replicate indexed-mesh tints onto triangle-list vertices, same order as
+/// [`triangulate`].
+fn expand_vertex_colors(mesh: &Mesh, tints: &[[u8; 3]]) -> Vec<[u8; 3]> {
+    let mut colors = Vec::with_capacity(mesh.faces.len() * 3);
+    for face in &mesh.faces {
+        let Some(rgb) = face
+            .iter()
+            .map(|index| tints.get(*index as usize).copied())
+            .collect::<Option<Vec<[u8; 3]>>>()
+        else {
+            continue;
+        };
+        colors.extend(rgb);
+    }
+    colors
+}
+
 /// Stable ordering key for a role, so batch order depends on the role itself
 /// and not on the order primitives happened to arrive in.
 fn role_key(role: SemanticRole) -> u8 {
@@ -924,12 +962,17 @@ fn role_class(role: PrimitiveRole) -> u8 {
     }
 }
 
+/// Brushed-metal fallback matching `GateFinish::Stainless` /
+/// `ROLE_COLORS.TicketGate`.
+const TICKET_GATE_STAINLESS: [u8; 3] = [205, 200, 189];
+
 /// Accumulates one `(level, role)` batch before quantization.
 struct BatchAccumulator {
     role: SemanticRole,
     vertices: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     feature_indices: Vec<u32>,
+    colors: Option<Vec<[u8; 3]>>,
 }
 
 impl BatchAccumulator {
@@ -939,14 +982,33 @@ impl BatchAccumulator {
             vertices: Vec::new(),
             normals: Vec::new(),
             feature_indices: Vec::new(),
+            colors: None,
         }
     }
 
-    fn push(&mut self, triangles: &Triangles, feature_index: u32) {
+    fn push(
+        &mut self,
+        triangles: &Triangles,
+        feature_index: u32,
+        tints: Option<&[[u8; 3]]>,
+    ) {
+        let n = triangles.vertices.len();
+        if let Some(tints) = tints {
+            match &mut self.colors {
+                None => {
+                    let mut colors = vec![TICKET_GATE_STAINLESS; self.vertices.len()];
+                    colors.extend_from_slice(tints);
+                    self.colors = Some(colors);
+                }
+                Some(colors) => colors.extend_from_slice(tints),
+            }
+        } else if let Some(colors) = &mut self.colors {
+            colors.extend(std::iter::repeat_n(TICKET_GATE_STAINLESS, n));
+        }
         self.vertices.extend_from_slice(&triangles.vertices);
         self.normals.extend_from_slice(&triangles.normals);
         self.feature_indices
-            .extend(std::iter::repeat_n(feature_index, triangles.vertices.len()));
+            .extend(std::iter::repeat_n(feature_index, n));
     }
 
     fn finish(self, level_index: u32) -> SceneBatch {
@@ -961,6 +1023,39 @@ impl BatchAccumulator {
             positions,
             normals: self.normals.into_iter().map(encode_normal_oct).collect(),
             feature_indices: self.feature_indices,
+            colors: self.colors,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kiriko_model::scene::{
+        Mesh, OcclusionClass, PrimitiveGeometry, PrimitiveRole, ScenePrimitive,
+    };
+
+    use super::mesh_of;
+
+    #[test]
+    fn mesh_of_reads_a_tinted_mesh() {
+        let mesh = Mesh {
+            positions: vec![[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+            faces: vec![[0, 1, 2]],
+        };
+        let primitive = ScenePrimitive {
+            id: "fx".into(),
+            role: PrimitiveRole::Fixture,
+            level_id: "l1".into(),
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref: 0,
+            canonical_feature_id: None,
+            source_locator_refs: Vec::new(),
+            evidence_refs: Vec::new(),
+            geometry: PrimitiveGeometry::TintedMesh {
+                mesh,
+                vertex_colors: vec![[205, 200, 189]; 3],
+            },
+        };
+        assert_eq!(mesh_of(&primitive).positions.len(), 3);
     }
 }

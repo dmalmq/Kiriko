@@ -103,6 +103,12 @@ pub enum PrimitiveGeometry {
     Mesh(Mesh),
     Portal { connects: (u32, u32), opening: Mesh },
     Conveyance { kind: ConveyanceKind, mesh: Mesh },
+    /// Illustration with per-vertex tints. `vertex_colors.len()` equals
+    /// `mesh.positions.len()`. Valid only on [`PrimitiveRole::Fixture`].
+    TintedMesh {
+        mesh: Mesh,
+        vertex_colors: Vec<[u8; 3]>,
+    },
 }
 
 /// One compiled semantic scene primitive, referencing §8's registries for its
@@ -242,9 +248,27 @@ mod tests {
                 },
             },
         };
+        let fixture = ScenePrimitive {
+            id: "p4".into(),
+            role: PrimitiveRole::Fixture,
+            level_id: "l1".into(),
+            occlusion: OcclusionClass::Opaque,
+            confidence_ref: 0,
+            canonical_feature_id: Some("f3".into()),
+            source_locator_refs: vec![0],
+            evidence_refs: vec![0],
+            geometry: PrimitiveGeometry::TintedMesh {
+                mesh: Mesh {
+                    positions: vec![[0, 0, 0], [100, 0, 0], [100, 100, 0]],
+                    faces: vec![[0, 1, 2]],
+                },
+                vertex_colors: vec![[205, 200, 189], [90, 176, 214], [28, 28, 32]],
+            },
+        };
         assert_eq!(surface.role, PrimitiveRole::Surface);
         assert_eq!(portal.role, PrimitiveRole::Portal);
         assert_eq!(conveyance.role, PrimitiveRole::Conveyance);
+        assert_eq!(fixture.role, PrimitiveRole::Fixture);
         assert_eq!(OcclusionClass::SemiTransparent as u8, 1);
         assert_eq!(ConveyanceKind::SourceEvidenced as u8, 0);
     }

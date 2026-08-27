@@ -94,6 +94,10 @@ pub struct SceneBatch {
     pub positions: Vec<[u16; 3]>,
     pub normals: Vec<[i16; 2]>,
     pub feature_indices: Vec<u32>,
+    /// Triangle-list RGB, same length as `vertex_count`. `None` uses the
+    /// renderer's `ROLE_COLORS[role]`.
+    #[serde(default)]
+    pub colors: Option<Vec<[u8; 3]>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

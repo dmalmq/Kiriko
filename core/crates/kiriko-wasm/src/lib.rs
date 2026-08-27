@@ -1255,7 +1255,10 @@ fn describe_scene(document: &kiriko_scene::SceneDocument) -> Result<DecodedScene
         for index in &batch.feature_indices {
             payload.extend_from_slice(&index.to_le_bytes());
         }
-        batch_meta.push(serde_json::json!({
+        while !payload.len().is_multiple_of(4) {
+            payload.push(0);
+        }
+        let mut meta = serde_json::json!({
             "levelIndex": batch.level_index,
             "role": format!("{:?}", batch.role),
             "quantizationOrigin": batch.quantization_origin,
@@ -1264,7 +1267,18 @@ fn describe_scene(document: &kiriko_scene::SceneDocument) -> Result<DecodedScene
             "positionsOffset": positions_offset,
             "normalsOffset": normals_offset,
             "featureIndicesOffset": features_offset,
-        }));
+        });
+        if let Some(colors) = &batch.colors {
+            let colors_offset = payload.len();
+            for rgb in colors {
+                payload.extend_from_slice(rgb);
+            }
+            while !payload.len().is_multiple_of(4) {
+                payload.push(0);
+            }
+            meta["colorsOffset"] = serde_json::json!(colors_offset);
+        }
+        batch_meta.push(meta);
     }
 
     let meta = serde_json::json!({
